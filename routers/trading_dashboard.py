@@ -10616,3 +10616,69 @@ async def coin_league_view(challenger: str = ""):
     if challenger:
         out["blueprint"] = coin_league.blueprint(out, challenger)
     return out
+
+
+@router.get("/loss-study")
+async def loss_study_view():
+    """How big the losses are, why they happen, and what would shrink them.
+
+    A grid that never sells at a loss already exists - it is called
+    holding. _pick_profitable_slice_to_sell refuses to force a losing
+    sale, so the ONLY thing that books a loss here is the stop. "No
+    losses" is therefore one setting away and it is the wrong setting: a
+    slice that falls 40% is then simply held forever, waiting for a
+    +2.5% that has to come from a much lower price. The loss does not
+    disappear; it stops being counted and starts being inventory. That is
+    exactly how a 0.9% grid step took this fleet from +65.4% to -71.1%.
+
+    So this measures the thing that can actually be improved: the size of
+    the average loss against the average win, and whether the stop
+    distance is the right one - replayed against the recorded max adverse
+    excursion on the SAME entries, which is what those columns were added
+    for. It refuses the comparison below a sample that can support it.
+
+    Read-only, DB-only.
+    """
+    try:
+        import loss_study
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"loss study unavailable: {exc}")
+
+    trades = []
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc())
+                .limit(5000))).scalars().all()
+        trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_reason": getattr(r, "exit_reason", None),
+                   "mae_pct": getattr(r, "mae_pct", None),
+                   "mfe_pct": getattr(r, "mfe_pct", None),
+                   "product_id": r.product_id, "closed_at": r.closed_at} for r in rows]
+    except Exception as exc:
+        log.warning(f"[loss] ledger unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503,
+                            detail=f"the closed book could not be read ({type(exc).__name__})")
+
+    analysis = loss_study.analyse(trades)
+    sweep = loss_study.stop_sweep(trades)
+    code, why = loss_study.verdict(analysis, sweep)
+
+    return {
+        **analysis,
+        "stop_sweep": sweep,
+        "verdict": code,
+        "verdict_detail": why,
+        "why_zero_losses_is_the_wrong_target": (
+            "The sell path already refuses to sell at a loss - only the stop ever books one. "
+            "Switch the stop off and a slice that falls 40% is held forever instead, waiting "
+            "for a +2.5% that now has to come from a much lower price. The loss stops being "
+            "counted and starts being inventory, which is how a 0.9% step took this fleet "
+            "from +65.4% to -71.1%. The goal that CAN be reached is a small average loss "
+            "against a large average win, and a stop distance chosen from the recorded "
+            "excursions rather than from an opinion."),
+        "is_a_measurement_not_a_change": True,
+    }

@@ -1241,6 +1241,29 @@
         <div id="beta-check-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
+    <div class="section-title">🩹 The losses — how big, and why</div>
+    <div class="panel">
+        <div class="panel-sub">A grid that never sells at a loss already exists. It is called
+            <strong>holding</strong>. The sell path already refuses to force a losing sale, so the
+            <strong>only</strong> thing that books a loss here is the stop - which means "no losses
+            at all" is one setting away, and it is the wrong setting.
+            <br><br>Switch the stop off and a slice that falls 40% is simply held forever, waiting
+            for a +2.5% that now has to come from a much lower price. The loss does not disappear -
+            <strong>it stops being counted and starts being inventory</strong>. That is exactly how
+            a 0.9% grid step took this fleet from <strong>+65.4% to −71.1%</strong>: nothing was
+            ever realised as a loss and everything was stuck.
+            <br><br>So the goal that can actually be reached is a <strong>small average loss
+            against a large average win</strong>, with the stop distance chosen from the recorded
+            excursions rather than from an opinion. Every slice records how far it ever went
+            against its entry, which is what makes "would a 5% stop have beaten the 8% one?"
+            answerable on the real closed book instead of by a backtest that also changes which
+            trades happened.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadLossStudy()">🩹 Size the losses</button>
+        </div>
+        <div id="loss-study-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">👑 The league — every coin chasing the crown</div>
     <div class="panel">
         <div class="panel-sub">The crown cannot be <strong>units</strong>. PEPE holds
@@ -8465,6 +8488,93 @@ async function loadLeague() {
                border-left:3px solid var(--border,#8884)">
             <strong style="color:var(--text)">Ranked on.</strong> ${esc2(d.ranked_on || '')}
             ${d.notes ? '<br><br><span style="color:' + warn + '">' + esc2(d.notes.join('; ')) + '</span>' : ''}
+          </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// ------------------------------------------------------ THE LOSSES
+// The ratio is the headline, not the count. A 76%-win strategy whose
+// wins are the same size as its losses is profitable on FREQUENCY, and
+// a win rate is the first thing a regime change moves.
+async function loadLossStudy() {
+    const wrap = document.getElementById('loss-study-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Sizing every closed loss…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/loss-study');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const dim = 'var(--text-dim)', good = 'var(--success,#16a34a)',
+              bad = 'var(--danger,#e05a4e)', warn = 'var(--warning,#d98324)';
+        const money = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+
+        const tone = {
+            LOSSES_ARE_IN_PROPORTION: good, EVERY_LOSS_IS_THE_STOP: good,
+            NO_LOSSES_YET: dim, NO_TRADES: dim,
+            PROFITABLE_ON_FREQUENCY_NOT_SIZE: warn,
+            A_FEW_LOSSES_DOMINATE: bad, LOSSES_ARE_NOT_FROM_THE_STOP: bad
+        }[d.verdict] || dim;
+
+        const tile = (label, value, sub, colour) => `
+          <div style="min-width:140px;flex:1 1 140px">
+            <div style="font-size:0.68em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">${esc2(label)}</div>
+            <div style="font-size:1.5em;font-weight:700;color:${colour || 'inherit'};font-variant-numeric:tabular-nums">${value == null ? '—' : esc2(String(value))}</div>
+            <div style="font-size:0.74em;color:${dim};line-height:1.45">${esc2(sub || '')}</div>
+          </div>`;
+
+        const sw = d.stop_sweep || {};
+        const sweepBlock = sw.available
+            ? `<div style="margin-top:14px">
+                 <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim};margin-bottom:6px">
+                   What each stop would have done, on the same entries</div>
+                 ${(sw.by_stop || []).map(o => `
+                   <div style="display:flex;gap:12px;padding:6px 10px;align-items:baseline;
+                        background:${o.stop_pct === sw.best_stop_pct ? 'var(--panel2,#0000000a)' : 'transparent'}">
+                     <div style="width:64px;font-weight:700;font-variant-numeric:tabular-nums">${o.stop_pct}%</div>
+                     <div style="width:110px;text-align:right;font-variant-numeric:tabular-nums;
+                          color:${o.net_usd > 0 ? good : bad};font-weight:700">${money(o.net_usd)}</div>
+                     <div style="flex:1;font-size:0.8em;color:${dim}">${o.would_stop_out} stopped out · ${o.would_keep} kept${o.stop_pct === sw.best_stop_pct ? ' · best' : ''}</div>
+                   </div>`).join('')}
+                 <div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:8px">${esc2(sw.detail || '')}</div>
+               </div>`
+            : `<div style="font-size:0.86em;line-height:1.6;padding:10px 12px;margin-top:14px;
+                 border-left:3px solid ${dim};background:var(--panel2,#0000000a)">
+                 <strong>The stop comparison is withheld.</strong> ${esc2(sw.reason || '')}</div>`;
+
+        wrap.innerHTML = `
+          <div style="border-left:4px solid ${tone};padding:10px 14px;margin-bottom:16px;background:var(--panel2,#0000000a)">
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">The losses</div>
+            <div style="font-size:1.2em;font-weight:700;color:${tone};margin:2px 0 6px">${esc2((d.verdict || '').replace(/_/g, ' '))}</div>
+            <div style="font-size:0.88em;line-height:1.6">${esc2(d.verdict_detail || '')}</div>
+          </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            ${tile('Average win', money(d.avg_win_usd), d.avg_win_pct != null ? d.avg_win_pct.toFixed(2) + '% of capital risked' : '', good)}
+            ${tile('Average loss', money(d.avg_loss_usd), d.avg_loss_pct != null ? d.avg_loss_pct.toFixed(2) + '% of capital risked' : '', bad)}
+            ${tile('Win ÷ loss size', d.win_loss_size_ratio != null ? d.win_loss_size_ratio.toFixed(2) + '×' : null,
+                   'above 1.5 is comfortable', d.win_loss_size_ratio == null ? null : (d.win_loss_size_ratio >= 1.5 ? good : warn))}
+            ${tile('Worst single loss', money(d.worst_loss_usd), d.worst_loss_pct != null ? d.worst_loss_pct.toFixed(2) + '%' : '', bad)}
+          </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            ${tile('Win rate', d.win_rate_pct != null ? d.win_rate_pct + '%' : null, `${d.wins} of ${d.trades} trades`)}
+            ${tile('Breakeven needs', d.breakeven_win_rate_pct != null ? d.breakeven_win_rate_pct + '%' : null,
+                   d.margin_of_safety_points != null ? d.margin_of_safety_points + ' points of room' : '',
+                   d.margin_of_safety_points == null ? null : (d.margin_of_safety_points > 15 ? good : warn))}
+            ${tile('Total lost', money(d.total_lost_usd), `${d.losses} losing trade(s)`, bad)}
+            ${tile('Big losses', d.big_losses, 'over 2× the average win', d.big_losses ? bad : good)}
+          </div>
+
+          ${Object.keys(d.losses_by_exit_reason || {}).length ? `<div style="font-size:0.84em;color:${dim};margin-bottom:10px">
+             How the losses were taken: ${Object.entries(d.losses_by_exit_reason).map(([k, v]) => `${esc2(k.replace(/_/g, ' '))} ×${v}`).join(' · ')}</div>` : ''}
+
+          ${sweepBlock}
+
+          <div style="font-size:0.84em;line-height:1.6;padding:10px 12px;margin-top:14px;
+               border-left:3px solid var(--border,#8884)">
+            <strong>Why zero losses is the wrong target.</strong> ${esc2(d.why_zero_losses_is_the_wrong_target || '')}
           </div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';

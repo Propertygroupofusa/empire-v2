@@ -386,3 +386,14 @@ def test_a_failed_league_never_stops_the_account_series_being_written():
     for h in handlers:
         assert not any(isinstance(x, _ast.Raise) for x in _ast.walk(h)), \
             "a handler re-raises, which would take the pass down"
+
+
+def test_the_loss_panel_only_reads_fields_the_endpoint_sends():
+    import loss_study
+    rows = [{"pnl": 1.0, "qty": 1.0, "entry_price": 100.0, "exit_reason": "profit_target"}] * 30
+    produced = set(loss_study.analyse(rows)) | {
+        "stop_sweep", "verdict", "verdict_detail",
+        "why_zero_losses_is_the_wrong_target", "is_a_measurement_not_a_change"}
+    read = _panel_fields("loadLossStudy")
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced
