@@ -223,7 +223,7 @@ def test_a_stale_snapshot_never_reports_a_negative_share():
 def base(**over):
     k = {"trades": 40, "sample_warning": None, "net_edge_per_trade_usd": 0.5,
          "outside_any_branch_pct": 10.0, "idle_capital_pct": 10.0,
-         "capital_velocity": 3.0}
+         "capital_velocity": 3.0, "free_cash_usd": 0.0}
     k.update(over)
     return k
 
@@ -248,6 +248,26 @@ def test_capital_outside_outranks_idle_and_velocity():
                                    capital_velocity=0.1))
     assert code == "CAPITAL_OUTSIDE"
     assert "90.9" in why
+
+
+def test_outside_still_names_the_cash_that_needs_no_sale():
+    """"Move coin into branches" points at the harder half while $892 of
+    unallocated cash sits inside the bot doing nothing."""
+    _, why = ck.bottleneck(base(outside_any_branch_pct=90.9,
+                                idle_capital_pct=86.2,
+                                free_cash_usd=892.30))
+    assert "892.30" in why and "CASH" in why
+
+
+def test_outside_says_nothing_about_cash_it_does_not_have():
+    _, why = ck.bottleneck(base(outside_any_branch_pct=90.9,
+                                idle_capital_pct=5.0, free_cash_usd=0.0))
+    assert "CASH" not in why
+
+
+def test_the_per_dollar_figure_never_claims_to_be_a_return():
+    note = ck.compute(series(40), allocated_usd=143.11)["per_1000_note"]
+    assert "never as a return" in note and "POINT-IN-TIME" in note
 
 
 def test_idle_outranks_velocity():

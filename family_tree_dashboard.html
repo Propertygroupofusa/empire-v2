@@ -7924,7 +7924,8 @@ async function loadCapitalKpis() {
           ${d.ledger_note ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:10px"><strong>Ledger.</strong> ${esc2(d.ledger_note)}</div>` : ''}
           ${d.capital_note ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:10px"><strong>Capital.</strong> ${esc2(d.capital_note)}</div>` : ''}
           <div style="font-size:0.78em;color:${dim};line-height:1.6">
-            ${esc2(d.velocity_note || '')}
+            <strong>On velocity.</strong> ${esc2(d.velocity_note || '')}
+            <br><br><strong>On per-dollar profit.</strong> ${esc2(d.per_1000_note || '')}
             <br><br>${d.ledger_rows_read ?? 0} ledger row(s) read${d.unreadable_rows ? ', ' + d.unreadable_rows + ' unreadable and dropped' : ''}.
             ${d.served_from_cache ? 'Served from a ' + d.cache_age_seconds + 's-old cache - a full census competes with the trimmer for the same rate limit.' : 'Read live.'}
           </div>`;

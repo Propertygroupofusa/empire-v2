@@ -177,6 +177,11 @@ def compute(trades, *, allocated_usd, free_cash_usd=0.0,
 
         "net_usd": net,
         "profit_per_1000_deployed_usd": per_1000,
+        "per_1000_note": (
+            "CUMULATIVE profit against a POINT-IN-TIME denominator - the capital deployed "
+            "right now, not the average deployed across the window. Read it as a rough "
+            "scale figure, never as a return: a return needs capital sampled over time, "
+            "and this ledger does not carry that."),
         "net_edge_per_trade_usd": edge,
 
         "capital_velocity": velocity,
@@ -253,10 +258,18 @@ def bottleneck(k):
     idle = k.get("idle_capital_pct")
     outside = k.get("outside_any_branch_pct")
     if outside is not None and outside > 50:
-        return ("CAPITAL_OUTSIDE",
-                f"{outside:.1f}% of the account sits outside every branch. The edge is "
-                f"positive but it is being applied to a fraction of the money - this is a "
-                f"capital placement problem, not a strategy one.")
+        why = (f"{outside:.1f}% of the account sits outside every branch. The edge is "
+               f"positive but it is being applied to a fraction of the money - this is a "
+               f"capital placement problem, not a strategy one.")
+        # Naming only the coin understates what can be done TODAY. Unallocated
+        # cash needs no sale to put to work, and saying "move coin into
+        # branches" while $892 sits in the wallet points at the harder half.
+        cash = k.get("free_cash_usd")
+        if idle is not None and idle > 40 and cash:
+            why += (f" ${cash:,.2f} of that is already unallocated CASH inside the bot "
+                    f"({idle:.1f}% of its own capital) - that part needs no sale to put "
+                    f"to work, only rungs to put it on.")
+        return ("CAPITAL_OUTSIDE", why)
     if idle is not None and idle > 40:
         return ("CAPITAL_IDLE",
                 f"{idle:.1f}% of the bot's own capital is unallocated cash. It is inside "
