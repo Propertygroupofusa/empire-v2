@@ -2660,6 +2660,41 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
 # finding somewhere, however mediocre, to go.
 MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 
+# A PARKED BRANCH HAS NO SPACING LEFT TO PROTECT.
+#
+# The sell attempt is gated on price >= reference_price * (1 + grid_pct).
+# That spacing exists so a branch does not sell a rung it is about to rebuy
+# a step lower - it is the geometry of a grid that CYCLES.
+#
+# A branch holding as many slices as it has levels cannot buy at all
+# (run_grid_branch_cycle only buys when len(slices) < num_levels). There is
+# no rebuy to space away from, so the gate is guarding a mechanism that is
+# not running - and it blocks the only thing such a branch CAN do, which is
+# sell into strength.
+#
+# Measured on the live fleet the day this was added: $5,821.51 - 78% of all
+# allocated capital - sat in branches that could neither buy (full) nor sell
+# (the reference gate wanted another 2.8% to 5.7%). Four of them, holding
+# 71% of the capital, had never completed a single round trip. The branches
+# still earning were the small ones that had room to cycle.
+#
+# So a parked branch may sell on its own merit instead of on the grid's
+# geometry. Two things keep that honest:
+#
+#   _pick_profitable_slice_to_sell still decides WHICH slice, and it refuses
+#   any sale that is not net-positive after real fees. This cannot realize a
+#   loss; it is not a second path around that function.
+#
+#   The floor below is a REAL margin, not the bare > 0 that function needs.
+#   1.0% net of fees, against a measured fee floor of 0.90% and the horizon
+#   study's 1.37% round trip - which clears within 2h on 32.7% of entries
+#   and within 6h on 54.3%. Selling at +$0.01 net would be churn wearing a
+#   profit's name.
+#
+# This is NOT the spacing being loosened to manufacture trades. A branch
+# that can still buy is untouched, and keeps the full grid_pct gate.
+GRID_PARKED_MIN_NET_PCT = float(os.getenv("GRID_PARKED_MIN_NET_PCT", "0.010"))
+
 # The coins the account owner actually wants this fleet trading, selected
 # 2026-09-25 from REAL GRID results and overridable without a deploy.
 #
@@ -5580,7 +5615,28 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 _stop_slice = _sl
                 break
 
-    if _stop_slice is not None or (price >= branch.reference_price * (1 + grid_pct) and slices):
+    # A branch as full as its levels cannot buy, so the spacing gate is
+    # protecting a rebuy that cannot happen - see GRID_PARKED_MIN_NET_PCT.
+    # Evaluated BEFORE the gate so the reason a sale happened is one of two
+    # named conditions rather than an implicit fall-through.
+    _parked = bool(slices) and len(slices) >= (branch.num_levels or 0)
+    _parked_sell = False
+    if _parked and _stop_slice is None:
+        _cand = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
+        if _cand is not None:
+            _basis = (_cand.qty or 0) * (_cand.entry_price or 0)
+            _net = _grid_slice_net_pnl(_cand.qty, _cand.entry_price, price,
+                                       _slice_rate(_cand, real_fee_rate, exit_leg_rate))
+            if _basis > 0 and (_net / _basis) >= GRID_PARKED_MIN_NET_PCT:
+                _parked_sell = True
+                log.info(
+                    f"[GRID] {branch.bot_name}: parked ({len(slices)} slices / "
+                    f"{branch.num_levels} levels - cannot buy), and a slice is "
+                    f"+{_net / _basis * 100:.2f}% net of fees. Selling on its own "
+                    f"merit rather than waiting for a {grid_pct * 100:.2f}% rise "
+                    f"off a reference it will never rebuy from.")
+
+    if _stop_slice is not None or _parked_sell or (price >= branch.reference_price * (1 + grid_pct) and slices):
         if _stop_slice is not None:
             # The stop deliberately bypasses _pick_profitable_slice_to_sell.
             # That function's whole job is to refuse a losing sale; here the

@@ -353,6 +353,20 @@ async def topup_once(session_factory, *, force_preview=False):
                 # never the planned count: the branch must end this write
                 # exactly full, and a sale since the plan was sized would
                 # otherwise leave it short and free to buy.
+                #
+                # THIS WRITE DOES NOT SURVIVE, and that is the point of the
+                # comment. run_grid_branch_cycle re-applies the global
+                # spacing override every pass and forces num_levels back to
+                # its own figure (3, under 3_levels_2.5pct). So the branch
+                # ends up with MORE open slices than levels - measured live:
+                # ZEC 6/3, XRP 9/3, SHIB 6/3 - which made it unable to buy
+                # AND, until GRID_PARKED_MIN_NET_PCT, unable to sell.
+                #
+                # It is still written, because it is the correct value at
+                # the moment of the write and a branch must never be left
+                # short of full even for one cycle. The parked-sell path is
+                # what makes the override's reclaim survivable rather than
+                # something this has to fight.
                 row.num_levels = len(open_now) + len(t["slices"])
                 # Equity is allocated + unrealized, and a slice entered at
                 # the current price adds no unrealized - so equity rises by
