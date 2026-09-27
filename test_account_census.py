@@ -164,5 +164,60 @@ ok("pricing tries the host that returned the balances FIRST",
    SRC.index("advanced_trade") < SRC.index("public_feed"),
    "capital_census priced from a host that does not answer from production")
 
+
+
+# --- available vs held must not be summed away -----------------------------
+#
+# This function used to add available_balance and hold together and return
+# only the sum. coin_adoption asks for `available_units` and falls back to
+# `units`, so with no supplier that fallback was the ONLY path ever taken -
+# the module built to size against what the venue will release was sizing
+# against everything owned, staked coin included.
+_accts = [
+    {"currency": "ZEC", "available_balance": {"value": "1.5"}, "hold": {"value": "0"}},
+    {"currency": "ADA", "available_balance": {"value": "0"}, "hold": {"value": "900"}},
+    {"currency": "SOL", "available_balance": {"value": "1"}, "hold": {"value": "6"}},
+    # two accounts for one currency must accumulate on BOTH figures
+    {"currency": "XRP", "available_balance": {"value": "10"}, "hold": {"value": "1"}},
+    {"currency": "XRP", "available_balance": {"value": "5"}, "hold": {"value": "0"}},
+]
+
+
+def _parse(accounts):
+    held, available = {}, {}
+    for a in accounts:
+        cur = a.get("currency")
+        if not cur:
+            continue
+
+        def _f(field):
+            try:
+                return float((a.get(field) or {}).get("value") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        avail = _f("available_balance")
+        total = avail + _f("hold")
+        if total > 0:
+            held[cur] = held.get(cur, 0.0) + total
+            available[cur] = available.get(cur, 0.0) + avail
+    return held, available
+
+
+_h, _a = _parse(_accts)
+ok("held still means everything owned", _h["SOL"] == 7.0)
+ok("available means only what the venue will release", _a["SOL"] == 1.0)
+ok("a fully staked coin is owned but not available",
+      _h["ADA"] == 900.0 and _a["ADA"] == 0.0)
+ok("a fully free coin has the two equal", _h["ZEC"] == _a["ZEC"] == 1.5)
+ok("both figures accumulate across accounts of one currency",
+      _h["XRP"] == 16.0 and _a["XRP"] == 15.0)
+ok("the parser in the module matches this one",
+      "available[cur] = available.get(cur, 0.0) + avail" in open("account_census.py").read())
+ok("a row reports available beside units, never instead of it",
+      '"available_units": au' in open("account_census.py").read()
+      and '"units": units' in open("account_census.py").read())
+ok("a missing available read stays None rather than copying units",
+      'au * p, 2) if au is not None else None' in open("account_census.py").read())
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

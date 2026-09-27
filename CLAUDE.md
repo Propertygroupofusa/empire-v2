@@ -13608,6 +13608,94 @@ serializer are the same bug three times. The config epoch lesson is this
 one's sibling - there, the question was what a measurement was drawn
 against; here, it is what a limit is counted against.
 
+## Idle coin under a branch that already exists, 2026-09-27
+
+The account owner asked for the idle ZEC, XRP, BTC, ETH and SHIB to be put
+to work. The first thing to establish was that **adoption cannot do it**,
+and that raising its cap would not have moved a cent.
+
+`coin_adoption` opens a branch for a coin that has NONE. Every path
+refuses a coin already claimed - `refuse()` returns ALREADY_CLAIMED and the
+writer skips again if a branch appeared since sizing. That refusal is
+correct and stays: two systems on one balance is the gap behind this
+repo's phantom positions. But all five coins already HAVE branches. The
+branch is simply smaller than the coin behind it:
+
+```
+ZEC   $2,284 held, $400 under a branch -> $1,884 idle
+XRP   $2,261 held, $400 under a branch -> $1,861 idle
+BTC   $1,482 held,  $69 under a branch -> $1,413 idle
+ETH   $1,258 held, $400 under a branch ->   $858 idle
+SHIB  $1,082 held, $200 under a branch ->   $882 idle
+                                 idle total $7,074
+```
+
+`spread_capital_evenly` cannot do it either - it moves CASH between FLAT
+branches, and all five hold open slices, so it files them under
+`untouched_holding`. Its top-up raises `allocated_usd` from free cash;
+this needs `allocated_usd` raised by putting owned COIN behind it.
+Conflating the two is how an unbacked branch gets made.
+
+Hence `coin_topup.py`: deepen a branch that exists, using coin already
+owned. Four things move together or nothing moves.
+
+- **allocated_usd** by exactly the market value of the slices written,
+  computed from the slices produced, never the requested figure.
+- **num_levels** by exactly the number of new slices, taken from the LIVE
+  open count inside the transaction rather than the planned one. A sale
+  between sizing and writing would otherwise leave the branch short of
+  full, and a branch below full is free to buy with cash nobody gave it.
+- **peak_equity** by the same amount. Equity is allocated plus unrealized
+  and a slice entered at today's price adds no unrealized, so equity rises
+  by exactly the added allocation.
+- **Only a branch that already carries `stop_loss_pct_override`.** That
+  column is written by adoption alone and marks a branch whose entries are
+  adoption prices. **BTC-USD is refused for this reason** - its branch is
+  an original with a real cost basis, and adding coin at today's price
+  would put the fleet stop 8% below an entry nobody paid. That is $1,413
+  deliberately left idle, not overlooked.
+
+### The cap here is different in kind, and that is the point
+
+Adoption's cap failed because every pass found NEW coins and got a fresh
+budget. This one is bounded by the coin itself: idle is `held - allocated`,
+so each top-up shrinks the thing that feeds it, and total exposure can
+never exceed coin already owned. Nothing here can buy. The per-pass
+ceiling is therefore a RAMP, not a safety limit - $2,000 a pass, so the
+first pass is readable before the rest follows. Simulated against the live
+fleet: $5,604.40 goes to work over three hourly passes.
+
+### The bug underneath: the census summed available and held together
+
+`account_census.fetch_balances` added `available_balance` and `hold` into
+one figure and returned only the sum. `coin_adoption` asks for
+`available_units` and falls back to `units` when absent - and because the
+census never supplied it, **that fallback was the only path ever taken.**
+The module written to size against what the venue will release had been
+sizing against everything owned, staked coin included, since the day it
+shipped. The census now reports both, plus `locked_units`.
+
+This matters on this account specifically: ADA, ATOM, AVAX and XTZ are
+100% staked, SOL 96%, ETH 88% - **$4,939.96 is owned but unreachable by
+any bot**, and four of the five deepest-red positions are in that set.
+
+### A test caught the sharp edge on its first run
+
+`available_units = 0.0` is the FULLY STAKED case. Running it through a
+positive-only helper turns it into `None`, which then takes the "census
+did not tell us" fallback and deploys every staked unit - the precise
+failure the whole path exists to stop. Missing is not zero, and on this
+account zero is the common case. `test_zero_available_is_not_confused_with_a_missing_read`
+keeps the two apart permanently.
+
+### What none of this does
+
+It does not make a red position green. A red number is the gap between
+what was paid and what the coin is worth; only a price recovery closes it.
+What this does is make the coin EARN while the gap sits there. The
+percentage stays red and the account still grows. Saying otherwise would
+be the same class of claim as a panel reporting a stop that cannot fire.
+
 ## Endpoints added
 
 `/capital-kpis` - `/growth-curve` - `/capital-placement` - `/beta-check`

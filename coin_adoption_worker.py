@@ -50,7 +50,9 @@ HEARTBEAT = {
     "last_pass_at": None,
     "passes": 0,
     "adopted": 0,
+    "topped_up": 0,
     "last_result": None,
+    "last_topup_result": None,
     "last_error": None,
 }
 
@@ -257,6 +259,127 @@ async def check_once(session_factory, *, force_preview=False):
                        if written else "armed, but nothing was written")}
 
 
+async def topup_once(session_factory, *, force_preview=False):
+    """One top-up pass: put idle coin under branches that already exist.
+
+    Separate from check_once on purpose. Adoption opens a branch for a coin
+    that has none and refuses anything already claimed; this deepens a
+    branch that exists. Same arm switch, same double check, same refusal to
+    buy or sell anything - but a different question, and merging them would
+    make the ALREADY_CLAIMED refusal ambiguous.
+
+    It writes to branches that are actively trading, so the branch row is
+    re-read inside the transaction and every figure is recomputed from it.
+    A plan sized a second earlier can already be stale: a sell between the
+    read and the write changes allocated_usd and the open slice count, and
+    writing the planned numbers over that would silently undo the sale.
+    """
+    import aiohttp
+    import account_census
+    import coin_topup
+    import crypto_grid_bot as grid
+    from models import CryptoGridBranch, CryptoGridSlice
+    from sqlalchemy import select
+
+    armed = is_armed()
+    if not armed and not force_preview:
+        return {"armed": False, "topped_up": 0,
+                "detail": f"{MODE_ENV} is '{current_mode()}' - observing, nothing fetched"}
+
+    st = await grid.get_grid_status()
+    branches = st.get("branches") or []
+    if not branches:
+        return {"armed": armed, "topped_up": 0, "detail": "no branches to top up"}
+
+    async with aiohttp.ClientSession() as session:
+        census = await account_census.census(session, tracked_usd=0.0)
+    if not census.get("available"):
+        return {"armed": armed, "topped_up": 0,
+                "detail": f"census unavailable ({str(census.get('error'))[:60]}) - nothing sized"}
+
+    plan = coin_topup.plan(census.get("holdings") or [], branches,
+                           account_total_usd=census.get("total_usd"))
+    if not plan["ok"]:
+        return {"armed": armed, "topped_up": 0, "plan": plan,
+                "detail": f"nothing to top up: {plan['detail'][:140]}"}
+    if not armed:
+        return {"armed": False, "topped_up": 0, "plan": plan,
+                "detail": f"PREVIEW only - would add ${plan['total_usd']:,.2f}"}
+
+    written = []
+    for t in plan["topups"]:
+        # Checked again immediately before the write, against the same
+        # constant. Between the first check and this one the account was
+        # read and the plan sized; neither can arm anything.
+        if not is_armed():
+            log.warning("[topup] disarmed mid-pass - stopping before the write")
+            break
+        try:
+            async with session_factory()() as db:
+                row = (await db.execute(
+                    select(CryptoGridBranch)
+                    .where(CryptoGridBranch.bot_name == t["bot_name"]))).scalars().first()
+                if row is None:
+                    log.warning(f"[topup] {t['bot_name']} vanished since the plan - skipping")
+                    continue
+                # Re-checked against the LIVE row, not the planned one. The
+                # override is what makes this branch safe to deepen, and a
+                # branch that lost it between the read and now must not be
+                # written to.
+                if row.stop_loss_pct_override is None:
+                    log.warning(f"[topup] {t['bot_name']} is no longer an adopted branch "
+                                f"- skipping rather than moving its stop")
+                    continue
+                open_now = (await db.execute(
+                    select(CryptoGridSlice)
+                    .where(CryptoGridSlice.bot_name == row.bot_name))).scalars().all()
+
+                added_usd = round(sum(s["qty"] * s["entry_price"] for s in t["slices"]), 2)
+                for sl in t["slices"]:
+                    db.add(CryptoGridSlice(
+                        bot_name=row.bot_name,
+                        product_id=row.product_id,
+                        entry_price=sl["entry_price"],
+                        qty=sl["qty"],
+                        opened_at=datetime.utcnow(),
+                        adopted=True,
+                    ))
+                # THE THREE FIGURES MOVE TOGETHER OR NOT AT ALL.
+                #
+                # allocated_usd by exactly the coin put behind it, so the
+                # backing ledger gains the same amount on both sides.
+                row.allocated_usd = round((row.allocated_usd or 0.0) + added_usd, 2)
+                # num_levels from the LIVE open count plus the new slices,
+                # never the planned count: the branch must end this write
+                # exactly full, and a sale since the plan was sized would
+                # otherwise leave it short and free to buy.
+                row.num_levels = len(open_now) + len(t["slices"])
+                # Equity is allocated + unrealized, and a slice entered at
+                # the current price adds no unrealized - so equity rises by
+                # exactly added_usd. The cycle ratchet would lift the peak
+                # anyway at the next pass; doing it here keeps the stored
+                # row consistent with itself in the meantime.
+                row.peak_equity = round((row.peak_equity or row.allocated_usd) + added_usd, 2)
+                if t.get("sell_only"):
+                    row.buys_paused = True
+                await db.commit()
+            written.append({"asset": t["asset"], "bot_name": t["bot_name"],
+                            "added_usd": added_usd, "slices": len(t["slices"]),
+                            "sell_only": bool(t.get("sell_only"))})
+            HEARTBEAT["topped_up"] += 1
+            log.warning(f"[topup] 🌿 {t['asset']} +${added_usd:,.2f} of coin already owned "
+                        f"put under {t['bot_name']} as {len(t['slices'])} slice(s) at "
+                        f"${t['price']:,.8f}. Nothing bought, nothing sold."
+                        + (" SELL-ONLY." if t.get("sell_only") else ""))
+        except Exception as exc:
+            log.warning(f"[topup] {t['asset']} failed: {type(exc).__name__}: {exc}")
+
+    return {"armed": True, "topped_up": len(written), "written": written, "plan": plan,
+            "detail": (f"{len(written)} branch(es) deepened, "
+                       f"${sum(w['added_usd'] for w in written):,.2f} of idle coin put to work"
+                       if written else "armed, but nothing was written")}
+
+
 async def run_periodically(session_factory):
     """Never dies. A loop that raises adopts nothing and says nothing."""
     HEARTBEAT["started_at"] = datetime.utcnow().isoformat() + "Z"
@@ -268,6 +391,19 @@ async def run_periodically(session_factory):
             HEARTBEAT["last_error"] = None
             if r.get("adopted"):
                 log.warning(f"[adopt] {r['detail']}")
+
+            # Adoption first, then the top-up: a coin adopted this pass
+            # gets its branch before the top-up reads the fleet, so its
+            # remaining idle coin is offered on the NEXT pass rather than
+            # being deepened in the same breath as being opened.
+            try:
+                tr = await topup_once(session_factory)
+                HEARTBEAT["last_topup_result"] = tr.get("detail")
+                if tr.get("topped_up"):
+                    log.warning(f"[topup] {tr['detail']}")
+            except Exception as e:
+                HEARTBEAT["last_topup_result"] = f"{type(e).__name__}: {e}"
+                log.warning(f"[topup] pass failed: {type(e).__name__}: {e}")
         except Exception as e:
             HEARTBEAT["last_error"] = f"{type(e).__name__}: {e}"
             HEARTBEAT["last_result"] = None

@@ -106,21 +106,39 @@ async def fetch_balances(session) -> dict:
     except Exception as e:
         return {"available": False, "error": f"{type(e).__name__}: {e}"}
 
-    held = {}
+    # AVAILABLE AND HELD ARE KEPT APART, NOT SUMMED AWAY.
+    #
+    # This used to add available_balance and hold into one figure and
+    # return only the sum. Everything downstream then had a number that
+    # counts coin the venue will not release - staked units, units behind
+    # a resting stop, units in an open order. coin_adoption already asks
+    # for `available_units` and falls back to `units` when it is absent,
+    # and because this function never supplied it, that fallback was the
+    # only path ever taken: the module that exists to size against what
+    # the venue will release has been sizing against everything owned.
+    #
+    # The venue is the authority on this and it already says so per
+    # account. Both figures are reported; `held` keeps its old meaning so
+    # no existing caller changes behaviour.
+    held, available = {}, {}
     for a in accounts:
         cur = a.get("currency")
         if not cur:
             continue
-        total = 0.0
-        for field in ("available_balance", "hold"):
+
+        def _f(field):
             try:
-                total += float((a.get(field) or {}).get("value") or 0)
+                return float((a.get(field) or {}).get("value") or 0)
             except (TypeError, ValueError):
-                pass
+                return 0.0
+
+        avail = _f("available_balance")
+        total = avail + _f("hold")
         if total > 0:
             held[cur] = held.get(cur, 0.0) + total
-    return {"available": True, "held": held, "pages": pages,
-            "accounts_seen": len(accounts)}
+            available[cur] = available.get(cur, 0.0) + avail
+    return {"available": True, "held": held, "available_units": available,
+            "pages": pages, "accounts_seen": len(accounts)}
 
 
 async def _price_one(session, asset: str):
@@ -178,6 +196,7 @@ async def census(session, tracked_usd: float = None) -> dict:
         return {"available": False, "error": bal.get("error"),
                 "detail": bal.get("detail")}
     held = bal["held"]
+    avail_units = bal.get("available_units") or {}
     prices = await price_all(session, list(held))
 
     cash, coin_usd = 0.0, 0.0
@@ -192,8 +211,17 @@ async def census(session, tracked_usd: float = None) -> dict:
             cash += usd
         else:
             coin_usd += usd
+        au = avail_units.get(asset)
         rows.append({"asset": asset, "units": units, "price": p,
                      "usd": round(usd, 2),
+                     # What the venue will actually release, beside what is
+                     # owned. None only when the balance read did not carry
+                     # it - never silently equal to `units`, because a
+                     # caller that cannot tell them apart is exactly the
+                     # caller that tries to sell staked coin.
+                     "available_units": au,
+                     "available_usd": (round(au * p, 2) if au is not None else None),
+                     "locked_units": (round(units - au, 12) if au is not None else None),
                      "source": (prices.get(asset) or {}).get("source")})
     rows.sort(key=lambda r: -r["usd"])
     total = cash + coin_usd
