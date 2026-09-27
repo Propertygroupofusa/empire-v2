@@ -1035,12 +1035,33 @@ async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
 # one because "protective" and "too aggressive" can be the same order at
 # different distances - a price that comes back in 60s and rolls over by 10
 # minutes is a real shape, and a single horizon reports half of it.
-_EXPIRY_HORIZONS = ((60, "1m"), (180, "3m"), (300, "5m"), (600, "10m"))
+# THE LADDER RUNS TO 72 HOURS. See GridMakerExpiry's own comment for why:
+# a study built to ask "should the rung have rested longer?" that stops
+# looking at 10 minutes can only ever answer it out to 10 minutes, and
+# horizon_study measures the payoff arriving far past there (8.1% inside
+# 30m, 34.1% inside 6h, 92.5% inside 72h).
+#
+# This changes the MEASUREMENT only. maker_wait_seconds is untouched.
+_EXPIRY_HORIZONS = ((60, "1m"), (180, "3m"), (300, "5m"), (600, "10m"),
+                    (1800, "30m"), (7200, "2h"), (21600, "6h"),
+                    (86400, "24h"), (259200, "72h"))
+_EXPIRY_FINAL_TAG = _EXPIRY_HORIZONS[-1][1]
+_EXPIRY_FINAL_SECONDS = _EXPIRY_HORIZONS[-1][0]
 
 # Resolving costs one book read per product per cycle, so it is capped. The
 # backlog is tiny by construction (this fleet expires a handful of orders a
 # day) and anything not resolved this cycle is resolved on the next one.
 _EXPIRY_RESOLVE_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_RESOLVE_MAX", "8"))
+# How many unresolved rows are LOOKED AT per cycle. Larger than the read cap
+# because with a 72h ladder most scanned rows have nothing due yet, and a
+# scan that stops before reaching the fresh ones is how a new expiry loses
+# its 1m reading. Scanning is a cheap indexed read; the book call is what
+# _EXPIRY_RESOLVE_MAX_PER_CYCLE bounds.
+_EXPIRY_SCAN_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_SCAN_MAX", "200"))
+# Below this a horizon reports "not enough data" rather than a finding. Not
+# derived - chosen so three samples cannot be read as a result, which is how
+# the 50-trade history got misread once already.
+_EXPIRY_MIN_RESOLVED = int(os.getenv("GRID_EXPIRY_MIN_RESOLVED", "20"))
 
 
 async def _record_maker_expiry(session, product_id: str, side: str, bot_name: str = None):
@@ -1083,20 +1104,41 @@ async def _resolve_maker_expiries(session):
     try:
         now = datetime.utcnow()
         async with get_session_factory()() as db:
+            # A ROW WITH NOTHING DUE MUST NOT CONSUME A SLOT.
+            #
+            # The limit exists to cap book reads, and before the ladder ran
+            # to 72h it doubled as a row cap harmlessly - every unresolved
+            # row was minutes old and had something due. Now a row stays
+            # unresolved for three days, and oldest-first ordering would
+            # hand all 8 slots to rows waiting on their 24h and 72h marks
+            # while every freshly expired order starved and lost its 1m
+            # reading permanently. The scan is cheap; the book read is not,
+            # so the cap now bounds the reads and the scan is widened to
+            # cover the backlog the longer ladder creates.
             rows = (await db.execute(
                 select(GridMakerExpiry)
                 .where(GridMakerExpiry.resolved_at.is_(None))
                 .order_by(GridMakerExpiry.expired_at)
-                .limit(_EXPIRY_RESOLVE_MAX_PER_CYCLE))).scalars().all()
+                .limit(_EXPIRY_SCAN_MAX_PER_CYCLE))).scalars().all()
             if not rows:
                 return
             prices = {}
+            touched = 0
             for row in rows:
                 age = (now - row.expired_at).total_seconds() if row.expired_at else 0
+                # Past the final horizon with gaps still open, this row can
+                # never fill them - a restart or an unreadable book cost it
+                # a reading. Retire it so it stops being scanned forever.
+                if age >= _EXPIRY_FINAL_SECONDS + 3600 and row.resolved_at is None:
+                    row.resolved_at = now
+                    continue
                 due = [(sec, tag) for sec, tag in _EXPIRY_HORIZONS
                        if age >= sec and getattr(row, f"price_{tag}") is None]
                 if not due:
                     continue
+                if touched >= _EXPIRY_RESOLVE_MAX_PER_CYCLE:
+                    break
+                touched += 1
                 if row.product_id not in prices:
                     try:
                         bid, ask = await engine.get_best_bid_ask(session, row.product_id)
@@ -1116,7 +1158,7 @@ async def _resolve_maker_expiries(session):
                     setattr(row, f"price_{tag}", price)
                     setattr(row, f"drift_{tag}_pct", round(drift, 4))
                     setattr(row, f"cancel_benefit_{tag}_pct", round(benefit, 4))
-                if row.price_10m is not None:
+                if getattr(row, f"price_{_EXPIRY_FINAL_TAG}") is not None:
                     row.resolved_at = now
             await db.commit()
     except Exception as e:
@@ -1160,18 +1202,58 @@ async def get_maker_expiry_drift() -> dict:
             "helped": sum(1 for v in vals if v > 0),
             "hurt": sum(1 for v in vals if v < 0),
         }
+    wait_s = await maker_wait_seconds()
     ten = out["horizons"]["10m"]
     # 20 is not a magic number with a derivation behind it - it is simply the
     # point below which this says nothing, chosen so the field cannot be read
     # as a finding while it is still noise.
-    if (ten["n"] or 0) < 20:
-        out["verdict"] = f"not enough data ({ten['n']}/20 resolved at 10m)"
+    if (ten["n"] or 0) < _EXPIRY_MIN_RESOLVED:
+        out["verdict"] = (f"not enough data ({ten['n']}/{_EXPIRY_MIN_RESOLVED} "
+                          f"resolved at 10m)")
     elif ten["mean_benefit_pct"] > 0:
-        out["verdict"] = ("the 240s timeout looks PROTECTIVE - price moved "
-                          "against us after cancelling, on average")
+        out["verdict"] = (f"the {wait_s}s timeout looks PROTECTIVE - price moved "
+                          f"against us after cancelling, on average")
     else:
-        out["verdict"] = ("the 240s timeout looks TOO AGGRESSIVE - price moved "
-                          "in our favour after cancelling, on average")
+        out["verdict"] = (f"the {wait_s}s timeout looks TOO AGGRESSIVE - price moved "
+                          f"in our favour after cancelling, on average")
+
+    # THE QUESTION THE SHORT HORIZONS CANNOT ANSWER.
+    #
+    # The verdict above asks whether cancelling was right over the next ten
+    # minutes. It is a different question from the one the account owner is
+    # actually asking, which is whether the rung should have been left to
+    # rest for hours - horizon_study puts 34.1% of round trips inside 6h and
+    # 92.5% inside 72h, none of which is visible at 10m.
+    #
+    # Reported as its OWN verdict rather than replacing the short one,
+    # because they can legitimately disagree: a cancel can be protective at
+    # 10 minutes and still have cost a fill that came good by the next day.
+    # The longest horizon with enough resolved rows wins, so this stays
+    # silent until the data arrives instead of reading three samples as a
+    # finding.
+    long_tags = [t for _s, t in _EXPIRY_HORIZONS if t in ("30m", "2h", "6h", "24h", "72h")]
+    usable = [t for t in long_tags
+              if (out["horizons"][t]["n"] or 0) >= _EXPIRY_MIN_RESOLVED]
+    if not usable:
+        best = max(long_tags, key=lambda t: out["horizons"][t]["n"] or 0)
+        out["long_horizon_verdict"] = (
+            f"not enough data yet - the longest horizon with any resolved rows is "
+            f"{best} at {out['horizons'][best]['n'] or 0}/{_EXPIRY_MIN_RESOLVED}. "
+            f"Rows take {_EXPIRY_FINAL_SECONDS // 3600}h to fill the full ladder, "
+            f"so this is a matter of waiting, not of a missing measurement.")
+    else:
+        tag = usable[-1]
+        h = out["horizons"][tag]
+        out["long_horizon_tag"] = tag
+        out["long_horizon_verdict"] = (
+            (f"over {tag}, cancelling HELPED by {h['mean_benefit_pct']:+.4f}% per expiry "
+             f"({h['helped']} helped / {h['hurt']} hurt, n={h['n']}) - resting the rung "
+             f"longer than {wait_s}s would have cost money, not made it.")
+            if (h["mean_benefit_pct"] or 0) > 0 else
+            (f"over {tag}, cancelling COST {abs(h['mean_benefit_pct']):.4f}% per expiry "
+             f"({h['helped']} helped / {h['hurt']} hurt, n={h['n']}) - the fills were "
+             f"coming, and {wait_s}s is too short to collect them. This is the evidence "
+             f"for lengthening the rest; nothing changes the wait automatically."))
     return out
 
 

@@ -243,13 +243,23 @@ ok("it runs AFTER the branch loop, so it cannot delay a trade",
 ok("each horizon resolves once and only once",
    'getattr(row, f"price_{tag}") is None' in RES)
 
+# Asserted on the behaviour, not on the literal 20 - the floor is now a
+# named constant so it can be raised, and a test pinned to the digit would
+# fail on a change that made the rule stricter.
+import crypto_grid_bot as _grid_for_floor
 ok("the verdict refuses to speak on a small sample",
-   "not enough data" in DRIFT and "< 20" in DRIFT,
+   "not enough data" in DRIFT and "_EXPIRY_MIN_RESOLVED" in DRIFT,
    "reading three samples as a finding is how the 50-trade book got misread")
+ok("and the floor is still 20 by default", _grid_for_floor._EXPIRY_MIN_RESOLVED == 20)
+ok("the long-horizon verdict has its own evidence floor",
+   DRIFT.count("_EXPIRY_MIN_RESOLVED") >= 2)
 ok("POSITIVE is defined on screen as 'cancelling helped'",
    "moved against us after cancelling" in CARD_CODE)
 ok("the drift block is served in the payload", '"maker_expiry_drift"' in BOT)
-ok("the card renders all four horizons", "['1m','3m','5m','10m']" in CARD_CODE)
+ok("the card renders the whole ladder, not just the short end",
+   "['1m','3m','5m','10m','30m','2h','6h','24h','72h']" in CARD_CODE)
+ok("and it surfaces the long-horizon verdict beside the short one",
+   "long_horizon_verdict" in CARD_CODE and "Should the rung have rested longer?" in CARD_CODE)
 
 
 print("\nthe opportunity pipeline reaches the dashboard, not just the payload")

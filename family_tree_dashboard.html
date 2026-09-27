@@ -4299,7 +4299,7 @@ function renderGridMakerOnlyToggle(data) {
             ? `<p class="why" style="margin:8px 0 0"><strong>After we cancelled</strong> ` +
               `(${drift.expiries} expired order${drift.expiries === 1 ? '' : 's'}: ` +
               `${drift.buy} buy / ${drift.sell} sell) — mean benefit of cancelling: ` +
-              ['1m','3m','5m','10m'].map(t => {
+              ['1m','3m','5m','10m','30m','2h','6h','24h','72h'].map(t => {
                   const h = drift.horizons[t];
                   return h && h.mean_benefit_pct != null
                       ? `${t} <strong style="color:${h.mean_benefit_pct >= 0 ? '#10b981' : '#ef4444'}">` +
@@ -4307,7 +4307,21 @@ function renderGridMakerOnlyToggle(data) {
                       : `${t} —`;
               }).join(' · ') +
               `. Positive means price moved against us after cancelling, so the timeout protected the account. ` +
-              `<em>${drift.verdict || ''}</em></p>`
+              `<em>${drift.verdict || ''}</em></p>` +
+              // THE LONG HORIZONS ARE THE QUESTION BEING ASKED.
+              //
+              // The short rungs say whether cancelling was right over the
+              // next ten minutes. They cannot say whether the rung should
+              // have rested for hours, which is the actual question - the
+              // horizon panel on this same page puts 34.1% of round trips
+              // inside 6h and 92.5% inside 72h, none of it visible at 10m.
+              // Rendered as its own line because the two verdicts can
+              // legitimately disagree: a cancel can protect at 10 minutes
+              // and still have cost a fill that came good by the next day.
+              (drift.long_horizon_verdict
+                  ? `<p class="why" style="margin:6px 0 0"><strong>Should the rung have rested longer?</strong> ` +
+                    `<em>${drift.long_horizon_verdict}</em></p>`
+                  : '')
             : `<p class="why" style="margin:8px 0 0; opacity:.7"><strong>After we cancelled:</strong> ` +
               `no post-only order has expired unfilled yet, so there is nothing to say about the 240s timeout.</p>`) +
         (floor != null

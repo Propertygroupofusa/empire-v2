@@ -1394,26 +1394,58 @@ class GridMakerExpiry(Base):
     price_at_expiry = Column(Float)
     expired_at = Column(DateTime, default=datetime.utcnow, index=True)
 
-    # Four horizons rather than one, because "too aggressive" and
+    # Many horizons rather than one, because "too aggressive" and
     # "protective" can be the same row at different distances: a fill that
     # comes good in 60s and rolls over by 10 minutes is a real pattern and a
     # single horizon would report only half of it. Each resolves
     # independently and stays NULL until its moment arrives, so a row is
     # usable while still filling in.
+    #
+    # THE LADDER RUNS TO 72 HOURS, AND IT HAS TO.
+    #
+    # This table exists to answer one question: should a resting rung be
+    # given longer before it is cancelled? It used to stop at 10 minutes,
+    # which meant it could only ever answer that question out to 10 minutes
+    # - and the answer it was built to test lives well past there.
+    # horizon_study measures the same market and finds 8.1% of entries clear
+    # a round trip inside 30m, 34.1% inside 6h and 92.5% inside 72h. A study
+    # whose longest look is 10 minutes cannot see any of that; it is the
+    # same shape as the signal ledger calling "no coin pays" from a window
+    # bounded at 30 minutes, which is the bug horizon_study was written to
+    # expose in the first place.
+    #
+    # Extending the ladder does NOT lengthen the wait. The wait stays where
+    # it is until this table says otherwise - what changes is that it can
+    # now say something.
     price_1m = Column(Float, nullable=True)
     price_3m = Column(Float, nullable=True)
     price_5m = Column(Float, nullable=True)
     price_10m = Column(Float, nullable=True)
+    price_30m = Column(Float, nullable=True)
+    price_2h = Column(Float, nullable=True)
+    price_6h = Column(Float, nullable=True)
+    price_24h = Column(Float, nullable=True)
+    price_72h = Column(Float, nullable=True)
     drift_1m_pct = Column(Float, nullable=True)
     drift_3m_pct = Column(Float, nullable=True)
     drift_5m_pct = Column(Float, nullable=True)
     drift_10m_pct = Column(Float, nullable=True)
+    drift_30m_pct = Column(Float, nullable=True)
+    drift_2h_pct = Column(Float, nullable=True)
+    drift_6h_pct = Column(Float, nullable=True)
+    drift_24h_pct = Column(Float, nullable=True)
+    drift_72h_pct = Column(Float, nullable=True)
     # Side-corrected: positive = cancelling helped. See the class docstring.
     cancel_benefit_1m_pct = Column(Float, nullable=True)
     cancel_benefit_3m_pct = Column(Float, nullable=True)
     cancel_benefit_5m_pct = Column(Float, nullable=True)
     cancel_benefit_10m_pct = Column(Float, nullable=True)
-    # Set once the 10-minute horizon is in, so the resolver can stop looking.
+    cancel_benefit_30m_pct = Column(Float, nullable=True)
+    cancel_benefit_2h_pct = Column(Float, nullable=True)
+    cancel_benefit_6h_pct = Column(Float, nullable=True)
+    cancel_benefit_24h_pct = Column(Float, nullable=True)
+    cancel_benefit_72h_pct = Column(Float, nullable=True)
+    # Set once the LAST horizon is in, so the resolver can stop looking.
     resolved_at = Column(DateTime, nullable=True, index=True)
 
 
