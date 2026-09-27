@@ -1224,6 +1224,23 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # Idle rotation: stale cash back into a branch that is trading.
+        # Observes unless GRID_IDLE_ROTATION_MODE=arm. Separate from
+        # GRID_AUTO_ROTATE, which stays off - see idle_rotation_worker's
+        # docstring for why this is not that switch turned on.
+        try:
+            import idle_rotation_worker
+            asyncio.create_task(idle_rotation_worker.run_periodically())
+            try:
+                log.info(f"🔁 Idle rotation running, mode={idle_rotation_worker.current_mode()}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log.warning(f"idle rotation not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # THE GROWTH LEDGER.
         #
         # Writes one reading of every capital KPI on a fixed interval, so

@@ -10452,6 +10452,41 @@ _ADOPTION_CACHE = {"at": 0.0, "payload": None}
 _ADOPTION_TTL_SECONDS = 180
 
 
+@router.post("/idle-capital/rotate")
+async def idle_capital_rotate(dry_run: bool = True):
+    """Move stale cash into a branch that is demonstrably trading.
+
+    DRY RUN BY DEFAULT. A bare POST previews and changes nothing; only
+    ?dry_run=false moves money. Same shape as the btc_compound close: the
+    preview and the action are the same endpoint, one told to stop short,
+    so the write guard covers both rather than leaving a read-only door
+    into a state-changing path.
+
+    It executes idle_capital's plan through
+    crypto_grid_bot.move_cash_between_grid_branches - the same function the
+    "Move Cash Between Grid Branches" modal calls. Everything that function
+    refuses, this refuses: a non-flat source, an amount above its own
+    allocated_usd, a locked branch, the same branch at both ends,
+    STOP_TRADING.
+
+    It only ever moves what idle_capital calls STALE - no completed round
+    trip in 72h, the window in which 92.5% of this account's moves finish -
+    and never into another stale branch, never past the owner's 20% rule,
+    and never out to unallocated cash.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import idle_rotation_worker
+    try:
+        # require_arm=False: this is a write-guarded request a human made on
+        # purpose, which is the authorisation. The periodic loop still needs
+        # its own env switch.
+        return await idle_rotation_worker.rotate_once(
+            dry_run=dry_run, require_arm=False)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/idle-capital")
 async def idle_capital_report():
     """Which branches are actually idle, and which only look it.
