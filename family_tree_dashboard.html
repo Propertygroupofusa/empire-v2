@@ -4396,13 +4396,39 @@ function renderStatusStrip(d, history) {
         var todays = trades.filter(function (t) {
             return String(t.closed_at || '').slice(0, 10) === today;
         });
+
+        // THE WINDOW THIS IS COUNTED FROM IS NOT THE WHOLE LEDGER.
+        // recent_trades is capped (50 rows) while total_trade_count is the
+        // real total - 50 of 87 when this was written. The trades from today are
+        // the newest, so they survive the cap and the figure is exact AS
+        // LONG AS the window reaches back past midnight. With 21 branches
+        // a busy day can fill all 50 rows inside today, and then this
+        // silently reports a PART of the day as if it were the day. The
+        // undercount hides activity, which is the direction that gets
+        // missed. So: establish coverage, and when it cannot be
+        // established, say "at least" rather than a number that looks
+        // whole. Not knowing is not the same as being fine - the same rule
+        // the backing banner on this strip already follows.
+        var totalCount = Number((history && history.total_trade_count) || 0);
+        var haveAll = totalCount > 0 && trades.length >= totalCount;
+        var oldestInWindow = trades.length
+            ? String(trades[trades.length - 1].closed_at || '').slice(0, 10) : null;
+        // Covered when the window starts BEFORE today (so midnight is
+        // inside it), or when the window is the entire ledger.
+        var dayFullyCovered = haveAll || (!!oldestInWindow && oldestInWindow < today);
+
         var el = document.getElementById('strip-today');
         var sub = document.getElementById('strip-today-sub');
         if (todays.length) {
             var net = todays.reduce(function (a, t) { return a + Number(t.pnl || 0); }, 0);
-            el.textContent = (net < 0 ? '-$' : '+$') + Math.abs(net).toFixed(2);
+            el.textContent = (dayFullyCovered ? '' : '\u2265 ')
+                + (net < 0 ? '-$' : '+$') + Math.abs(net).toFixed(2);
             el.style.color = net < 0 ? '#b42318' : '#1a7f37';
-            sub.textContent = todays.length + ' trade' + (todays.length === 1 ? '' : 's') + ' today';
+            sub.textContent = dayFullyCovered
+                ? (todays.length + ' trade' + (todays.length === 1 ? '' : 's') + ' today')
+                : ('at least ' + todays.length + ' trades today \u2014 the '
+                   + trades.length + '-row window starts inside today, so older '
+                   + 'closes are not counted here');
         } else {
             el.textContent = 'none';
             el.style.color = 'var(--text-dim)';

@@ -131,6 +131,29 @@ ok("but it is now collapsed behind a details element",
    "<details" in page and "Recovery tools" in page)
 ok("details tags are balanced", page.count("<details") == page.count("</details>"))
 
+# --- "today" must not report a partial day as a whole one -------------------
+#
+# recent_trades is capped (50) while total_trade_count is the real total -
+# 50 of 87 the day this was written. The newest trades survive the cap, so
+# the figure is exact only while the window reaches back past midnight.
+# With 21 branches a busy day can fill every row inside today, and then the
+# strip would silently report PART of the day as the day. It undercounts,
+# which is the direction that gets missed.
+ok("it knows the real total, not just the window",
+   "total_trade_count" in strip)
+ok("it establishes whether midnight is inside the window",
+   "dayFullyCovered" in strip and "oldestInWindow" in strip)
+ok("a window that IS the whole ledger counts as covered",
+   "haveAll" in strip and "trades.length >= totalCount" in strip)
+ok("an uncovered day is marked as a floor, not a total",
+   "at least " in strip)
+ok("and the headline carries the same caveat as the subtitle",
+   "dayFullyCovered ? '' :" in strip)
+ok("a covered day still reads exactly as before",
+   "' trade' + (todays.length === 1 ? '' : 's') + ' today'" in strip)
+ok("no trades at all still names the last one",
+   "no trades on record" in strip and "last trade " in strip)
+
 # --- hygiene ---------------------------------------------------------------
 ids = re.findall(r'id="([a-zA-Z0-9_-]+)"', page)
 ok("no duplicate element ids", len({i for i in ids if ids.count(i) > 1}) == 0)
