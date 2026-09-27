@@ -9584,3 +9584,92 @@ async def resting_stops_preview():
         "balance. Both are protections and they compete for the same units - that is "
         "a decision to make deliberately, not a setting to flip.")
     return out
+
+
+@router.get("/grid-universe")
+async def grid_universe_ranking(step_pct: float = 3.75, hours: int = 350,
+                                max_branches: int = 20):
+    """Which coins deserve a grid branch, scored on what they actually did.
+
+    Recommends; changes nothing. Adding a branch earmarks real cash.
+
+    HOW MUCH TO TRUST THE ORDER
+
+    Tested train-on-first-70%, score-on-the-rest over 22 coins: the top
+    half by training rank went on to average +2.55%/day against +0.87% for
+    the bottom half, a separation of 1.68 points, with a Spearman rank
+    correlation of +0.348.
+
+    That is real signal and it is WEAK. It means the split between good
+    and bad halves holds up, and the order WITHIN a half does not: the
+    single best coin in training (ARB) landed 21st of 22 out of sample.
+    So this is a reason to spread across many coins from the top half,
+    never a reason to bet on the top name.
+
+    The percentages are from a replay that assumes a rung fills whenever
+    price touches it. The RANKING survives that assumption because it
+    applies equally to every coin; the LEVELS do not. The fleet's real
+    measured rate is 0.499%/day on its own capital, from actual fills.
+    """
+    try:
+        import grid_universe
+        import crypto_selection_backtest as CSB
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"grid universe unavailable: {exc}")
+
+    from datetime import datetime, timedelta, timezone
+
+    hours = max(60, min(int(hours or 350), 1000))
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours + 24)
+
+    try:
+        st = await grid.get_grid_status() if hasattr(grid, "get_grid_status") else {}
+    except Exception:
+        st = {}
+    live = [str(b.get("product_id", "")).split("-")[0]
+            for b in (st.get("branches") or []) if b.get("product_id")]
+
+    candidates = sorted({*live, "ARB", "INJ", "APT", "OP", "AVAX", "SUI", "XLM", "DOT",
+                         "LTC", "ATOM", "SEI", "LINK", "DOGE", "ADA", "SOL", "NEAR",
+                         "ONDO", "TIA", "BONK", "FLOKI", "BTC"})
+
+    book, failed = {}, {}
+    async with aiohttp.ClientSession() as session:
+        for coin in candidates:
+            try:
+                got = await CSB.fetch_candles_window(
+                    session, f"{coin}-USD", start, end, granularity=3600)
+            except Exception as exc:
+                failed[coin] = f"{type(exc).__name__}"
+                continue
+            if not got or not got[0] or len(got[0]) < 60:
+                failed[coin] = f"only {len(got[0]) if got and got[0] else 0} bars"
+                continue
+            closes, highs, lows = got[0], got[1], got[2]
+            book[coin] = [{"close": c, "high": h, "low": l}
+                          for c, h, l in zip(closes, highs, lows)]
+
+    if not book:
+        raise HTTPException(status_code=502, detail=f"no candles loaded: {failed}")
+
+    ranked = grid_universe.rank(book, current=live, step_pct=step_pct)
+    out = grid_universe.recommend(ranked, max_branches=max_branches)
+    out["ranked"] = ranked
+    out["live_branches"] = live
+    out["step_pct"] = step_pct
+    out["unavailable"] = failed
+    out["how_much_to_trust_the_order"] = {
+        "spearman_train_to_test": 0.348,
+        "top_half_test_pct_per_day": 2.551,
+        "bottom_half_test_pct_per_day": 0.868,
+        "separation_pts": 1.683,
+        "reading": ("The good/bad SPLIT holds out of sample; the order inside a half "
+                    "does not - the top training pick landed 21st of 22. Spread across "
+                    "the top half; never bet the top name."),
+        "levels_are_not_reliable": ("These %/day figures come from a replay that fills a "
+                                    "rung whenever price touches it. The fleet's real "
+                                    "measured rate from actual fills is 0.499%/day."),
+    }
+    return out
