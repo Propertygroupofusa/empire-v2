@@ -30,10 +30,14 @@ THE FOUR LEVERS, LARGEST FIRST
                       and is enabled. It opens nothing, for the reason
                       below.
 
-  COMPOUND_REALIZED   $19.61 banked. Compounding it is the account
-                      owner's own rule - "the compound always come after
-                      the profit is made" - and $19.61 does not fund a
-                      branch, so this lever is real and simply small yet.
+  COMPOUND_REALIZED   $19.61 banked, and ALREADY put back to work.
+                      run_grid_branch_cycle does allocated_usd += pnl on
+                      every FIFO sell, so a win raises its own branch's
+                      allocation as it closes. This module first sized
+                      this lever at the full $19.61 and called it open,
+                      which would have had the same profit deployed
+                      twice - claims up, backing flat, which is the
+                      precise shape of an unbacked branch.
 
 WHY THE LADDER IS FROZEN, WHICH IS THE ACTUAL BUG
 
@@ -235,37 +239,63 @@ def lever_fund(free_cash_usd, *, reserve_usd=DEFAULT_RESERVE_USD,
 
 
 def lever_compound(realized_usd, *, levels=DEFAULT_LEVELS, min_trade=MIN_TRADE_USD,
-                   already_compounded_usd=0.0):
-    """Profit already banked, put back to work.
+                   already_compounded_usd=None):
+    """Profit already banked - and already put back to work by the engine.
 
-    The account owner's rule, and the order matters: the compound comes
-    AFTER the profit is made. This lever never anticipates profit and
-    never counts unrealised gains - a position marked up is not a dollar
-    that can fund anything.
+    THIS LEVER IS NOT A TO-DO, AND THAT MATTERS.
+
+    The first version of this module sized it at the full realised $19.61
+    and reported it OPEN, as though that money were waiting to be
+    deployed. It is not. run_grid_branch_cycle does `allocated_usd += pnl`
+    on every FIFO sell, so a winning slice raises its own branch's
+    allocation the moment it closes. The $19.61 is already inside the
+    $553.89 those branches claim.
+
+    Adding it again would raise claims without raising backing, which is
+    exactly the hole allocation_backing exists to detect - a number in a
+    database with nothing behind it. So this reports the mechanism and
+    sizes the outstanding amount at zero unless a caller can show profit
+    the branches have NOT already absorbed.
+
+    The owner's rule still holds and is still what the engine does: the
+    compound comes after the profit is made. It just does not need a
+    second loop to do it.
     """
     banked = _num(realized_usd) or 0.0
-    done = _num(already_compounded_usd) or 0.0
-    available = round(max(banked - done, 0.0), 2)
-    floor = branch_floor_usd(levels, min_trade)
-    if available < min_trade:
-        blocked = "NOTHING_BANKED_TO_COMPOUND"
-        take = (f"${available:,.2f} of realised profit is uncompounded, below the "
-                f"${min_trade:,.2f} minimum order. It compounds when it clears that, not "
-                f"before - unrealised gains are not dollars and never fund anything here.")
-    elif available < floor:
-        blocked = None
-        take = (f"${available:,.2f} banked can top up an EXISTING branch's allocation - it "
-                f"cannot open a new one, which needs ${floor:,.2f}.")
-    else:
-        blocked = None
-        take = f"${available:,.2f} banked is enough to open a branch of its own."
+    # Absent evidence to the contrary, every banked dollar is assumed
+    # already compounded - because the trading loop compounds it. An
+    # explicit figure overrides this; a missing one must never be read
+    # as "none of it has been".
+    done = _num(already_compounded_usd)
+    if done is None:
+        done = banked
+    outstanding = round(max(banked - done, 0.0), 2)
+
+    if outstanding < min_trade:
+        return {
+            "lever": "COMPOUND_REALIZED",
+            "usd_addressable": outstanding,
+            "realized_usd": round(banked, 2),
+            "already_compounded_usd": round(done, 2),
+            "blocked_by": "ALREADY_AUTOMATIC",
+            "what_it_would_take": (
+                f"Nothing - this already runs. run_grid_branch_cycle adds a slice's profit "
+                f"to its own branch's allocation the moment the sell fills, so the "
+                f"${banked:,.2f} realised is already inside what the branches claim. A second "
+                f"loop adding it again would raise claims without raising backing, which is "
+                f"the exact shape of an unbacked branch. The compound comes after the profit "
+                f"is made, and the trading loop is where it happens."),
+        }
     return {
         "lever": "COMPOUND_REALIZED",
-        "usd_addressable": available,
+        "usd_addressable": outstanding,
         "realized_usd": round(banked, 2),
         "already_compounded_usd": round(done, 2),
-        "blocked_by": blocked,
-        "what_it_would_take": take,
+        "blocked_by": None,
+        "what_it_would_take": (
+            f"${outstanding:,.2f} of realised profit is NOT reflected in any branch's "
+            f"allocation, which should not happen - the trading loop compounds on every "
+            f"close. Worth reconciling before adding it by hand."),
     }
 
 
@@ -330,7 +360,7 @@ def plan(*, kpis, holdings, branches, free_cash_usd, account_total_usd,
          claimed_products=(), eligible_products=(), stages=(),
          realized_usd=None, reserve_usd=DEFAULT_RESERVE_USD,
          levels=DEFAULT_LEVELS, min_trade=MIN_TRADE_USD,
-         already_compounded_usd=0.0):
+         already_compounded_usd=None):
     """Every lever, sized, ranked, each with the thing stopping it.
 
     Refuses wholesale on a negative edge. More capital placed against a

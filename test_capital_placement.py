@@ -210,37 +210,38 @@ def test_funding_is_open_when_there_is_cash_and_a_coin():
 
 # ------------------------------------------------- the compound lever
 
-def test_the_compound_comes_after_the_profit_is_made():
-    """The owner's own rule. Never anticipates, never counts unrealised."""
+def test_banked_profit_is_not_offered_a_second_time():
+    """run_grid_branch_cycle already does allocated_usd += pnl on every
+    FIFO sell, so the realised $19.61 is inside the $553.89 the branches
+    claim. Offering it again deploys the same profit twice - claims up,
+    backing flat, which is an unbacked branch by definition."""
     lev = cp.lever_compound(19.61)
-    assert lev["usd_addressable"] == 19.61
-    assert lev["realized_usd"] == 19.61
+    assert lev["usd_addressable"] == 0.0
+    assert lev["blocked_by"] == "ALREADY_AUTOMATIC"
+    assert "already runs" in lev["what_it_would_take"]
 
 
-def test_profit_already_compounded_is_not_compounded_twice():
-    assert cp.lever_compound(19.61, already_compounded_usd=15.0)["usd_addressable"] == \
-        pytest.approx(4.61)
+def test_a_missing_compounded_figure_is_never_read_as_none_compounded():
+    """The dangerous default. Absent evidence, every banked dollar is
+    assumed already compounded, because the trading loop compounds it."""
+    assert cp.lever_compound(500.0)["already_compounded_usd"] == 500.0
+    assert cp.lever_compound(500.0)["usd_addressable"] == 0.0
 
 
-def test_banked_profit_under_the_venue_minimum_waits():
-    lev = cp.lever_compound(2.00)
-    assert lev["blocked_by"] == "NOTHING_BANKED_TO_COMPOUND"
-    assert "unrealised gains are not dollars" in lev["what_it_would_take"]
-
-
-def test_banked_profit_between_the_minimum_and_a_branch_tops_up():
-    """$8 clears the $5 venue minimum but not the $15 a 3-rung branch needs."""
-    lev = cp.lever_compound(8.00)
-    assert lev["blocked_by"] is None and "cannot open a new one" in lev["what_it_would_take"]
-
-
-def test_banked_profit_past_the_branch_floor_can_open_one():
-    lev = cp.lever_compound(19.61)
-    assert "open a branch of its own" in lev["what_it_would_take"]
+def test_profit_the_branches_really_have_not_absorbed_is_flagged():
+    lev = cp.lever_compound(500.0, already_compounded_usd=100.0)
+    assert lev["usd_addressable"] == pytest.approx(400.0)
+    assert lev["blocked_by"] is None
+    assert "should not happen" in lev["what_it_would_take"]
 
 
 def test_a_loss_never_compounds_into_a_negative_placement():
     assert cp.lever_compound(-40.0)["usd_addressable"] == 0.0
+
+
+def test_the_compound_lever_is_not_counted_as_open_capital():
+    p = full()
+    assert "COMPOUND_REALIZED" not in (p["open_levers"] or [])
 
 
 # ----------------------------------------- the ladder ordering defect
