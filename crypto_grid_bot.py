@@ -3183,6 +3183,26 @@ async def _maybe_rotate_one_grid_branch(branch: CryptoGridBranch, after_sale: bo
         )
         return
 
+    # THE OFF SWITCH MUST MEAN OFF ON EVERY PATH.
+    #
+    # run_grid_auto_rotate_sweep and rebalance_flat_grid_branches_now both
+    # check is_grid_auto_rotate_active() before they call this. The MAIN
+    # CYCLE does not: run_grid_branch_cycle calls this with after_sale=True
+    # whenever a sale empties a branch to flat, and that path reached the
+    # env var alone - which DEFAULTS TO ON when unset.
+    #
+    # So the dashboard could report auto_rotate_active=False, the operator
+    # could be told rotation was off, and a branch that sold its last slice
+    # would still be re-pointed onto another coin. On 2026-09-25 rotation
+    # retired four EARNING branches and left 64% of the account idle; the
+    # switch that exists to prevent a repeat has to hold on the path that
+    # actually fires most often.
+    if not await is_grid_auto_rotate_active():
+        log.info(f"[GRID] auto-rotate declined {branch.bot_name}: the fleet switch is OFF "
+                 f"(is_grid_auto_rotate_active). Nothing is re-pointed while it stays off, "
+                 f"on this path or any other.")
+        return
+
     if rotation.auto_rotate_enabled():
         try:
             trips = await rotation.trips_for([branch.product_id, best_pid],
@@ -6138,6 +6158,19 @@ def _stop_policy_block():
                 "fixed_default_pct": GRID_STOP_LOSS_PCT}
 
 
+def _rotation_env_enabled():
+    """What GRID_AUTO_ROTATE reads, reported rather than assumed.
+
+    It defaults to ON when unset, which is why it must be shown beside
+    the DB switch instead of being left to inference.
+    """
+    try:
+        import coin_rotation as _r
+        return bool(_r.auto_rotate_enabled())
+    except Exception:
+        return None
+
+
 def _allocation_backing_block(branches, wallet_cash):
     """Never lets a reporting problem look like a clean balance sheet."""
     try:
@@ -6247,6 +6280,12 @@ async def get_grid_status() -> dict:
         out.append({
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
             "active": b.active, "locked": bool(b.locked), "grid_pct": b.grid_pct, "num_levels": b.num_levels,
+            # The stop this branch really trades under. A safety setting
+            # that cannot be inspected is one nobody can trust: adopted
+            # branches carry 0 so an 8% wobble cannot liquidate coin the
+            # owner has held for a year, and that has to be verifiable
+            # from outside rather than taken on faith.
+            "stop_loss_pct_override": getattr(b, "stop_loss_pct_override", None),
             "reference_price": b.reference_price, "open_slices": len(slices),
             "current_price": current_price,
             "peak_equity": round(peak_equity, 2) if peak_equity is not None else None,
@@ -6319,6 +6358,13 @@ async def get_grid_status() -> dict:
         # and USD really in the wallet stand behind it. The account owner
         # found the gap by underlining a subtitle - it gets its own field
         # now. See allocation_backing.py for the arithmetic.
+        # BOTH rotation gates, because reporting one of them was the bug.
+        # auto_rotate_active gates the scheduled sweep; the env var gates
+        # the post-sale path inside the main cycle and DEFAULTS TO ON.
+        # A reader who saw only the first was told rotation was off while
+        # a branch going flat could still be re-pointed.
+        "auto_rotate_env_enabled": _rotation_env_enabled(),
+        "auto_rotate_fully_off": (not await is_grid_auto_rotate_active()),
         "allocation_backing": _allocation_backing_block(out, wallet_cash_usd),
         # The stop configuration actually in force, and what it resolves to
         # per branch. Exposed because "did that environment variable take"

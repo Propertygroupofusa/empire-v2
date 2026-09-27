@@ -10160,16 +10160,28 @@ async def growth_curve(hours: float = 24.0, limit: int = 500):
 
     out = growth_ledger.summarise(snaps, hours=float(hours or 24.0))
 
+    # THE HEARTBEAT COUNTS THIS PROCESS ONLY, AND MUST SAY SO.
+    #
+    # It read "38 readings over 6.89h - recorder: 1 pass(es), 1 reading(s)
+    # written", which is a contradiction on its face. HEARTBEAT lives in
+    # memory and resets on every deploy; the 38 rows accumulated across
+    # many process lifetimes. Printing a per-process counter beside a
+    # whole-series total made a working recorder look broken.
     hb = dict(getattr(__import__("growth_ledger_worker"), "HEARTBEAT", {})) \
         if out is not None else {}
+    hb["counts_since"] = "this process started - it resets on every deploy"
+    hb["rows_in_series"] = out.get("points") if isinstance(out, dict) else None
     if not hb.get("started_at"):
         hb["verdict"] = ("the recorder has not started in this process - readings stop "
                          "accumulating until it does")
     elif not hb.get("last_pass_at"):
-        hb["verdict"] = "the recorder started but has not finished a pass yet"
+        hb["verdict"] = ("the recorder restarted and has not finished a pass yet; the "
+                         "readings already in the series are unaffected")
     else:
-        hb["verdict"] = (f"{hb.get('passes')} pass(es), {hb.get('rows_written')} reading(s) "
-                         f"written, last finished {hb['last_pass_at']}")
+        hb["verdict"] = (
+            f"{out.get('points') if isinstance(out, dict) else '?'} reading(s) recorded in "
+            f"all; {hb.get('passes')} pass(es) since this process started "
+            f"(the counter resets on every deploy), last finished {hb['last_pass_at']}")
     out["recorder"] = hb
     out["is_a_measurement_not_a_change"] = True
     if not out.get("available"):
@@ -10691,3 +10703,112 @@ async def loss_study_view():
             "excursions rather than from an opinion."),
         "is_a_measurement_not_a_change": True,
     }
+
+
+@router.get("/target-rate")
+async def target_rate_view(target_usd_per_hour: float = 20.0, per_coin: int = 1):
+    """What an hourly target would actually cost, in capital.
+
+    "It should be at least $20 an hour per coin" is a capital question
+    wearing a strategy question's clothes. A grid earns a RATE on the
+    money behind it, so the hourly figure is fixed once you know how much
+    each deployed dollar earns per hour and how many of them there are.
+    Wanting a bigger number sets the first; only the second is a lever.
+
+    Both measured rates are always reported - the recent one and the
+    all-time one - because quoting the flattering one alone promises a
+    return this fleet has never sustained, and quoting only the long one
+    ignores that the current configuration really is trading better.
+
+    Read-only, DB-only.
+    """
+    try:
+        import target_rate
+        import capital_kpis
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"target rate unavailable: {exc}")
+
+    trades = []
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc())
+                .limit(5000))).scalars().all()
+        trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "opened_at": r.opened_at, "closed_at": r.closed_at,
+                   "product_id": r.product_id} for r in rows]
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"the closed book could not be read ({type(exc).__name__})")
+
+    deployed = account_total = None
+    coins = 0
+    try:
+        st = await grid.get_grid_status()
+        backing = st.get("allocation_backing") or {}
+        deployed = backing.get("deployed_coin_usd")
+        coins = int(st.get("branch_count") or 0)
+    except Exception as exc:
+        log.warning(f"[target] grid status unreadable: {type(exc).__name__}: {exc}")
+
+    # The recent window comes from the recorded series, which is the only
+    # place a SHORT-run rate can come from honestly.
+    recent_earned = recent_hours = None
+    try:
+        import growth_ledger
+        from models import CapitalKpiSnapshot
+        from database import get_session_factory as _sf
+        async with _sf()() as db:
+            snaps = (await db.execute(
+                select(CapitalKpiSnapshot)
+                .order_by(CapitalKpiSnapshot.captured_at.desc())
+                .limit(500))).scalars().all()
+        series = [{"captured_at": s.captured_at,
+                   **{f: getattr(s, f, None) for f in growth_ledger.FIELDS}} for s in snaps]
+        d = growth_ledger.delta(series, "net_usd", hours=24.0)
+        if d.get("change") is not None and d.get("window_minutes"):
+            recent_earned, recent_hours = d["change"], d["window_minutes"] / 60.0
+    except Exception as exc:
+        log.warning(f"[target] series unreadable: {type(exc).__name__}: {exc}")
+
+    k = capital_kpis.compute(trades, allocated_usd=deployed)
+    alltime_hours = (k.get("days_span") or 0) * 24.0
+
+    out = target_rate.assess(
+        target_usd_per_hour=target_usd_per_hour,
+        coins=(coins if per_coin else 1),
+        account_total_usd=(await _account_total_best_effort()),
+        deployed_usd=deployed,
+        recent_earned_usd=recent_earned, recent_hours=recent_hours,
+        alltime_earned_usd=k.get("net_usd"), alltime_hours=alltime_hours,
+        # The historical average deployed is NOT today's figure. Using
+        # today's would divide 27 days of profit by capital that only
+        # arrived this morning and understate the rate several-fold.
+        alltime_avg_deployed_usd=None,
+        trades=k.get("trades"))
+    out["per_coin"] = bool(per_coin)
+    out["trades"] = k.get("trades")
+    out["is_a_measurement_not_a_change"] = True
+    out["denominator_warning"] = (
+        "The all-time rate divides 27+ days of profit by the capital deployed TODAY. "
+        "Deployed capital was a tenth of this for most of that window, so this rate is "
+        "understated - the true long-run rate is higher, and the capital a target needs is "
+        "correspondingly lower. A time-weighted denominator would settle it and this ledger "
+        "does not carry one yet.")
+    return out
+
+
+async def _account_total_best_effort():
+    """The account total, or None. Never a zero - a zero here would make
+    every "multiple of the account" figure infinite."""
+    try:
+        import account_census
+        async with aiohttp.ClientSession() as session:
+            c = await account_census.census(session, tracked_usd=0.0)
+        return c.get("total_usd") if c.get("available") else None
+    except Exception:
+        return None

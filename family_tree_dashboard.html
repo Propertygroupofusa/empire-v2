@@ -8157,8 +8157,8 @@ async function loadGrowthCurve(hours) {
         wrap.innerHTML = `
           <div style="font-size:0.95em;font-weight:600;margin-bottom:4px">${esc2(d.headline || '')}</div>
           <div style="font-size:0.78em;color:${dim};margin-bottom:14px">
-            ${d.points} reading(s) over ${d.span_hours}h · window ${d.window_hours}h ·
-            recorder: ${esc2((d.recorder||{}).verdict || 'unknown')}</div>
+            ${d.points} reading(s) over ${d.span_hours}h · window ${d.window_hours}h
+            <br>${esc2((d.recorder||{}).verdict || 'recorder state unknown')}</div>
 
           ${breaks.length ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;
              border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:14px">

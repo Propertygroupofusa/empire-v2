@@ -121,3 +121,50 @@ def test_an_eight_percent_stop_on_an_adoption_price_is_the_risk_named():
 def test_the_stop_trigger_itself_is_unchanged():
     src = cycle_src()
     assert "if _entry and price <= _entry * (1 - _stop_pct):" in src
+
+
+# ------------------------------- the off switch must mean off
+
+def test_the_post_sale_rotation_path_honours_the_fleet_switch():
+    """THE HOLE. run_grid_branch_cycle calls _maybe_rotate_one_grid_branch
+    with after_sale=True whenever a sale empties a branch to flat, and
+    that path reached only the env var - which DEFAULTS TO ON. The
+    dashboard could report auto_rotate_active=False while a branch that
+    sold its last slice was still re-pointed onto another coin."""
+    fn = next(n for n in ast.walk(TREE)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "_maybe_rotate_one_grid_branch")
+    body = "\n".join(SRC.splitlines()[fn.lineno - 1:fn.end_lineno])
+    assert "is_grid_auto_rotate_active" in body, \
+        "the post-sale path does not check the fleet switch"
+    # and it must be checked BEFORE the env var, which defaults to on
+    assert body.index("is_grid_auto_rotate_active") < body.index("auto_rotate_enabled()")
+
+
+def test_every_caller_of_the_rotation_helper_is_now_gated():
+    """Three callers: the sweep, the flat-rebalance, and the main cycle.
+    The gate lives inside the helper now, so all three inherit it."""
+    callers = set()
+    for node in ast.walk(TREE):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")) \
+                    == "_maybe_rotate_one_grid_branch":
+                for p in ast.walk(TREE):
+                    if (isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef))
+                            and p.lineno <= node.lineno <= (p.end_lineno or 0)):
+                        callers.add(p.name)
+                        break
+    assert "run_grid_branch_cycle" in callers, "the main-cycle caller vanished"
+    assert len(callers) >= 3
+
+
+def test_both_rotation_gates_are_reported_not_just_one():
+    """Reporting only the DB switch is what made 'off' misleading."""
+    assert '"auto_rotate_env_enabled"' in SRC
+    assert '"auto_rotate_fully_off"' in SRC
+
+
+def test_the_branch_stop_override_is_visible_from_outside():
+    """A safety setting that cannot be inspected is one nobody can trust."""
+    assert '"stop_loss_pct_override": getattr(b, "stop_loss_pct_override", None)' in SRC
