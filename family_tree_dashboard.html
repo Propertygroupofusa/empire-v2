@@ -1219,6 +1219,48 @@
         <div id="growth-wrap"><div class="coin-history-empty">Not loaded.</div></div>
     </div>
 
+    <div class="section-title">📉 Where the numbers have been</div>
+    <div class="panel">
+        <div class="panel-sub">Every other figure on this page is a <strong>point in time</strong>.
+            "Is it growing?" cannot be answered from a point - only from two - so the panel below
+            could give a perfect diagnosis of why the profit is small and still not say whether
+            anything had moved since yesterday. Nothing was writing down where the numbers had
+            been, so there was no curve to watch.
+            <br><br>A reading is now recorded every 15 minutes. <strong>Earned</strong> and
+            <strong>placed</strong> are drawn apart, on their own scales, and never added: both
+            look like "it went up" and only one of them is income. The header once showed a
+            balance in green with a plus sign and it rose the day the trimmer sold $882.68 of
+            holdings - that was liquidation rendered as profit.
+            <br><br>A reading that could not be taken is stored as a <strong>gap</strong>, never
+            as a zero. An unread census drawn as $0.00 is a crash on the chart that never
+            happened, and someone acts on it.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadGrowthCurve(24)">📉 Last 24 hours</button>
+            <button class="unlock-btn" style="margin-top:0; opacity:0.8;" onclick="loadGrowthCurve(168)">Last 7 days</button>
+        </div>
+        <div id="growth-curve-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
+    <div class="section-title">🎯 Where the next dollar should go</div>
+    <div class="panel">
+        <div class="panel-sub"><strong>$10,772.48 of an $11,397.11 account belongs to no branch.</strong>
+            The edge measured +$0.2363 a trade with a 3.70 profit factor, and it is being applied
+            to a twentieth of the money. So the useful question is not "how do we trade better" -
+            it is "what is stopping each dollar from reaching a strategy that already works",
+            asked once per lever with the dollars attached.
+            <br><br>Four levers, largest first: coin already held that no branch manages, earmarks
+            branches have not converted into coin, free cash, and profit already banked. Each comes
+            back either <strong>open</strong> or with the thing blocking it <strong>named</strong> -
+            never as a vague "could be better".
+            <br><br>Every lever is refused at once on a negative edge. More capital onto a losing
+            strategy is the same loss, larger and sooner, and this is the one place in the system
+            where that mistake would be made at scale.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadPlacement()">🎯 Show the levers</button>
+        </div>
+        <div id="placement-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">🔬 Why the profit is that size</div>
     <div class="panel">
         <div class="panel-sub">"$19.61 realized" answers one question and hides four. It cannot
@@ -7929,6 +7971,212 @@ async function loadCapitalKpis() {
             <br><br>${d.ledger_rows_read ?? 0} ledger row(s) read${d.unreadable_rows ? ', ' + d.unreadable_rows + ' unreadable and dropped' : ''}.
             ${d.served_from_cache ? 'Served from a ' + d.cache_age_seconds + 's-old cache - a full census competes with the trimmer for the same rate limit.' : 'Read live.'}
           </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// ----------------------------------------------------- THE GROWTH CURVE
+// Two charts, never one. Earned and placed are different quantities on
+// different scales, and a dual-axis chart would let the eye read a
+// crossing that means nothing - which is exactly how a balance rising on
+// a sale gets read as profit.
+//
+// A null reading breaks the line rather than dropping it to zero. An
+// unread census drawn at $0.00 is a crash that never happened.
+function sparkline(points, opts) {
+    const W = 320, H = 88, PAD_L = 8, PAD_R = 8, PAD_T = 10, PAD_B = 18;
+    const vals = points.filter(p => p.v != null).map(p => p.v);
+    if (vals.length < 2) {
+        return `<div style="font-size:0.8em;color:var(--text-dim);padding:22px 0">
+                  ${vals.length === 1 ? 'One reading. A second makes it a line.' : 'No readings yet.'}
+                </div>`;
+    }
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (hi === lo) { hi = lo + Math.max(Math.abs(lo) * 0.01, 0.01); lo = lo - Math.max(Math.abs(lo) * 0.01, 0.01); }
+    const t0 = points[0].t, t1 = points[points.length - 1].t;
+    const span = Math.max(t1 - t0, 1);
+    const x = p => PAD_L + (W - PAD_L - PAD_R) * ((p.t - t0) / span);
+    const y = v => PAD_T + (H - PAD_T - PAD_B) * (1 - (v - lo) / (hi - lo));
+
+    // Break the path at every gap instead of bridging it.
+    const segs = [];
+    let cur = [];
+    for (const p of points) {
+        if (p.v == null) { if (cur.length > 1) segs.push(cur); cur = []; continue; }
+        cur.push(`${x(p).toFixed(1)},${y(p.v).toFixed(1)}`);
+    }
+    if (cur.length > 1) segs.push(cur);
+    const last = points.filter(p => p.v != null).slice(-1)[0];
+
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block"
+                 role="img" aria-label="${esc2(opts.label)}">
+      <line x1="${PAD_L}" y1="${(H - PAD_B).toFixed(1)}" x2="${W - PAD_R}" y2="${(H - PAD_B).toFixed(1)}"
+            stroke="var(--border,#8884)" stroke-width="1" fill="none"/>
+      ${segs.map(sg => `<polyline points="${sg.join(' ')}" fill="none"
+            stroke="${opts.colour}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`).join('')}
+      <circle cx="${x(last).toFixed(1)}" cy="${y(last.v).toFixed(1)}" r="4" fill="${opts.colour}"/>
+      <text x="${PAD_L}" y="${(PAD_T - 2).toFixed(1)}" font-size="9" fill="var(--text-dim)">${esc2(opts.fmt(hi))}</text>
+      <text x="${PAD_L}" y="${(H - 6).toFixed(1)}" font-size="9" fill="var(--text-dim)">${esc2(opts.fmt(lo))}</text>
+    </svg>`;
+}
+
+async function loadGrowthCurve(hours) {
+    const wrap = document.getElementById('growth-curve-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Reading the recorded series…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/growth-curve?hours=' + (hours || 24));
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const dim = 'var(--text-dim)', good = 'var(--success,#16a34a)',
+              bad = 'var(--danger,#e05a4e)', warn = 'var(--warning,#d98324)';
+        const money = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+
+        if (!d.available) {
+            wrap.innerHTML = `<div style="font-size:0.88em;line-height:1.6;padding:12px 14px;
+                border-left:3px solid ${dim};background:var(--panel2,#0000000a)">
+                <strong>No readings yet.</strong> ${esc2(d.reason || '')}
+                <br><br>${esc2(d.what_happens_next || '')}
+                <br><br><span style="font-size:0.9em;color:${dim}">Recorder: ${esc2((d.recorder||{}).verdict || 'unknown')}</span></div>`;
+            return;
+        }
+
+        const series = d.series || [];
+        const pt = f => series.map(s => ({t: Date.parse(s.at), v: s[f]}));
+        const chg = k => {
+            const c = d[k];
+            if (!c) return `<span style="color:${dim}">—</span>`;
+            if (c.change == null) return `<span style="color:${dim}" title="${esc2(c.why||'')}">withheld</span>`;
+            const col = c.change > 0 ? good : c.change < 0 ? bad : dim;
+            return `<span style="color:${col};font-weight:700">${c.change > 0 ? '+' : ''}${c.change.toLocaleString('en-US',{maximumFractionDigits:2})}</span>`;
+        };
+
+        // Realised P&L only accumulates. A fall is a rewritten ledger or a
+        // failed read stored as a number - never a loss to draw.
+        const integ = d.integrity || {};
+        const breaks = integ.monotonic_breaks || [];
+
+        wrap.innerHTML = `
+          <div style="font-size:0.95em;font-weight:600;margin-bottom:4px">${esc2(d.headline || '')}</div>
+          <div style="font-size:0.78em;color:${dim};margin-bottom:14px">
+            ${d.points} reading(s) over ${d.span_hours}h · window ${d.window_hours}h ·
+            recorder: ${esc2((d.recorder||{}).verdict || 'unknown')}</div>
+
+          ${breaks.length ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;
+             border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:14px">
+             <strong>This series is not trustworthy.</strong> Realised profit and the trade count
+             only accumulate, and ${breaks.length} reading(s) show one falling
+             (${esc2(breaks[0].field)} from ${breaks[0].fell_from} to ${breaks[0].to}). That is a
+             rewritten ledger or a failed read stored as a number - not a loss.</div>` : ''}
+
+          <div style="display:flex;gap:26px;flex-wrap:wrap;margin-bottom:16px">
+            <div style="flex:1 1 300px">
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Earned · banked, cumulative</div>
+              ${sparkline(pt('net_usd'), {label: 'Realised profit over time', colour: good, fmt: money})}
+              <div style="font-size:0.78em;color:${dim}">change over window: ${chg('earned')} · this is the only income line</div>
+            </div>
+            <div style="flex:1 1 300px">
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Capital placed · deployed in branches</div>
+              ${sparkline(pt('allocated_usd'), {label: 'Capital deployed over time', colour: 'var(--accent,#3b82f6)', fmt: money})}
+              <div style="font-size:0.78em;color:${dim}">change over window: ${chg('placed')} · arrangement, not income</div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:26px;flex-wrap:wrap;margin-bottom:16px">
+            <div style="flex:1 1 300px">
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Outside every branch</div>
+              ${sparkline(pt('outside_any_branch_pct'), {label: 'Share of the account outside any branch', colour: warn, fmt: v => v.toFixed(1) + '%'})}
+              <div style="font-size:0.78em;color:${dim}">change: ${chg('outside_any_branch_pct')} points · down is the goal</div>
+            </div>
+            <div style="flex:1 1 300px">
+              <div style="font-size:0.72em;letter-spacing:.12em;text-transform:uppercase;color:${dim}">Closed round trips</div>
+              ${sparkline(pt('trades'), {label: 'Cumulative closed trades', colour: 'var(--text,#888)', fmt: v => v.toFixed(0)})}
+              <div style="font-size:0.78em;color:${dim}">change: ${chg('trades')} trades</div>
+            </div>
+          </div>
+
+          <div style="font-size:0.86em;line-height:1.6;padding:10px 12px;border-left:3px solid
+               ${d.bottleneck_changed ? good : dim};background:var(--panel2,#0000000a)">
+            <strong>The reason it is stuck.</strong>
+            ${d.bottleneck_changed
+              ? `It CHANGED across this series: ${esc2(d.bottleneck_first||'—')} → <strong>${esc2(d.bottleneck_now||'—')}</strong>. A different binding cause means a different fix applies now.`
+              : `Unchanged across every reading: <strong>${esc2(d.bottleneck_now||'—')}</strong>. The numbers may move, but the thing limiting them has not.`}
+            ${integ.null_fields ? `<br><br><span style="color:${dim}">${integ.null_fields} field(s) across the series could not be read and are drawn as breaks in the line, not as zeroes.</span>` : ''}
+          </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+
+// ------------------------------------------------------- THE LEVERS
+async function loadPlacement() {
+    const wrap = document.getElementById('placement-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Sizing every lever against the live account…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/capital-placement');
+        if (r.status === 429) throw new Error('Coinbase rate limit - this view runs a full census. Wait a few minutes.');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const dim = 'var(--text-dim)', good = 'var(--success,#16a34a)',
+              bad = 'var(--danger,#e05a4e)', warn = 'var(--warning,#d98324)';
+        const money = v => (v == null ? '—' : (v < 0 ? '-' : '') + '$' +
+            Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}));
+
+        const title = {
+            ADOPT_HELD_COIN: 'Coin already owned, managed by nothing',
+            FILL_RUNGS: 'Earmarked, not yet converted into coin',
+            FUND_NEW_BRANCH: 'Free cash',
+            COMPOUND_REALIZED: 'Profit already banked'
+        };
+
+        const head = d.ok
+            ? `<div style="border-left:4px solid ${good};padding:10px 14px;margin-bottom:16px;background:var(--panel2,#0000000a)">
+                 <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">Addressable</div>
+                 <div style="font-size:1.6em;font-weight:700;font-variant-numeric:tabular-nums">${money(d.total_addressable_usd)}</div>
+                 <div style="font-size:0.88em;line-height:1.6;margin-top:6px">${esc2(d.detail || '')}</div>
+               </div>`
+            : `<div style="border-left:4px solid ${bad};padding:10px 14px;margin-bottom:16px;background:var(--panel2,#0000000a)">
+                 <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">Every lever refused</div>
+                 <div style="font-size:1.25em;font-weight:700;color:${bad};margin:2px 0 6px">${esc2(d.refused || '')}</div>
+                 <div style="font-size:0.88em;line-height:1.6">${esc2(d.detail || '')}</div>
+               </div>`;
+
+        const levers = (d.levers || []).map(l => {
+            const open = l.blocked_by == null;
+            return `
+            <div style="border-left:3px solid ${open ? good : warn};padding:10px 14px;margin-bottom:12px;background:var(--panel2,#0000000a)">
+              <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:baseline">
+                <div>
+                  <div style="font-size:1.25em;font-weight:700;font-variant-numeric:tabular-nums">${money(l.usd_addressable)}</div>
+                  <div style="font-size:0.82em;color:${dim}">${esc2(title[l.lever] || l.lever)}</div>
+                </div>
+                <div style="font-size:0.68em;letter-spacing:.1em;text-transform:uppercase;font-weight:700;
+                            padding:3px 8px;border:1px solid ${open ? good : warn};color:${open ? good : warn}">
+                  ${open ? 'open' : esc2(String(l.blocked_by).replace(/_/g, ' ').toLowerCase())}
+                </div>
+              </div>
+              <div style="font-size:0.86em;line-height:1.6;margin-top:8px">${esc2(l.what_it_would_take || '')}</div>
+              ${(l.candidates || []).length ? `<div style="font-size:0.8em;color:${dim};margin-top:8px">
+                 ${l.candidates.slice(0, 8).map(c => `${esc2(c.asset)} ${money(c.usd)}${c.over_position_limit ? ' <span style="color:'+warn+'">over 20%</span>' : ''}`).join(' · ')}
+                 ${l.candidates.length > 8 ? ` · +${l.candidates.length - 8} more` : ''}</div>` : ''}
+              ${l.empty_rungs ? `<div style="font-size:0.8em;color:${dim};margin-top:8px">${l.empty_rungs} unfilled rung(s) across ${(l.branches||[]).length} branch(es)</div>` : ''}
+            </div>`;
+        }).join('');
+
+        const lad = d.ladder || {};
+        const frozen = lad.frozen_behind_another_coins_gate || [];
+        const ladder = `
+          <div style="border-left:3px solid ${frozen.length ? warn : dim};padding:10px 14px;margin-top:4px;background:var(--panel2,#0000000a)">
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">The staged fleet</div>
+            <div style="font-size:0.88em;line-height:1.6;margin-top:6px">${esc2(lad.detail || '')}</div>
+            ${frozen.length ? `<div style="font-size:0.8em;color:${dim};margin-top:8px">
+               ${frozen.map(f => `${esc2(f.product_id)} <span style="color:${f.backtested_roi_pct != null && f.backtested_roi_pct < 0 ? bad : dim}">${f.backtested_roi_pct != null ? f.backtested_roi_pct.toFixed(1) + '%' : 'no backtest'}</span>`).join(' · ')}</div>` : ''}
+          </div>`;
+
+        wrap.innerHTML = head + levers + ladder +
+          (d.notes ? `<div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:10px">${esc2(d.notes.join('; '))}</div>` : '') +
+          `<div style="font-size:0.78em;color:${dim};margin-top:10px">${d.served_from_cache ? 'Served from a ' + d.cache_age_seconds + 's-old cache - a full census competes with the trimmer for the same rate limit.' : 'Read live.'} This view places nothing.</div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
     }

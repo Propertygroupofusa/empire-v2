@@ -10116,3 +10116,190 @@ async def capital_kpis(fresh: int = 0, limit: int = 2000):
     _KPI_CACHE["at"] = _time.time()
     _KPI_CACHE["payload"] = out
     return out
+
+
+@router.get("/growth-curve")
+async def growth_curve(hours: float = 24.0, limit: int = 500):
+    """Where the numbers have BEEN, which is the only way to say if they moved.
+
+    Every other figure on this dashboard is a point in time. "Is it
+    growing?" cannot be answered from a point - only from two - so the
+    KPI panel could give a perfect diagnosis of why the profit was small
+    and still not say whether anything had changed since yesterday.
+
+    This reads the recorded series and reports what EARNED and what was
+    PLACED, apart and never added. Both look like "it went up" and only
+    one of them is income: the header once showed a balance in green with
+    a plus sign, and it rose the day the trimmer sold $882.68 of
+    holdings.
+
+    Read-only, and DB-only - it costs the venue nothing, so it can be
+    polled without starving the loops that place orders.
+    """
+    try:
+        import growth_ledger
+        from models import CapitalKpiSnapshot
+        from database import get_session_factory
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"growth ledger unavailable: {exc}")
+
+    try:
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CapitalKpiSnapshot)
+                .order_by(CapitalKpiSnapshot.captured_at.desc())
+                .limit(max(int(limit or 0), 2)))).scalars().all()
+    except Exception as exc:
+        log.warning(f"[growth] snapshots unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503,
+                            detail=f"snapshot table unreadable: {type(exc).__name__}")
+
+    snaps = [{"captured_at": r.captured_at, "bottleneck": r.bottleneck, "note": r.note,
+              **{f: getattr(r, f, None) for f in growth_ledger.FIELDS}} for r in rows]
+
+    out = growth_ledger.summarise(snaps, hours=float(hours or 24.0))
+
+    hb = dict(getattr(__import__("growth_ledger_worker"), "HEARTBEAT", {})) \
+        if out is not None else {}
+    if not hb.get("started_at"):
+        hb["verdict"] = ("the recorder has not started in this process - readings stop "
+                         "accumulating until it does")
+    elif not hb.get("last_pass_at"):
+        hb["verdict"] = "the recorder started but has not finished a pass yet"
+    else:
+        hb["verdict"] = (f"{hb.get('passes')} pass(es), {hb.get('rows_written')} reading(s) "
+                         f"written, last finished {hb['last_pass_at']}")
+    out["recorder"] = hb
+    out["is_a_measurement_not_a_change"] = True
+    if not out.get("available"):
+        out["what_happens_next"] = (
+            "The recorder writes a reading on its interval. The first one makes a point, "
+            "the second makes a line - there is nothing to render until then, and drawing "
+            "a flat line from one reading would be inventing a history.")
+    return out
+
+
+# The placement view reads a census. Same reasoning as /auto-trim and
+# /capital-kpis: a diagnosis two minutes old is still a correct diagnosis,
+# and polling it fresh starves the loops that place real orders.
+_PLACEMENT_CACHE = {"at": 0.0, "payload": None}
+_PLACEMENT_TTL_SECONDS = 180
+
+
+@router.get("/capital-placement")
+async def capital_placement(fresh: int = 0):
+    """Where the next dollar should go, and what is actually stopping it.
+
+    $10,772.48 of an $11,397.11 account belongs to no branch. The edge
+    measured +$0.2363 a trade with a 3.70 profit factor and is being
+    applied to a twentieth of the money, so the useful question is not
+    "how do we trade better" - it is "what is stopping each dollar from
+    reaching a strategy that already works", asked once per lever with
+    the dollars attached.
+
+    Four levers, largest first: coin already held that no branch manages,
+    earmarks branches have not converted into coin, free cash, and profit
+    already banked. Each comes back either open or with the thing
+    blocking it named.
+
+    Refuses every lever at once on a negative edge. More capital onto a
+    losing strategy is the same loss, larger and sooner, and this is the
+    one place in the system where that mistake would be made at scale.
+
+    Read-only. It places nothing.
+    """
+    import time as _time
+    if not fresh and _PLACEMENT_CACHE["payload"] is not None:
+        age = _time.time() - _PLACEMENT_CACHE["at"]
+        if age < _PLACEMENT_TTL_SECONDS:
+            out = dict(_PLACEMENT_CACHE["payload"])
+            out["served_from_cache"] = True
+            out["cache_age_seconds"] = round(age, 1)
+            return out
+
+    try:
+        import capital_placement
+        import capital_kpis
+        import account_census
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"placement unavailable: {exc}")
+
+    notes = []
+
+    trades = []
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc())
+                .limit(2000))).scalars().all()
+        trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_price": r.exit_price, "opened_at": r.opened_at,
+                   "closed_at": r.closed_at, "product_id": r.product_id} for r in rows]
+    except Exception as exc:
+        notes.append(f"closed book unreadable ({type(exc).__name__})")
+        log.warning(f"[placement] ledger unreadable: {type(exc).__name__}: {exc}")
+
+    branches, free_cash, allocated, claimed = [], None, None, None
+    stages, claimed_products, eligible = [], [], []
+    try:
+        st = await grid.get_grid_status()
+        branches = st.get("branches") or []
+        backing = st.get("allocation_backing") or {}
+        allocated = backing.get("deployed_coin_usd")
+        claimed = backing.get("claimed_usd")
+        free_cash = st.get("real_free_cash_usd")
+        fleet = st.get("adaptive_fleet") or {}
+        stages = fleet.get("stages") or []
+        eligible = fleet.get("eligible_product_ids") or []
+        claimed_products = [b.get("product_id") for b in branches if b.get("product_id")]
+    except Exception as exc:
+        notes.append(f"grid status unreadable ({type(exc).__name__})")
+        log.warning(f"[placement] grid status unreadable: {type(exc).__name__}: {exc}")
+
+    holdings, total = [], None
+    try:
+        async with aiohttp.ClientSession() as session:
+            census = await account_census.census(session, tracked_usd=0.0)
+        if census.get("available"):
+            holdings = census.get("holdings") or []
+            total = census.get("total_usd")
+        else:
+            err = str(census.get("error") or "")
+            if "429" in err:
+                raise HTTPException(
+                    status_code=429,
+                    detail=("Coinbase rate limit reached. This view runs a full census and "
+                            "competes with the workers for the same allowance. Wait a few "
+                            "minutes - each retry spends the budget the trimmer needs."))
+            notes.append(f"census unavailable ({err[:60] or 'unknown'}), so the coin held "
+                         f"outside every branch cannot be sized")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        notes.append(f"census failed ({type(exc).__name__})")
+        log.warning(f"[placement] census failed: {type(exc).__name__}: {exc}")
+
+    k = capital_kpis.compute(trades, allocated_usd=allocated,
+                             free_cash_usd=free_cash or 0.0, account_total_usd=total)
+
+    reserve = getattr(grid, "GRID_CASH_RESERVE_USD", capital_placement.DEFAULT_RESERVE_USD)
+    out = capital_placement.plan(
+        kpis=k, holdings=holdings, branches=branches,
+        free_cash_usd=free_cash, account_total_usd=total,
+        claimed_products=claimed_products, eligible_products=eligible,
+        stages=stages, realized_usd=k.get("net_usd"), reserve_usd=reserve)
+
+    out["notes"] = notes or None
+    out["account_total_usd"] = total
+    out["claimed_usd"] = claimed
+    out["deployed_coin_usd"] = allocated
+    out["free_cash_usd"] = free_cash
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0
+    _PLACEMENT_CACHE["at"] = _time.time()
+    _PLACEMENT_CACHE["payload"] = out
+    return out

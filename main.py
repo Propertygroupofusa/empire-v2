@@ -1194,6 +1194,27 @@ async def lifespan(app: FastAPI):
                 log.warning(f"resting stops not started: {type(e).__name__}: {e}")
             except Exception:
                 pass
+        # THE GROWTH LEDGER.
+        #
+        # Writes one reading of every capital KPI on a fixed interval, so
+        # "is it growing?" has an answer that is not a single point. It
+        # spends nothing and has no arm switch by design: a recorder that
+        # must be armed is off on the day the history is wanted, and the
+        # history only exists if collection began before anyone asked.
+        try:
+            import growth_ledger_worker
+            from database import get_session_factory as _growth_sf
+            asyncio.create_task(growth_ledger_worker.run_periodically(_growth_sf))
+            try:
+                log.info(f"📈 Growth ledger recording, every "
+                         f"{growth_ledger_worker.interval_seconds()}s")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log.warning(f"growth ledger not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
         log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")

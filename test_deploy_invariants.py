@@ -217,3 +217,75 @@ def test_the_kpi_panel_only_reads_fields_the_endpoint_sends():
     read = set(re.findall(r"\bd\.([A-Za-z_][A-Za-z0-9_]*)", body))
     assert read, "found no field reads - the slice is wrong, not the panel"
     assert read <= produced, read - produced
+
+
+def _panel_fields(fn_name):
+    """Every `d.<field>` a dashboard panel reads, straight from the page."""
+    import re
+    html = open("family_tree_dashboard.html", encoding="utf-8").read()
+    start = html.index(f"async function {fn_name}(")
+    end = html.index("\n}", html.index("} catch (e)", start))
+    return set(re.findall(r"\bd\.([A-Za-z_][A-Za-z0-9_]*)", html[start:end]))
+
+
+def test_the_growth_curve_panel_only_reads_fields_the_endpoint_sends():
+    import growth_ledger
+    from datetime import datetime, timedelta
+    t0 = datetime(2026, 9, 27)
+    snaps = [{"captured_at": t0 + timedelta(hours=i), "bottleneck": "CAPITAL_OUTSIDE",
+              "note": None, **{f: 1.0 for f in growth_ledger.FIELDS}} for i in range(3)]
+    produced = set(growth_ledger.summarise(snaps))
+    produced |= set(growth_ledger.summarise([]))          # the no-readings shape
+    produced |= {"recorder", "is_a_measurement_not_a_change", "what_happens_next"}
+    read = _panel_fields("loadGrowthCurve")
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced
+
+
+def test_the_placement_panel_only_reads_fields_the_endpoint_sends():
+    import capital_placement
+    p = capital_placement.plan(kpis={"net_edge_per_trade_usd": 0.2, "net_usd": 19.61},
+                               holdings=[], branches=[], free_cash_usd=481.52,
+                               account_total_usd=11397.11, realized_usd=19.61)
+    refused = capital_placement.plan(kpis={"net_edge_per_trade_usd": -1.0},
+                                     holdings=[], branches=[], free_cash_usd=0.0,
+                                     account_total_usd=0.0)
+    produced = set(p) | set(refused) | {
+        "notes", "account_total_usd", "claimed_usd", "deployed_coin_usd",
+        "free_cash_usd", "served_from_cache", "cache_age_seconds"}
+    read = _panel_fields("loadPlacement")
+    assert read, "found no field reads - the slice is wrong, not the panel"
+    assert read <= produced, read - produced
+
+
+def test_every_background_worker_is_registered_exactly_once():
+    """A worker imported twice runs twice - two loops placing against one
+    account. A worker imported zero times is the /auto-trim failure: the
+    module had tests, the route existed, and nothing ever started it."""
+    src = open("main.py").read()
+    for worker in ("auto_trim_worker", "resting_stops_worker", "growth_ledger_worker"):
+        starts = src.count(f"{worker}.run_periodically(")
+        assert starts == 1, f"{worker} started {starts} times in main.py"
+
+
+def test_the_snapshot_writer_only_sets_columns_the_table_has():
+    """A typo'd kwarg on the model raises at INSERT - inside a background
+    loop, where it would be swallowed into a warning and the series would
+    silently never fill."""
+    import ast as _ast
+    import models
+    cols = {c.name for c in models.CapitalKpiSnapshot.__table__.columns}
+    tree = _ast.parse(open("growth_ledger_worker.py").read())
+    for node in _ast.walk(tree):
+        if (isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name)
+                and node.func.id == "CapitalKpiSnapshot"):
+            for kw in node.keywords:
+                if kw.arg is not None:
+                    assert kw.arg in cols, kw.arg
+            for kw in node.keywords:
+                if kw.arg is None:          # **{...} - check the literal keys
+                    for d in _ast.walk(kw.value):
+                        if isinstance(d, _ast.Dict):
+                            for k in d.keys:
+                                if isinstance(k, _ast.Constant) and isinstance(k.value, str):
+                                    assert k.value in cols, k.value

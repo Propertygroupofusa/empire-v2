@@ -2565,3 +2565,57 @@ class AutoTrimAction(Base):
     kind = Column(String, index=True)           # TRIM / CONSOLIDATE / the tier that refused
     skipped_reason = Column(String, index=True)
     detail = Column(String)
+
+
+class CapitalKpiSnapshot(Base):
+    """One reading of every capital KPI, kept so the numbers have a SHAPE.
+
+    Every figure on the dashboard was a point in time. "Is it growing?"
+    cannot be answered from a point - only from two of them - so the panel
+    could show a perfect diagnosis and still not say whether anything had
+    moved since yesterday. The account owner asked to watch the numbers
+    improve in real time, and nothing in this system was writing down
+    where they had been.
+
+    Written by growth_ledger_worker on a fixed interval. Rows are cheap
+    and the series is the whole point, so nothing here is overwritten -
+    a snapshot is an observation, and an observation is not edited.
+
+    A field is NULL when it could not be read, never zero. A zero in this
+    table is a measurement; a gap is a gap, and a chart that draws an
+    unread census as $0.00 invents a crash that never happened.
+    """
+    __tablename__ = "capital_kpi_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    captured_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # --- what was earned (cumulative, from the closed book) ---
+    trades = Column(Integer, nullable=True)
+    net_usd = Column(Float, nullable=True)
+    net_edge_per_trade_usd = Column(Float, nullable=True)
+    profit_factor = Column(Float, nullable=True)
+    win_rate_pct = Column(Float, nullable=True)
+
+    # --- where the capital was ---
+    allocated_usd = Column(Float, nullable=True)      # coin really deployed in branches
+    claimed_usd = Column(Float, nullable=True)        # what branches earmarked
+    free_cash_usd = Column(Float, nullable=True)
+    account_total_usd = Column(Float, nullable=True)
+    outside_any_branch_pct = Column(Float, nullable=True)
+    idle_capital_pct = Column(Float, nullable=True)
+
+    # --- how hard it worked ---
+    capital_velocity = Column(Float, nullable=True)
+    branch_count = Column(Integer, nullable=True)
+    open_slices = Column(Integer, nullable=True)
+
+    # The one binding cause at the time of the reading, so the series
+    # shows not just whether the numbers moved but whether the REASON
+    # they were stuck ever changed.
+    bottleneck = Column(String, nullable=True, index=True)
+
+    # Why a reading is partial, when it is. Kept beside the row rather
+    # than in a log, because a chart drawn from rows nobody can explain
+    # is how a degraded snapshot gets read as a real fall.
+    note = Column(String, nullable=True)
