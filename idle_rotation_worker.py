@@ -52,7 +52,15 @@ HEARTBEAT = {
 }
 
 MODE_ENV = "GRID_IDLE_ROTATION_MODE"
-CHECK_SECONDS = int(os.getenv("GRID_IDLE_ROTATION_CHECK_SECONDS", "3600"))
+# 15 minutes. The condition this detects moves on a 72-HOUR clock - a branch
+# is stale after three days of silence - so a faster sweep cannot change
+# whether a branch qualifies, only how soon it is noticed after the mark
+# passes. What made hourly the right answer before was cost: each pass spent
+# ~45 venue calls. Reading the branches from the database instead makes a
+# pass two indexed queries, so the interval is now free to be chosen on
+# responsiveness. 900s buys a worst-case delay of 15 minutes on a 4,320
+# minute condition, and costs nothing that the trading loop needs.
+CHECK_SECONDS = int(os.getenv("GRID_IDLE_ROTATION_CHECK_SECONDS", "900"))
 # One move per pass by default. Rotation is the rarest action this fleet
 # takes and a burst of them is the signature of a bad plan, not a busy one.
 MAX_MOVES_PER_PASS = int(os.getenv("GRID_IDLE_ROTATION_MAX_PER_PASS", "1"))
@@ -67,13 +75,66 @@ def is_armed() -> bool:
     return current_mode() == "arm"
 
 
-async def plan_now():
-    """The current plan, read-only. Shared by the loop and the endpoint."""
+async def _branches_from_db():
+    """The five fields the idle check needs, straight from the database.
+
+    WHY NOT get_grid_status().
+    
+    The sweep reads allocated_usd, bot_name, product_id, open_slices and
+    created_at - every one a stored column. get_grid_status fetches a LIVE
+    PRICE per distinct product, a wallet balance, and an adaptive stop per
+    product: roughly forty-five venue calls to answer a question no live
+    price takes part in.
+
+    That is the whole reason the sweep interval was ever a tradeoff. This
+    account is already hitting the venue's rate limit - "HTTP 429 fetching
+    USD" and "[dashboard] Coinbase USD balance fetch failed: HTTP 429"
+    appear repeatedly in the production log - and the calls this would
+    crowd out belong to the TRADING loop, which shares the same outbound
+    IP and the same limit. A janitor that starves the engine to sweep more
+    often is a bad trade at any interval.
+
+    Read from the DB it costs two indexed queries, so the interval can be
+    chosen on how fast the answer should arrive rather than on what it
+    costs to ask.
+    """
+    from sqlalchemy import func, select
+    from models import CryptoGridBranch, CryptoGridSlice
+    from database import get_session_factory
+
+    async with get_session_factory()() as db:
+        branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
+        counts = dict((await db.execute(
+            select(CryptoGridSlice.bot_name, func.count(CryptoGridSlice.id))
+            .group_by(CryptoGridSlice.bot_name))).all())
+    return [{
+        "bot_name": b.bot_name,
+        "product_id": b.product_id,
+        "allocated_usd": float(b.allocated_usd or 0.0),
+        # Absent must never read as "holding something" - that would hide a
+        # stale branch behind a missing count.
+        "open_slices": int(counts.get(b.bot_name, 0)),
+        "created_at": b.created_at,
+        "active": bool(b.active),
+        "locked": bool(getattr(b, "locked", False)),
+    } for b in branches]
+
+
+async def plan_now(*, cheap: bool = True):
+    """The current plan, read-only. Shared by the loop and the endpoint.
+
+    `cheap` reads branches from the database. The endpoint passes False so a
+    human looking at the preview sees the same branch rows the rest of the
+    dashboard is showing them, priced live; the loop leaves it True.
+    """
     import crypto_grid_bot as grid
-    status = await grid.get_grid_status()
+    if cheap:
+        branches = await _branches_from_db()
+    else:
+        branches = (await grid.get_grid_status()).get("branches") or []
     history = await grid.get_grid_trade_history()
     report = idle_capital.report(
-        status.get("branches") or [],
+        branches,
         history.get("recent_trades") or [],
         total_trade_count=history.get("total_trade_count"),
     )
@@ -94,7 +155,7 @@ async def rotate_once(*, dry_run: bool = True, require_arm: bool = True,
         return {"armed": False, "moved": 0,
                 "detail": f"{MODE_ENV} is '{current_mode()}' - observing, nothing moved"}
 
-    report, plan = await plan_now()
+    report, plan = await plan_now(cheap=require_arm)
     if not plan["ok"]:
         return {"armed": is_armed(), "moved": 0, "plan": plan, "report": report,
                 "detail": f"nothing to rotate: {plan['detail'][:160]}"}

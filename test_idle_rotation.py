@@ -118,6 +118,63 @@ ok("the planner still cannot reach the venue or the database",
    not (ic_mods & {"aiohttp", "sqlalchemy", "models", "crypto_grid_bot", "requests"}),
    f"{sorted(ic_mods)}")
 
+# --- the sweep must not compete with the trading loop for the rate limit ---
+#
+# It reads allocated_usd, bot_name, product_id, open_slices and created_at -
+# all stored columns. get_grid_status fetches a live price per product, a
+# wallet balance and an adaptive stop per product: ~45 venue calls to answer
+# a question no live price takes part in. Production already logs "HTTP 429
+# fetching USD", and the calls this would crowd out belong to the trading
+# loop on the same outbound IP.
+DB = fn("_branches_from_db")
+PLAN = fn("plan_now")
+
+ok("there is a database path for the branch read", "_branches_from_db" in SRC)
+ok("it selects branches and slice counts, not prices",
+   "CryptoGridBranch" in DB and "CryptoGridSlice" in DB)
+# Asserted on CALLS in the parsed function, not its text: the docstring
+# names get_grid_status to explain what it avoids, and a substring search
+# reads that explanation as the offence. Fifth occurrence of this trap in
+# this session's tests - the rule is now simply "never grep a docstring".
+_dbfn = next(x for x in ast.walk(TREE)
+             if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and x.name == "_branches_from_db")
+_dbcalls = set()
+for _n in ast.walk(_dbfn):
+    if isinstance(_n, ast.Call):
+        _f = _n.func
+        if isinstance(_f, ast.Name):
+            _dbcalls.add(_f.id)
+        elif isinstance(_f, ast.Attribute):
+            _dbcalls.add(_f.attr)
+ok("it never fetches a price, a balance or a stop",
+   not (_dbcalls & {"get_price_and_volatility", "get_usd_balance",
+                    "_resolve_branch_stop", "get_grid_status",
+                    "get_best_bid_ask"}), f"{sorted(_dbcalls)}")
+ok("a missing slice count reads as flat, never as holding",
+   "counts.get(b.bot_name, 0)" in DB)
+ok("the loop takes the cheap path", "cheap=require_arm" in ROT)
+ok("plan_now defaults to cheap", "cheap: bool = True" in PLAN)
+ok("the expensive path still exists for the human-facing preview",
+   "get_grid_status()" in PLAN)
+
+# --- the interval ----------------------------------------------------------
+#
+# The condition moves on a 72-hour clock, so a faster sweep changes only how
+# soon a branch is noticed after the mark passes - never whether it
+# qualifies. 15 minutes is a worst-case 0.35% delay on a 4,320-minute
+# condition, which is why this is a preference rather than a tradeoff once
+# the pass is cheap.
+ok("the sweep is every 15 minutes", w.CHECK_SECONDS == 900)
+ok("the interval is settable", "GRID_IDLE_ROTATION_CHECK_SECONDS" in SRC)
+ok("a pass can never run tighter than a minute", "max(CHECK_SECONDS, 60)" in SRC)
+
+import idle_capital as _ic  # noqa: E402
+_stale_minutes = _ic.STALE_AFTER_HOURS * 60
+ok("the sweep is far faster than the condition it watches",
+   w.CHECK_SECONDS / 60.0 < _stale_minutes / 100.0,
+   f"sweep {w.CHECK_SECONDS / 60:.0f}min vs condition {_stale_minutes:.0f}min")
+
 _failed = [l for l, p in _checks if not p]
 print(f"\n{len(_checks) - len(_failed)} passed, {len(_failed)} failed")
 sys.exit(1 if _failed else 0)
