@@ -9568,6 +9568,16 @@ async def resting_stops_preview():
         if not p.get("ok"):
             refusals.setdefault(p["reason"], []).append(p["asset"])
     out["refusals"] = refusals
+    try:
+        import resting_stops_worker
+        hb = dict(getattr(resting_stops_worker, "HEARTBEAT", {}) or {})
+        hb["verdict"] = ("the loop has NOT started - nothing will be placed"
+                         if not hb.get("started_at") else
+                         f"{hb.get('passes')} pass(es), last {hb.get('last_pass_at')}")
+        out["worker"] = hb
+    except Exception as exc:
+        out["worker"] = {"verdict": f"worker unavailable: {type(exc).__name__}"}
+
     out["conflict"] = (
         "A resting stop holds the coins it covers. Anything covered here becomes "
         "unavailable to the concentration trimmer, which sizes against the available "

@@ -79,6 +79,53 @@ REPLACE_MOVE_PCT = 1.0
 MODE_ENV = "RESTING_STOPS_MODE"
 MODE_OBSERVE, MODE_ARM = "observe", "arm"
 
+# Coins the concentration trimmer owns. A resting stop holds the units it
+# covers, and the trimmer sizes against what is AVAILABLE - so resting a
+# stop on a coin the trimmer is managing takes away the very units it
+# needs. Two protections, one pile of coins; the trimmer gets first claim
+# because a coin over the ceiling is the one that can end the account, and
+# a stop that cannot be acted on is not protection.
+#
+# ZEC is here by the account owner's decision: the trimmer has it.
+EXCLUDE_ENV = "RESTING_STOPS_EXCLUDE"
+DEFAULT_EXCLUDED = ("ZEC",)
+
+# And the same idea as a rule rather than a list, so a coin that drifts up
+# into the trimmer's territory is excluded without anyone remembering to
+# add it. Anything within this many points of the concentration limit is
+# the trimmer's.
+NEAR_LIMIT_BAND_PCT = 3.0
+
+
+def excluded_assets(raw=None):
+    """The explicit exclusion list. Unset means the default.
+
+    An empty string means "exclude nothing" and is honoured, because the
+    alternative - treating empty as unset - makes it impossible to turn
+    the default off.
+    """
+    import os
+    if raw is None:
+        raw = os.getenv(EXCLUDE_ENV)
+    if raw is None:
+        return set(DEFAULT_EXCLUDED)
+    return {a.strip().upper() for a in str(raw).split(",") if a.strip()}
+
+
+def is_trimmers(asset, share_pct, limit_pct, *, excluded=None,
+                band_pct=NEAR_LIMIT_BAND_PCT):
+    """Should the trimmer keep these units? (asset, reason) or (False, None)."""
+    a = (asset or "").upper()
+    ex = excluded_assets() if excluded is None else excluded
+    if a in ex:
+        return True, f"{a} is managed by the concentration trimmer, which needs its units free"
+    sp = _num(share_pct)
+    lp = _num(limit_pct)
+    if sp is not None and lp is not None and sp >= lp - (_num(band_pct) or 0):
+        return True, (f"{a} is {sp:.2f}% of the account against a {lp:.0f}% limit - "
+                      f"close enough that the trimmer will want these units")
+    return False, None
+
 
 def normalise_mode(value) -> str:
     """Only the exact string "arm" arms it. Everything else observes."""
@@ -115,7 +162,8 @@ def plan_stop(asset, *, units_available, price, stop_price,
               base_increment="0.00000001", quote_increment="0.01",
               base_min_size=None, coverage_pct=COVERAGE_PCT,
               limit_band_pct=LIMIT_BAND_PCT, min_distance_pct=MIN_DISTANCE_PCT,
-              min_stop_usd=MIN_STOP_USD):
+              min_stop_usd=MIN_STOP_USD, share_pct=None, limit_pct=None,
+              excluded=None):
     """One resting stop, or why there will not be one.
 
     `stop_price` is the level holdings_watch already computed. Nothing is
@@ -125,6 +173,10 @@ def plan_stop(asset, *, units_available, price, stop_price,
     """
     def no(reason, detail):
         return {"asset": asset, "ok": False, "reason": reason, "detail": detail}
+
+    mine, why = is_trimmers(asset, share_pct, limit_pct, excluded=excluded)
+    if mine:
+        return no("TRIMMERS_COIN", why)
 
     u = _num(units_available)
     p = _num(price)
@@ -237,6 +289,7 @@ def summarise(plans, mode):
         "worst_case_usd": round(sum(p["worst_case_usd"] for p in ok), 2),
         "coverage_pct": COVERAGE_PCT,
         "limit_band_pct": LIMIT_BAND_PCT,
+        "excluded": sorted(excluded_assets()),
         "plans": plans,
         "what_it_does_not_do": (
             "A stop-limit is not a guarantee. If price gaps through the limit the "

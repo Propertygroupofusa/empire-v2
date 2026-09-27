@@ -1174,6 +1174,26 @@ async def lifespan(app: FastAPI):
                 log.warning(f"auto-trimmer not started: {type(e).__name__}: {e}")
             except Exception:
                 pass
+
+        # RESTING STOPS. The other loop that reaches the venue, and the
+        # only one that can place an order which then sits there holding
+        # coins. Same switch shape as the trimmer: nothing happens unless
+        # RESTING_STOPS_MODE is exactly "arm". It has no buy path, it
+        # cancels only orders carrying its own client_order_id prefix, and
+        # a stop it manages ratchets up and never down.
+        try:
+            import resting_stops_worker
+            from database import get_session_factory as _stop_sf
+            asyncio.create_task(resting_stops_worker.run_periodically(_stop_sf))
+            try:
+                log.info(f"🛑 Resting stops running, mode={resting_stops_worker.current_mode()}")
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                log.warning(f"resting stops not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
         log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")

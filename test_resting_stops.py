@@ -10,8 +10,13 @@ import pytest
 import resting_stops as rs
 
 
+# ZEC is on the default exclusion list (the trimmer owns it), so the tests
+# about ORDER MECHANICS opt out of that explicitly. The exclusion itself is
+# tested separately below - a fixture that silently dodged it would make
+# every mechanics test pass for the wrong reason.
 ZEC = dict(units_available=1.42, price=1639.01, stop_price=1414.55,
-           base_increment="0.00000001", quote_increment="0.01")
+           base_increment="0.00000001", quote_increment="0.01",
+           excluded=set())
 
 
 # ------------------------------------------------- the catastrophic one
@@ -31,9 +36,9 @@ def test_a_stop_one_tick_below_the_market_is_still_refused():
 def test_the_minimum_distance_is_enforced_exactly():
     p = 100.0
     just_in = rs.plan_stop("X", units_available=100, price=p, stop_price=98.0,
-                           quote_increment="0.01")
+                           quote_increment="0.01", excluded=set())
     just_out = rs.plan_stop("X", units_available=100, price=p, stop_price=98.5,
-                            quote_increment="0.01")
+                            quote_increment="0.01", excluded=set())
     assert just_in["ok"] is True          # exactly 2.0% away
     assert just_out["ok"] is False and just_out["reason"] == "TOO_CLOSE"
 
@@ -96,7 +101,7 @@ def test_missing_level_refuses(bad):
 
 def test_a_dust_position_is_refused():
     r = rs.plan_stop("FLOCK", units_available=1000, price=0.0009,
-                     stop_price=0.0007, quote_increment="0.000001")
+                     stop_price=0.0007, quote_increment="0.000001", excluded=set())
     assert r["ok"] is False and r["reason"] == "TOO_SMALL"
 
 
@@ -115,14 +120,14 @@ def test_size_never_exceeds_what_is_available():
 def test_prices_round_down_not_up():
     """Rounding a sell trigger UP moves protection toward the market."""
     r = rs.plan_stop("X", units_available=100, price=100.0, stop_price=93.999,
-                     quote_increment="0.01")
+                     quote_increment="0.01", excluded=set())
     assert float(r["stop_price"]) <= 93.999
 
 
 def test_size_lands_on_the_product_grid():
     r = rs.plan_stop("XRP", units_available=1558.651817, price=1.5263,
                      stop_price=1.4, base_increment="0.000001",
-                     quote_increment="0.0001")
+                     quote_increment="0.0001", excluded=set())
     frac = r["base_size"].split(".")[1] if "." in r["base_size"] else ""
     assert len(frac.rstrip("0")) <= 6
 
@@ -206,3 +211,80 @@ def test_defaults_are_sane():
     assert 0 < rs.LIMIT_BAND_PCT < 10
     assert rs.MIN_STOP_USD > 0
     assert rs.REPLACE_MOVE_PCT > 0
+
+
+# ------------------------------------------------- the trimmer's coins
+
+def test_zec_is_excluded_by_default():
+    """The account owner's decision: the trimmer has ZEC."""
+    assert "ZEC" in rs.DEFAULT_EXCLUDED
+    r = rs.plan_stop("ZEC", **{**ZEC, "excluded": {"ZEC"}})
+    assert r["ok"] is False and r["reason"] == "TRIMMERS_COIN"
+    assert "trimmer" in r["detail"]
+
+
+def test_an_excluded_coin_is_refused_before_anything_else_is_checked():
+    """Even a perfectly placeable stop is refused if the trimmer owns it."""
+    r = rs.plan_stop("ZEC", units_available=1.42, price=1639.01, stop_price=1000.0,
+                     excluded={"ZEC"})
+    assert r["reason"] == "TRIMMERS_COIN"
+
+
+def test_a_coin_near_the_limit_is_the_trimmers_without_being_listed():
+    mine, why = rs.is_trimmers("FOO", share_pct=18.0, limit_pct=20.0, excluded=set())
+    assert mine is True and "trimmer will want" in why
+
+
+def test_a_small_coin_is_not_the_trimmers():
+    mine, why = rs.is_trimmers("FOO", share_pct=4.0, limit_pct=20.0, excluded=set())
+    assert mine is False and why is None
+
+
+def test_the_exclusion_list_can_be_emptied():
+    """Empty must mean 'exclude nothing', not 'fall back to the default'."""
+    assert rs.excluded_assets("") == set()
+    assert rs.excluded_assets(None) == set(rs.DEFAULT_EXCLUDED)
+    assert rs.excluded_assets("ZEC, xrp") == {"ZEC", "XRP"}
+
+
+def test_excluding_nothing_lets_zec_through():
+    r = rs.plan_stop("ZEC", **{**ZEC, "excluded": set()})
+    assert r["ok"] is True
+
+
+def test_the_summary_names_who_is_excluded():
+    s = rs.summarise([], "observe")
+    assert "ZEC" in s["excluded"]
+
+
+# ------------------------------------------- the worker's own guards
+
+def test_worker_only_recognises_its_own_orders():
+    src = open("resting_stops_worker.py").read()
+    assert "COID_PREFIX" in src
+    tree = ast.parse(src)
+    # cancel must never be reachable without the prefix check that builds `mine`
+    assert 'startswith(COID_PREFIX)' in src, \
+        "the worker must identify its own orders before cancelling anything"
+
+
+def test_worker_never_buys():
+    src = open("resting_stops_worker.py").read()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert node.value != "BUY", "the worker builds a BUY somewhere"
+
+
+def test_worker_places_exactly_one_kind_of_order():
+    src = open("resting_stops_worker.py").read()
+    tree = ast.parse(src)
+    posts = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Attribute) and n.attr == "post"]
+    # one to place, one to cancel
+    assert len(posts) == 2, f"expected place+cancel, found {len(posts)} posts"
+
+
+def test_worker_checks_the_mode():
+    src = open("resting_stops_worker.py").read()
+    assert "is_armed()" in src and "MODE_ARM" in src
