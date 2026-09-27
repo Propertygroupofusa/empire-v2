@@ -10452,6 +10452,32 @@ _ADOPTION_CACHE = {"at": 0.0, "payload": None}
 _ADOPTION_TTL_SECONDS = 180
 
 
+@router.get("/idle-capital")
+async def idle_capital_report():
+    """Which branches are actually idle, and which only look it.
+
+    Read-only. It rotates nothing and cannot - rotation is GRID_AUTO_ROTATE,
+    which is deliberately off. This exists so that decision is made on
+    measured idleness instead of on a branch looking empty at a glance.
+
+    A flat branch is not an idle one. Measured live, three were flat at the
+    same moment: ONDO had traded 4 hours earlier, TIA 5 hours, BONK
+    eighteen DAYS. The first two are grids between fills. Only the third is
+    capital in the wrong coin, and a rotation keyed on flatness would have
+    churned all three.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import idle_capital
+    status = await crypto_grid_bot_module.get_grid_status()
+    history = await crypto_grid_bot_module.get_grid_trade_history()
+    return idle_capital.report(
+        status.get("branches") or [],
+        history.get("recent_trades") or [],
+        total_trade_count=history.get("total_trade_count"),
+    )
+
+
 @router.get("/coin-adoption")
 async def coin_adoption_preview(fresh: int = 0):
     """Putting coin the account already owns under a grid - without buying or selling it.
