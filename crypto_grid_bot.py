@@ -381,6 +381,89 @@ def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None):
     bound = "branch allocation" if slice_usd <= deployable else "wallet less the fee reserve"
     return round(spend, 2), f"${spend:,.2f}, bounded by {bound}"
 
+
+def branch_is_adopted_only(slices) -> bool:
+    """True when EVERY open slice on this branch was adopted.
+
+    Such a branch holds coin, but it never spent cash to get it - the
+    adoption worker wrote its rows for coin the account already owned. A
+    branch that has since bought a real slice is mixed and takes the
+    ordinary path; requiring "every" keeps the special case to a state
+    that can be checked rather than estimated.
+    """
+    return bool(slices) and all(slice_paid_no_entry_fee(s) for s in slices)
+
+
+def adopted_rung_usd(deployable_usd, contenders, min_trade=None):
+    """What ONE dip buy on an adopted branch may spend. (usd, reason).
+
+    WHY THIS IS NOT allocated_usd / num_levels.
+
+    An adopted branch's allocated_usd is the market value of coin the
+    account ALREADY OWNED - not a cash budget the branch brought to the
+    grid. The ordinary sizing reads it as a budget, and on the live fleet
+    that produces figures with no relationship to the money available.
+    Measured 2026-09-27, wallet $1,194.54 less the $88.00 fee reserve =
+    $1,106.54 deployable, against eleven parked branches:
+
+        ZEC   $757.54   68.5% of the entire deployable wallet
+        XRP   $746.85   67.5%
+        ...
+        total $2,135.34 wanted against $1,106.54 available - 1.9x over
+
+    ZEC and XRP are the two branches sitting furthest underwater. Under
+    that sizing the first one to dip takes two thirds of the wallet and
+    doubles down on the worst position; the second cannot be served at
+    all, and the other nine starve. That is what "unpark them" would have
+    meant if the level count alone had been raised.
+
+    So an adopted rung is sized from CASH, split evenly between the
+    branches that could use one - the same equal-weight rule idle_cash.py
+    already deploys unclaimed cash under. Every branch can act, and none
+    can take the wallet.
+
+    contenders is counted from the stop-override marker, which also
+    catches adopted branches that have since bought a real slice and no
+    longer qualify. That overcounts, which makes each rung SMALLER - the
+    safe direction, and the reason an approximate count is acceptable
+    here where an approximate spend would not be.
+    """
+    if min_trade is None:
+        min_trade = MIN_TRADE_USD
+    if deployable_usd is None:
+        return 0.0, "deployable cash unavailable"
+    n = max(1, int(contenders or 1))
+    if deployable_usd <= 0:
+        return 0.0, (f"${deployable_usd:,.2f} deployable - the wallet is at or below "
+                     f"the fee reserve, so no rung can be funded")
+    # Floored to the cent, never rounded. Rounding UP breaks the one
+    # property this rule exists for: at 20 contenders a rounded share puts
+    # the sum $0.06 over the wallet, so the last branch to dip finds less
+    # than its share. Caught by the "every contender can be served" test,
+    # which is the invariant, not the arithmetic detail.
+    share = int((deployable_usd / n) * 100) / 100   # floor; deployable is > 0 here
+    if share < min_trade:
+        return 0.0, (f"${share:,.2f} is this branch's even share of ${deployable_usd:,.2f} "
+                     f"across {n} adopted branch(es), below the ${min_trade:,.2f} minimum "
+                     f"trade - a dust order pays a full fee for a position too small to exit")
+    return round(share, 2), (f"${share:,.2f} - an even share of ${deployable_usd:,.2f} "
+                             f"deployable across {n} adopted branch(es)")
+
+
+async def _adopted_branch_count() -> int:
+    """Active branches carrying the adoption marker. One indexed query.
+
+    stop_loss_pct_override is written by coin_adoption_worker and by
+    nothing else, which is what makes it usable as the marker here (the
+    same property _adopted_so_far relies on).
+    """
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridBranch.bot_name)
+            .where(CryptoGridBranch.stop_loss_pct_override.isnot(None))
+            .where(CryptoGridBranch.active.is_(True)))).all()
+    return len(rows)
+
 # Caps how many NEW branches one single sweep can create - real,
 # deliberate friction against a large, sudden cash windfall (or a bug)
 # spinning up dozens of tiny branches in one shot. A real surplus above
@@ -5207,6 +5290,26 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     override_cfg = GRID_LEVEL_SPACING_CANDIDATES.get(grid_spacing_override)
     if override_cfg is not None:
         real_effective_levels = max(1, min(_safe_num_levels_for_allocation(branch.allocated_usd), override_cfg["num_levels"]))
+        # ---- ADOPTED HEADROOM ----------------------------------------
+        # An adopted branch is written FULL on purpose: coin_adoption_worker
+        # sets num_levels to the slice count so the grid cannot double down
+        # on a position it never chose. The cost of that, measured on the
+        # live fleet, is eleven branches holding $6,576 of coin that can
+        # neither buy a dip (full) nor sell (underwater) - the grid half of
+        # buy-dip/sell-rise switched off, which is a hold, not a grid.
+        #
+        # ONE rung, not a reopened ladder. The branch may take a single dip;
+        # the slice it buys is a real one, so branch_is_adopted_only() goes
+        # false on the next cycle and this clamp snaps back - it must sell
+        # before it may buy again. That is the deliberate safety of the
+        # original decision kept, with the deadlock removed.
+        #
+        # The rung is sized by adopted_rung_usd(), NOT by allocated_usd /
+        # num_levels. Read that docstring before touching this: raising the
+        # level count without the sizing change is what would have let ZEC
+        # spend 68.5% of the wallet averaging down its own worst position.
+        if branch_is_adopted_only(slices):
+            real_effective_levels = max(real_effective_levels, len(slices) + 1)
         if real_effective_levels != branch.num_levels:
             async with get_session_factory()() as db:
                 result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
@@ -5384,11 +5487,23 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 f"existing slices still sell normally"
             )
     elif price <= branch.reference_price * (1 - grid_pct) and len(slices) < branch.num_levels:
-        slice_usd = branch.allocated_usd / branch.num_levels
         real_balance, real_balance_err = await engine.get_usd_balance(session)
         if real_balance is None:
             log.warning(f"[GRID] {branch.bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
             return
+        if branch_is_adopted_only(slices):
+            # allocated_usd here is coin the account already owned, not a
+            # cash budget - see adopted_rung_usd().
+            slice_usd, rung_reason = adopted_rung_usd(
+                real_balance - max(0.0, GRID_CASH_RESERVE_USD),
+                await _adopted_branch_count())
+            if slice_usd <= 0:
+                log.info(f"[GRID] {branch.bot_name}: no adopted rung - {rung_reason}")
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "ADOPTED_RUNG", rung_reason)
+                return
+        else:
+            slice_usd = branch.allocated_usd / branch.num_levels
         spend, spend_reason = spendable_for_slice(slice_usd, real_balance)
         if spend <= 0:
             log.info(f"[GRID] {branch.bot_name}: no buy - {spend_reason}")
@@ -5664,7 +5779,16 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     # protecting a rebuy that cannot happen - see GRID_PARKED_MIN_NET_PCT.
     # Evaluated BEFORE the gate so the reason a sale happened is one of two
     # named conditions rather than an implicit fall-through.
-    _parked = bool(slices) and len(slices) >= (branch.num_levels or 0)
+    # An adopted-only branch counts as parked HERE even when the adopted
+    # headroom above has lifted num_levels past its slice count. That
+    # headroom is one conditional rung for BUYING; it is not room, and this
+    # gate asks a different question - can this branch get out at all. Left
+    # as the bare level comparison, granting the rung would have silently
+    # switched the parked-sell gate back off for the eleven branches it was
+    # built for, leaving them on the 2.5% reference-rise trigger they have
+    # not been able to reach. Buy headroom must not cost sell freedom.
+    _parked = bool(slices) and (len(slices) >= (branch.num_levels or 0)
+                                or branch_is_adopted_only(slices))
     _parked_sell = False
     if _parked and _stop_slice is None:
         _cand = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
