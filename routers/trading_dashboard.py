@@ -10487,6 +10487,62 @@ async def idle_capital_rotate(dry_run: bool = True):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/coin-evidence")
+async def coin_evidence_report():
+    """Which coins deserve capital - without waiting for the trips bar.
+
+    Read-only, decides nothing. It reports what each coin's evidence can
+    and cannot establish, and how many closed trips its own metric would
+    actually need.
+
+    The headline is that the 10-trip bar is on WIN RATE, which a grid holds
+    near 77% by construction, so ten trips can only catch a coin below
+    roughly 17% green. Separating a merely mediocre coin on that metric
+    needs hundreds to thousands of trips. Return per trip separates; replay
+    over historical candles supplies it today, and may only ELIMINATE - a
+    positive result over a rising window has not been shown a falling one.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import coin_evidence
+    hist = await crypto_grid_bot_module.get_grid_trade_history()
+    trades = hist.get("recent_trades") or []
+
+    per = {}
+    for t in trades:
+        pid = t.get("product_id")
+        if not pid:
+            continue
+        qty = float(t.get("qty") or 0.0)
+        entry = float(t.get("entry_price") or 0.0)
+        row = per.setdefault(pid, {"product_id": pid, "trips": 0, "wins": 0,
+                                   "pnl": 0.0, "notional": 0.0})
+        row["trips"] += 1
+        row["wins"] += 1 if float(t.get("pnl") or 0.0) > 0 else 0
+        row["pnl"] += float(t.get("pnl") or 0.0)
+        row["notional"] += qty * entry
+
+    coins = []
+    for r in per.values():
+        # Percentage of the slice, never dollars - dollars conflate a coin's
+        # edge with how much was allocated to it.
+        r["mean_pct"] = round(r["pnl"] / r["notional"] * 100, 4) if r["notional"] else None
+        coins.append(r)
+
+    total_notional = sum(r["notional"] for r in per.values())
+    total_pnl = sum(r["pnl"] for r in per.values())
+    fleet_pct = round(total_pnl / total_notional * 100, 4) if total_notional else 0.0
+    fleet_rate = (hist.get("overall_win_rate") or 0.0) / 100.0
+
+    out = coin_evidence.report(coins, fleet_win_rate=fleet_rate or 0.77,
+                               fleet_mean_pct=fleet_pct)
+    out["window"] = {"trades_in_window": len(trades),
+                     "total_trade_count": hist.get("total_trade_count"),
+                     "truncated": bool(hist.get("total_trade_count")
+                                       and len(trades) < hist["total_trade_count"])}
+    return out
+
+
 @router.get("/idle-capital")
 async def idle_capital_report():
     """Which branches are actually idle, and which only look it.
