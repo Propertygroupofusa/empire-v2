@@ -1204,6 +1204,22 @@
         <div id="sell-amount-wrap"></div>
     </div>
 
+    <div class="section-title">💰 What a round trip really costs</div>
+    <div class="panel">
+        <div class="panel-sub">The gate refuses a setup when the expected move does not beat
+            the cost of a round trip. That cost is part measured and part assumed, and the
+            assumed part is currently <strong>twice the measured one</strong> - which is why
+            1,614 scans produced zero qualified trades, with <code>expected_move</code> as
+            74% of the refusals.
+            <br><br>Swapping the measured figure in would halve the bar and turn most of
+            those refusals into trades. It is not swapped in, and this panel exists to show
+            exactly why and exactly what would change that.</div>
+        <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="unlock-btn" style="margin-top:0;" onclick="loadCostTruth()">💰 Show the gap</button>
+        </div>
+        <div id="cost-truth-wrap"><div class="coin-history-empty">Not loaded.</div></div>
+    </div>
+
     <div class="section-title">✂️ The trimmer</div>
     <div class="panel">
         <div class="panel-sub">Checks every 15 minutes whether any coin has drifted past your 20% rule,
@@ -7656,6 +7672,74 @@ async function loadAutoTrim() {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read the trimmer: ' + e.message + '</div>';
     }
 }
+
+
+// ---------------------------------------------------- WHAT IT REALLY COSTS
+// Read-only. The whole value is the DISTINCTION between the measured half
+// and the assumed half, so the panel never shows one number - it shows
+// both and what stands between them.
+async function loadCostTruth() {
+    const wrap = document.getElementById('cost-truth-wrap');
+    wrap.innerHTML = '<div class="coin-history-empty">Reading the ledger…</div>';
+    try {
+        const r = await fetch('/api/trading-dashboard/cost-truth');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        const a = d.adverse || {};
+        const c = a.counts || {};
+        const need = a.falling_samples_needed;
+        const ok = a.may_replace_assumption;
+
+        const bar = (label, n, tone) =>
+            `<div style="display:flex;align-items:center;gap:8px;margin:3px 0;font-size:0.82em">
+               <span style="width:70px;color:var(--text-dim)">${label}</span>
+               <span style="flex:1;height:10px;background:var(--panel2,#0000000d);border-radius:5px;overflow:hidden">
+                 <span style="display:block;height:100%;width:${Math.min(100,(n/ Math.max(1,(c.RISING||0)+(c.FALLING||0)+(c.FLAT||0)+(c.UNKNOWN||0)))*100)}%;background:${tone}"></span>
+               </span>
+               <span style="width:52px;text-align:right;font-weight:600">${n||0}</span>
+             </div>`;
+
+        wrap.innerHTML = `
+          <div style="font-size:1.05em;margin-bottom:12px">
+            priced at <strong style="color:var(--danger,#e05a4e)">${d.cost_in_force_pct}%</strong>
+            &nbsp;·&nbsp; would be <strong style="color:var(--success,#16a34a)">${d.cost_if_measured_were_swapped_pct}%</strong>
+            &nbsp;·&nbsp; gap <strong>${d.gap_pct}%</strong>
+          </div>
+
+          <table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-bottom:12px">
+            <tbody>
+              <tr><td style="padding:5px 0">Fees — <em>measured, from your live fee tier</em></td>
+                  <td style="text-align:right;font-weight:600">${d.fee_pct}%</td></tr>
+              <tr><td style="padding:5px 0">Adverse selection — <em>${ok ? 'measured' : 'ASSUMED'}</em></td>
+                  <td style="text-align:right;font-weight:600;color:${ok?'var(--success,#16a34a)':'var(--danger,#e05a4e)'}">
+                      ${a.adverse_pct_in_force}%</td></tr>
+              <tr style="border-top:1px solid var(--border)">
+                  <td style="padding:5px 0"><strong>What the gate demands a move beats</strong></td>
+                  <td style="text-align:right;font-weight:700">${d.cost_in_force_pct}%</td></tr>
+            </tbody>
+          </table>
+
+          <div style="font-size:0.82em;font-weight:600;margin-bottom:4px">Where the measurements came from</div>
+          ${bar('rising', c.RISING, 'var(--success,#16a34a)')}
+          ${bar('falling', c.FALLING, 'var(--danger,#e05a4e)')}
+          ${bar('flat', c.FLAT, 'var(--text-dim)')}
+          ${bar('unknown', c.UNKNOWN, 'var(--border)')}
+
+          <div style="margin-top:12px;padding:10px 12px;border-left:3px solid ${ok?'var(--success,#16a34a)':'var(--danger,#e05a4e)'};
+                      background:var(--panel2,#0000000a);font-size:0.84em;line-height:1.55">
+            <strong>${ok ? 'The measured figure may now be used.' :
+                           need + ' more falling-market samples needed.'}</strong><br>
+            ${esc2(a.basis || '')}
+          </div>
+
+          <div style="margin-top:10px;font-size:0.78em;color:var(--text-dim);line-height:1.55">
+            ${esc2(a.why_not_a_blend || '')}<br><br>${esc2(d.what_would_change || '')}
+          </div>`;
+    } catch (e) {
+        wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
+    }
+}
+function esc2(t){ const d=document.createElement('div'); d.textContent=String(t==null?'':t); return d.innerHTML; }
 
 </script>
 </body>

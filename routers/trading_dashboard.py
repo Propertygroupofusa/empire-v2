@@ -9773,3 +9773,85 @@ async def expand_grid_fleet(req: ExpandFleetRequest):
             "detail": (f"{len(created)} opened, {len(failed)} refused. Refusals carry the "
                        f"bot's own reason. Branches before a failure exist; those after "
                        f"it do not.")}
+
+
+@router.get("/cost-truth")
+async def cost_truth():
+    """What a round trip really costs, and what is still assumed about it.
+
+    The live gate prices a round trip at 1.37% - 0.70% of measured fees
+    plus 0.67% of ASSUMED adverse selection. The instrumentation has since
+    measured adverse selection at about -0.02%, which would halve the bar.
+    It is not swapped in because that sample never saw a falling market,
+    and adverse selection in a rising market measures the one regime where
+    it does not bite.
+
+    This endpoint states the gap, the evidence behind each half, and
+    exactly how many falling-market samples are still needed before the
+    measured figure may replace the assumption. It changes nothing.
+    """
+    try:
+        import regime_tag
+        import crypto_grid_bot as grid
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"cost view unavailable: {exc}")
+
+    fee = None
+    try:
+        fee = round(float(await grid.get_effective_round_trip_fee_rate()) * 100, 4)
+    except Exception:
+        pass
+
+    # Samples come from the signal telemetry where the measurement lives.
+    # Absent, this still answers - with the assumption in force and the
+    # count at zero, which is the honest state rather than an error.
+    samples = []
+    try:
+        from models import ShortTermSignal
+        from database import get_session_factory
+        from datetime import datetime, timedelta
+        since = datetime.utcnow() - timedelta(days=30)
+        async with get_session_factory()() as db:
+            rows = (await db.execute(
+                select(ShortTermSignal.actual_move_30m_pct,
+                       ShortTermSignal.expected_move_pct,
+                       ShortTermSignal.ret_30m_pct)
+                .where(ShortTermSignal.scored_at >= since)
+                .where(ShortTermSignal.actual_move_30m_pct != None))).all()  # noqa: E711
+        for r in rows:
+            if r.actual_move_30m_pct is None:
+                continue
+            # The concession between what was expected and what arrived,
+            # tagged by the direction the market was going at the time.
+            adverse = float(r.expected_move_pct or 0) - float(r.actual_move_30m_pct)
+            samples.append({"adverse_pct": adverse,
+                            "benchmark_move_pct": r.ret_30m_pct})
+    except Exception as exc:
+        log.warning(f"[cost] adverse samples unreadable: {type(exc).__name__}: {exc}")
+
+    view = regime_tag.summarise(samples)
+    in_force = view["adverse_pct_in_force"]
+    cost_now = regime_tag.round_trip_cost_pct(fee, in_force)
+    cost_if = regime_tag.round_trip_cost_pct(fee, view["means_by_regime"].get("RISING"))
+
+    return {
+        "is_a_measurement_not_a_change": True,
+        "fee_pct": fee,
+        "cost_in_force_pct": cost_now,
+        "cost_if_measured_were_swapped_pct": cost_if,
+        "gap_pct": (round(cost_now - cost_if, 4)
+                    if cost_now is not None and cost_if is not None else None),
+        "adverse": view,
+        "headline": (
+            f"A round trip is priced at {cost_now}% and would be {cost_if}% if the "
+            f"measured figure were used. It is not, because "
+            f"{view['falling_samples_needed']} more falling-market samples are needed "
+            f"before that measurement has tested the case it exists for."
+            if cost_now is not None and cost_if is not None else
+            "Not enough data to price the gap yet."),
+        "what_would_change": (
+            "Halving the cost turns a large share of the refusals into trades. That is "
+            "the point and the danger: passing more and paying worse is what a lowered "
+            "threshold looks like, and the only thing separating this from that is "
+            "whether the cheaper number has been checked in a falling market."),
+    }
