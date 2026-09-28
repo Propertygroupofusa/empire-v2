@@ -270,6 +270,34 @@ Also each pass: for every branch compute
 
 ## Reference figures — update in place
 
+**LOCKED INVENTORY, full 23-branch sweep at 23:45Z (af869a4 serving).**
+$977.02 locked across seven branches, all seven priced so the total is
+complete (was $923.23 at 09:44Z):
+
+| coin | locked units | price | locked USD |
+|---|---:|---:|---:|
+| XLM | 1980.76640025 | 0.228728 | 453.06 |
+| ALGO | 1134.30 | 0.134480 | 152.54 |
+| LINK | 6.63 | 15.419 | 102.23 |
+| SOL | 0.77595005 | 118.68 | 92.09 |
+| NEAR | 15.951 | 4.8201 | 76.89 |
+| ACH | 11745.30 | 0.005977 | 70.20 |
+| JASMY | 5862.00 | 0.005120 | 30.01 |
+
+**Cannot sell at all** (available floors to 0): XLM (0.0 of 1980.77), ALGO
+(0.046389 of 1134.35), JASMY (0.757 of 5862.76 — NEW, not in the 09:44Z list).
+**QNT: 0.0 locked**, holds ~22¢ dust — freeing inventory does nothing for it.
+**PRIME and TIA: `direct_available=0.0`, `venue_lists_no_such_account=False`** —
+accounts that EXIST holding exactly zero, which only the fixed four-state
+endpoint can say. Everything else in the fleet: 0.0 locked.
+
+**The owner asked for the free-locked-inventory dry run.** It could not be
+run — `DASHBOARD_WRITE_TOKEN` is not in this container AND the POST was
+refused by the permission classifier. Both reported; the read-only
+reconstruction above was delivered instead. Do not retry the POST; do not ask
+for the token.
+
+
 **23:28Z (edcdbe8 serving).** `not_working_usd` $1,294.41 (was $1,406.77 —
 $112 more deployed), free cash $204.03, allocated $8,249.56, deployed
 $7,557.88, idle-in-branch $1,090.38, total capital $8,453.59, unrealized
@@ -497,6 +525,13 @@ survive and should: `measure_capital` returns aggregates only, so coercing the
 internal per-row None to 0.0 yields a byte-identical response, and `x or 0`
 sums the same as skipping None. Recorded in the test's own docstring so a later
 pass doesn't read them as holes and contort a test to kill them.
+
+**`while read` silently drops the last line.** A sweep over a file written
+with `'\n'.join(...)` (no trailing newline) read 22 of 23 branches and said
+nothing. It was caught by comparing the row count to the expected count, not
+by any error. **Always assert the count.** Same failure shape as everything
+else tonight: an incomplete answer presented as a complete one — and this one
+was mine.
 
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
