@@ -9124,6 +9124,62 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     return out
 
 
+@router.get("/schema-health")
+async def schema_health_endpoint():
+    """Which model tables are actually present on the live database.
+
+    Both creation paths fail QUIETLY. database.py wraps
+    Base.metadata.create_all in `except Exception` and prints "failed
+    (non-critical)"; main.py's foreign-key validator catches per-table
+    creation errors into a log warning. So a model can ship, its table
+    can fail to appear, and the only evidence is a line in stdout that
+    rotates.
+
+    The cost of that is a silent wrong answer rather than an error. A new
+    model's endpoint returns an empty list, which reads exactly like "the
+    thing that writes here has not run yet" - and the two are
+    indistinguishable from outside. That happened with trade_decisions:
+    the honest way to answer "does the table exist" was to filter on one
+    of its columns and see whether the query 500ed.
+
+    Read-only, and it names what is missing rather than returning a bare
+    count, because the useful form of this answer is which one.
+    """
+    from database import get_engine
+    from sqlalchemy import inspect as _inspect
+    from models import Base
+    import models  # noqa: F401  - registers every table on Base
+
+    try:
+        async with get_engine().begin() as conn:
+            present = set(await conn.run_sync(
+                lambda c: _inspect(c).get_table_names()))
+    except Exception as exc:
+        # A gap is not an empty schema. Never report "all missing".
+        raise HTTPException(
+            status_code=503,
+            detail=(f"the database schema could not be read "
+                    f"({type(exc).__name__}: {exc}) - that is not the same as "
+                    f"the tables being absent"))
+
+    lower = {t.lower() for t in present}
+    expected = [t.name for t in Base.metadata.sorted_tables]
+    missing = sorted(t for t in expected if t.lower() not in lower)
+    return {
+        "tables_expected": len(expected),
+        "tables_present": len(expected) - len(missing),
+        "missing": missing,
+        "status": "OK" if not missing else "MISSING_TABLES",
+        "detail": (
+            f"all {len(expected)} model table(s) exist on the live database"
+            if not missing else
+            f"{len(missing)} model table(s) are declared but absent: "
+            f"{', '.join(missing)}. Anything writing to them is failing "
+            f"silently, and anything reading them returns empty - which "
+            f"looks identical to 'nothing has happened yet'."),
+    }
+
+
 @router.get("/mandates/decisions")
 async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
                                      admitted: bool = None, limit: int = 100):
