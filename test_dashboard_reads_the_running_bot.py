@@ -177,3 +177,115 @@ if __name__ == "__main__":
             except AssertionError as e:
                 fails += 1; print(f"  FAIL {name}: {e}")
     sys.exit(1 if fails else 0)
+
+
+# ── the Alpaca half: a hardcoded venue URL beside a configurable one ───
+#
+# /live-dashboard-data reported buying_power 0, equity 0, daily_profit 0
+# and total_profit 0 at 14:52Z on 2026-09-28, while /status reported
+# equity $980.18, cash $274.26, 7 trades today and 1 open position on
+# the SAME account.
+#
+# Cause: the handler built its own request to the literal
+# "https://paper-api.alpaca.markets/v2/account", while
+# _fetch_alpaca_account - the helper /status goes through - reads
+# ALPACA_BASE_URL, which is configurable. Point that at the live
+# endpoint and the two paths read different accounts; the handler's
+# `except` swallowed the mismatch and its zeros went to the page as
+# figures.
+#
+# Third instance in one day of a literal standing in for a real value,
+# after 483.00 and getattr(..., 'BOT_RUNNING', True). The generalisable
+# guard is the one below: no venue hostname may be written into this
+# router as a literal when a configured base URL exists for it.
+
+# Only hosts a CONFIGURED base actually covers. The first draft of this
+# list said "alpaca.markets" and "api.exchange.coinbase.com" too, and
+# went red on a dozen pre-existing lines - but those are different
+# services: data.alpaca.markets is market data and
+# api.exchange.coinbase.com is the public price host, neither of which
+# ALPACA_BASE_URL or COINBASE_HOST stands in for. A rule that fires on
+# code it has no opinion about is a rule nobody can act on. The rule was
+# wrong, not the code.
+#
+# What remained after narrowing was four real instances of
+# "https://api.coinbase.com" written into this router while
+# account_census.COINBASE_HOST and crypto_coinbase_bot.COINBASE_BASE_URL
+# both exist - and three of them sign with account_census._auth_headers,
+# whose JWT `uri` claim embeds the host. Set COINBASE_HOST and the
+# signature would be for one host while the request went to another.
+# They were fixed rather than exempted.
+VENUE_HOSTS = ("paper-api.alpaca.markets", "api.alpaca.markets", "api.coinbase.com")
+
+
+def _string_constants(tree):
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value, node.lineno
+
+
+def test_no_venue_url_is_hardcoded_where_a_configured_base_exists():
+    """Parses the AST, so the comment above - which names the offending
+    URL on purpose - cannot trip it. That regex mistake was made once
+    already today, on the "max" literal check."""
+    src = open(ROUTER, encoding="utf-8").read()
+    tree = ast.parse(src)
+
+    # Which base-URL names the module defines at module level.
+    configured = {t.id for node in tree.body if isinstance(node, ast.Assign)
+                  for t in node.targets
+                  if isinstance(t, ast.Name) and t.id.endswith("_BASE_URL")}
+    assert configured, "no *_BASE_URL is configured in this router at all"
+
+    # Module-level assignments are allowed to hold the default.
+    module_level_lines = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for c, ln in _string_constants(node):
+                module_level_lines.add(ln)
+
+    offenders = []
+    for value, lineno in _string_constants(tree):
+        if lineno in module_level_lines:
+            continue
+        if any(host in value for host in VENUE_HOSTS) and value.startswith("http"):
+            offenders.append((value, lineno))
+    assert not offenders, (
+        "venue URL hardcoded inside a function while a configured base exists "
+        f"({sorted(configured)}): "
+        + "; ".join(f"{v!r} at line {ln}" for v, ln in offenders))
+
+
+def test_the_live_dashboard_reads_alpaca_through_the_shared_helper():
+    fn = _handler_source()
+    calls = {n.func.id for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_fetch_alpaca_account" in calls, (
+        "the handler does not go through _fetch_alpaca_account, so it can "
+        "read a different account than /status does")
+
+
+def test_the_alpaca_pnl_is_not_a_hardcoded_zero():
+    """daily_profit and total_profit were literal 0 behind a TODO. On a
+    live account that reads as a flat day, not as 'nobody computed it'."""
+    fn = _handler_source()
+    offenders = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if (isinstance(k, ast.Constant) and k.value in ("daily_profit", "total_profit",
+                                                            "growth_percent", "equity",
+                                                            "buying_power")
+                    and isinstance(v, ast.Constant) and isinstance(v.value, (int, float))):
+                offenders.append((k.value, v.value, v.lineno))
+    assert not offenders, (
+        "hardcoded numeric account figure(s): "
+        + "; ".join(f"{k}={v} at line {ln}" for k, v, ln in offenders))
+
+
+def test_the_page_renders_a_null_pnl_as_not_computed():
+    html = open(os.path.join(ROOT, "live_trading_dashboard.html"), encoding="utf-8").read()
+    assert "hasDaily" in html and "hasTotal" in html, \
+        "the card does not distinguish a null P&L from a zero one"
+    assert "account.daily_profit !== null" in html

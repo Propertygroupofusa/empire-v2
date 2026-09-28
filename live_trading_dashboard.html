@@ -681,6 +681,11 @@
             const card = document.createElement('div');
             card.className = 'account-card';
 
+            // A null P&L is "nobody computed this", not "$0.00". The
+            // Alpaca card carried hardcoded zeros behind a TODO and they
+            // read as a flat day on a live account.
+            const hasDaily = account.daily_profit !== null && account.daily_profit !== undefined;
+            const hasTotal = account.total_profit !== null && account.total_profit !== undefined;
             const profitClass = account.total_profit >= 0 ? 'positive' : 'negative';
 
             // A read that failed is shown as a failed read. This card used
@@ -694,8 +699,10 @@
                 ? `${account.growth_percent >= 0 ? '+' : ''}${account.growth_percent.toFixed(1)}%`
                 : '—';
 
-            const buyingPower = account.buying_power !== undefined ? `${formatCurrency(account.buying_power)}` : 'N/A';
-            const equity = account.equity !== undefined && account.equity > 0 ? `Equity: ${formatCurrency(account.equity)}` : '';
+            const buyingPower = (account.buying_power !== undefined && account.buying_power !== null)
+                ? `${formatCurrency(account.buying_power)}` : 'unavailable';
+            const equity = (account.equity !== undefined && account.equity !== null && account.equity > 0)
+                ? `Equity: ${formatCurrency(account.equity)}` : '';
             const split = (account.cash_usd !== undefined && account.cash_usd !== null)
                 ? `Cash ${formatCurrency(account.cash_usd)} · Coin ${formatCurrency(account.coin_usd)}`
                 : '';
@@ -722,14 +729,16 @@
                 <div class="metric-row">
                     <div class="metric">
                         <div class="metric-label">Daily P&L</div>
-                        <div class="metric-value ${account.daily_profit >= 0 ? 'positive' : 'negative'}">
-                            ${account.daily_profit >= 0 ? '+' : ''}${formatCurrency(account.daily_profit)}
+                        <div class="metric-value ${hasDaily ? (account.daily_profit >= 0 ? 'positive' : 'negative') : 'muted'}"
+                             title="${account.profit_detail || ''}">
+                            ${hasDaily ? `${account.daily_profit >= 0 ? '+' : ''}${formatCurrency(account.daily_profit)}` : '—'}
                         </div>
                     </div>
                     <div class="metric">
                         <div class="metric-label">Total Profit</div>
-                        <div class="metric-value ${profitClass}">
-                            ${account.total_profit >= 0 ? '+' : ''}${formatCurrency(account.total_profit)}
+                        <div class="metric-value ${hasTotal ? profitClass : 'muted'}"
+                             title="${account.profit_detail || ''}">
+                            ${hasTotal ? `${account.total_profit >= 0 ? '+' : ''}${formatCurrency(account.total_profit)}` : '—'}
                         </div>
                     </div>
                 </div>

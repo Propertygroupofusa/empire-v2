@@ -7024,7 +7024,7 @@ async def sell_amount_of_holding(req: PartialSellRequest):
         try:
             path = "/api/v3/brokerage/accounts"
             async with session.get(
-                f"https://api.coinbase.com{path}?limit=250",
+                f"https://{account_census.COINBASE_HOST}{path}?limit=250",
                 headers=account_census._auth_headers("GET", path), timeout=25
             ) as r:
                 if r.status != 200:
@@ -7052,7 +7052,7 @@ async def sell_amount_of_holding(req: PartialSellRequest):
         increment, min_size = "0.00000001", None
         try:
             ppath = f"/api/v3/brokerage/products/{product_id}"
-            async with session.get(f"https://api.coinbase.com{ppath}",
+            async with session.get(f"https://{account_census.COINBASE_HOST}{ppath}",
                                    headers=account_census._auth_headers("GET", ppath),
                                    timeout=20) as r:
                 if r.status == 200:
@@ -7090,7 +7090,7 @@ async def sell_amount_of_holding(req: PartialSellRequest):
         opath = "/api/v3/brokerage/orders"
         try:
             async with session.post(
-                f"https://api.coinbase.com{opath}",
+                crypto_coinbase_bot.COINBASE_BASE_URL + opath,
                 headers=crypto_coinbase_bot._auth_headers("POST", opath),
                 json=order, timeout=30
             ) as r:
@@ -7280,35 +7280,38 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
         except Exception as e:
             census_error = f"{type(e).__name__}: {e}"
             log.warning(f"live-dashboard account read failed: {census_error}")
-        # Fetch Alpaca account data
-        alpaca_buying_power = 0
-        alpaca_equity = 0
+        # THE ALPACA ACCOUNT, THROUGH THE SAME HELPER /status USES.
+        #
+        # What stood here was a SECOND hand-rolled request, and its URL
+        # was the literal "https://paper-api.alpaca.markets/v2/account"
+        # - while _fetch_alpaca_account, three hundred lines up, reads
+        # ALPACA_BASE_URL, which is configurable and is what /status
+        # goes through. Point that variable at the live endpoint and the
+        # two paths read DIFFERENT ACCOUNTS. On 2026-09-28 at 14:52Z
+        # this panel reported buying_power 0, equity 0, daily_profit 0
+        # and total_profit 0 while /status reported equity $980.18,
+        # cash $274.26, 7 trades today and 1 open position on the same
+        # account. The except below swallowed whatever the paper
+        # endpoint said and the zeros went to the page as figures.
+        #
+        # Third instance today of one literal standing in for a real
+        # value, after 483.00 and BOT_RUNNING. The fix is the same as
+        # the census one: delete the second source rather than repair
+        # it, so the page and /status cannot read different accounts.
+        alpaca_buying_power = None
+        alpaca_equity = None
+        alpaca_error = None
         try:
-            # NO `import aiohttp` HERE. aiohttp is imported at module
-            # level (line 26); a local import of the same name rebinds it
-            # for the entire function, so every earlier use in this
-            # function raised UnboundLocalError. That is what made the
-            # account read above impossible and pinned the page to a
-            # hardcoded 483.00 for as long as it has been deployed.
-            alpaca_key = os.getenv("ALPACA_API_KEY", "")
-            alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
-            if alpaca_key and alpaca_secret:
-                headers = {
-                    "APCA-API-KEY-ID": alpaca_key,
-                    "APCA-API-SECRET-KEY": alpaca_secret
-                }
+            if ALPACA_KEY and ALPACA_SECRET:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        "https://paper-api.alpaca.markets/v2/account",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=5)
-                    ) as resp:
-                        if resp.status == 200:
-                            account = await resp.json()
-                            alpaca_buying_power = round(float(account.get("buying_power", 0)), 2)
-                            alpaca_equity = round(float(account.get("equity", 0)), 2)
+                    account = await _fetch_alpaca_account(session)
+                alpaca_buying_power = round(float(account.get("buying_power", 0)), 2)
+                alpaca_equity = round(float(account.get("equity", 0)), 2)
+            else:
+                alpaca_error = "no Alpaca credentials configured"
         except Exception as e:
-            log.warning(f"Alpaca account fetch failed: {e}")
+            alpaca_error = f"{type(e).__name__}: {e}"
+            log.warning(f"Alpaca account fetch failed: {alpaca_error}")
 
         # POSITIONS, PAIRS AND BOT STATUS - ALL THREE FROM THE FLEET
         # THAT IS ACTUALLY TRADING.
@@ -7462,11 +7465,21 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
                 },
                 "alpaca": {
                     "name": "Alpaca (Stocks & Futures)",
+                    # available=False rather than zeros. A credential
+                    # gap and a $0 account are not the same thing, and
+                    # the old shape could not tell them apart.
+                    "available": alpaca_equity is not None,
+                    "detail": alpaca_error,
                     "buying_power": alpaca_buying_power,
                     "equity": alpaca_equity,
-                    "daily_profit": 0,  # TODO: Calculate from Alpaca trade logs when database logging added
-                    "total_profit": 0,  # TODO: Calculate from Alpaca trade logs when database logging added
-                    "growth_percent": 0
+                    # These were hardcoded 0 behind a TODO, which reads
+                    # as "this account made nothing today" rather than
+                    # "nobody computed it". None says the second thing.
+                    "daily_profit": None,
+                    "total_profit": None,
+                    "growth_percent": None,
+                    "profit_detail": ("not computed here - /status carries the session P&L "
+                                      "for this account and is the one source for it"),
                 }
             },
             "positions": {
@@ -10691,7 +10704,7 @@ async def resting_stops_preview():
             pid = f"{asset}-USD"
             try:
                 path = f"/api/v3/brokerage/products/{pid}"
-                async with session.get(f"https://api.coinbase.com{path}",
+                async with session.get(f"https://{account_census.COINBASE_HOST}{path}",
                                        headers=account_census._auth_headers("GET", path),
                                        timeout=20) as r:
                     if r.status == 200:
