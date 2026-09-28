@@ -961,7 +961,7 @@
         </div>
         <div style="text-align:right;">
             <div class="header-totals">
-                <div class="header-total-row">🪙 Coinbase <span style="opacity:.6;font-weight:400">balance</span>: <span id="header-total-coinbase" class="v">—</span></div>
+                <div class="header-total-row" title="Cash only - the part of your money NOT in coin right now. It goes DOWN every time the bot buys a dip, because the cash became coin. That is money moving, not money lost. For what you actually own, read CRYPTO TOTAL on the grid fleet card; for what you have actually banked, read realized P&L.">🪙 Coinbase <span style="opacity:.6;font-weight:400">cash waiting</span>: <span id="header-total-coinbase" class="v">—</span><span style="opacity:.55;font-weight:400;font-size:.8em"> · not profit</span></div>
                 <div class="header-total-row">📈 Alpaca <span style="opacity:.6;font-weight:400">balance</span>: <span id="header-total-alpaca" class="v">—</span></div>
             </div>
             <div id="status">Loading…</div>
@@ -1532,7 +1532,7 @@
         <div style="margin:10px 0;">
             <button id="league-btn" class="unlock-btn" style="margin-top:0;" onclick="runLeague()">🏆 Run the standings</button>
         </div>
-        <div id="league-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
+        <div id="newsroom-league-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
     <div class="section-title">🔔 The alarm</div>
@@ -1856,7 +1856,30 @@ async function _apiGetOnce(path, timeoutMs) {
         err.transient = TRANSIENT_STATUSES.indexOf(res.status) !== -1;
         throw err;
     }
-    return res.json();
+    // A TRUNCATED BODY IS A 200. Hit live on 2026-09-28: /grid-status
+    // answered HTTP 200 with the JSON cut off mid-object at 18,615 of
+    // ~108,000 bytes. res.ok was true, the status was not in
+    // TRANSIENT_STATUSES, and res.json() threw a SyntaxError carrying no
+    // .transient - so apiGet rethrew it immediately and the single most
+    // retryable failure there is was the one case that never retried.
+    // A retry on the very next attempt returned the full 108KB.
+    //
+    // Parsed here rather than returned raw so the failure is caught where
+    // it can be classified. A cut-off read is a GAP, never a zero: it must
+    // reach the caller as an error, never as an empty object that renders
+    // as $0.00.
+    const text = await res.text();
+    try {
+        return JSON.parse(text);
+    } catch (parseErr) {
+        const err = new Error(
+            'the service returned a truncated response (' + text.length +
+            ' bytes, not valid JSON) - this is a cut-off read, not a zero. ' +
+            'Retrying.');
+        err.transient = true;
+        err.truncated = true;
+        throw err;
+    }
 }
 
 function fmtUsd(n) {
@@ -5352,7 +5375,15 @@ const DIV_COLOUR = {
 };
 
 function renderLeague(L) {
-    const wrap = document.getElementById('league-wrap');
+    // newsroom-league-wrap, NOT league-wrap. Two panels carried id
+    // "league-wrap": this newsroom one and the coin-league one ~160 lines
+    // earlier. getElementById returns the FIRST match, so every render here
+    // landed in the other panel, off-screen up the page - "Run the
+    // standings" looked like a button that did nothing, and the coin-league
+    // panel got silently overwritten with newsroom data. Caught by
+    // test_dashboard_governs' "no duplicate element ids" check, which had
+    // been failing on this.
+    const wrap = document.getElementById('newsroom-league-wrap');
     if (!L) { wrap.innerHTML = '<div class="coin-history-empty">No standings.</div>'; return; }
     const medal = ['\u{1F947}', '\u{1F948}', '\u{1F949}'];
     const chg = n => n == null
@@ -5410,7 +5441,7 @@ function renderLeague(L) {
 
 async function runLeague() {
     const btn = document.getElementById('league-btn');
-    const wrap = document.getElementById('league-wrap');
+    const wrap = document.getElementById('newsroom-league-wrap');
     const original = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Rebuilding the standings…'; }
     try {
@@ -7684,7 +7715,13 @@ async function loadHeaderTotals() {
     try {
         const data = await apiGet('/family-tree-status');
 
-        // Coinbase: display real USD balance (actual cash + holdings in Coinbase)
+        // Coinbase: real USD CASH only - NOT cash + holdings, whatever the
+        // old comment here claimed. real_usd_balance is the wallet's dollars;
+        // coin is not in it. Labelling this "balance" is what led the account
+        // owner to read it as a score and watch it "go down" while the bot was
+        // simply converting cash into coin on dips - $274.18 of buys on
+        // 2026-09-27, fully reconciled, nothing lost. The label now says what
+        // the number is.
         if (data.real_usd_balance !== null && data.real_usd_balance !== undefined) {
             renderHeaderTotal('header-total-coinbase', data.real_usd_balance, 'balance');
         } else {
