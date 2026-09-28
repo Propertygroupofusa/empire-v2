@@ -1068,7 +1068,8 @@ async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT
 
 
 async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID,
-                            source: str = None):
+                            source: str = None,
+                            allow_unverified_balance: bool = False):
     """Sells qty of product_id at market. Returns (filled_qty, filled_price) or None.
 
     Before placing, clamps qty to the real held balance and rounds it down
@@ -1081,8 +1082,35 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID,
     Coinbase rejects as INVALID_SIZE_PRECISION if exceeded.
     """
     base_currency = product_id.split("-")[0]
-    real_balance, _ = await get_asset_balance(session, base_currency)
-    if real_balance is not None and real_balance < qty:
+    real_balance, _bal_err = await get_asset_balance(session, base_currency)
+    if real_balance is None:
+        # AN UNKNOWN BALANCE MUST NEVER GENERATE AN ORDER.
+        #
+        # This used to fall through. The clamp read "if the balance is not
+        # None AND it is smaller, clamp", so a FAILED read skipped the clamp
+        # entirely and the order went out at the TRACKED quantity - the one
+        # number already known to drift away from the wallet. That is how a
+        # branch sends an order for coin it does not hold, and the reason was
+        # discarded into `_`, so nothing ever said why.
+        #
+        # A forced exit is the one caller that may proceed: refusing there
+        # leaves a live position unprotected, which is the worse failure for
+        # a protection path. It must ask explicitly and it is logged as the
+        # risk it is.
+        if not allow_unverified_balance:
+            log.warning(
+                f"[BTC-COMPOUND] {product_id}: REFUSING to sell - the real "
+                f"{base_currency} balance could not be read ({_bal_err}). An "
+                f"unknown balance is not a known one; no order placed, will "
+                f"retry next cycle.")
+            _last_order_error[product_id] = f"balance unreadable: {_bal_err}"
+            return None
+        log.warning(
+            f"[BTC-COMPOUND] {product_id}: balance unreadable ({_bal_err}) but "
+            f"the caller is a FORCED EXIT, so selling the tracked qty "
+            f"{qty:.8f} unverified. If this over-sends the venue rejects it; "
+            f"leaving the position open was judged the larger risk.")
+    elif real_balance < qty:
         log.info(f"[BTC-COMPOUND] {product_id}: clamping sell qty {qty:.8f} -> real held balance {real_balance:.8f}")
         qty = real_balance
 
@@ -1329,8 +1357,17 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     back). Applies the same real-balance and precision clamps
     place_market_sell already does."""
     base_currency = product_id.split("-")[0]
-    real_balance, _ = await get_asset_balance(session, base_currency)
-    if real_balance is not None and real_balance < qty:
+    real_balance, _bal_err = await get_asset_balance(session, base_currency)
+    if real_balance is None:
+        # Same rule, no exception. This is the opportunistic maker path and
+        # there is always a next cycle, so there is never a reason to rest an
+        # order sized off a number the wallet could not confirm.
+        log.warning(
+            f"[GRID] {product_id}: REFUSING to rest a maker sell - the real "
+            f"{base_currency} balance could not be read ({_bal_err}). Not "
+            f"placed; retried next cycle.")
+        return None
+    if real_balance < qty:
         qty = real_balance
     decimals = await get_product_size_decimals(session, product_id)
     factor = 10 ** decimals

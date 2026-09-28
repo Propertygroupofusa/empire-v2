@@ -8023,8 +8023,13 @@ async def close_all_grid_slices(only_bot_name: str = None,
             if not slices:
                 continue
             total_qty = sum(s.qty for s in slices)
+            # close-all is a PROTECTION, and protections fail open: if the
+            # balance cannot be read here, leaving a live position open is
+            # the worse outcome, so this is the one caller allowed to sell
+            # an unverified quantity. Every other seller refuses.
             fill = await engine.place_market_sell(session, total_qty, b.product_id,
-                                                  source="grid_close_branch")
+                                                  source="grid_close_branch",
+                                                  allow_unverified_balance=True)
             if not fill:
                 reason = engine._last_order_error.get(b.product_id, "real sell did not fill")
                 results.append({
