@@ -108,8 +108,20 @@ ok("and it is only computed for a BUYING POWER halt",
    "a daily-loss halt has nothing to do with these fields")
 
 print("\nthe halt itself is unchanged - this is diagnosis, not policy")
-ok("the thresholds are untouched",
-   'if buying_power < capital["critical_buying_power"]' in SRC)
+# The comparison moved behind a magnitude on 2026-09-28: the floor is now
+# read as abs(capital["critical_buying_power"]), because written negative
+# the old expression `buying_power < -150` could never fire and the guard
+# silently stopped guarding. The THRESHOLD is still the mandate's and the
+# test is still "below the floor halts" - so this check keeps its job
+# (catching a policy change smuggled in with a diagnosis change) and is
+# retargeted rather than dropped.
+ok("the floor still comes from the mandate, not a local constant",
+   'abs(capital["critical_buying_power"])' in SRC,
+   "the floor must be read from the mandate every time")
+ok("and buying power is still compared against it",
+   re.search(r"if buying_power < critical_bp:", SRC) is not None)
+ok("the loss limit is read the same way, for the same reason",
+   'abs(capital["max_daily_loss"])' in SRC)
 ok("it still returns from the cycle rather than trading on",
    re.search(r"log\.critical\(f?\"\[KILL CONDITION\].*?\n(?:.*?\n)??\s+return", SRC, re.S) is not None)
 

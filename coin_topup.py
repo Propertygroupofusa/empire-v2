@@ -165,8 +165,17 @@ def plan(holdings, branches, *, account_total_usd,
                              "allocated_usd": round(allocated, 2), "idle_usd": idle_usd,
                              "reason": "NO_IDLE_COIN"})
             continue
+        # The units the branch ALREADY tracks, summed from its own slices.
+        # Exact, and the only figure that can answer "how much of this coin
+        # is not yet under a branch" - see the note where it is used.
+        tracked_units = 0.0
+        for _s in (b.get("slices") or []):
+            _q = _pos(_s.get("qty") if hasattr(_s, "get") else getattr(_s, "qty", None))
+            if _q:
+                tracked_units += _q
         rows.append({"product_id": pid, "asset": asset, "bot_name": b.get("bot_name"),
                      "held_usd": held_usd, "allocated_usd": round(allocated, 2),
+                     "tracked_units": tracked_units,
                      "idle_usd": idle_usd, "price": price,
                      "num_levels": int(b.get("num_levels") or 0),
                      "available_units": h.get("available_units"),
@@ -221,9 +230,33 @@ def plan(holdings, branches, *, account_total_usd,
                                  "held_usd": r["held_usd"], "idle_usd": r["idle_usd"],
                                  "reason": "ALL_UNITS_LOCKED_OR_STAKED"})
                 continue
-        # The units already under the branch are not idle. Subtract them
-        # before deciding what is free to add.
-        units_under_branch = (r["allocated_usd"] / r["price"]) if r["price"] else 0.0
+        # THE UNITS ALREADY UNDER THE BRANCH, MEASURED - NOT ESTIMATED.
+        #
+        # This was `allocated_usd / price`: a cost-basis dollar figure
+        # divided by TODAY's price. Those are different quantities. When
+        # the price has risen since the slices were written, the quotient
+        # UNDERSTATES the units already tracked, and the difference is
+        # handed back as "free" and registered a second time. The branch
+        # then claims more coin than the wallet holds, and a sale of those
+        # slices is an order for units that do not exist.
+        #
+        # Measured 2026-09-28. PEPE-USD was adopted at 12:17 on 09-27
+        # (20.23M units), bought 9.10M through the venue at 02:58, then
+        # topped up AGAIN at 03:08 for 18.05M - reaching 47.39M tracked
+        # against 39.09M held. BCH-USD shows the same shape: three adopted
+        # slices, one real buy, and 0.379323 units short. Both were topped
+        # up; neither was ever trimmed, which is why the trimmer did not
+        # explain them.
+        #
+        # The branch's own slices are the exact answer and are already in
+        # the payload. Falls back to the old estimate only when a branch
+        # reports no slices at all, so a payload without them behaves as
+        # it did rather than treating every held unit as free.
+        tracked_units = r.get("tracked_units")
+        if tracked_units:
+            units_under_branch = tracked_units
+        else:
+            units_under_branch = (r["allocated_usd"] / r["price"]) if r["price"] else 0.0
         free_units = max(0.0, avail_units - units_under_branch)
         free_usd = round(free_units * r["price"], 2)
 

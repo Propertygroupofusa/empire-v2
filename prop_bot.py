@@ -1822,13 +1822,29 @@ def check_kill_conditions(buying_power, equity, daily_loss, open_position_count)
     mandate = APEX_MANDATE
     capital = mandate["capital"]
 
+    # BOTH LIMITS ARE MAGNITUDES, so both are read as magnitudes.
+    #
+    # max_daily_loss was negated directly: `daily_loss < -capital[...]`. Set
+    # to the positive 5 it currently holds that is correct. Written as -5 -
+    # which reads perfectly naturally for a loss limit, and is how the same
+    # number is expressed elsewhere in this repo - the negation makes it +5
+    # and the test becomes `daily_loss < 5`, which is TRUE for a $3 PROFIT.
+    # The kill switch would halt a winning day, and the log line would say
+    # "Daily loss limit hit: $3.00" while the account was up.
+    #
+    # critical_buying_power fails the mirror image: written negative, the
+    # test `buying_power < -150` can never fire and the guard silently
+    # stops guarding. One is a false halt, the other is no halt at all.
+    max_daily_loss = abs(capital["max_daily_loss"])
+    critical_bp = abs(capital["critical_buying_power"])
+
     # Kill condition 1: Daily loss limit hit
-    if daily_loss < -capital["max_daily_loss"]:
-        return True, f"Daily loss limit hit: ${daily_loss:.2f} <= -${capital['max_daily_loss']}"
+    if daily_loss < -max_daily_loss:
+        return True, f"Daily loss limit hit: ${daily_loss:.2f} <= -${max_daily_loss}"
 
     # Kill condition 2: Buying power below critical threshold
-    if buying_power < capital["critical_buying_power"]:
-        return True, f"Buying power critical: ${buying_power:.2f} < ${capital['critical_buying_power']}"
+    if buying_power < critical_bp:
+        return True, f"Buying power critical: ${buying_power:.2f} < ${critical_bp}"
 
     # Kill condition 3: Equity fallen below survival level (80% of starting)
     if equity < 800:
