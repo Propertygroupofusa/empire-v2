@@ -1494,6 +1494,18 @@ async def lifespan(app: FastAPI):
         else:
             print("[LIFESPAN] ✗ alpaca_swing_bot_module is None", flush=True)
             log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
+
+        # market_brain's cycle. Starts on every boot and does NOTHING
+        # until market_brain_owns_equities is set in TradingBotState -
+        # the runner re-reads that flag every cycle, so the owner can
+        # stop it from the dashboard without a redeploy.
+        try:
+            import threading
+            import market_brain_runner
+            threading.Thread(target=market_brain_runner.run, daemon=True).start()
+            log.info("🧠 market_brain runner started (idle until the handover flag is on)")
+        except Exception as e:
+            log.warning(f"⚠️ market_brain runner failed to start: {e}")
     except Exception as e:
         import traceback
         print(f"[LIFESPAN] ✗ Exception: {e}", flush=True)

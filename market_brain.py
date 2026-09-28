@@ -73,12 +73,28 @@ def get_file_hash(filepath):
         return ""
 
 
+SELF_UPDATE_ENABLED = os.getenv("MARKET_BRAIN_SELF_UPDATE", "false").lower() == "true"
+
+
 def check_for_updates(current_file):
     """
     Check GitHub for newer version of this bot.
     If update found — download and log for next restart.
     Render auto-restarts on file change.
+
+    OFF BY DEFAULT AS OF 2026-09-28. This function downloads a new copy
+    of market_brain.py from GitHub and OVERWRITES ITS OWN FILE. On a
+    module that places real orders on a live account, that is remote
+    code replacement between trading cycles, with no review step in
+    between - whatever is on the branch becomes the trading logic.
+
+    That was harmless while nothing ran this module. The owner has now
+    chosen to run it, so the default flips: set MARKET_BRAIN_SELF_UPDATE
+    =true to restore the old behaviour deliberately. Nothing else about
+    the function changed.
     """
+    if not SELF_UPDATE_ENABLED:
+        return False
     now = _time.time() if "_time" in dir() else __import__("time").time()
     if now - _last_update_check[0] < UPDATE_CHECK_INTERVAL:
         return False

@@ -130,3 +130,50 @@ if __name__ == "__main__":
             except AssertionError as e:
                 fails += 1; print(f"  FAIL {name}: {e}")
     sys.exit(1 if fails else 0)
+
+
+# ── the runner ────────────────────────────────────────────────────────
+
+def test_the_runner_is_started_from_main():
+    src = open(os.path.join(ROOT, "main.py"), encoding="utf-8").read()
+    assert "market_brain_runner" in src, "the cycle is never launched"
+
+
+def test_the_runner_checks_the_flag_every_cycle_not_once_at_boot():
+    """A bot you can only stop by deploying is a bot you cannot stop."""
+    import market_brain_runner as r
+    src = inspect.getsource(r.run)
+    assert "_flag_on()" in src, "the flag is not read inside the loop"
+    assert "while True" in src
+
+
+def test_the_runner_refuses_to_trade_on_a_partial_book():
+    import market_brain_runner as r
+    src = inspect.getsource(r.run)
+    assert "_reconcile" in src
+    rec = inspect.getsource(r._reconcile)
+    assert "return False" in rec and "book is None" in rec
+
+
+def test_the_runner_honours_the_process_wide_kill_switch():
+    import market_brain_runner as r
+    assert "STOP_TRADING" in inspect.getsource(r.run)
+
+
+def test_the_flag_read_failing_means_do_not_trade():
+    """Opposite direction from prop_bot's copy of the flag, deliberately.
+    There it fails OPEN (a DB hiccup must not stop an already-running
+    bot). Here it fails CLOSED - a runner that cannot read its own
+    switch must not place orders."""
+    import market_brain_runner as r
+    src = inspect.getsource(r._flag_on)
+    assert "return False" in src and "except Exception" in src
+
+
+def test_market_brain_does_not_self_update_by_default():
+    """run_cycle() opens with check_for_updates(__file__), which
+    downloads a new market_brain.py from GitHub and overwrites its own
+    file. On a module that places real orders that is remote code
+    replacement between cycles, with no review in between."""
+    assert mb.SELF_UPDATE_ENABLED is False
+    assert mb.check_for_updates("market_brain.py") is False
