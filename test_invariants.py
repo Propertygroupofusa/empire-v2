@@ -194,3 +194,50 @@ def test_no_check_is_incapable_of_failing():
               if not n.startswith("_") and callable(getattr(inv, n))
               and n not in ("summarize",)}
     assert checked == public, f"a check has no failing test: {public - checked}"
+
+
+# ------------------------------- an UNKNOWN must say why it could not look
+def test_the_endpoint_records_why_a_check_went_blind():
+    """Found live 2026-09-28 01:41Z: fee_rate_agreement and
+    spacing_evidence_current BOTH read UNKNOWN while
+    /grid-status/fee-reality was answering the same question perfectly well
+    (61 classified fills, 0.006088/leg). The endpoint had swallowed the
+    exception and set the rate to None, so two of four checks were blind and
+    there was no way to tell a rate-limited call from a renamed function.
+
+    A blind check is worse than a failing one - it looks like silence. So
+    the cause is captured and attached to the verdict.
+    """
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    i = src.index("async def grid_invariants_endpoint")
+    block = src[i:i + 4000]
+    assert "blind_because" in block
+    # the bare swallow must be gone
+    assert "except Exception:\n            measured_leg = None" not in block
+    assert "except Exception as e:" in block
+    assert 'f"{type(e).__name__}: {e}"' in block
+    # and a starved sample is distinguished from a thrown call
+    assert "classified_fills" in block
+
+
+def test_a_starved_sample_and_a_thrown_call_are_different_causes():
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    i = src.index("async def grid_invariants_endpoint")
+    block = src[i:i + 4000]
+    assigns = block.count("blind_because = ")
+    assert assigns >= 3, "expected: init, starved-sample, exception"
+
+
+def test_the_cause_is_only_attached_to_unknowns_not_to_fails():
+    """A FAIL already carries its arithmetic; appending a cause to it would
+    bury the number under plumbing."""
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    i = src.index("async def grid_invariants_endpoint")
+    block = src[i:i + 4000]
+    assert 'r["status"] == inv.UNKNOWN and blind_because' in block

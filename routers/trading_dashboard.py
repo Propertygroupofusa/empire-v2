@@ -8305,21 +8305,39 @@ async def grid_invariants_endpoint():
         mix = await g.get_fill_mix()
         reported = (mix.get("overall") or {}).get("maker_round_trip_fee_rate")
         reported_leg = (reported / 2) if reported else None
+        # AN UNKNOWN MUST CARRY ITS CAUSE. This block used to swallow the
+        # exception and set measured_leg = None, so when it failed BOTH
+        # fee_rate_agreement and spacing_evidence_current reported UNKNOWN
+        # with nothing to act on - two of four checks blind, and no way to
+        # tell a rate-limited call from a renamed function. Observed at
+        # 01:41Z while /grid-status/fee-reality was answering the same
+        # question perfectly well (61 classified fills, 0.006088/leg).
+        # A blind check is worse than a failing one: it looks like silence.
         measured_leg = None
+        blind_because = None
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
                 fills = await g.engine.get_recent_fills_summary(session, limit=250)
-            # Only a sample large enough to conclude from. A starved sample
-            # is UNKNOWN, which the check reports as such rather than as a pass.
             if fills.get("enough_to_conclude"):
                 measured_leg = fills.get("real_leg_fee_rate")
-        except Exception:
-            measured_leg = None
-        results.append(inv.fee_rate_agreement(floor_leg, reported_leg, measured_leg))
-        results.append(inv.spacing_evidence_current(
+            else:
+                # A starved sample is UNKNOWN, not a pass - and it says so.
+                blind_because = (
+                    f"only {fills.get('classified_fills')} spot fills carried a "
+                    f"maker/taker label, under the sample this concludes from")
+        except Exception as e:
+            blind_because = f"{type(e).__name__}: {e}"
+        r1 = inv.fee_rate_agreement(floor_leg, reported_leg, measured_leg)
+        r2 = inv.spacing_evidence_current(
             g.SPACING_EVIDENCE_PRICED_AT_ROUND_TRIP,
-            (measured_leg * 2) if measured_leg is not None else None))
+            (measured_leg * 2) if measured_leg is not None else None)
+        for r in (r1, r2):
+            if r["status"] == inv.UNKNOWN and blind_because:
+                r["detail"] = f"{r['detail']} - because: {blind_because}"
+                r["blind_because"] = blind_because
+        results.append(r1)
+        results.append(r2)
     except Exception as e:
         results.append({"name": "fee_rate_agreement", "status": inv.UNKNOWN,
                         "detail": f"could not be checked: {type(e).__name__}: {e}"})
