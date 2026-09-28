@@ -683,6 +683,48 @@ def send_trade_alert(subject: str, body: str):
 _price_rsi_last_failure = {}
 
 
+def bars_start_iso(calendar_days):
+    """RFC3339 `start` for a bars request, `calendar_days` back.
+
+    WHY EVERY BARS REQUEST NEEDS ONE.
+
+    Alpaca's /v2/stocks/{symbol}/bars with no `start` returns only the
+    CURRENT DAY's bars. That is not a theory - this codebase already
+    proved it once and then papered over it. get_price_rsi() used to
+    hard-require 50 5-min bars, and the comment recording the fix says
+    it plainly: "for roughly the first ~4 hours of every single trading
+    day ... the scanner skipped every symbol". The response at the time
+    was to LOWER the bar requirement from 50 to 15.
+
+    Lowering the requirement cannot work for get_price_momentum(): a
+    20-bar SMA needs 20 bars, and there is no smaller honest number. At
+    15-min bars that is 5h15m of session, so the momentum scanner had
+    NO DATA AT ALL from the 09:30 ET open until roughly 14:45 ET -
+    every trading day, every symbol. No entries could be considered and,
+    until ef86ee9, no held position's stop could be evaluated either.
+    Live confirmation at 16:36Z on 28 Sep, from META's own refusal:
+    "Only 17 of the required 21 15-min bars are available right now".
+
+    The fix is to ask for history that exists rather than to accept less
+    of it. Callers pair this with a large `limit` and then take the TAIL
+    of the response: Alpaca returns bars oldest-first and truncates to
+    `limit` from the START, so `start` plus a small `limit` would serve
+    a price several days stale - which on an exit path is far worse than
+    no price at all.
+    """
+    return (datetime.now(timezone.utc)
+            - timedelta(days=calendar_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Calendar days of history to request, per timeframe. Sized to clear a
+# weekend plus a holiday and still contain the bars each caller needs:
+#   5Min  needs 50 -> ~4.2h of session
+#   15Min needs 21 -> ~5.3h of session
+#   1Hour needs 50 -> ~7.7 trading days
+BARS_LOOKBACK_DAYS_INTRADAY = 6
+BARS_LOOKBACK_DAYS_HOURLY = 21
+
+
 # THE BROKER'S OWN MARK, KEPT AS A FALLBACK FOR EXIT CHECKS.
 #
 # The exit pass used to depend entirely on `scans`, which is built from
@@ -796,7 +838,9 @@ async def get_price_rsi(session, symbol):
         # feed, Alpaca's default depends on the account's data
         # subscription tier, which previously made this endpoint
         # inconsistent with the (working) 1-hour trend check right below it.
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min&limit=50&feed=iex"
+        url = (f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=5Min"
+                   f"&start={bars_start_iso(BARS_LOOKBACK_DAYS_INTRADAY)}"
+                   f"&limit=10000&feed=iex")
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 try:
@@ -852,6 +896,15 @@ async def get_price_rsi(session, symbol):
                 _price_rsi_last_failure[symbol] = f"Only {bar_count} of the required {MIN_BARS_FOR_RSI} 5-min bars are available right now"
                 return None
 
+            # TAKE THE TAIL, ALWAYS.
+            #
+            # `start` above widens the window so the bars actually
+            # exist; this makes sure we use the NEWEST of them.
+            # Alpaca returns bars oldest-first, so a wide window is
+            # exactly how a stale price gets served as "current" -
+            # and a stale price on an exit path is worse than no
+            # price, because it looks like the stop ran.
+            bars = bars[-50:]
             closes = [b["c"] for b in bars]
             price = closes[-1]
 
@@ -1053,7 +1106,9 @@ async def get_price_momentum(session, symbol):
     unchanged. Reuses the same _price_rsi_last_failure dict for the same
     diagnosability the dashboard's error messages already rely on."""
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min&limit=100&feed=iex"
+        url = (f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=15Min"
+                   f"&start={bars_start_iso(BARS_LOOKBACK_DAYS_INTRADAY)}"
+                   f"&limit=10000&feed=iex")
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 try:
@@ -1084,6 +1139,15 @@ async def get_price_momentum(session, symbol):
                 _price_rsi_last_failure[symbol] = f"Only {bar_count} of the required {MIN_BARS} 15-min bars are available right now"
                 return None
 
+            # TAKE THE TAIL, ALWAYS.
+            #
+            # `start` above widens the window so the bars actually
+            # exist; this makes sure we use the NEWEST of them.
+            # Alpaca returns bars oldest-first, so a wide window is
+            # exactly how a stale price gets served as "current" -
+            # and a stale price on an exit path is worse than no
+            # price, because it looks like the stop ran.
+            bars = bars[-100:]
             closes = [b["c"] for b in bars]
             price = closes[-1]
 
@@ -1114,12 +1178,36 @@ async def get_price_momentum(session, symbol):
             trend = "bullish" if price > sma20 else "bearish"
             momentum = ((price - closes[-3]) / closes[-3]) * 100 if len(closes) >= 3 and closes[-3] > 0 else 0
 
+            # HOW OLD IS THE PRICE WE ARE ABOUT TO TRADE ON?
+            #
+            # Now that the request spans several days rather than just
+            # today, "the last bar" is no longer implicitly recent. This
+            # does NOT gate anything - a 15-min bar is legitimately hours
+            # old outside session hours, and refusing then would block
+            # exits, which is the failure we just spent two commits
+            # removing. It makes the age visible so a genuinely stalled
+            # feed can be seen instead of inferred.
+            bar_age_seconds = None
+            try:
+                _t = bars[-1].get("t")
+                if _t:
+                    _bar_ts = datetime.fromisoformat(_t.replace("Z", "+00:00"))
+                    bar_age_seconds = (
+                        datetime.now(timezone.utc) - _bar_ts).total_seconds()
+            except Exception:
+                bar_age_seconds = None
+            if bar_age_seconds is not None and bar_age_seconds > 3600:
+                log.warning(
+                    f"[APEX_589296] {symbol}: newest 15-min bar is "
+                    f"{bar_age_seconds/60:.0f} minutes old - the price driving "
+                    f"entries and exits for this symbol is not current.")
+
             _price_rsi_last_failure.pop(symbol, None)
             return {
                 "price": price, "rsi": round(rsi, 1) if rsi is not None else None,
                 "trend": trend, "momentum": round(momentum, 2), "sma20": sma20,
                 "rsi_prev": round(rsi_prev, 1) if rsi_prev is not None else None,
-                "sma20_prev": sma20_prev,
+                "sma20_prev": sma20_prev, "bar_age_seconds": bar_age_seconds,
             }
     except Exception as e:
         log.error(f"Momentum price error {symbol}: {e}")
@@ -1141,7 +1229,9 @@ async def get_higher_tf_trend(session, symbol):
     fetch failure so a data hiccup never blocks a trade outright, only
     a genuinely confirmed opposing trend does."""
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour&limit=50&feed=iex"
+        url = (f"https://data.alpaca.markets/v2/stocks/{symbol}/bars?timeframe=1Hour"
+                   f"&start={bars_start_iso(BARS_LOOKBACK_DAYS_HOURLY)}"
+                   f"&limit=10000&feed=iex")
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
                 return "UNKNOWN"
@@ -1150,6 +1240,15 @@ async def get_higher_tf_trend(session, symbol):
             if len(bars) < 50:
                 return "UNKNOWN"
 
+            # TAKE THE TAIL, ALWAYS.
+            #
+            # `start` above widens the window so the bars actually
+            # exist; this makes sure we use the NEWEST of them.
+            # Alpaca returns bars oldest-first, so a wide window is
+            # exactly how a stale price gets served as "current" -
+            # and a stale price on an exit path is worse than no
+            # price, because it looks like the stop ran.
+            bars = bars[-50:]
             closes = [b["c"] for b in bars]
             sma20 = sum(closes[-20:]) / 20
             sma50 = sum(closes[-50:]) / 50
