@@ -475,11 +475,23 @@ def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
     if newest > armed:
         after_h = _hours_between(armed, newest)
         return {"name": "maker_only_holds", "status": FAIL,
+                # SAY ONLY WHAT THIS CAN PROVE. The first live FAIL read
+                # "something is still crossing the spread", which points at
+                # the grid - and the grid cannot be the cause on its maker
+                # path: place_maker_buy/sell both set post_only=True, so
+                # Coinbase REJECTS such an order rather than filling it as a
+                # taker. What is actually known is that a taker leg was
+                # billed after arming. The fills feed carries no originating
+                # subsystem, so naming one would be a guess dressed as a
+                # finding.
                 "detail": (f"{seen}, and the newest was filled {after_h:.1f}h AFTER "
-                           f"maker-only was armed. Under maker-only there is no market "
-                           f"fallback, so something is still crossing the spread - each "
-                           f"such leg costs 0.75% against the 0.35% the spacing floor "
-                           f"is priced on."),
+                           f"maker-only was armed. A taker leg costs ~0.75% against the "
+                           f"0.35% the spacing floor is priced on, so it is worth "
+                           f"tracing. The grid's own maker orders are post_only and are "
+                           f"rejected rather than crossed, so the likely source is a "
+                           f"MARKET order from another path - a resting stop firing, the "
+                           f"trimmer, a close, or a manual sale. This feed does not say "
+                           f"which, so check those before changing anything in the grid."),
                 "newest_taker_at": newest.isoformat(),
                 "armed_at": armed.isoformat()}
 

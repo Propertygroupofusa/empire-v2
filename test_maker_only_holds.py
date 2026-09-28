@@ -29,6 +29,21 @@ def test_a_taker_fill_after_arming_is_a_real_failure():
     assert "0.75%" in r["detail"], "the cost of the bug belongs in the verdict"
 
 
+def test_the_failure_does_not_blame_the_grid_it_cannot_have_been():
+    """place_maker_buy/sell set post_only=True, so Coinbase REJECTS a
+    crossing maker order rather than filling it as a taker. The first live
+    FAIL said "something is still crossing the spread", which points at the
+    one subsystem that provably cannot do it. The feed carries no
+    originating subsystem, so the verdict must name the possibilities
+    rather than pick one."""
+    d = inv.maker_only_holds(34, 85, ago(1), ago(5))["detail"]
+    assert "post_only" in d
+    assert "MARKET order from another path" in d
+    for named in ("resting stop", "trimmer", "close", "manual sale"):
+        assert named in d, named
+    assert "something is still crossing the spread" not in d
+
+
 def test_taker_fills_that_all_predate_arming_pass():
     r = inv.maker_only_holds(34, 85, ago(9), ago(5))
     assert r["status"] == inv.OK
