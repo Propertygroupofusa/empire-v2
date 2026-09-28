@@ -1738,6 +1738,12 @@ async def get_recent_fills_summary(session, limit: int = 250,
     taker_notional = 0.0
     notional_total = 0.0
     oldest = newest = None
+    # Per-liquidity newest, so "is the fallback firing NOW?" can be
+    # ANSWERED rather than handed to a human to work out. The maker_only
+    # invariant read a bare taker COUNT over a 250-fill window and could
+    # only shrug: a window that reaches back past the day maker-only was
+    # armed cannot tell an old taker fill from a live one.
+    newest_taker = newest_maker = None
     skipped_non_spot = 0
     # Counted here as well as in summarise_fills. A str.replace that matched
     # the return dict of BOTH functions added this key to this one without
@@ -1780,8 +1786,12 @@ async def get_recent_fills_summary(session, limit: int = 250,
 
         if liq == "MAKER":
             maker += 1
+            if ts:
+                newest_maker = ts if newest_maker is None or ts > newest_maker else newest_maker
         elif liq == "TAKER":
             taker += 1
+            if ts:
+                newest_taker = ts if newest_taker is None or ts > newest_taker else newest_taker
         else:
             unknown += 1
 
@@ -1854,6 +1864,10 @@ async def get_recent_fills_summary(session, limit: int = 250,
         "per_product": per_product,
         "oldest_fill": oldest,
         "newest_fill": newest,
+        # None means "no fill of that kind in this window" - never a
+        # substitute for "none ever". The window is capped.
+        "newest_taker_fill": newest_taker,
+        "newest_maker_fill": newest_maker,
         "classified_fills": classified,
         "enough_to_conclude": classified >= 20,
         # So a starved sample reads as starved rather than as a quiet account.

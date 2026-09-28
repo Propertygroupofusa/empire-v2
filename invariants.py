@@ -33,6 +33,8 @@ Pure functions over already-fetched data: no network, no database, so the
 checks are testable and cannot themselves be the thing that breaks.
 """
 
+import datetime as _dt
+
 OK, FAIL, UNKNOWN = "OK", "FAIL", "UNKNOWN"
 
 
@@ -40,6 +42,43 @@ def _v(name, status, detail, **extra):
     out = {"name": name, "status": status, "detail": detail}
     out.update(extra)
     return out
+
+
+def _num(v):
+    """A float, or None. None means UNREADABLE and never 0.0."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _utcnow():
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _as_dt(v):
+    """A timezone-aware datetime, or None. Accepts a datetime, an ISO
+    string (with or without a Z), or epoch seconds. A naive datetime is
+    read as UTC, which is what every writer in this codebase stores.
+    """
+    if v is None:
+        return None
+    if isinstance(v, _dt.datetime):
+        return v if v.tzinfo else v.replace(tzinfo=_dt.timezone.utc)
+    if isinstance(v, (int, float)):
+        try:
+            return _dt.datetime.fromtimestamp(float(v), _dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    try:
+        out = _dt.datetime.fromisoformat(str(v).strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return out if out.tzinfo else out.replace(tzinfo=_dt.timezone.utc)
+
+
+def _hours_between(a, b):
+    return abs((b - a).total_seconds()) / 3600.0
 
 
 # ── 1. the fee rate every other number is priced against ────────────────
@@ -251,3 +290,78 @@ def summarize(results):
     return {"status": status, "headline": headline,
             "checks": sorted(results, key=lambda r: order[r["status"]]),
             "failed": len(fails), "unknown": len(unknown), "total": len(results)}
+
+
+def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
+                     maker_only_active=True):
+    """Is the market fallback firing while maker-only is on?
+
+    This check used to be permanently UNKNOWN, and its own detail text told
+    the reader to go and work the answer out by hand: "check the newest
+    taker fill's timestamp against when it was armed." An invariant that
+    delegates its verdict to a human is not an invariant - it sat UNKNOWN
+    for as long as anyone looked at it, reporting 34 of 85 fills as TAKER
+    and drawing no conclusion from it either way.
+
+    It was unanswerable because two facts were missing, not because the
+    question was hard. Both are now recorded:
+
+      * the newest TAKER fill's timestamp (summarise_fills), rather than a
+        bare count over a window that reaches back 250 fills
+      * when the current run of maker-only started
+        (crypto_grid_bot.record_maker_only_state)
+
+    With both, the verdict is arithmetic. A taker fill stamped AFTER the
+    mode was armed means the fallback fired under a mode that removes it -
+    a real bug. Every taker fill stamped before it is history the window
+    happens to still reach.
+
+    UNKNOWN is kept for exactly one case: a missing arming time. It is then
+    reported WITH the newest taker fill's age, because that is the fact
+    that makes it actionable - a taker fill minutes old is worth chasing
+    whatever the arming time turns out to be.
+    """
+    if not maker_only_active:
+        return {"name": "maker_only_holds", "status": OK,
+                "detail": "maker-only is off - the market fallback is allowed"}
+
+    taker = _num(taker_fills) or 0
+    if not taker:
+        return {"name": "maker_only_holds", "status": OK,
+                "detail": "no taker fills in the recent window"}
+
+    seen = f"{int(taker)} of {int(_num(classified_fills) or 0)} recent fills were TAKER"
+    newest = _as_dt(newest_taker_at)
+    armed = _as_dt(armed_at)
+
+    if newest is None:
+        return {"name": "maker_only_holds", "status": UNKNOWN,
+                "detail": (f"{seen}, but none of them carried a timestamp - so whether "
+                           f"they predate the mode cannot be established from this "
+                           f"window. Not read as a pass.")}
+
+    if armed is None:
+        age_h = _hours_between(newest, _utcnow())
+        return {"name": "maker_only_holds", "status": UNKNOWN,
+                "detail": (f"{seen}. The newest is {age_h:.1f}h old, but there is no "
+                           f"record of when maker-only was armed, so it cannot be "
+                           f"called stale or live. The stamp is written on the next "
+                           f"grid cycle and this answers itself from then on."),
+                "newest_taker_age_hours": round(age_h, 1)}
+
+    if newest > armed:
+        after_h = _hours_between(armed, newest)
+        return {"name": "maker_only_holds", "status": FAIL,
+                "detail": (f"{seen}, and the newest was filled {after_h:.1f}h AFTER "
+                           f"maker-only was armed. Under maker-only there is no market "
+                           f"fallback, so something is still crossing the spread - each "
+                           f"such leg costs 0.75% against the 0.35% the spacing floor "
+                           f"is priced on."),
+                "newest_taker_at": newest.isoformat(),
+                "armed_at": armed.isoformat()}
+
+    return {"name": "maker_only_holds", "status": OK,
+            "detail": (f"{seen}, but every one predates maker-only being armed "
+                       f"{_hours_between(armed, _utcnow()):.1f}h ago - the window simply "
+                       f"reaches back further than the mode does."),
+            "armed_at": armed.isoformat()}

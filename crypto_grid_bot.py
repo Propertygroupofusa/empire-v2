@@ -644,6 +644,13 @@ CONSERVATIVE_ROUND_TRIP_FEE_RATE = float(
 # Last real observed round-trip fee rate, persisted so a restart doesn't
 # fall back to the conservative default while real trading continues.
 REAL_FEE_RATE_STATE_KEY = "grid_real_round_trip_fee_rate"
+# When maker-only was last observed ON. Without it the maker_only invariant
+# could only report a taker COUNT over a 250-fill window and shrug: a window
+# reaching back past the day the mode was armed cannot tell a stale taker
+# fill from the fallback firing right now. Stored as an ISO string in
+# TradingBotState.notes; cleared when the mode goes off, so it always means
+# "the start of the CURRENT run of maker-only", never the first time ever.
+MAKER_ONLY_ARMED_AT_STATE_KEY = "grid_maker_only_armed_at"
 
 # In-process cache of the same, refreshed each cycle by refresh_real_fee_rate().
 _cached_real_round_trip_fee_rate = None
@@ -878,6 +885,59 @@ def maker_only_env_override():
     if raw in _FALSE:
         return False
     return None
+
+
+async def maker_only_armed_at():
+    """When the CURRENT run of maker-only started, or None if it is off or
+    was never recorded. Epoch seconds live in base_capital - the same
+    pattern the measured maker rate already uses for starting_capital,
+    since TradingBotState has no free-text column.
+
+    None means UNKNOWN, never "just now" and never "long ago". A caller
+    that cannot establish this must say it cannot, not pick a side.
+    """
+    try:
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(TradingBotState).where(
+                TradingBotState.bot_name == MAKER_ONLY_ARMED_AT_STATE_KEY))).scalar_one_or_none()
+        if row is None or not row.base_capital:
+            return None
+        return datetime.utcfromtimestamp(float(row.base_capital))
+    except Exception as exc:
+        log.warning(f"[GRID] maker-only arming time unreadable: {exc}")
+        return None
+
+
+async def record_maker_only_state(active: bool):
+    """Stamp the start of a run of maker-only, or clear it when it ends.
+
+    Deliberately NOT refreshed while the mode stays on: the stored value is
+    the START of this run, so a taker fill can be compared against it. A
+    timestamp that moved every cycle would make every fill look older than
+    the arming and the check would pass forever.
+
+    Best-effort. A failure here loses a diagnostic, never a trade, so it is
+    logged and swallowed rather than allowed to break a cycle.
+    """
+    try:
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(TradingBotState).where(
+                TradingBotState.bot_name == MAKER_ONLY_ARMED_AT_STATE_KEY))).scalar_one_or_none()
+            if active:
+                if row is None:
+                    db.add(TradingBotState(bot_name=MAKER_ONLY_ARMED_AT_STATE_KEY,
+                                           base_capital=datetime.utcnow().timestamp()))
+                    await db.commit()
+                    log.info("[GRID] maker-only armed - stamped the start of this run")
+                elif not row.base_capital:
+                    row.base_capital = datetime.utcnow().timestamp()
+                    await db.commit()
+            elif row is not None:
+                await db.delete(row)
+                await db.commit()
+                log.info("[GRID] maker-only off - cleared the arming stamp")
+    except Exception as exc:
+        log.warning(f"[GRID] could not record maker-only state (non-fatal): {exc}")
 
 
 async def is_maker_only_active() -> bool:
@@ -6580,6 +6640,13 @@ async def run_grid_branches_cycle():
     # running at all. See _record_grid_heartbeat for what conflating the
     # two cost.
     await _record_grid_heartbeat("entered")
+    # Stamp the start of a run of maker-only while we are here. Cheap, and
+    # it is the one fact the maker_only invariant needs to stop being
+    # permanently UNKNOWN - see maker_only_armed_at().
+    try:
+        await record_maker_only_state(await is_maker_only_active())
+    except Exception:
+        pass
     # Exactly one process may trade this wallet - see acquire_grid_lease.
     # Checked AFTER the heartbeat so a process that is alive but not the
     # owner still proves it is alive, which is how a stalled owner is

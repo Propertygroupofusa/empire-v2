@@ -8466,22 +8466,22 @@ async def grid_invariants_endpoint():
         # the fee check can pass on like-for-like while this still says the
         # fallback fired. The window spans 250 fills and can predate the mode
         # being switched on, so this is worded as a question, not a verdict.
+        #
+        # This used to hardcode UNKNOWN and tell the reader to go and work
+        # the answer out by hand. It now has the two facts it was missing -
+        # the newest TAKER fill's timestamp, and when the current run of
+        # maker-only started - so inv.maker_only_holds returns a verdict.
         try:
-            if _maker_only and fills.get("taker_fills"):
-                results.append({
-                    "name": "maker_only_holds", "status": inv.UNKNOWN,
-                    "detail": (f"{fills.get('taker_fills')} of "
-                               f"{fills.get('classified_fills')} recent fills were TAKER "
-                               f"while maker-only is on. Under maker-only there is no "
-                               f"market fallback, so either these predate the mode being "
-                               f"switched on or something is still crossing the spread - "
-                               f"check the newest taker fill's timestamp against when it "
-                               f"was armed.")})
-            elif _maker_only:
-                results.append({"name": "maker_only_holds", "status": inv.OK,
-                                "detail": "no taker fills in the recent window"})
-        except Exception:
-            pass
+            if _maker_only:
+                results.append(inv.maker_only_holds(
+                    fills.get("taker_fills"),
+                    fills.get("classified_fills"),
+                    fills.get("newest_taker_fill"),
+                    await g.maker_only_armed_at(),
+                    maker_only_active=True))
+        except Exception as exc:
+            results.append({"name": "maker_only_holds", "status": inv.UNKNOWN,
+                            "detail": f"could not be checked: {type(exc).__name__}: {exc}"})
     except Exception as e:
         results.append({"name": "fee_rate_agreement", "status": inv.UNKNOWN,
                         "detail": f"could not be checked: {type(e).__name__}: {e}"})
