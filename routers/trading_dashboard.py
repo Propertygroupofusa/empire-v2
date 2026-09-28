@@ -10381,6 +10381,17 @@ async def resting_stops_preview():
             except Exception:
                 pass
 
+    # The same grid read the worker does, so this preview refuses the same
+    # assets the worker will. A preview that runs a weaker rule than the
+    # loop it previews is worse than no preview. Fails open, as there.
+    _protected = ()
+    try:
+        _units, _ = await crypto_grid_bot_module.fleet_tracked_units_by_product()
+        if _units:
+            _protected = {p.split("-")[0].upper() for p in _units}
+    except Exception:
+        pass
+
     plans = []
     for row in (watch.get("rows") or []):
         asset = row.get("asset")
@@ -10390,7 +10401,8 @@ async def resting_stops_preview():
         plans.append(resting_stops.plan_stop(
             asset, units_available=row.get("units"), price=row.get("price"),
             stop_price=row.get("stop_level"), base_increment=bi,
-            quote_increment=qi, base_min_size=bms))
+            quote_increment=qi, base_min_size=bms,
+            actively_traded=_protected))
 
     out = resting_stops.summarise(plans, os.getenv(resting_stops.MODE_ENV))
     out["is_a_preview_not_an_order"] = True

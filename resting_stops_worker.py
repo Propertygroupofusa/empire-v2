@@ -151,6 +151,24 @@ async def check_once(session_factory, *, place_orders=True) -> dict:
                                "than risk placing a second stop on the same coins")}
 
         total = watch.get("coin_usd") or 0.0
+
+        # Coins the grid currently holds open slices on. A resting sell on
+        # those holds the units the grid trades with, and sells them out
+        # from under the branch if it fires - see the note in
+        # resting_stops.plan_stop. Read ONCE per pass, not per asset.
+        #
+        # Fails OPEN on an unreadable grid: an empty set protects nothing,
+        # which is exactly the behaviour this loop had before.
+        protected = ()
+        try:
+            import crypto_grid_bot as _grid
+            _units, _ = await _grid.fleet_tracked_units_by_product()
+            if _units:
+                protected = {p.split("-")[0].upper() for p in _units}
+        except Exception as exc:
+            log.warning(f"[stops] could not read grid positions ({type(exc).__name__}) "
+                        f"- placing without that protection this pass")
+
         for row in (watch.get("rows") or []):
             asset = row.get("asset")
             if not asset:
@@ -178,7 +196,8 @@ async def check_once(session_factory, *, place_orders=True) -> dict:
                 asset, units_available=row.get("units"), price=row.get("price"),
                 stop_price=row.get("stop_level"), base_increment=bi,
                 quote_increment=qi, base_min_size=bms,
-                share_pct=share, limit_pct=20.0)
+                share_pct=share, limit_pct=20.0,
+                actively_traded=protected)
 
             have = existing.get(asset)
             if not plan.get("ok"):

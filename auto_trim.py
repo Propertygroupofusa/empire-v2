@@ -216,6 +216,20 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
     # ONE-DIRECTIONAL: it can only ever cancel a trim, never cause one.
     protected = {str(a).upper() for a in (actively_traded or ())}
 
+    # The account's own money is in the census `holdings` list, correctly -
+    # it is part of the account - and this loop applied the ceiling to it.
+    # Live on 2026-09-28 it planned to sell $61.62 of USD at 20.08%.
+    #
+    # There is no order to place: auto_trim_worker builds the product id as
+    # f"{asset}-USD", so that one is "USD-USD". And the rule does not apply:
+    # the ceiling exists because one bad week in a position this size moves
+    # the whole account, and dollars do not have bad weeks - the proceeds of
+    # selling dollars are dollars, so the share would not even move.
+    #
+    # Imported, never restated. A second copy of this list is how two
+    # subsystems come to disagree about what counts as money.
+    from account_census import STABLE as CASH_EQUIVALENTS
+
     if t is None or t <= 0:
         for h in holdings or ():
             out.append({"asset": (h.get("asset") or "?").upper(), "act": False,
@@ -239,6 +253,16 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
 
         if not asset:
             rec.update(reason="NO_ASSET", detail="row carries no ticker")
+            out.append(rec); continue
+        # Checked before the share is even computed. Excluded from the RULE,
+        # never from the TOTAL it is measured against - a coin's share is a
+        # share of the whole account, cash included, or every share inflates.
+        if asset in CASH_EQUIVALENTS:
+            rec.update(reason="NOT_A_POSITION",
+                       detail=(f"{asset} is the account's cash, not a position - there is "
+                               f"no {asset}-USD to sell, and selling cash for cash would "
+                               f"not move its share. It still counts toward the account "
+                               f"total every other share is measured against."))
             out.append(rec); continue
         if usd is None:
             rec.update(reason="UNPRICED",
@@ -311,27 +335,58 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
 
 
 def summarise(plans, mode):
-    """One line for the dashboard, and the numbers behind it."""
+    """One line for the dashboard, and the numbers behind it.
+
+    The headline counts ONLY rows that place an order. Tail consolidation
+    is sized in plan_actions and placed by nothing, so it is reported on
+    its own line rather than added to the sale.
+
+    Live on 2026-09-28 this read "4 holding(s) over the limit. $143.38
+    will be sold on the next pass." while the same response carried
+    consolidation_is_preview_only: true. Of that $143.38, $81.76 was
+    three preview-only consolidations and $61.62 was the USD row, which
+    is not a product. Nothing at all was going to be sold. Two numbers
+    that must agree, computed in two places, and the one a reader sees
+    first was the wrong one.
+
+    plan_trims emits no CONSOLIDATE rows, so the worker's summary - the
+    path that really sells - reads exactly as it did before.
+    """
     acting = [p for p in plans if p.get("act")]
-    total = round(sum(p.get("trim_usd") or 0.0 for p in acting), 2)
+    ordering = [p for p in acting if p.get("kind") != "CONSOLIDATE"]
+    preview = [p for p in acting if p.get("kind") == "CONSOLIDATE"]
+    total = round(sum(p.get("trim_usd") or 0.0 for p in ordering), 2)
+    preview_total = round(sum(p.get("trim_usd") or 0.0 for p in preview), 2)
     m = normalise_mode(mode)
-    if not acting:
+
+    # Named, never dropped: a reader who saw the consolidations listed
+    # needs to know why they are not in the figure above them.
+    tail_note = ""
+    if preview:
+        tail_note = (f" Separately, {len(preview)} tail position(s) worth "
+                     f"${preview_total:,.2f} are sized here as a preview - nothing "
+                     f"places them.")
+
+    if not ordering:
         headline = "Nothing is over the limit."
         over = [p for p in plans if p.get("reason") in ("COOLDOWN", "TOO_SMALL")]
         if over:
             headline = (f"{len(over)} holding(s) over the limit, none actionable this pass "
                         f"({', '.join(sorted({p['reason'] for p in over}))}).")
+        headline += tail_note
     elif m == MODE_ARM:
-        headline = (f"{len(acting)} holding(s) over the limit. "
-                    f"${total:,.2f} will be sold on the next pass.")
+        headline = (f"{len(ordering)} holding(s) over the limit. "
+                    f"${total:,.2f} will be sold on the next pass." + tail_note)
     else:
-        headline = (f"{len(acting)} holding(s) over the limit. ${total:,.2f} would be sold, "
-                    f"but the trimmer is OBSERVING - nothing will be placed.")
+        headline = (f"{len(ordering)} holding(s) over the limit. ${total:,.2f} would be sold, "
+                    f"but the trimmer is OBSERVING - nothing will be placed." + tail_note)
     return {
         "mode": m,
         "armed": m == MODE_ARM,
-        "would_trim_count": len(acting),
+        "would_trim_count": len(ordering),
         "would_trim_usd": total,
+        "would_consolidate_count": len(preview),
+        "would_consolidate_usd": preview_total,
         "headline": headline,
         "plans": plans,
     }

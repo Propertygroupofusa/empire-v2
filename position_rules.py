@@ -64,9 +64,12 @@ ANCHOR, CORE, SATELLITE, TAIL, STRANDED, BLIND, CASH = (
 
 # Cash is not a small position. It is the thing the tail is consolidated
 # INTO, and a tier check that sorted $66 of USD into TAIL would have the
-# trimmer sell dollars for dollars. Kept identical to
-# account_census.STABLE so the two cannot drift apart.
-STABLE = {"USD", "USDC", "USDT", "DAI", "PYUSD", "USDS"}
+# trimmer sell dollars for dollars.
+#
+# This used to be a copy of account_census.STABLE with a comment saying it
+# was "kept identical so the two cannot drift apart" - a claim nothing
+# enforced. Imported now, so the claim is true.
+from account_census import STABLE
 
 TRIM, HOLD_WITH_STOP, CONSOLIDATE, NO_ACTION_POSSIBLE, DECIDE_NOTHING = (
     "TRIM", "HOLD_WITH_STOP", "CONSOLIDATE", "NO_ACTION_POSSIBLE", "DECIDE_NOTHING")

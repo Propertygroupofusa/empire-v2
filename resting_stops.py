@@ -170,13 +170,16 @@ def plan_stop(asset, *, units_available, price, stop_price,
               base_min_size=None, coverage_pct=COVERAGE_PCT,
               limit_band_pct=LIMIT_BAND_PCT, min_distance_pct=MIN_DISTANCE_PCT,
               min_stop_usd=MIN_STOP_USD, share_pct=None, limit_pct=None,
-              excluded=None):
+              excluded=None, actively_traded=()):
     """One resting stop, or why there will not be one.
 
     `stop_price` is the level holdings_watch already computed. Nothing is
     re-derived here: a second opinion about where the stop belongs is how
     the dashboard and the venue end up disagreeing about what is
     protected.
+
+    `actively_traded` is the set of tickers a grid branch currently holds
+    open slices on. Nothing rests on those - see the block below.
     """
     def no(reason, detail):
         return {"asset": asset, "ok": False, "reason": reason, "detail": detail}
@@ -184,6 +187,37 @@ def plan_stop(asset, *, units_available, price, stop_price,
     mine, why = is_trimmers(asset, share_pct, limit_pct, excluded=excluded)
     if mine:
         return no("TRIMMERS_COIN", why)
+
+    # SECOND SELLER, SAME MISTAKE.
+    #
+    # The concentration trimmer sold $885.43 of ZEC and $244.78 of XRP out
+    # from under live grid branches before plan_trims was given this rule.
+    # This file is the other seller and never had it: on 2026-09-28 it was
+    # placing stops on XLM, NEAR, LINK, ALGO, SOL and ACH, five of which
+    # were live branches, with ZEC excluded only because it belonged to
+    # the trimmer. It knew about the trimmer and not about the grid.
+    #
+    # A resting sell holds 75% of the position, so the grid cannot trade
+    # its own inventory; and if it fires it sells that 75% in one order
+    # while the branch goes on tracking it slice by slice, leaving the
+    # branch claiming units the wallet no longer holds. That is how ETH
+    # came to be short 0.0316 units.
+    #
+    # It also cannot be squared with the standing rule that nothing red is
+    # realised - a stop under an underwater grid position is a scheduled
+    # loss on a position that is not to be sold at a loss.
+    #
+    # Checked before any reason that could let it through. ONE-DIRECTIONAL:
+    # it can only ever cancel a placement, never cause one. And it FAILS
+    # OPEN - an empty or unreadable set leaves behaviour exactly as it was,
+    # because a protection that disappears on a read error is worse than
+    # one that was never there.
+    if str(asset).upper() in {str(a).upper() for a in (actively_traded or ())}:
+        return no("ACTIVELY_TRADED",
+                  f"{asset} has open grid slices on it. A resting sell would hold 75% "
+                  f"of the units the grid trades with, and if it fired it would sell "
+                  f"coin the branch still has on its books. The branch carries its own "
+                  f"adaptive stop; this would be a second one the first cannot see.")
 
     u = _num(units_available)
     p = _num(price)
