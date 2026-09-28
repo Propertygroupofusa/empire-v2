@@ -100,7 +100,7 @@ def explain(verdict):
     return line
 
 
-def summarise(rows, returned=None, capped=False):
+def summarise(rows, returned=None, capped=False, sample_reason=None):
     """Why a bot has or has not been trading, over a set of decisions.
 
     `rows` is the WHOLE WINDOW, not the page the caller is displaying.
@@ -167,7 +167,8 @@ def summarise(rows, returned=None, capped=False):
                  f"({at_least}{top[0][1]} time(s))."
                  if top else " Nothing was refused by a named rule."))
 
-    blocking = _one_blocking_condition(rows, counts, admitted)
+    blocking = _one_blocking_condition(rows, counts, admitted,
+                                       sample_reason=sample_reason)
     if blocking:
         detail += " " + blocking["detail"]
 
@@ -188,7 +189,7 @@ def summarise(rows, returned=None, capped=False):
     }
 
 
-def _one_blocking_condition(rows, counts, admitted):
+def _one_blocking_condition(rows, counts, admitted, sample_reason=None):
     """When every refusal in the window is the SAME rule, say so once -
     and say which way the blocking number is moving.
 
@@ -233,8 +234,12 @@ def _one_blocking_condition(rows, counts, admitted):
         stamped.append((str(at), None if val is None else float(val)))
     stamped.sort()
 
+    # The caller may pass the reason separately: the window projection
+    # that feeds this is deliberately narrow and does not carry free
+    # text. Falling back to the row keeps the pure-function tests honest.
+    reason = sample_reason if sample_reason else g(rows[0], "reason")
     out = {"rule": rule, "count": count,
-           "reason": str(g(rows[0], "reason") or "")[:400],
+           "reason": str(reason or "")[:400],
            "first_at": stamped[0][0] if stamped else None,
            "last_at": stamped[-1][0] if stamped else None}
 

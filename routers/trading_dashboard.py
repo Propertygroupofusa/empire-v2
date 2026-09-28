@@ -9483,9 +9483,22 @@ async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
     # page too, which is worse than a wrong total: it is a wrong answer to
     # "which rule should I fix".
     #
-    # Only the two columns the summary needs, so counting a whole window
+    # Only the columns the summary needs, so counting a whole window
     # costs a narrow read rather than hydrating every row.
-    n_q = _filtered(select(TradeDecision.admitted, TradeDecision.failed_rules)
+    #
+    # decided_at and buying_power were added when blocking_condition
+    # shipped: it reads them to say which way a repeated block is
+    # moving, and with the old two-column projection it could only ever
+    # answer UNKNOWN in production. It did, on its very first live call,
+    # while reporting WORSENING against every test fixture - which is
+    # the mistake summarise()'s own comment already records ("my tests
+    # fed it row_from_verdict output and never the to_dict output the
+    # caller actually sends"), made a second time in the same function.
+    # Both added columns are small scalars; `reason` is NOT selected
+    # here because it is free text and this read is capped at 5000 rows,
+    # so a sample comes from the paged rows below instead.
+    n_q = _filtered(select(TradeDecision.admitted, TradeDecision.failed_rules,
+                           TradeDecision.decided_at, TradeDecision.buying_power)
                     .where(TradeDecision.decided_at >= since))
     q = _filtered(select(TradeDecision).where(TradeDecision.decided_at >= since))
     async with get_session_factory()() as db:
@@ -9500,11 +9513,18 @@ async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
     # A window bigger than the cap makes every figure a floor, and the
     # summary says so rather than presenting a slice as a total.
     capped = len(window) > DECISION_COUNT_CAP
-    counted = [{"admitted": a, "failed_rules": f}
-               for a, f in window[:DECISION_COUNT_CAP]]
+    counted = [{"admitted": a, "failed_rules": f,
+                "decided_at": (d.isoformat() if hasattr(d, "isoformat") else d),
+                "buying_power": bp}
+               for a, f, d, bp in window[:DECISION_COUNT_CAP]]
 
     dicts = [r.to_dict() for r in rows]
-    summary = decision_log.summarise(counted, returned=len(dicts), capped=capped)
+    # The newest full row's reason, for the blocking-condition summary.
+    # Free text is not worth pulling across the whole window when every
+    # row of a single repeated condition carries the same sentence.
+    sample_reason = next((d.get("reason") for d in dicts if d.get("reason")), None)
+    summary = decision_log.summarise(counted, returned=len(dicts), capped=capped,
+                                     sample_reason=sample_reason)
     return {
         "window_hours": int(hours),
         "bot": bot,

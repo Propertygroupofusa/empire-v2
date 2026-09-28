@@ -156,3 +156,89 @@ if __name__ == "__main__":
             except AssertionError as e:
                 fails += 1; print(f"  FAIL {name}: {e}")
     sys.exit(1 if fails else 0)
+
+
+# ── what the CALLER actually sends ─────────────────────────────────────
+#
+# blocking_condition's first live call returned trend UNKNOWN, first_at
+# null, last_at null and reason "" - while every test above said
+# WORSENING. The endpoint's window query selected two columns,
+# `admitted` and `failed_rules`, deliberately, so counting a whole
+# window stays cheap. The three fields the trend needs were not in it.
+#
+# summarise()'s own source already carries a comment about this exact
+# mistake: "My tests fed it row_from_verdict output and never the
+# to_dict output the caller actually sends." Made twice now, in the
+# same function. These tests pin the caller's shape, not a convenient
+# fixture.
+import ast
+import os
+
+ROUTER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "routers", "trading_dashboard.py")
+
+# Row keys _one_blocking_condition reads. Derived from the source below,
+# not typed out, so the two cannot drift.
+def _fields_the_summary_reads():
+    import decision_log as _dl
+    import inspect
+    src = inspect.getsource(_dl._one_blocking_condition)
+    tree = ast.parse(src.lstrip())
+    found = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "g" and len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)):
+            found.add(node.args[1].value)
+    return found
+
+
+def test_the_window_projection_carries_every_field_the_summary_reads():
+    """The static guard. If someone narrows that select again, or the
+    summary starts reading a new field, this fails instead of the
+    feature silently degrading to UNKNOWN in production."""
+    src = open(ROUTER, encoding="utf-8").read()
+    tree = ast.parse(src)
+    selected = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "select"):
+            for a in node.args:
+                if (isinstance(a, ast.Attribute) and isinstance(a.value, ast.Name)
+                        and a.value.id == "TradeDecision"):
+                    selected.add(a.attr)
+    needed = _fields_the_summary_reads()
+    # `reason` is passed separately by the caller, on purpose - free text
+    # is not pulled across a 5000-row window.
+    needed.discard("reason")
+    missing = needed - selected
+    assert not missing, (
+        f"the decisions window projection does not select {sorted(missing)}, "
+        f"which _one_blocking_condition reads - it can only report UNKNOWN. "
+        f"Selected: {sorted(selected)}")
+
+
+def test_the_two_column_shape_the_endpoint_used_to_send_reports_unknown():
+    """The shape that actually shipped. It must degrade honestly, not
+    invent a direction from fields it does not have."""
+    two_col = [{"admitted": False, "failed_rules": "kill_condition"} for _ in range(106)]
+    b = dl.summarise(two_col)["blocking_condition"]
+    assert b is not None and b["count"] == 106
+    assert b["trend"] == "UNKNOWN"
+    assert "cannot be established" in b["detail"]
+
+
+def test_the_reason_can_be_passed_in_when_the_window_does_not_carry_it():
+    two_col = [{"admitted": False, "failed_rules": "kill_condition",
+                "decided_at": "2026-09-28T08:08:57", "buying_power": 92.98},
+               {"admitted": False, "failed_rules": "kill_condition",
+                "decided_at": "2026-09-28T13:21:41", "buying_power": 78.04}]
+    b = dl.summarise(two_col, sample_reason="Buying power critical: $78.04 < $150")["blocking_condition"]
+    assert b["reason"] == "Buying power critical: $78.04 < $150"
+    assert b["trend"].startswith("WORSENING")
+    assert "Buying power critical" in b["detail"]
+
+
+def test_a_row_carrying_its_own_reason_still_works_without_the_argument():
+    b = dl.summarise(LIVE)["blocking_condition"]
+    assert "Buying power critical: $92.98" in b["reason"]
