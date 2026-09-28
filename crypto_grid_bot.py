@@ -6496,7 +6496,24 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 order_id = f"{branch.bot_name}_{oldest.id}_{int(time.time()*1000)}"
                 hold_time_minutes = int((time.time() - oldest.opened_at.timestamp()) / 60) if oldest.opened_at else 0
                 gross_pnl = filled_qty * (filled_price - oldest.entry_price)
-                exit_reason = 'profit_target' if pnl >= 0 else 'stop_loss'
+                # THE SIGN OF THE P&L IS NOT A REASON.
+                #
+                # This read `'profit_target' if pnl >= 0 else 'stop_loss'`,
+                # which makes exit_reason a restatement of the P&L sign and
+                # nothing more: it carries no information the P&L does not
+                # already carry, while being labelled as the independent fact
+                # that explains it. A profit-target sale left slightly
+                # negative by fees came through as a stop; a stop that
+                # happened to close up came through as a target hit.
+                #
+                # _stop_slice is set only when the stop actually chose this
+                # slice, so it is the real source - the same one the
+                # persisted ledger uses at the _log_grid_trade call below,
+                # whose own comment already said the sign "cannot tell a stop
+                # from an ordinary sale that happened to lose". It was in
+                # scope here all along (assigned well above this block); the
+                # two write sites simply disagreed.
+                exit_reason = 'stop_loss' if _stop_slice is not None else 'profit_target'
 
                 shadow_manager.on_position_closed(
                     client_order_id=order_id,
@@ -8161,7 +8178,29 @@ async def close_all_grid_slices(only_bot_name: str = None,
                     pnl = _grid_slice_net_pnl(s.qty, s.entry_price, filled_price,
                                               _slice_rate(s, close_all_fee_rate, close_all_exit_leg_rate))
                     branch_pnl += pnl
-                    await _log_grid_trade(b.bot_name, b.product_id, s.entry_price, filled_price, s.qty, pnl, s.opened_at)
+                    # A FORCED EXIT IS ITS OWN REASON, AND IT WAS KNOWN HERE.
+                    #
+                    # This call passed no exit_reason, so every close-all row
+                    # landed as None - UNKNOWN - when the reason is not in
+                    # doubt at all: the owner closed the branch. A close-all
+                    # sale is a market exit at the taker rate and has nothing
+                    # to do with a profit target or a stop, so leaving it
+                    # unknown puts forced exits into the same bucket the
+                    # column exists to keep them out of ("did the stop do its
+                    # job, or did the grid sell badly?").
+                    #
+                    # The analysis fields travel too. They are on the slice
+                    # right here, and a close-all row that omits them is
+                    # needlessly less analysable than an ordinary one.
+                    await _log_grid_trade(
+                        b.bot_name, b.product_id, s.entry_price, filled_price,
+                        s.qty, pnl, s.opened_at,
+                        exit_reason="close_all",
+                        mae_pct=getattr(s, "mae_pct", None),
+                        mfe_pct=getattr(s, "mfe_pct", None),
+                        entry_atr_pct=getattr(s, "entry_atr_pct", None),
+                        entry_spread_pct=getattr(s, "entry_spread_pct", None),
+                        entry_gate_json=getattr(s, "entry_gate_json", None))
                     slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == s.id))
                     slice_row = slice_result.scalar_one_or_none()
                     if slice_row:

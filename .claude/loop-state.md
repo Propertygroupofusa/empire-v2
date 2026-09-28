@@ -533,6 +533,33 @@ by any error. **Always assert the count.** Same failure shape as everything
 else tonight: an incomplete answer presented as a complete one — and this one
 was mine.
 
+**A field that restates another field is not a second fact.** The shadow
+path computed `exit_reason = 'profit_target' if pnl >= 0 else 'stop_loss'` —
+the P&L sign under a new name, carrying nothing the P&L did not already
+carry, while labelled as the independent fact that explains it. The
+persisted ledger got it right from `_stop_slice` and its comment already
+said the sign "cannot tell a stop from an ordinary sale that happened to
+lose". Two write sites, the honest source in scope at both, disagreeing.
+**When two sites compute the same field differently, one of them is wrong —
+find out which before trusting either.**
+
+**Seven columns written on every close and read by nobody.**
+`CryptoGridTradeHistory.to_dict()` dropped exit_reason, stop_pct, mae_pct,
+mfe_pct, entry_atr_pct, entry_spread_pct and entry_gate_json. Every consumer
+goes through to_dict(), so the whole analysis layer was invisible. The
+model's own comment said exit_reason exists because "without it the ledger
+shows a loss and cannot say whether the stop did its job" — and it could not
+say, because the value never left the database. **Same shape as
+GridMakerExpiry. When a column is added for a later experiment, check the
+serialiser in the same change.** Guard is stated over the table
+(`omits NO column at all`), not a fixed list, so a column added later is
+covered without anyone remembering.
+
+**close_all was writing a known reason as UNKNOWN.** The forced-exit path
+logged no exit_reason, so every owner-requested close landed as None. It is
+a market exit at the taker rate — neither target nor stop — and now records
+`"close_all"`. Third legal value; None still means genuinely unrecorded.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those

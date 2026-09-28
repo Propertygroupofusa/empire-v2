@@ -1519,7 +1519,12 @@ class CryptoGridTradeHistory(Base):
     # trips a day, so the ~250 trades that experiment wants is about a year
     # of data. Recorded now because the cost is nothing and the data only
     # accumulates if collection starts before it is needed.
-    exit_reason = Column(String, nullable=True)     # "profit_target" | "stop_loss"
+    # "profit_target" | "stop_loss" | "close_all" (a forced market exit the
+    # owner asked for - not a target and not a stop, and it used to be written
+    # as None, which made a perfectly known reason read as UNKNOWN).
+    # None still means genuinely unrecorded and is never a synonym for any of
+    # the three.
+    exit_reason = Column(String, nullable=True)
     entry_spread_pct = Column(Float, nullable=True)  # live spread when the order was placed
     entry_gate_json = Column(Text, nullable=True)    # the gate's full diagnostic at entry
     mae_pct = Column(Float, nullable=True)          # worst point of the trade, vs entry
@@ -1540,6 +1545,33 @@ class CryptoGridTradeHistory(Base):
             "closed_at": (self.closed_at.isoformat() + "Z") if self.closed_at else None,
             "entry_expected_price": self.entry_expected_price,
             "exit_expected_price": self.exit_expected_price,
+
+            # WRITTEN ON EVERY CLOSE AND READ BY NOBODY.
+            #
+            # All seven of these columns are populated by _log_grid_trade on
+            # every completed round trip, and to_dict() dropped every one of
+            # them - which means every consumer of this table (the
+            # trade-history endpoint, the dashboard, any later experiment)
+            # has been served a row with the analysis stripped out.
+            #
+            # exit_reason is the one that stings. This class's own comment on
+            # it says it exists because "without it the ledger shows a loss
+            # and cannot say whether the stop did its job or the grid sold
+            # badly" - and the ledger could not say, because the field never
+            # left the database. The same shape as GridMakerExpiry: a system
+            # that records the answer and cannot repeat it.
+            #
+            # entry_gate_json is included deliberately. It is the largest of
+            # the seven, but it is the gate's full diagnostic at entry, which
+            # is the only record of WHY a trade was allowed; a row that omits
+            # it can describe what happened and never why it was permitted.
+            "exit_reason": self.exit_reason,
+            "stop_pct": self.stop_pct,
+            "mae_pct": self.mae_pct,
+            "mfe_pct": self.mfe_pct,
+            "entry_atr_pct": self.entry_atr_pct,
+            "entry_spread_pct": self.entry_spread_pct,
+            "entry_gate_json": self.entry_gate_json,
         }
 
 
