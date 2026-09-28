@@ -1635,6 +1635,21 @@ FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.030"))
 # now agree. The invariant fails again the moment they diverge.
 SPACING_EVIDENCE_PRICED_AT_ROUND_TRIP = 0.0070
 
+# Mirrors crypto_nine_coin_scanner.DEFAULT_MAX_TARGET_SWING_MULTIPLE by
+# VALUE, not by import - that module imports helpers from this one, so the
+# reverse would be a circular import. Same duplicate-by-value discipline
+# already used for GRID_LEVEL_SPACING_CANDIDATES. If the gate's limit ever
+# moves, this must move with it or the cap stops matching the gate it exists
+# to satisfy; a test asserts the two agree.
+SWING_CEILING_MULTIPLE = 3.0
+
+
+def _swing_ceiling_enabled() -> bool:
+    """On unless switched off. Off restores the old behaviour exactly: the
+    fleet minimum raises the step and the gate refuses the buy."""
+    raw = (os.getenv("GRID_SWING_CEILING") or "").strip().strip('"').strip("'").lower()
+    return raw not in {"0", "false", "no", "off"}
+
 # ---- THE STOP LOSS ----
 #
 # Sell a slice that has fallen this far below its own entry, at a loss, on
@@ -5537,6 +5552,55 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         new_grid_pct = FLEET_MIN_STEP_PCT
         spacing_log_note = (f"{spacing_log_note or 'spacing'} (raised {_current_step*100:.2f}% "
                             f"-> {FLEET_MIN_STEP_PCT*100:.2f}% fleet minimum)")
+
+    # THE SWING CEILING. The net-edge gate refuses any target over 3.0x a
+    # coin's own average hourly swing - "would sit unfilled" - so a step above
+    # that does not trade WIDER, it does not trade AT ALL.
+    #
+    # The fleet minimum is one-directional and knew nothing about this. Found
+    # in the live activity feed 2026-09-28: every one of the last 40 events
+    # was a GATE_BLOCK, and SOL-USD's read "target is 3.0x the 0.98% hourly
+    # swing, over the 3.0x limit". Raising the fleet minimum 2.50% -> 3.00%
+    # put it over: at 2.50% it was 2.55x and passing. That regression is mine.
+    #
+    # Measured across all 20 live coins, the ceiling binds on three:
+    #     BTC   0.56% swing -> 1.68% ceiling   (blocked at 2.50% too)
+    #     ETH   0.75% swing -> 2.25% ceiling   (blocked at 2.50% too)
+    #     SOL   0.98% swing -> 2.94% ceiling   (blocked by my change)
+    # $597 of capital that cannot place a buy at any price. BTC and ETH were
+    # already stranded before this, so the cap fixes more than it repairs.
+    #
+    # THIS IS NOT LOWERING A THRESHOLD TO MANUFACTURE ACTIVITY. The fee floor
+    # below is untouched and still guarantees every completed trip clears its
+    # costs. The swing multiple is not a safety limit, it is a statement about
+    # whether an order will ever be FILLED - and the floor still wins where
+    # the two disagree, which correctly leaves a coin refusing rather than
+    # trading at a loss.
+    if _swing_ceiling_enabled():
+        try:
+            _swing_pct = await engine.get_average_hourly_swing_pct(session, branch.product_id)
+        except Exception:
+            _swing_pct = None
+        if _swing_pct and _swing_pct > 0:
+            _ceiling = SWING_CEILING_MULTIPLE * float(_swing_pct)
+            _step_now = new_grid_pct if new_grid_pct is not None else branch.grid_pct
+            _hard_floor = await fee_safe_floor_pct()
+            if _step_now > _ceiling + 1e-9:
+                if _ceiling >= _hard_floor:
+                    new_grid_pct = _ceiling
+                    spacing_log_note = (
+                        f"{spacing_log_note or 'spacing'} (capped {_step_now*100:.2f}% -> "
+                        f"{_ceiling*100:.2f}%, {SWING_CEILING_MULTIPLE:.1f}x the "
+                        f"{_swing_pct*100:.2f}% hourly swing - above it the gate refuses "
+                        f"every buy)")
+                else:
+                    # The coin cannot both clear its fees and fill its orders.
+                    # That is an answer, not a failure: the floor holds and the
+                    # gate keeps refusing, which is the correct outcome.
+                    log.info(
+                        f"[GRID] {branch.bot_name}: {branch.product_id} swing ceiling "
+                        f"{_ceiling*100:.2f}% is under the {_hard_floor*100:.2f}% fee floor - "
+                        f"too quiet to grid profitably. Leaving the floor in force.")
 
     # THE GATE-CLEARING FLOOR.
     #
