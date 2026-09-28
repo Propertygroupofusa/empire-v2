@@ -28,7 +28,8 @@ from __future__ import annotations
 
 import json as _json
 
-__all__ = ["MAX_CHECKS_JSON", "row_from_verdict", "explain", "summarise"]
+__all__ = ["MAX_CHECKS_JSON", "refusal", "row_from_verdict", "explain",
+           "summarise"]
 
 #: A decision carries a handful of rules. A payload far past that is a
 #: symptom, not a record, and is truncated rather than allowed to bloat
@@ -122,4 +123,36 @@ def summarise(rows):
             f"{admitted} of {len(rows)} decision(s) admitted a trade."
             + (f" The rule refusing most often was {top[0][0]} ({top[0][1]} time(s))."
                if top else " Nothing was refused by a named rule.")),
+    }
+
+
+def refusal(symbol, rule, detail, *, mandate=None, direction=None,
+            value=None, threshold=None):
+    """A verdict for a refusal decided BEFORE the mandate check runs.
+
+    THE HOLE THIS FILLS. The first hook went in at the mandate check,
+    which is the LAST gate in try_open - two refusals return above it:
+
+        contract not in approved_universe   -> return False
+        symbol in excluded_symbols          -> return False
+
+    Both are ordinary, both are frequent, and neither wrote a row. So the
+    decision log recorded only the decisions that survived far enough to
+    be interesting, and stayed empty the rest of the time - which reads
+    exactly like a bot that is not running. Checked live an hour after
+    shipping: the endpoint returned zero rows.
+
+    Shaped identically to validate_entry_verbose's output so one row
+    format covers every refusal, wherever in the path it was decided.
+    """
+    return {
+        "admitted": False,
+        "reason": detail,
+        "checks": [{"name": rule, "passed": False, "value": value,
+                    "threshold": threshold, "detail": detail}],
+        "failed": [rule],
+        "blocked": None,
+        "mandate": mandate,
+        "direction": direction,
+        "symbol": symbol,
     }

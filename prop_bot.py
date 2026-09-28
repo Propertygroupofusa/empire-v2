@@ -20,6 +20,7 @@ import aiohttp
 import uuid
 from sqlalchemy import select, desc, func, case
 from database import get_session_factory
+import decision_log as _dlog
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch, AlpacaBranchTradeHistory
 import bot_mandates
 from bot_mandates import (APEX_MANDATE, validate_entry, validate_entry_verbose,
@@ -2148,6 +2149,16 @@ async def run_prop_cycle():
         )
         if contract not in approved_universe:
             log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")
+            # Logged here too. This return is ABOVE the mandate check, and
+            # a decision log that only records what reaches the last gate
+            # stays empty most of the time - which reads exactly like a
+            # bot that is not running.
+            await _record_trade_decision(_dlog.refusal(
+                contract, "universe",
+                f"{contract} not in the approved universe "
+                f"({len(approved_universe)} symbols)",
+                mandate="apex", direction=side,
+                threshold=f"{len(approved_universe)} approved symbols"))
             return False
 
         # MANDATE CHECK 1.5: real-backtest auto-exclusion + top-N ROI
@@ -2160,6 +2171,10 @@ async def run_prop_cycle():
         if config["symbol"] in excluded_symbols:
             reason = await describe_symbol_exclusion_reason(config["symbol"])
             log.warning(f"[MANDATE] {contract} ({config['symbol']}) excluded - {reason} - SKIPPING")
+            await _record_trade_decision(_dlog.refusal(
+                contract, "excluded_symbol",
+                f"{contract} ({config['symbol']}) excluded - {reason}",
+                mandate="apex", direction=side, value=config["symbol"]))
             return False
 
         # A real Alpaca branch (see the ALPACA BRANCHES section below) may
@@ -2171,6 +2186,10 @@ async def run_prop_cycle():
         branch_claimed = await get_alpaca_branch_claimed_contracts()
         if contract in branch_claimed:
             log.info(f"[MANDATE] {contract} is claimed by a real Alpaca branch - SKIPPING (managed independently)")
+            await _record_trade_decision(_dlog.refusal(
+                contract, "claimed_by_branch",
+                f"{contract} is claimed by a real Alpaca branch and is managed independently",
+                mandate="apex", direction=side))
             return False
 
         # The opening-bar live system (see that section below) may already
@@ -2180,6 +2199,10 @@ async def run_prop_cycle():
         # once. A no-op check whenever that system is off or holds nothing.
         if contract in open_opening_bar_positions:
             log.info(f"[MANDATE] {contract} is held by the opening-bar live system - SKIPPING (managed independently)")
+            await _record_trade_decision(_dlog.refusal(
+                contract, "held_by_opening_bar",
+                f"{contract} is held by the opening-bar live system and is managed independently",
+                mandate="apex", direction=side))
             return False
 
         # MANDATE CHECK 2: Entry conditions validation

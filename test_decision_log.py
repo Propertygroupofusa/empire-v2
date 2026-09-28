@@ -175,3 +175,55 @@ def test_the_module_opens_no_database_of_its_own():
     src = (HERE / "decision_log.py").read_text()
     for forbidden in ("import models", "get_session_factory", "sqlalchemy"):
         assert forbidden not in src, forbidden
+
+
+# ── the hook was too deep, and the endpoint proved it ────────────────────
+
+def test_a_pre_mandate_refusal_has_the_same_row_shape():
+    """Checked live an hour after shipping: /mandates/decisions returned
+    zero rows, because the only hook was at the LAST gate. A row decided
+    earlier must be indistinguishable in shape from one decided late."""
+    r = dl.refusal("TSLA", "universe", "TSLA not in the approved universe",
+                   mandate="apex", direction="long")
+    row = dl.row_from_verdict(r, bot="prop_apex")
+    assert row is not None
+    assert row["admitted"] is False
+    assert row["failed_rules"] == "universe"
+    assert row["mandate"] == "apex"
+    assert "universe" in row["checks_json"]
+
+
+def test_a_refusal_verdict_reads_like_any_other():
+    line = dl.explain(dl.refusal("TSLA", "universe", "TSLA not in the approved universe"))
+    assert "TSLA REFUSED" in line
+    assert "approved universe" in line
+
+
+def test_refusals_decided_early_and_late_summarise_together():
+    rows = [dl.row_from_verdict(dl.refusal("TSLA", "universe", "no"), bot="b"),
+            dl.row_from_verdict(verdict(symbol="TSLA"), bot="b")]
+    out = dl.summarise(rows)
+    assert out["refused"] == 2
+    assert out["top_blockers"][0]["rule"] == "universe"
+    assert out["top_blockers"][0]["count"] == 2
+
+
+def test_every_refusing_return_in_try_open_logs_a_decision():
+    """The regression that motivated this: a `return False` above the
+    mandate check that writes nothing. Asserted on the parsed tree over
+    the whole function, not on the one path I happened to remember."""
+    src = (HERE / "prop_bot.py").read_text()
+    tree = ast.parse(src)
+    fn = None
+    for n in ast.walk(tree):
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "try_open":
+            fn = n
+            break
+    assert fn is not None, "try_open not found"
+    body = ast.get_source_segment(src, fn)
+    # Every early refusal that names MANDATE must record a decision.
+    for chunk in body.split("[MANDATE]")[1:]:
+        upto = chunk.split("return False")[0]
+        assert "_record_trade_decision" in upto, (
+            "a MANDATE refusal returns without logging a decision:\n"
+            + upto[:200])
