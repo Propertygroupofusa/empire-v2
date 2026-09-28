@@ -130,6 +130,10 @@ def summarise(rows, returned=None, capped=False):
     shown = n if returned is None else int(returned)
     if not rows:
         return {"decisions": 0, "admitted": 0, "refused": 0, "top_blockers": [],
+                # Present on every verdict, same rule the other summary
+                # fields follow - a caller should never have to tell
+                # "no single condition" from "this shape has no such key".
+                "blocking_condition": None,
                 "returned": shown, "capped": bool(capped),
                 "detail": ("no decisions recorded in this window - which is itself a "
                            "finding if the bot was meant to be running")}
@@ -162,6 +166,11 @@ def summarise(rows, returned=None, capped=False):
               + (f" The rule refusing most often was {top[0][0]} "
                  f"({at_least}{top[0][1]} time(s))."
                  if top else " Nothing was refused by a named rule."))
+
+    blocking = _one_blocking_condition(rows, counts, admitted)
+    if blocking:
+        detail += " " + blocking["detail"]
+
     if shown < n:
         detail += f" {shown} of them are shown below."
     if capped:
@@ -172,10 +181,87 @@ def summarise(rows, returned=None, capped=False):
         "admitted": admitted,
         "refused": n - admitted,
         "top_blockers": [{"rule": k, "count": v} for k, v in top],
+        "blocking_condition": blocking,
         "returned": shown,
         "capped": bool(capped),
         "detail": detail,
     }
+
+
+def _one_blocking_condition(rows, counts, admitted):
+    """When every refusal in the window is the SAME rule, say so once -
+    and say which way the blocking number is moving.
+
+    WHY THIS EXISTS. On 2026-09-28 /mandates/decisions read "106
+    decisions, 0 admitted, the rule refusing most often was
+    kill_condition (106 times)" for three consecutive review passes. It
+    reads like 106 independent failures of an unnamed rule, so each pass
+    re-flagged it as unexplained and nobody looked.
+
+    All 106 were one condition on the prop_apex mandate: buying power
+    under the $150 floor, because $732.60 of $810.64 cash was unsettled
+    sale proceeds in a CASH account. The guard was working perfectly.
+    But the summary could not distinguish that from a stuck flag, and
+    it could not show the part that actually mattered: across 5h13m
+    buying power went $92.98 -> $78.04 while unsettled rose by exactly
+    the same $14.94. The block was getting FURTHER away from clearing,
+    and the alarm read identically either way.
+
+    Same shape as the maker_only recency fix. An alarm that reads the
+    same whether a condition is clearing or worsening is one people
+    stop reading - and this one had already been stopped reading.
+
+    Only fires when the picture is unambiguous: nothing admitted, one
+    rule, every refusal carrying it. Otherwise returns None and the
+    summary is unchanged, because a mixed window has no single story.
+    """
+    if admitted or len(counts) != 1:
+        return None
+    rule, count = next(iter(counts.items()))
+    if count != len(rows):
+        return None          # some refusal carried a different rule
+
+    def g(r, k, d=None):
+        return (r.get(k, d) if hasattr(r, "get") else getattr(r, k, d))
+
+    stamped = []
+    for r in rows:
+        at = g(r, "decided_at")
+        val = g(r, "buying_power")
+        if at is None:
+            continue
+        stamped.append((str(at), None if val is None else float(val)))
+    stamped.sort()
+
+    out = {"rule": rule, "count": count,
+           "reason": str(g(rows[0], "reason") or "")[:400],
+           "first_at": stamped[0][0] if stamped else None,
+           "last_at": stamped[-1][0] if stamped else None}
+
+    vals = [v for _, v in stamped if v is not None]
+    if len(vals) >= 2:
+        first, last = vals[0], vals[-1]
+        out.update(first_value=round(first, 2), last_value=round(last, 2),
+                   change=round(last - first, 2),
+                   min_value=round(min(vals), 2), max_value=round(max(vals), 2))
+        if last > first:
+            way = f"IMPROVING: {first:,.2f} -> {last:,.2f}"
+        elif last < first:
+            way = f"WORSENING: {first:,.2f} -> {last:,.2f}"
+        else:
+            way = f"FLAT at {last:,.2f}"
+        out["trend"] = way
+        out["detail"] = (f"Every one of the {count} refusals is the SAME condition "
+                         f"({rule}), not {count} separate problems. The blocking "
+                         f"value is {way} across the window, best it reached was "
+                         f"{max(vals):,.2f}. Reason given: {out['reason']}")
+    else:
+        out["trend"] = "UNKNOWN"
+        out["detail"] = (f"Every one of the {count} refusals is the SAME condition "
+                         f"({rule}), not {count} separate problems. The blocking "
+                         f"value was not recorded, so whether it is clearing cannot "
+                         f"be established. Reason given: {out['reason']}")
+    return out
 
 
 def refusal(symbol, rule, detail, *, mandate=None, direction=None,
