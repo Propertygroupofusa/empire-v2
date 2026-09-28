@@ -8785,6 +8785,116 @@ async def close_all_grid_slices_endpoint():
     return result
 
 
+@router.post("/grid-status/close-branch")
+async def close_one_grid_branch_endpoint(product_id: str, dry_run: bool = True,
+                                         accept_loss: bool = False):
+    """Close every open slice on ONE branch, at market, even at a loss.
+
+    There was no path to this. close-all refuses unless the WHOLE fleet is
+    in profit, which is the right rule for a button that liquidates
+    everything, and it left no way to exit a single position that has
+    stopped working. The only alternative was a raw /coinbase/sell, which
+    would have moved the coin and left the branch rows behind still
+    claiming it - a phantom position, and a worse problem than the one
+    being solved.
+
+    DRY RUN BY DEFAULT. Realising a loss is not reversible, so the
+    default answer is a priced preview: every slice, its entry, what it
+    is worth now, and the exact figure that would be booked. Executing
+    takes dry_run=false AND accept_loss=true when the total is negative -
+    two deliberate flags, because one of them is easy to leave set in a
+    saved command.
+
+    The exit is a MARKET sell, so it pays the taker leg. Maker-only does
+    not apply: a close that does not fill is not a close.
+
+    Everything else - the fee formula, the per-slice P&L, the trade
+    history rows, the allocation write-back - is close_all_grid_slices'
+    own machinery, narrowed to one branch. Nothing here is a second copy
+    of that math.
+
+    Write-guarded like every POST on this router (see write_guard): the
+    middleware refuses it without the token, so this cannot be triggered
+    by anyone holding the URL.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+
+    g = crypto_grid_bot_module
+    status = await g.get_grid_status()
+    branch = next((b for b in (status.get("branches") or [])
+                   if b.get("product_id") == product_id), None)
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"no grid branch holds {product_id}")
+    slices = branch.get("slices") or []
+    if not slices:
+        raise HTTPException(status_code=400, detail=f"{product_id} has no open slices to close")
+
+    price = branch.get("current_price")
+    if price is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{product_id} could not be priced right now, so the realised figure "
+                    f"would be a guess - refusing to close blind. A gap is not a zero."))
+
+    # The exit leg is TAKER: this is a market sell by design.
+    round_trip = await g.get_effective_round_trip_fee_rate()
+    exit_leg = (round_trip or 0.0) / 2
+
+    rows, cost_total, value_total = [], 0.0, 0.0
+    for sl in slices:
+        qty = float(sl.get("qty") or 0.0)
+        entry = float(sl.get("entry_price") or 0.0)
+        cost = qty * entry
+        value = qty * price
+        net = value - cost - (value * exit_leg)
+        cost_total += cost
+        value_total += value
+        rows.append({"qty": qty, "entry_price": round(entry, 8),
+                     "value_usd": round(value, 2), "cost_usd": round(cost, 2),
+                     "net_pnl_usd": round(net, 2),
+                     "net_pct": round(net / cost * 100, 2) if cost else None})
+
+    fees = value_total * exit_leg
+    realized = value_total - cost_total - fees
+    preview = {
+        "product_id": product_id,
+        "bot_name": branch.get("bot_name"),
+        "slices": rows,
+        "slice_count": len(rows),
+        "price": price,
+        "cost_basis_usd": round(cost_total, 2),
+        "market_value_usd": round(value_total, 2),
+        "exit_fee_usd": round(fees, 2),
+        "exit_leg_fee_rate": exit_leg,
+        "realized_pnl_usd": round(realized, 2),
+        "cash_returned_usd": round(value_total - fees, 2),
+        "allocated_usd": branch.get("allocated_usd"),
+    }
+
+    if dry_run:
+        preview["dry_run"] = True
+        preview["detail"] = (
+            f"PREVIEW ONLY - nothing was sold. Closing {product_id} at ${price:,.2f} would "
+            f"return ${preview['cash_returned_usd']:,.2f} to the wallet and book "
+            f"${realized:,.2f}. Re-send with dry_run=false"
+            + (" and accept_loss=true" if realized < 0 else "") + " to execute.")
+        return preview
+
+    if realized < 0 and not accept_loss:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Closing {product_id} would realise ${realized:,.2f} - a LOSS. This is "
+                    f"not reversible. Re-send with accept_loss=true if that is intended."))
+
+    result = await g.close_all_grid_slices(only_product_id=product_id)
+    log.warning(
+        f"[dashboard] 🔻 Closed {product_id}: {result.get('slices_closed')} slice(s), "
+        f"${result.get('total_realized_pnl', 0):.2f} realised (previewed ${realized:.2f})")
+    result["preview"] = preview
+    return result
+
+
 @router.get("/fleet-status")
 async def get_fleet_status():
     """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""

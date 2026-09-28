@@ -7664,7 +7664,8 @@ def _funnel_bottleneck(sig, attempted, filled, completed) -> str:
     return "none - the pipeline is completing round trips"
 
 
-async def close_all_grid_slices() -> dict:
+async def close_all_grid_slices(only_bot_name: str = None,
+                                only_product_id: str = None) -> dict:
     """Real, one-way "close everything" - per the account owner's direct
     request for one button at the bottom of the Grid Bot section that
     takes all the real profit if the whole section is up, instead of
@@ -7688,8 +7689,20 @@ async def close_all_grid_slices() -> dict:
     entirely - nothing to close, nothing logged. A real sell that doesn't
     fill for one branch never blocks or rolls back any other branch's own
     real close in the same call - each branch's outcome is independent
-    and reported separately."""
+    and reported separately.
+
+    `only_bot_name` / `only_product_id` narrow it to a single branch,
+    which is what makes closing ONE position possible at all - there was
+    no path to it before, and the only alternative was a raw Coinbase
+    sell that would have left the branch rows behind claiming coin that
+    no longer existed. Everything else about the close is identical, so
+    one branch and the whole fleet cannot drift apart in how they book a
+    sale. Both None means every branch, exactly as before."""
     branches = await get_grid_branches()
+    if only_bot_name:
+        branches = [b for b in branches if b.bot_name == only_bot_name]
+    if only_product_id:
+        branches = [b for b in branches if b.product_id == only_product_id]
     results = []
     total_realized_pnl = 0.0
     branches_closed = 0
