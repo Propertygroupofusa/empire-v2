@@ -9212,9 +9212,23 @@ async def asset_balance(currency: str):
     That ambiguity was read as a zero once, on QNT-USD, and the wrong
     conclusion reached the owner. coin_tracked_is_held had it right and
     said UNREADABLE; the census was asked a question it cannot answer.
-    This endpoint answers it: fetch_balances() returns every currency the
-    venue reports with a positive total, and this reports that currency's
-    row, or says plainly that the venue listed no such account.
+
+    THE FIRST VERSION OF THIS ENDPOINT REPRODUCED THAT EXACT BUG. It read
+    only fetch_balances(), whose map keeps a currency solely when
+    available + hold > 0, and then reported a currency missing from that
+    map as "a real absence, not an unread one". Those are two different
+    facts: the venue may list no such account, or it may list one holding
+    exactly zero. The filter makes them indistinguishable, so the verdict
+    was a claim the evidence could not support - and the docstring said
+    "with a positive total" three lines above it.
+
+    So there are TWO reads here now. The census map supplies held and
+    available (and therefore the lock). get_asset_balance supplies an
+    unfiltered per-currency read that CAN tell zero from absent: it
+    returns (0.0, None) for an account holding nothing and
+    (None, "no X account found on this key") when the venue lists none.
+    The verdict is drawn from that one, and a disagreement between the two
+    is reported rather than resolved.
 
     NO PRICING, NO DUST FILTER, NO ROUNDING. Units as the venue gives
     them, held and available reported separately - `held` includes units
@@ -9247,24 +9261,83 @@ async def asset_balance(currency: str):
     avail = bal.get("available_units") or {}
     present = currency in held
 
+    # THE SECOND READ. Unfiltered, one currency, and it is the only one of
+    # the two that can tell an account holding zero from no account at all.
+    # Its failures are kept as failures: `direct_units` None with a reason
+    # that is not "no account found" is a GAP, never a zero.
+    import crypto_btc_compound_bot as _engine
+    direct_units, direct_reason = None, None
+    try:
+        async with _aiohttp.ClientSession() as _s2:
+            direct_units, direct_reason = await _engine.get_asset_balance(_s2, currency)
+    except Exception as exc:
+        direct_reason = f"direct read raised: {type(exc).__name__}: {exc}"
+
+    # "no account found" is the venue's own answer and the ONLY thing that
+    # licenses the word absent. Matched on the reason get_asset_balance
+    # itself produces; anything else it returns is an unread, not an empty.
+    _absent = (direct_units is None and isinstance(direct_reason, str)
+               and "no " + currency + " account found" in direct_reason)
+    _gap = direct_units is None and not _absent
+
+    if _gap:
+        _verdict = (
+            f"{currency}: UNKNOWN. The direct balance read did not come back "
+            f"({direct_reason}), so nothing here may be read as a zero. The "
+            f"census map {'does' if present else 'does not'} list this "
+            f"currency, which on its own cannot tell absent from zero.")
+    elif _absent:
+        _verdict = (
+            f"{currency}: the venue lists NO account for this currency at all "
+            f"(scanned {bal.get('accounts_seen')} in the census map, and the "
+            f"direct per-currency read agrees: {direct_reason}). This is the "
+            f"one case that is a real absence rather than an unread one.")
+    elif not present:
+        _verdict = (
+            f"{currency}: the account EXISTS and its available balance is "
+            f"{direct_units}. It is missing from the census map only because "
+            f"that map keeps a currency when available + hold > 0, so a "
+            f"genuinely empty account is dropped from it. Absent from the map "
+            f"is NOT absent from the venue - that conflation is what this "
+            f"endpoint was built to stop, and the first version of it made "
+            f"the same mistake.")
+    else:
+        _verdict = (
+            f"{currency}: held {held.get(currency)}, available "
+            f"{avail.get(currency)}. `held` counts units behind resting orders; "
+            f"`available` is what a sell could actually use.")
+
+    # Reported, not reconciled. Two reads of the same thing taken moments
+    # apart can legitimately differ, and picking one silently is how a
+    # disagreement becomes an unexamined fact.
+    _disagreement = None
+    if present and direct_units is not None:
+        _m = avail.get(currency)
+        if _m is not None and abs(_m - direct_units) > max(abs(_m), abs(direct_units)) * 1e-6:
+            _disagreement = (
+                f"the census map says available {_m} and the direct read says "
+                f"{direct_units}. Not reconciled here - treat the smaller as "
+                f"the sellable figure and look at why they differ.")
+
     return {
         "readable": True,
         "currency": currency,
-        "venue_lists_this_account": present,
+        # Renamed: this key describes the CENSUS MAP, which is not the venue.
+        # It answered "is it in the filtered map" while being named as though
+        # it answered "does the venue list it".
+        "census_map_lists_this_account": present,
         "held_units": held.get(currency) if present else None,
         "available_units": avail.get(currency) if present else None,
         "locked_units": (round(held[currency] - avail.get(currency, 0.0), 12)
                          if present else None),
+        "direct_available_units": direct_units,
+        "direct_read_reason": direct_reason,
+        "venue_lists_no_such_account": (True if _absent else
+                                        (False if direct_units is not None else None)),
         "accounts_seen": bal.get("accounts_seen"),
         "pages": bal.get("pages"),
-        "verdict": (
-            f"{currency}: the venue reports no account with a positive balance. "
-            f"It scanned {bal.get('accounts_seen')} account(s), so this is a real "
-            f"absence, not an unread one."
-            if not present else
-            f"{currency}: held {held.get(currency)}, available "
-            f"{avail.get(currency)}. `held` counts units behind resting orders; "
-            f"`available` is what a sell could actually use."),
+        "reads_disagree": _disagreement,
+        "verdict": _verdict,
         "what_this_does_not_say": (
             "Nothing about whether a BRANCH's claim matches this. Compare it "
             "against the branch's tracked units yourself - coin_tracked_is_held "

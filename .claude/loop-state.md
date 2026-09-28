@@ -60,6 +60,15 @@ refreshes baselines first.
 
 ## The central finding — growth = turnover × edge
 
+**MEASURED 23:20Z, no longer inferred.** With edcdbe8 serving, every flagged
+maker-expiry row is `order_rested=False` — 56 of 56, across QNT, ALGO and
+PRIME, all reading "nothing sellable: available … floors to 0". Zero rested
+orders. So the sell failures on these products are not orders resting untaken;
+they are orders never created. The attribution that was a strong inference
+from balances is now a direct measurement. The expiry study correctly reports
+"not enough data" as a result — that is honest, not broken; do not "fix" it.
+
+
 Measured 19:21Z 28 Sep, 127 round trips over 28.94 days (`/growth-model`):
 
 | Term | Value |
@@ -176,6 +185,16 @@ reason; `grid_sell` reports it.
 does not.
 
 ## Retractions — carry forward until stale
+
+**"The blocker is inventory locked by resting orders" is right for ALGO and
+XLM and WRONG for QNT.** Direct reads at 23:21Z: ALGO held 1134.346389 /
+available 0.046389 / **locked 1134.3**; XLM held 1980.76640025 / available
+**0.0** / locked 1980.76640025 — both genuinely locked, and
+`free-locked-inventory` is the remedy. QNT held 0.00097323 / available
+0.00097323 / **locked 0.0** — nothing is locked; it holds dust (~22¢) that
+floors to 0 at 3 decimals. Freeing inventory does nothing for QNT. Three
+products failing for two different reasons were logging the same sentence.
+
 
 **A maker-expiry row count is not evidence that orders existed — nor that they
 didn't.** Rows were written on all three None paths, so the 441 QNT / 429 ALGO
@@ -427,6 +446,19 @@ truth was no order was ever sent. **When a wrong fact is found, grep for
 every reader of it before calling the fix done** — the model docstring, the
 recorder docstring, the study, the resolver backlog, the funnel counts and one
 test all rested on it.
+
+**I rebuilt the bug I built the endpoint to prevent.** `/grid-status/asset-balance`
+existed because `/account-census` filters, and a filtered view is not an
+authoritative one. It then read only `fetch_balances()`, whose map keeps a
+currency solely when `available + hold > 0`, and reported a currency missing
+from that map as *"a real absence, not an unread one"* — while its own
+docstring said "with a positive total" three lines above. PRIME-USD is the
+live case: the map omits it, and only an unfiltered per-currency read can say
+whether the venue has no such account or an account holding zero.
+`get_asset_balance` is the read that can: `(0.0, None)` for an empty account,
+`(None, "no X account found on this key")` for absence. **Knowing the rule is
+not following it — and the second time, the wrong claim was in the same
+function as the sentence that refuted it.**
 
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was

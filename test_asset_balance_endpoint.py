@@ -75,11 +75,56 @@ if fn is not None:
         has_return = any(isinstance(x, ast.Return) for x in ast.walk(h))
         return has_raise and not has_return
 
-    ok("an exception RAISES and never returns a value",
-       bool(handlers) and all(_handler_raises_and_never_returns(h) for h in handlers),
-       "returning a value on an unreadable venue is how UNKNOWN becomes zero")
+    # WHY THIS IS NO LONGER "every handler raises".
+    #
+    # There are two venue reads now. The census read is the one the whole
+    # response is built on, so its failure must abort. The direct
+    # per-currency read is a refinement: when it fails the endpoint can
+    # still return the census figures, PROVIDED it says so and reports no
+    # number. So the property is not "always raise" - it is that a failed
+    # read never turns into a value. Stated as never-does-Y, because a
+    # guard that only checks the one correct handler passes a mutant that
+    # adds a wrong one beside it.
+    ok("at least one handler aborts outright, and no aborting handler returns",
+       any(_handler_raises_and_never_returns(h) for h in handlers)
+       and all(not any(isinstance(x, ast.Return) for x in ast.walk(h))
+               for h in handlers if any(isinstance(x, ast.Raise)
+                                        for x in ast.walk(h))),
+       "an early return above an unreachable raise is exactly the bug")
+    _num_in_handler = [
+        h for h in handlers
+        for a in ast.walk(h)
+        if isinstance(a, ast.Assign)
+        and isinstance(a.value, ast.Constant)
+        and isinstance(a.value.value, (int, float))
+        and not isinstance(a.value.value, bool)
+    ]
+    ok("NO handler ever substitutes a number for a read that failed",
+       not _num_in_handler,
+       "assigning 0.0 (or any figure) on the failure path is precisely how "
+       "an UNKNOWN becomes a zero - the failure must carry a reason, not a "
+       "quantity")
     ok("an unavailable account list also raises", len(raises) >= 3,
        "not available, bad currency and the exception path each need one")
+
+    # EXACTLY ONE RETURN, AND IT IS THE SUCCESS RETURN.
+    #
+    # The handler-scoped rule above missed a whole family of the same bug:
+    # `if not bal.get("available"): return {...}` sits in a plain `if`, not
+    # an except clause, so "no handler returns" passed a mutant that put an
+    # early return above the unreachable raise. Every failure path in this
+    # endpoint must abort, so there is no legitimate second return, and
+    # counting them is the one formulation that covers every block shape.
+    _returns = [r for r in ast.walk(fn) if isinstance(r, ast.Return)]
+    ok("the endpoint has EXACTLY ONE return, so no failure path can answer",
+       len(_returns) == 1,
+       f"found {len(_returns)} - any extra one is a path that answers instead "
+       f"of aborting, which is how an unreadable venue becomes a balance")
+    if len(_returns) == 1 and isinstance(_returns[0].value, ast.Dict):
+        _rk = [k.value for k in _returns[0].value.keys
+               if isinstance(k, ast.Constant)]
+        ok("and that one return is the readable-success payload",
+           "readable" in _rk and "verdict" in _rk)
 
     keys = set()
     for n in ast.walk(fn):
@@ -91,8 +136,40 @@ if fn is not None:
        {"held_units", "available_units"} <= keys,
        "held counts units behind resting orders; available is what can sell")
     ok("the lock is reported", "locked_units" in keys)
-    ok("presence is an explicit field, not inferred from a null",
-       "venue_lists_this_account" in keys)
+    ok("presence in the census map is an explicit field, not inferred from a null",
+       "census_map_lists_this_account" in keys,
+       "and it is named for the MAP, not the venue: the first version called "
+       "this venue_lists_this_account while it only ever described a map that "
+       "drops any account where available + hold is zero")
+    ok("the field name never claims the census map speaks for the venue",
+       "venue_lists_this_account" not in keys,
+       "that name asserted the venue had been consulted about existence when "
+       "only the filtered map had")
+    ok("venue-level absence is reported as its own field",
+       "venue_lists_no_such_account" in keys,
+       "absent-from-the-map and absent-from-the-venue are different facts and "
+       "the filter cannot tell them apart")
+    ok("the unfiltered per-currency read is reported, value and reason both",
+       {"direct_available_units", "direct_read_reason"} <= keys,
+       "this is the only read that can distinguish an account holding zero "
+       "from no account at all")
+    ok("a disagreement between the two reads is surfaced, not resolved",
+       "reads_disagree" in keys,
+       "picking one silently is how a disagreement becomes an unexamined fact")
+
+    # The word "absence" may only be reached via the direct read. If the
+    # verdict can say it off the census flag alone, the original bug is back.
+    _absent_flag = None
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id.lstrip("_").startswith("absent"):
+                    _absent_flag = n.value
+    ok("the absence verdict is computed from the direct read, never the map",
+       _absent_flag is not None
+       and "direct" in (ast.dump(_absent_flag) or "")
+       and "present" not in (ast.dump(_absent_flag) or ""),
+       "the census map's own flag cannot license the word absent")
     ok("it reports how many accounts were scanned",
        "accounts_seen" in keys,
        "an absence is only real if the scan was complete")
