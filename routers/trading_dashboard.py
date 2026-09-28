@@ -9280,6 +9280,67 @@ async def schema_health_endpoint():
 DECISION_COUNT_CAP = 5000
 
 
+#: A month of hourly snapshots is ~720. This bounds one read without
+#: truncating any window a reader is likely to ask for; past it the
+#: oldest are dropped, which shortens the window rather than biasing it.
+EDGE_RATE_MAX_SNAPSHOTS = 2000
+
+
+@router.get("/edge-rate")
+async def edge_rate_endpoint(hours: int = 720, basis: str = "account"):
+    """The fleet's edge as a rate, against a denominator that is stated.
+
+    Read-only. This is the answer to "what does it actually earn", asked
+    in a way that cannot give two answers twenty minutes apart.
+
+    On 2026-09-28 it could. The fleet had realised $50.04 over 26.17
+    days; divided by the working capital of that instant it came to
+    0.1183%/day, and twenty-two minutes later the same arithmetic gave
+    0.0509%/day with nothing traded in between. Neither was a rate.
+    Nothing recorded the denominator over time, so there was no honest
+    way to compute one.
+
+    capital_snapshots records it hourly, and edge_rate divides by the
+    TIME-WEIGHTED AVERAGE across the window rather than by either
+    endpoint. Fewer than two snapshots is UNKNOWN, not a rate: a series
+    that has just started reports how long it needs, rather than
+    answering from one reading.
+
+    `basis` picks the book: account (the default and the only one that
+    holds still), allocated, or working.
+    """
+    import edge_rate
+    from models import CapitalSnapshot
+    from sqlalchemy import desc as _desc
+
+    since = datetime.utcnow() - timedelta(hours=max(1, int(hours)))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CapitalSnapshot)
+            .where(CapitalSnapshot.at >= since)
+            .order_by(_desc(CapitalSnapshot.at))
+            .limit(EDGE_RATE_MAX_SNAPSHOTS)
+        )).scalars().all()
+
+    snaps = [r.to_dict() for r in rows]
+    out = {"window_hours": int(hours), "snapshots": len(snaps),
+           "basis": basis,
+           "rate": edge_rate.series_rate(snaps, basis=basis),
+           "series": snaps}
+    # Every book at once, so a reader comparing them cannot pick one by
+    # accident - which is the specific mistake this endpoint exists for.
+    out["all_bases"] = {b: edge_rate.series_rate(snaps, basis=b)
+                        for b in sorted(edge_rate.BASES)}
+    out["detail"] = out["rate"]["detail"]
+    if len(snaps) < 2:
+        out["detail"] = (
+            f"{len(snaps)} snapshot(s) recorded. One is written per hour by the "
+            f"grid cycle, so a first rate is available about "
+            f"{max(0, 2 - len(snaps))} hour(s) from now. Until then this reports "
+            f"UNKNOWN rather than dividing a long measurement by a single reading.")
+    return out
+
+
 @router.get("/mandates/decisions")
 async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
                                      admitted: bool = None, limit: int = 100):

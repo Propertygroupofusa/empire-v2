@@ -6664,6 +6664,96 @@ async def read_grid_lease_state() -> dict:
         return {"held": None, "error": f"{type(e).__name__}: {e}"}
 
 
+async def record_capital_snapshot():
+    """One row an hour: realised P&L beside the capital that produced it.
+
+    See models.CapitalSnapshot for why. In short: realised has a durable
+    history and the capital behind it had none, so every rate had to be
+    computed against whatever the wallet looked like at the moment
+    somebody asked - and on 2026-09-28 that produced 0.1183%/day and
+    0.0509%/day from the same 26 days, twenty-two minutes apart.
+
+    Throttled by reading the newest row, not by an in-process timer, so
+    a restart cannot reset the clock and flood the table.
+
+    NEVER fatal, and never partial: if any figure cannot be read, NO row
+    is written. A snapshot with working_usd missing would be a hole in
+    exactly the series that exists to have no holes, and edge_rate would
+    have to skip the interval anyway.
+    """
+    try:
+        import account_census
+        import aiohttp as _aiohttp
+        import edge_rate
+        import invariants as inv
+        from models import CapitalSnapshot
+        from sqlalchemy import desc as _desc
+
+        async with get_session_factory()() as db:
+            newest = (await db.execute(
+                select(CapitalSnapshot).order_by(_desc(CapitalSnapshot.at)).limit(1)
+            )).scalar_one_or_none()
+            if newest is not None and newest.at is not None:
+                age = (datetime.utcnow() - newest.at).total_seconds()
+                if age < edge_rate.SNAPSHOT_INTERVAL_SECONDS:
+                    return None
+
+        status = await get_grid_status()
+        branches = status.get("branches") or []
+        alloc = {b.get("product_id"): float(b.get("allocated_usd") or 0.0) for b in branches}
+        allocated = sum(alloc.values())
+
+        async with _aiohttp.ClientSession() as _s:
+            census = await account_census.census(_s, tracked_usd=0.0)
+        if not census.get("available"):
+            return None
+        account = census.get("total_usd")
+
+        rows = []
+        for b in branches:
+            slices = b.get("slices") or []
+            pcts = [s.get("unrealized_net_pct") for s in slices]
+            pcts = [p * 100 for p in pcts if p is not None]
+            rows.append({"product_id": b.get("product_id"),
+                         "allocated_usd": b.get("allocated_usd"),
+                         "open_slices": len(slices),
+                         "num_levels": b.get("num_levels"),
+                         "best_slice_net_pct": max(pcts) if pcts else None})
+        dead = inv.no_dead_capital(rows)
+        tracked, _ = await fleet_tracked_units_by_product()
+        free = inv.grid_inventory_is_free(tracked, census.get("holdings") or [])
+
+        stuck_set = set(dead.get("branches") or []) if dead.get("status") == inv.FAIL else set()
+        locked_set = ({r["product_id"] for r in (free.get("locked_positions") or [])}
+                      if free.get("status") == inv.FAIL else set())
+        # UNION, never the sum - three branches sit in both lists, and
+        # adding them double-counts $346.75 of the live book.
+        parked_set = stuck_set | locked_set
+        parked = sum(alloc.get(p, 0.0) for p in parked_set)
+
+        realized = ((status.get("adaptive_fleet") or {}).get("realized_grid_pnl"))
+        if realized is None or account is None:
+            return None
+
+        async with get_session_factory()() as db:
+            db.add(CapitalSnapshot(
+                at=datetime.utcnow(),
+                realized_usd=float(realized),
+                account_usd=float(account),
+                allocated_usd=round(allocated, 2),
+                working_usd=round(allocated - parked, 2),
+                parked_usd=round(parked, 2),
+                stuck_usd=round(sum(alloc.get(p, 0.0) for p in stuck_set), 2),
+                locked_usd=round(sum(alloc.get(p, 0.0) for p in locked_set), 2),
+                open_branches=len(branches),
+            ))
+            await db.commit()
+        return True
+    except Exception as e:
+        log.debug(f"[GRID] capital snapshot skipped (non-fatal): {type(e).__name__}: {e}")
+        return None
+
+
 async def _record_grid_heartbeat(stage: str):
     """Stamp 'the grid loop reached here, at this moment'.
 
@@ -6787,6 +6877,10 @@ async def run_grid_branches_cycle():
         await _record_grid_heartbeat("no_active_branches")
         return
     await _record_grid_heartbeat("cycled")
+    # Beside the heartbeat, and as unable to stop the loop as it is: the
+    # denominator, recorded while it is true rather than reconstructed
+    # later from prices that have moved.
+    await record_capital_snapshot()
     async with engine.aiohttp.ClientSession() as session:
         # Refresh the account's REAL Coinbase fee rate ONCE per cycle (not
         # once per branch - it is an account-wide rate, so one real API

@@ -2820,3 +2820,61 @@ class CoinLeagueSnapshot(Base):
     # a configuration retired the day before.
     config_status = Column(String, nullable=True)
     trades_on_current_config = Column(Integer, nullable=True)
+
+
+class CapitalSnapshot(Base):
+    """Realised P&L beside the capital that produced it, hourly.
+
+    WHY THIS TABLE EXISTS. On 2026-09-28 the fleet's edge was reported as
+    0.1183%/day, "inside the professional band". Twenty-two minutes later
+    the same arithmetic gave 0.0509%/day, with nothing traded in between:
+    XRP crossed back over the -1% line and the working-capital
+    denominator went from $1,516.21 to $3,756.75 on price alone.
+
+    Neither figure was a rate. Both were 26 days of realised P&L divided
+    by ONE INSTANT'S denominator, and the instant supplied the answer.
+
+    The error was not visible in stored data, because nothing stored the
+    denominator. Realised P&L has a durable history in
+    crypto_grid_trade_history; the capital behind it had none, so any
+    rate had to be computed against whatever the wallet happened to look
+    like at the moment somebody asked.
+
+    One row an hour, carrying all three books, so a rate can be computed
+    later against any of them without re-guessing which was meant. See
+    edge_rate, which divides by the TIME-WEIGHTED AVERAGE of these rather
+    than by either endpoint.
+    """
+    __tablename__ = "capital_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    at = Column(DateTime, index=True, default=datetime.utcnow)
+    # The numerator: cumulative realised, which can only ever go up. A
+    # fall means the books were reset, and edge_rate reports UNKNOWN
+    # rather than reading the difference as a loss.
+    realized_usd = Column(Float)
+    # The three denominators. Stored together because "0.05%/day" means
+    # nothing without the book it was measured against, and choosing the
+    # book after the fact is how the mistake above happened.
+    account_usd = Column(Float)      # cash + coin, the whole account
+    allocated_usd = Column(Float)    # capital assigned to grid branches
+    working_usd = Column(Float)      # allocated, minus stuck and locked
+    parked_usd = Column(Float)       # the union of stuck and locked
+    # Context, so a later reader can see WHY working moved without
+    # re-deriving it from prices that have since changed.
+    stuck_usd = Column(Float)
+    locked_usd = Column(Float)
+    open_branches = Column(Integer)
+
+    def to_dict(self):
+        return {
+            "at": self.at.isoformat() + "Z" if self.at else None,
+            "realized_usd": self.realized_usd,
+            "account_usd": self.account_usd,
+            "allocated_usd": self.allocated_usd,
+            "working_usd": self.working_usd,
+            "parked_usd": self.parked_usd,
+            "stuck_usd": self.stuck_usd,
+            "locked_usd": self.locked_usd,
+            "open_branches": self.open_branches,
+        }
