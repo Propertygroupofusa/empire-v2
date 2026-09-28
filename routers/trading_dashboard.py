@@ -8504,7 +8504,14 @@ async def grid_invariants_endpoint():
         rows = []
         for b in (status.get("branches") or []):
             slices = b.get("slices") or []
-            best = max((s.get("unrealized_net_pct") or 0) * 100 for s in slices) if slices else None
+            # `or 0` here turned an UNREADABLE slice into a 0.00% one, and
+            # 0 is not less than 0, so one failed price read made its branch
+            # look exactly like one sitting at break-even - fabricating dead
+            # capital out of a gap. Unreadable slices are dropped; a branch
+            # with nothing readable reports None and the check says so.
+            pcts = [s.get("unrealized_net_pct") for s in slices]
+            pcts = [p * 100 for p in pcts if p is not None]
+            best = max(pcts) if pcts else None
             rows.append({"product_id": b.get("product_id"),
                          "allocated_usd": b.get("allocated_usd"),
                          "open_slices": len(slices),

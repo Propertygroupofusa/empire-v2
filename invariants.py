@@ -282,29 +282,89 @@ def cash_reconciles(cash_before, cash_now, spent_on_buys, proceeds_from_sells,
 
 
 # ── 5. capital that can neither buy nor sell ────────────────────────────
-def no_dead_capital(branches):
+# A branch whose best slice is within this of breaking even is one ordinary
+# move from selling, not stranded. Measured on the live fleet 2026-09-28:
+# XRP was 0.02% away holding $2,240.54, and the whole $6,557.08 was being
+# reported as one lump of dead capital. A tenth of a percent is inside a
+# single tick on most of these coins; a full 1% is inside a normal hour on
+# every one of them. This changes NO trading behaviour - nothing sells
+# sooner, no threshold moves - it only stops "about to trade" being
+# reported as "stuck".
+NEAR_EXIT_PCT = 1.0
+
+
+def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
     """A branch full of slices AND underwater is a hold, not a grid.
 
     branches: dicts with product_id, allocated_usd, open_slices, num_levels,
     best_slice_net_pct. Deliberately takes the shape the status payload
     already has, so the check cannot drift from what the dashboard shows.
+
+    best_slice_net_pct of None means UNREADABLE and is reported as such.
+    It used to arrive as 0 because the caller wrote `(pct or 0)`, and 0 is
+    not less than 0, so an unreadable slice made its branch look exactly
+    like one sitting at break-even - fabricating dead capital out of a
+    failed read. The caller no longer does that; this refuses to guess
+    either way if it ever comes back None.
     """
     if not branches:
         return _v("no_dead_capital", UNKNOWN, "no branch data")
-    dead, usd = [], 0.0
+    stuck, near, unreadable = [], [], []
+    stuck_usd = near_usd = 0.0
     for b in branches:
         n, lv = b.get("open_slices"), b.get("num_levels")
         best = b.get("best_slice_net_pct")
-        if n is None or lv is None or best is None:
+        if n is None or lv is None:
+            continue
+        if best is None:
+            if n >= lv:
+                unreadable.append(b.get("product_id"))
             continue
         if n >= lv and best <= 0:
-            dead.append(b.get("product_id"))
-            usd += float(b.get("allocated_usd") or 0.0)
-    if dead:
-        return _v("no_dead_capital", FAIL,
-                  f"${usd:,.2f} across {len(dead)} branch(es) can neither buy (full) nor "
-                  f"sell (underwater): {', '.join(str(d) for d in dead)}. That capital is "
-                  f"held, not gridded.", stuck_usd=round(usd, 2), branches=dead)
+            usd = float(b.get("allocated_usd") or 0.0)
+            if best >= -abs(near_exit_pct):
+                near.append((b.get("product_id"), best))
+                near_usd += usd
+            else:
+                stuck.append((b.get("product_id"), best))
+                stuck_usd += usd
+
+    def _names(rows):
+        return ", ".join(f"{p} ({v:+.2f}%)" for p, v in rows)
+
+    extra = {}
+    if near:
+        extra["near_exit_usd"] = round(near_usd, 2)
+        extra["near_exit"] = [p for p, _ in near]
+    if unreadable:
+        extra["unreadable"] = unreadable
+
+    if stuck:
+        detail = (f"${stuck_usd:,.2f} across {len(stuck)} branch(es) can neither buy (full) "
+                  f"nor sell (underwater): {_names(stuck)}. That capital is held, not "
+                  f"gridded.")
+        if near:
+            detail += (f" Separately, ${near_usd:,.2f} across {len(near)} branch(es) is "
+                       f"within {abs(near_exit_pct):.1f}% of a profitable exit and is "
+                       f"counted as between fills, not stuck: {_names(near)}.")
+        if unreadable:
+            detail += (f" {len(unreadable)} full branch(es) could not be priced and are in "
+                       f"neither figure: {', '.join(str(u) for u in unreadable)}.")
+        return _v("no_dead_capital", FAIL, detail,
+                  stuck_usd=round(stuck_usd, 2), branches=[p for p, _ in stuck], **extra)
+
+    if unreadable:
+        return _v("no_dead_capital", UNKNOWN,
+                  f"{len(unreadable)} full branch(es) could not be priced, so whether their "
+                  f"capital is stuck cannot be established: "
+                  f"{', '.join(str(u) for u in unreadable)}. Not read as a pass.", **extra)
+
+    if near:
+        return _v("no_dead_capital", OK,
+                  f"no branch is stranded. ${near_usd:,.2f} across {len(near)} branch(es) is "
+                  f"full and marginally under, but within {abs(near_exit_pct):.1f}% of a "
+                  f"profitable exit - a grid between fills: {_names(near)}.", **extra)
+
     return _v("no_dead_capital", OK, "every branch can either buy a dip or sell a rise")
 
 
