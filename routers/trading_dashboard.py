@@ -9197,6 +9197,83 @@ async def redeploy_freed_cash_endpoint(dry_run: bool = True,
     return report
 
 
+@router.get("/grid-status/asset-balance")
+async def asset_balance(currency: str):
+    """One currency's REAL balance, straight from the venue, unfiltered.
+
+    WHY THIS EXISTS. /account-census answers "what is this account worth",
+    and to do that it drops assets it cannot price and rolls anything
+    under the dust threshold into a count and a total WITHOUT NAMING the
+    assets. Both are right for its job and both make it the wrong tool
+    for "does this account hold X at all" - an asset absent from its
+    `holdings` list may be unpriced, may be dust, or may genuinely not
+    exist, and the response cannot tell you which.
+
+    That ambiguity was read as a zero once, on QNT-USD, and the wrong
+    conclusion reached the owner. coin_tracked_is_held had it right and
+    said UNREADABLE; the census was asked a question it cannot answer.
+    This endpoint answers it: fetch_balances() returns every currency the
+    venue reports with a positive total, and this reports that currency's
+    row, or says plainly that the venue listed no such account.
+
+    NO PRICING, NO DUST FILTER, NO ROUNDING. Units as the venue gives
+    them, held and available reported separately - `held` includes units
+    behind a resting order, `available` is what could actually be sold
+    right now, and the difference is the lock.
+    """
+    currency = (currency or "").strip().upper()
+    if not currency:
+        raise HTTPException(status_code=400, detail="currency is required")
+
+    import account_census as _ac
+    import aiohttp as _aiohttp
+    try:
+        async with _aiohttp.ClientSession() as _s:
+            bal = await _ac.fetch_balances(_s)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(f"the venue's account list is unreadable: "
+                    f"{type(exc).__name__}: {exc}. This is a GAP - it does "
+                    f"NOT mean the balance is zero."))
+
+    if not bal.get("available"):
+        raise HTTPException(
+            status_code=502,
+            detail=("the venue's account list came back unavailable. UNKNOWN, "
+                    "not zero - do not read this as 'no balance'."))
+
+    held = bal.get("held") or {}
+    avail = bal.get("available_units") or {}
+    present = currency in held
+
+    return {
+        "readable": True,
+        "currency": currency,
+        "venue_lists_this_account": present,
+        "held_units": held.get(currency) if present else None,
+        "available_units": avail.get(currency) if present else None,
+        "locked_units": (round(held[currency] - avail.get(currency, 0.0), 12)
+                         if present else None),
+        "accounts_seen": bal.get("accounts_seen"),
+        "pages": bal.get("pages"),
+        "verdict": (
+            f"{currency}: the venue reports no account with a positive balance. "
+            f"It scanned {bal.get('accounts_seen')} account(s), so this is a real "
+            f"absence, not an unread one."
+            if not present else
+            f"{currency}: held {held.get(currency)}, available "
+            f"{avail.get(currency)}. `held` counts units behind resting orders; "
+            f"`available` is what a sell could actually use."),
+        "what_this_does_not_say": (
+            "Nothing about whether a BRANCH's claim matches this. Compare it "
+            "against the branch's tracked units yourself - coin_tracked_is_held "
+            "is the check that does that, and it reports a coin missing from "
+            "the wallet map as UNREADABLE rather than short, on purpose."),
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.get("/grid-status/maker-expiries")
 async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 200):
     """Every maker-only order this fleet gave up on, newest first.
