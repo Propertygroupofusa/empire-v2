@@ -2246,6 +2246,22 @@ async def run_prop_cycle():
             APEX_MANDATE["universe"]["inverse_etfs"] +
             APEX_MANDATE["universe"]["equities"]
         )
+        # THE HANDOVER. Entry only - try_open wraps open_position, so
+        # every exit path for a position prop_bot already holds is
+        # untouched. It must still be able to close the META it is
+        # carrying; it simply stops opening new equity positions.
+        if contract in APEX_MANDATE["universe"]["equities"]:
+            if await is_market_brain_equities_active():
+                log.info(f"[HANDOVER] {contract} is market_brain's now - prop_bot not entering")
+                await _record_trade_decision(_dlog.refusal(
+                    contract, "handover",
+                    f"{contract} is an equity and market_brain owns the equity side; "
+                    f"prop_bot enters no new equity positions while that flag is on "
+                    f"(exits are unaffected)",
+                    mandate="apex", direction=side,
+                    threshold="market_brain_owns_equities"))
+                return False
+
         if contract not in approved_universe:
             log.warning(f"[MANDATE] {contract} NOT in approved universe - SKIPPING")
             # Logged here too. This return is ABOVE the mandate check, and
@@ -3760,6 +3776,16 @@ async def run_alpaca_branches_cycle():
 # ============================================================================
 
 OPENING_BAR_LIVE_MODE_KEY = "opening_bar_live_mode"
+# Option 1, chosen by the account owner 2026-09-28: market_brain owns the
+# EQUITY side and prop_bot stops entering it. One trader per instrument
+# class on one account - the scar this avoids is written down in
+# alpaca_swing_bot.py: "one bot had stopped trading PSQ while the other
+# kept buying it, on the SAME Alpaca account."
+#
+# DB-persisted like every other live flag here, default OFF, flipped from
+# the dashboard - deliberately not an env var, per the stray-quote bug
+# class that silently disabled the crypto coordinator.
+MARKET_BRAIN_EQUITIES_KEY = "market_brain_owns_equities"
 
 
 async def is_opening_bar_live_active() -> bool:
@@ -3773,6 +3799,39 @@ async def is_opening_bar_live_active() -> bool:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == OPENING_BAR_LIVE_MODE_KEY))
         row = result.scalar_one_or_none()
         return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def is_market_brain_equities_active() -> bool:
+    """True once the owner hands the equity side to market_brain.
+
+    False by default, so this whole change is a no-op until it is turned
+    on. Any read failure returns False - this flag can only ever REMOVE
+    prop_bot entries, so failing to read it must leave prop_bot working
+    exactly as before, never silently stop it trading.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == MARKET_BRAIN_EQUITIES_KEY))
+            row = result.scalar_one_or_none()
+            return bool(row and row.base_capital and row.base_capital >= 1.0)
+    except Exception as e:
+        log.warning(f"[HANDOVER] could not read {MARKET_BRAIN_EQUITIES_KEY} ({e}) - "
+                    f"prop_bot keeps the equity side this cycle")
+        return False
+
+
+async def set_market_brain_equities_active(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(TradingBotState).where(TradingBotState.bot_name == MARKET_BRAIN_EQUITIES_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=MARKET_BRAIN_EQUITIES_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+    log.warning(f"[HANDOVER] market_brain owns equities: {enabled}")
 
 
 async def set_opening_bar_live_active(enabled: bool):

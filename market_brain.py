@@ -564,8 +564,35 @@ def confidence_to_alloc(score):
     else:            return 0.05
 
 
-def can_open_position(positions, new_alloc):
-    """Never exceed 60% total exposure."""
+def can_open_position(positions, new_alloc, account_positions=None, equity=None):
+    """Never exceed 60% total exposure.
+
+    `positions` is this module's own book - the trades it opened, held in
+    brain_state.json. That is the wrong denominator for the sentence
+    above and always was:
+
+      - prop_bot trades the same Alpaca account through the same
+        ALPACA_BASE_URL, and this book cannot see it. Measured live on
+        2026-09-28: prop_bot held META worth 72.0% of equity while this
+        book was empty, so the gate would have allowed a further 60% -
+        about 132% combined.
+      - brain_state.json sits on Railway's ephemeral disk and is wiped on
+        every redeploy (models.py names this as why the ML filter never
+        accumulated a training set), so after any deploy the gate forgets
+        its own open positions while the real ones stay open.
+
+    "Total exposure" is a statement about the ACCOUNT. Pass
+    account_positions (broker rows) and equity and it is measured that
+    way, across every bot, surviving any redeploy. Omit them and the old
+    self-only behaviour is kept, so nothing that calls this the original
+    way changes.
+    """
+    if account_positions is not None and equity is not None:
+        import account_exposure
+        ok, _reason, _projected = account_exposure.can_open(
+            account_positions, equity, new_alloc * float(equity),
+            CONFIG["max_exposure"])
+        return ok
     total = sum(p.get("alloc", 0.20) for p in positions.values())
     return (total + new_alloc) <= CONFIG["max_exposure"]
 
