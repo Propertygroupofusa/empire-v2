@@ -1579,7 +1579,45 @@ AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
 #
 # Applied as a one-directional floor, like every other spacing rule here: a
 # branch below it is raised, a branch above it is left alone.
-FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.025"))
+# RE-MEASURED 2026-09-28 at the REAL fee, over a range that goes WIDER.
+#
+# The 14-day table above was priced at a 1.37% round trip. The account's
+# measured cost is 0.70%. It also only ever tested steps going DOWN, and the
+# widest step it tried won - so nobody had looked at where the curve turns
+# over. Re-run with step_study.py over 60 days of real hourly candles across
+# all 20 live coins, priced at 0.70%:
+#
+#     step   trips/60d   net each   fleet $
+#     1.00%     136        +0.30%    $28.15
+#     1.50%      93        +0.80%    $51.34
+#     2.00%      70        +1.30%    $62.79
+#     2.50%      54        +1.80%    $67.07   <- the old minimum
+#     3.00%      46        +2.30%    $73.00
+#     3.50%      37        +2.80%    $71.48
+#     4.00%      33        +3.30%    $75.14   <- nominal peak
+#     5.00%      24        +4.30%    $71.21
+#     6.00%      20        +5.30%    $73.14
+#     8.00%      12        +7.30%    $60.44
+#
+# 3.00% to 6.00% is a PLATEAU - every value in it lands within ~5% of the
+# others, which is inside the noise of 20-46 trips. The nominal 4.00% peak is
+# not meaningfully better than 3.00%, so this takes the NEAR edge: the
+# smallest step that reaches the plateau, keeping the most trips for
+# essentially the same money and the least extrapolation from the evidence.
+#
+# Two independent studies now agree on the direction. The 14-day table ranked
+# 3.0% first of the four it tried; this 60-day run ranks 2.5% below every
+# step from 3.0% to 6.0%. Worth +$5.93 per 60 days on the same capital, about
+# +9%, for FEWER trades - which is the whole finding and the opposite of the
+# intuition that keeps suggesting a tighter grid.
+#
+# PER-COIN STEPS WERE MEASURED AND REJECTED. Taking each coin's own argmax
+# scored +70.6% over one global step, and it is an artifact: gate it on the
+# chosen step having even 5 trips behind it and exactly ONE coin of twenty
+# survives (ACH-USD at 3.00%, 16 trips). Every other coin's "best" step rests
+# on 1 to 4 trips in sixty days. Choosing the maximum over ten candidates on
+# a sample that size fits noise, and would have shipped it as a gain.
+FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.030"))
 
 # The round-trip fee the table above was priced at. Stated as a CHECKABLE
 # CONSTANT rather than left in the prose, because the prose cannot be
@@ -1593,7 +1631,9 @@ FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.025"))
 # sets the fleet minimum is still defensible; the evidence under it is
 # priced at a cost the account no longer pays, and nothing would have said
 # so. Re-measure before moving FLEET_MIN_STEP_PCT on the strength of it.
-SPACING_EVIDENCE_PRICED_AT_ROUND_TRIP = 0.0137
+# Re-measured at the real fee on 2026-09-28, so the evidence and the cost
+# now agree. The invariant fails again the moment they diverge.
+SPACING_EVIDENCE_PRICED_AT_ROUND_TRIP = 0.0070
 
 # ---- THE STOP LOSS ----
 #
