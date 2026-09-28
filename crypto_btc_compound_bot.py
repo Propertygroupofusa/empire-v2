@@ -1732,6 +1732,10 @@ async def get_recent_fills_summary(session, limit: int = 250,
     per_product = {}
     maker = taker = unknown = 0
     commission_total = 0.0
+    maker_commission = 0.0
+    maker_notional = 0.0
+    taker_commission = 0.0
+    taker_notional = 0.0
     notional_total = 0.0
     oldest = newest = None
     skipped_non_spot = 0
@@ -1786,6 +1790,19 @@ async def get_recent_fills_summary(session, limit: int = 250,
         if liq in ("MAKER", "TAKER"):
             commission_total += comm
             notional_total += notional
+        # AND KEPT APART, because the blend answers a different question.
+        # Under maker-ONLY there is no market fallback, so what a NEW round
+        # trip will cost is the MAKER rate - and every coin that filled 100%
+        # maker bills exactly 0.0035/leg, while the blend reads 0.006137
+        # purely because pure-taker fills (XRP and XYO at 0.0075, ARB at
+        # 0.0062) are mixed into it. Comparing a maker-only floor against
+        # that blend flags a disagreement that is really a category error.
+        if liq == "MAKER":
+            maker_commission += comm
+            maker_notional += notional
+        elif liq == "TAKER":
+            taker_commission += comm
+            taker_notional += notional
 
         pid = pid_raw
         p = per_product.setdefault(pid, {"maker": 0, "taker": 0, "unknown": 0,
@@ -1803,6 +1820,11 @@ async def get_recent_fills_summary(session, limit: int = 250,
     # The rate an average LEG really paid, straight from the commission
     # Coinbase charged - not from any rate this codebase assumed.
     real_leg_rate = (commission_total / notional_total) if notional_total > 0 else None
+    # None, never 0.0, when nothing of that kind filled: "no maker fills in
+    # this window" is not "maker legs are free", and a caller that floors a
+    # spacing on it must be able to tell the two apart.
+    maker_leg_rate = (maker_commission / maker_notional) if maker_notional > 0 else None
+    taker_leg_rate = (taker_commission / taker_notional) if taker_notional > 0 else None
 
     for pid, p in per_product.items():
         p["maker_rate"] = round(p["maker"] / (p["maker"] + p["taker"]), 4) if (p["maker"] + p["taker"]) else None
@@ -1823,6 +1845,8 @@ async def get_recent_fills_summary(session, limit: int = 250,
         "unclassified_fills": unknown,
         "maker_rate": round(maker / classified, 4) if classified else None,
         "real_leg_fee_rate": round(real_leg_rate, 6) if real_leg_rate is not None else None,
+        "maker_leg_fee_rate": round(maker_leg_rate, 6) if maker_leg_rate is not None else None,
+        "taker_leg_fee_rate": round(taker_leg_rate, 6) if taker_leg_rate is not None else None,
         "real_round_trip_fee_rate": round(real_leg_rate * 2, 6) if real_leg_rate is not None else None,
         "total_commission_usd": round(commission_total, 4),
         "total_notional_usd": round(notional_total, 2),

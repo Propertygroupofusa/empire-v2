@@ -241,3 +241,68 @@ def test_the_cause_is_only_attached_to_unknowns_not_to_fails():
     i = src.index("async def grid_invariants_endpoint")
     block = src[i:i + 4000]
     assert 'r["status"] == inv.UNKNOWN and blind_because' in block
+
+
+# ================= like-for-like: maker-only floor vs maker-billed rate
+def test_the_maker_only_floor_is_compared_against_the_maker_billed_rate():
+    """A category error reported as a defect, found on the 02:45Z pass.
+
+    fee_rate_agreement FAILED with "the system prices 0.003500/leg but
+    Coinbase actually billed 0.006137/leg". Both numbers were right and they
+    answer different questions. Under maker-ONLY there is no market fallback,
+    so the floor prices the MAKER leg - and every coin that filled 100% maker
+    bills exactly 0.003500. The 0.006137 blend is pure-taker fills (XRP and
+    XYO at 0.0075, ARB at 0.0062) mixed in, most of them predating the mode.
+
+    Comparing those two makes the check cry wolf on correct behaviour, which
+    is how a check stops being read.
+    """
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    i = src.index("async def grid_invariants_endpoint")
+    block = src[i:i + 6000]
+    assert "is_maker_only_active" in block
+    assert 'fills.get("maker_leg_fee_rate")' in block
+    # the blend is still used when the fallback exists
+    assert 'fills.get("real_leg_fee_rate")' in block
+
+
+def test_a_taker_fill_under_maker_only_is_its_own_finding():
+    """It must not hide inside a blended rate. get_fill_mix's own note says
+    a taker leg counted while maker-only is on is a bug."""
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    i = src.index("async def grid_invariants_endpoint")
+    block = src[i:i + 7000]
+    assert '"name": "maker_only_holds"' in block
+    assert "taker_fills" in block
+
+
+def test_the_separated_rates_are_none_not_zero_when_nothing_filled():
+    """'No maker fills in this window' is not 'maker legs are free', and a
+    caller that floors a spacing on it must be able to tell them apart."""
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "crypto_btc_compound_bot.py"), encoding="utf-8").read()
+    assert "maker_leg_rate = (maker_commission / maker_notional) if maker_notional > 0 else None" in src
+    assert "taker_leg_rate = (taker_commission / taker_notional) if taker_notional > 0 else None" in src
+
+
+def test_maker_and_taker_commission_are_accumulated_separately():
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "crypto_btc_compound_bot.py"), encoding="utf-8").read()
+    assert 'if liq == "MAKER":\n            maker_commission += comm' in src
+    assert 'elif liq == "TAKER":\n            taker_commission += comm' in src
+    # and the blend still exists - this adds a view, it does not replace one
+    assert "commission_total += comm" in src
+
+
+def test_the_live_numbers_make_the_check_pass_like_for_like():
+    """Measured 02:45Z: maker-billed 0.0035 against a 0.0035 floor."""
+    import invariants as inv
+    assert inv.fee_rate_agreement(0.0035, 0.0035, 0.0035)["status"] == inv.OK
+    # and the old comparison is what was failing
+    assert inv.fee_rate_agreement(0.0035, 0.0035, 0.006137)["status"] == inv.FAIL

@@ -8389,7 +8389,23 @@ async def grid_invariants_endpoint():
             async with aiohttp.ClientSession() as session:
                 fills = await g.engine.get_recent_fills_summary(session, limit=250)
             if fills.get("enough_to_conclude"):
-                measured_leg = fills.get("real_leg_fee_rate")
+                # LIKE FOR LIKE. Under maker-ONLY there is no market
+                # fallback, so the floor prices the MAKER leg - and comparing
+                # that against the blended rate flags a category error as a
+                # defect. Measured 2026-09-28: every coin that filled 100%
+                # maker bills exactly 0.003500/leg, while the blend reads
+                # 0.006137 only because pure-taker fills (XRP and XYO at
+                # 0.0075, ARB at 0.0062) are mixed in. The blend is still the
+                # right number when the fallback exists, so the mode picks.
+                try:
+                    _maker_only = await g.is_maker_only_active()
+                except Exception:
+                    _maker_only = False
+                if _maker_only and fills.get("maker_leg_fee_rate") is not None:
+                    measured_leg = fills.get("maker_leg_fee_rate")
+                    blind_because = None
+                else:
+                    measured_leg = fills.get("real_leg_fee_rate")
             else:
                 # A starved sample is UNKNOWN, not a pass - and it says so.
                 blind_because = (
@@ -8407,6 +8423,27 @@ async def grid_invariants_endpoint():
                 r["blind_because"] = blind_because
         results.append(r1)
         results.append(r2)
+        # A TAKER FILL UNDER MAKER-ONLY IS A BUG, per get_fill_mix's own note,
+        # and it must not hide inside a blended rate. Reported separately so
+        # the fee check can pass on like-for-like while this still says the
+        # fallback fired. The window spans 250 fills and can predate the mode
+        # being switched on, so this is worded as a question, not a verdict.
+        try:
+            if _maker_only and fills.get("taker_fills"):
+                results.append({
+                    "name": "maker_only_holds", "status": inv.UNKNOWN,
+                    "detail": (f"{fills.get('taker_fills')} of "
+                               f"{fills.get('classified_fills')} recent fills were TAKER "
+                               f"while maker-only is on. Under maker-only there is no "
+                               f"market fallback, so either these predate the mode being "
+                               f"switched on or something is still crossing the spread - "
+                               f"check the newest taker fill's timestamp against when it "
+                               f"was armed.")})
+            elif _maker_only:
+                results.append({"name": "maker_only_holds", "status": inv.OK,
+                                "detail": "no taker fills in the recent window"})
+        except Exception:
+            pass
     except Exception as e:
         results.append({"name": "fee_rate_agreement", "status": inv.UNKNOWN,
                         "detail": f"could not be checked: {type(e).__name__}: {e}"})
