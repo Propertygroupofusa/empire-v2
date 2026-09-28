@@ -1373,10 +1373,31 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     factor = 10 ** decimals
     qty = math.floor(qty * factor) / factor
     if qty <= 0:
+        # NOTHING WAS PLACED. Said out loud because the caller's own
+        # message for a None return is "maker sell did not fill", and
+        # "did not fill" is false here - no order ever existed to fill.
+        # That wording sent a four-hour investigation after a resting
+        # order that was never resting: 441 QNT rows and 429 ALGO rows
+        # in one day, every one of them this branch, not a patient bid.
+        log.warning(
+            f"[GRID] {product_id}: NO MAKER SELL PLACED - after clamping to "
+            f"the available {base_currency} balance ({real_balance:.10f}) and "
+            f"flooring to {decimals} decimals there is nothing sellable. This "
+            f"is not an unfilled order; no order was created. Usually means "
+            f"the coin is reserved by a resting order, or the branch holds "
+            f"less than one tradeable unit.")
+        _last_order_error[product_id] = (
+            f"nothing sellable: available {real_balance:.10f} floors to 0 at "
+            f"{decimals} decimals")
         return None
 
     bid, ask = await get_best_bid_ask(session, product_id)
     if ask is None:
+        # Also not a fill failure - the book could not be read at all.
+        log.warning(
+            f"[GRID] {product_id}: NO MAKER SELL PLACED - the order book was "
+            f"unreadable, so there is no ask to rest at. No order created.")
+        _last_order_error[product_id] = "order book unreadable: no ask"
         return None
 
     order = {

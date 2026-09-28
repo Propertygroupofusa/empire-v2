@@ -1328,8 +1328,17 @@ async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
             return filled_qty, price, (_leg if _leg is not None
                                        else (await get_effective_round_trip_fee_rate()) / 2)
         if await is_maker_only_active():
-            log.info(f"[GRID] {product_id}: maker sell did not fill and maker-ONLY mode is on - "
-                     f"holding the slice rather than paying the taker leg out of its own profit")
+            # WHY, not just THAT. place_maker_sell returns None for three
+            # different reasons and this line used to call all of them "did
+            # not fill". Two of the three never place an order at all, so
+            # "did not fill" was actively misleading - it describes a
+            # patient resting bid that in those cases does not exist. The
+            # engine now records which one it was; report it.
+            _why = engine._last_order_error.get(
+                product_id, "the order rested at the ask and no buyer crossed")
+            log.info(f"[GRID] {product_id}: no maker sell completed and maker-ONLY mode is on - "
+                     f"holding the slice rather than paying the taker leg out of its own "
+                     f"profit. Reason: {_why}")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_SELL_KEY)
             await _record_maker_expiry(session, product_id, "sell", bot_name)
             return None
