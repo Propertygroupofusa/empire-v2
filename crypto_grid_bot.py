@@ -1136,13 +1136,20 @@ async def get_fill_mix() -> dict:
     return out
 
 
-async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = None):
+async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = None,
+                   outcome_out: dict = None):
     """Real grid BUY: maker first (cheap, may not fill), market fallback
     (always fills, costs more) - unless maker-ONLY mode has removed that
     fallback, in which case an unfilled maker order simply means no buy
     this cycle. Returns (filled_qty, price, leg_fee_rate) or None - the
     real rate actually paid comes back with the fill so the slice can
-    record it and be priced honestly later."""
+    record it and be priced honestly later.
+
+    `outcome_out`, when given, is filled with why there was no fill -
+    order_outcome.MAKER_EXPIRED for a maker order nobody took inside its
+    window (routine under maker-only), or REJECTED for one the venue
+    actually refused. The caller used to have to guess, and guessed
+    "rejected" for both. Same detail_out pattern as _net_edge_gate_ok."""
     if await is_maker_orders_active():
         fill = await engine.place_maker_buy(session, usd_amount, product_id,
                                             await maker_wait_seconds())
@@ -1161,9 +1168,17 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
                      f"passing this cycle rather than paying the taker leg")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_BUY_KEY)
             await _record_maker_expiry(session, product_id, "buy", bot_name)
+            if outcome_out is not None:
+                import order_outcome
+                outcome_out["cause"] = order_outcome.MAKER_EXPIRED
+                outcome_out["wait_seconds"] = await maker_wait_seconds()
             return None
     fill = await engine.place_market_buy(session, usd_amount, product_id)
     if not fill:
+        if outcome_out is not None:
+            import order_outcome
+            outcome_out["cause"] = order_outcome.REJECTED
+            outcome_out["detail"] = engine._last_order_error.get(product_id)
         return None
     qty, price = fill
     await _record_fill_leg(GRID_FILL_MIX_BUY_KEY, False)
@@ -5841,16 +5856,37 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         except Exception as e:
             log.warning(f"[LEARN] {branch.bot_name}: memory unavailable ({e}) - trading anyway")
 
-        fill = await grid_buy(session, spend, branch.product_id, branch.bot_name)
+        _outcome = {}
+        fill = await grid_buy(session, spend, branch.product_id, branch.bot_name,
+                              outcome_out=_outcome)
         if not fill:
-            reason = engine._last_order_error.get(branch.product_id, "no reason reported")
-            log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} did not fill - will retry next cycle")
             # Durable, so rejections can be COUNTED. They were only ever
             # logged before, which meant "orders rejected" could not be
             # reported at all and an execution problem could hide behind a
             # normal-looking gate pass rate.
-            await _record_gate_decision(branch.bot_name, branch.product_id, "ORDER_REJECTED",
-                                        f"buy ${spend:,.2f} did not fill - {reason}")
+            #
+            # Which is exactly why the label has to be right. This branch
+            # used to write ORDER_REJECTED for ANY empty return, including
+            # a maker order that simply was not taken inside its window -
+            # routine under maker-only, and already recorded as an expiry
+            # a few lines up in grid_buy. Live on 2026-09-28 all three
+            # "rejections" in an hour filled successfully minutes later at
+            # the same size (FLOKI $17.99 at 03:20 -> 03:26, SHIB $36.02 at
+            # 03:03 -> 03:05, PEPE at 02:53 -> 02:58). Nothing had refused
+            # them. A counter that fires on normal behaviour cannot be used
+            # to detect abnormal behaviour, so a real venue rejection would
+            # have been buried in expiries.
+            import order_outcome
+            _event, _msg = order_outcome.event_for(
+                _outcome.get("cause"), spend,
+                detail=_outcome.get("detail"),
+                wait_seconds=_outcome.get("wait_seconds"))
+            if order_outcome.is_execution_fault(_outcome.get("cause")):
+                log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} "
+                            f"did not fill - will retry next cycle")
+            else:
+                log.info(f"[GRID] {branch.bot_name}: {_msg}")
+            await _record_gate_decision(branch.bot_name, branch.product_id, _event, _msg)
             return
         filled_qty, filled_price, buy_leg_fee = fill
 
