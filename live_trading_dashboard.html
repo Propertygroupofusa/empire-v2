@@ -235,6 +235,10 @@
             box-shadow: 0 0 8px var(--accent-profit);
         }
 
+        .bot-status-indicator.unknown {
+            background: #6b7a82;
+        }
+
         .bot-status-indicator.inactive {
             background: var(--accent-loss);
         }
@@ -390,6 +394,11 @@
         .status-badge.active {
             color: var(--accent-profit);
             border-color: var(--accent-profit);
+        }
+
+        .status-badge.unknown {
+            background: #6b7a82;
+            color: #fff;
         }
 
         .status-badge.inactive {
@@ -744,15 +753,26 @@
             for (const [key, bot] of Object.entries(bots)) {
                 const botItem = document.createElement('div');
                 botItem.className = 'bot-item';
-                const isActive = bot.status === 'active';
-                const statusClass = isActive ? 'active' : 'inactive';
+                // Three states, not two. "we cannot tell" is not the
+                // same as "it has stopped", and collapsing them means a
+                // broken read looks exactly like a dead bot.
+                const st = bot.status;
+                const statusClass = st === 'active' ? 'active'
+                                  : st === 'unknown' ? 'unknown' : 'inactive';
+                const label = st === 'active' ? '🟢 Active'
+                            : st === 'stalled' ? '🔴 Stalled'
+                            : st === 'unknown' ? '⚪ Status unreadable'
+                            : '🔴 Inactive';
+                const age = (bot.heartbeat_age_seconds != null)
+                    ? ` · last cycle ${Math.round(bot.heartbeat_age_seconds)}s ago` : '';
 
                 botItem.innerHTML = `
                     <div class="bot-status-indicator ${statusClass}"></div>
                     <div class="bot-info">
                         <h3>${bot.name}</h3>
-                        <p>${isActive ? '🟢 Active' : '🔴 Inactive'}</p>
-                        ${bot.pairs ? `<p>${bot.pairs.slice(0, 3).join(', ')}...</p>` : ''}
+                        <p>${label}${age}</p>
+                        ${bot.branches != null ? `<p>${bot.branches} branches</p>` : ''}
+                        ${bot.pairs && bot.pairs.length ? `<p>${bot.pairs.slice(0, 3).join(', ')}${bot.pairs.length > 3 ? ` +${bot.pairs.length - 3} more` : ''}</p>` : ''}
                     </div>
                 `;
 
@@ -866,8 +886,8 @@
                 <div class="metric-card">
                     <div class="metric-label">🤖 Bot Status</div>
                     <div class="metric-value">
-                        <span class="status-badge ${crypto.status === 'active' ? 'active' : 'inactive'}">
-                            ${crypto.status === 'active' ? '🟢' : '🔴'} Crypto
+                        <span class="status-badge ${crypto.status === 'active' ? 'active' : crypto.status === 'unknown' ? 'unknown' : 'inactive'}">
+                            ${crypto.status === 'active' ? '🟢' : crypto.status === 'unknown' ? '⚪' : '🔴'} Crypto
                         </span>
                         <span class="status-badge ${alpaca.status === 'active' ? 'active' : 'inactive'}">
                             ${alpaca.status === 'active' ? '🟢' : '🔴'} Alpaca

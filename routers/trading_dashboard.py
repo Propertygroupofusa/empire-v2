@@ -7310,19 +7310,49 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
         except Exception as e:
             log.warning(f"Alpaca account fetch failed: {e}")
 
-        # Get open positions from bot
+        # POSITIONS, PAIRS AND BOT STATUS - ALL THREE FROM THE FLEET
+        # THAT IS ACTUALLY TRADING.
+        #
+        # This block read crypto_coinbase_bot.open_crypto_positions, a
+        # module global of the OLD bot. That bot is not the one running,
+        # so the dict is empty and the panel rendered "0 open positions"
+        # while 21 of 23 grid branches held coin against $7,885.21 of
+        # allocated capital. Same cause as the trade-source fix above:
+        # the page was wired to a bot that is not trading.
+        #
+        # Two more literals went with it. "max": 3 was hardcoded beside a
+        # 23-branch fleet. And the pairs list came from the old bot's
+        # CRYPTO_PAIRS, so the page named AVAX, DOGE and MATIC - none of
+        # which is a branch - while omitting most coins the fleet holds.
+        grid_status_payload = None
         open_positions = []
+        grid_products = []
+        branch_total = None
         try:
-            positions = getattr(crypto_coinbase_bot, 'open_crypto_positions', {})
-            for symbol, pos_data in list(positions.items())[:5]:  # Max 5 displayed
+            grid_status_payload = await crypto_grid_bot_module.get_grid_status() \
+                if crypto_grid_bot_module is not None else None
+            branches = (grid_status_payload or {}).get("branches") or []
+            branch_total = len(branches)
+            grid_products = [b.get("product_id") for b in branches if b.get("product_id")]
+            for b in branches:
+                slices = b.get("slices") or []
+                if not slices:
+                    continue          # a branch between fills holds no position
+                qty = sum(float(sl.get("qty") or 0.0) for sl in slices)
+                cost = sum(float(sl.get("qty") or 0.0) * float(sl.get("entry_price") or 0.0)
+                           for sl in slices)
+                opened = [sl.get("opened_at") for sl in slices if sl.get("opened_at")]
                 open_positions.append({
-                    "symbol": symbol,
-                    "entry_price": pos_data.get("entry_price", 0),
-                    "qty": pos_data.get("qty", 0),
-                    "entry_time": pos_data.get("entry_time", "unknown"),
-                    "current_price": pos_data.get("current_price", pos_data.get("entry_price", 0)),
-                    "unrealized_pnl": round((pos_data.get("current_price", pos_data.get("entry_price", 0)) - pos_data.get("entry_price", 0)) * pos_data.get("qty", 0), 2)
+                    "symbol": b.get("product_id"),
+                    "entry_price": round(cost / qty, 8) if qty else None,
+                    "qty": round(qty, 8),
+                    "entry_time": min(opened) if opened else "unknown",
+                    "current_price": b.get("current_price"),
+                    "unrealized_pnl": round(float(b.get("total_unrealized_net_usd") or 0.0), 2),
+                    "slices": len(slices),
+                    "levels": b.get("num_levels"),
                 })
+            open_positions.sort(key=lambda p: -abs(p["unrealized_pnl"]))
         except Exception as e:
             log.warning(f"Open positions fetch failed: {e}")
 
@@ -7384,8 +7414,19 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
             all_count = None
 
         win_rate = round(win_count / all_count * 100, 1) if all_count else 0
-        # Bot status
-        crypto_bot_active = getattr(crypto_coinbase_bot, 'BOT_RUNNING', True)
+        # Bot status. This was getattr(crypto_coinbase_bot, 'BOT_RUNNING',
+        # True) - and that module defines no BOT_RUNNING at all, so the
+        # call could only ever return its default. The indicator was a
+        # green light soldered on. It now reads the grid's own heartbeat,
+        # and says "unknown" rather than "active" when it cannot be read:
+        # a status light that cannot go out is not a status light.
+        hb = (grid_status_payload or {}).get("heartbeat") or {}
+        if not hb.get("seen"):
+            crypto_bot_state = "unknown"
+        elif hb.get("alive"):
+            crypto_bot_state = "active"
+        else:
+            crypto_bot_state = "stalled"
         alpaca_bot_active = True  # Assume active; could check via prop_bot
 
         return {
@@ -7431,7 +7472,10 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
             "positions": {
                 "open": open_positions,
                 "count": len(open_positions),
-                "max": 3
+                # The real branch count, not a literal 3 beside a fleet
+                # of 23. None when the fleet could not be read - a gap,
+                # not a number.
+                "max": branch_total,
             },
             "trading": {
                 "recent_trades": recent_trades,   # already newest-first
@@ -7442,9 +7486,13 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
             },
             "bots": {
                 "crypto": {
-                    "status": "active" if crypto_bot_active else "inactive",
-                    "name": "Coinbase (24/7)",
-                    "pairs": getattr(crypto_coinbase_bot, 'CRYPTO_PAIRS', [])[:10]
+                    "status": crypto_bot_state,
+                    "heartbeat_age_seconds": hb.get("age_seconds"),
+                    "last_cycle_at": hb.get("last_cycle_at"),
+                    "name": "Adaptive Capital Fleet (grid, 24/7)",
+                    # The coins the fleet actually has branches on.
+                    "pairs": grid_products,
+                    "branches": branch_total,
                 },
                 "alpaca": {
                     "status": "active" if alpaca_bot_active else "inactive",
