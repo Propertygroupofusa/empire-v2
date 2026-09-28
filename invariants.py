@@ -318,11 +318,33 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
         return _v("no_dead_capital", UNKNOWN, "no branch data")
     stuck, near, unreadable = [], [], []
     stuck_usd = near_usd = 0.0
+    # THE STRUCTURAL HALF, counted separately and regardless of price.
+    #
+    # This check requires BOTH "full on rungs" AND "underwater past the
+    # near-exit band", and only the first is structural. The second moves
+    # with every tick, so the reported figure inherited its volatility
+    # entirely: on 2026-09-28 it read $3,156.23 across 8 branches at
+    # 12:38Z, $588.59 across 4 at 12:55Z and $717.07 at 13:14Z, with
+    # nothing bought or sold to explain any of it.
+    #
+    # Meanwhile nine branches were full on their rungs the whole time -
+    # $3,611.79, 44.6% of allocated capital, unable to deploy another
+    # dollar at any price until a slice sells. That is the number a
+    # reader needs, and it was invisible because only the price-filtered
+    # subset of it was ever reported.
+    #
+    # Same shape as the maker_only_holds fix: there a frozen number could
+    # not show recency, here a volatile one hid a stable one.
+    full, full_usd = [], 0.0
     for b in branches:
         n, lv = b.get("open_slices"), b.get("num_levels")
         best = b.get("best_slice_net_pct")
         if n is None or lv is None:
             continue
+        if n >= lv:
+            # Being in profit does not give a branch a spare rung.
+            full.append(b.get("product_id"))
+            full_usd += float(b.get("allocated_usd") or 0.0)
         if best is None:
             if n >= lv:
                 unreadable.append(b.get("product_id"))
@@ -339,7 +361,9 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
     def _names(rows):
         return ", ".join(f"{p} ({v:+.2f}%)" for p, v in rows)
 
-    extra = {}
+    # Always present, including on a clean verdict: a pass must not hide
+    # that half the fleet cannot buy.
+    extra = {"full_usd": round(full_usd, 2), "full_branches": full}
     if near:
         extra["near_exit_usd"] = round(near_usd, 2)
         extra["near_exit"] = [p for p, _ in near]
@@ -349,7 +373,11 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
     if stuck:
         detail = (f"${stuck_usd:,.2f} across {len(stuck)} branch(es) can neither buy (full) "
                   f"nor sell (underwater): {_names(stuck)}. That capital is held, not "
-                  f"gridded.")
+                  f"gridded. THAT FIGURE MOVES ON PRICE - it read $3,156.23 across 8 "
+                  f"branches, then $588.59 across 4, then $717.07, inside 36 minutes "
+                  f"with nothing traded. The stable one is ${full_usd:,.2f} across "
+                  f"{len(full)} branch(es) full on their rungs, which cannot buy at any "
+                  f"price until a slice sells.")
         if near:
             detail += (f" Separately, ${near_usd:,.2f} across {len(near)} branch(es) is "
                        f"within {abs(near_exit_pct):.1f}% of a profitable exit and is "
@@ -372,7 +400,13 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
                   f"full and marginally under, but within {abs(near_exit_pct):.1f}% of a "
                   f"profitable exit - a grid between fills: {_names(near)}.", **extra)
 
-    return _v("no_dead_capital", OK, "every branch can either buy a dip or sell a rise")
+    ok = "every branch can either buy a dip or sell a rise"
+    if full:
+        # A clean verdict must not hide the structural picture.
+        ok += (f". ${full_usd:,.2f} across {len(full)} branch(es) is full on its rungs and "
+               f"cannot buy until a slice sells, but every one of them can sell at a "
+               f"profit, which is a grid working rather than capital stranded")
+    return _v("no_dead_capital", OK, ok, **extra)
 
 
 # ── 6. the read itself ──────────────────────────────────────────────────
