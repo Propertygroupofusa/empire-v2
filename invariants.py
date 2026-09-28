@@ -415,6 +415,28 @@ def summarize(results):
             "failed": len(fails), "unknown": len(unknown), "total": len(results)}
 
 
+#: A taker fill newer than this is treated as live; older, and whatever
+#: was crossing the spread has stopped. One hour because the grid cycles
+#: in minutes, so an hour of maker-only fills is evidence rather than a
+#: quiet patch.
+STALE_TAKER_HOURS = 1.0
+
+#: Every module that can put a MARKET order on this wallet. Hand-written
+#: prose listing four of them went stale the moment two more were added,
+#: and an incomplete list of suspects is worse than none: a reader checks
+#: the named four, finds nothing, and concludes the alarm is noise.
+#: test_maker_only_recency greps the repo for place_market_* callers and
+#: fails if any is missing from here.
+MARKET_ORDER_PATHS = (
+    "the grid's own close and stop paths (crypto_grid_bot)",
+    "the concentration trimmer (auto_trim_worker)",
+    "the family-tree bot (crypto_family_tree_bot)",
+    "the mean-reversion bot (crypto_mean_reversion_bot)",
+    "the BTC compound bot (crypto_btc_compound_bot)",
+    "a manual buy or sell from the dashboard (routers/trading_dashboard)",
+)
+
+
 def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
                      maker_only_active=True):
     """Is the market fallback firing while maker-only is on?
@@ -474,6 +496,24 @@ def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
 
     if newest > armed:
         after_h = _hours_between(armed, newest)
+        age_h = _hours_between(newest, _utcnow())
+
+        # BOTH NUMBERS, BECAUSE THEY ANSWER DIFFERENT QUESTIONS.
+        #
+        # after_h is newest_taker minus armed_at. Both are fixed points, so
+        # it never moves - it read "3.2h AFTER" at 09:22Z, at 11:00Z and at
+        # 11:31Z on 2026-09-28, while newest_taker_at stayed at 07:49:41
+        # and the maker count in the same window climbed from 72 to 81.
+        # Nothing had crossed the spread for hours and the only figure on
+        # offer could not show it. An alarm that reads the same whether the
+        # leak is live or long finished is one people stop reading.
+        if age_h <= STALE_TAKER_HOURS:
+            when = (f"and the newest was {age_h * 60:.0f} minutes old when this ran, "
+                    f"so it is STILL HAPPENING")
+        else:
+            when = (f"but the newest is {age_h:.1f}h ago, so whatever was doing it has "
+                    f"stopped - this window still reaches back to it")
+
         return {"name": "maker_only_holds", "status": FAIL,
                 # SAY ONLY WHAT THIS CAN PROVE. The first live FAIL read
                 # "something is still crossing the spread", which points at
@@ -484,15 +524,22 @@ def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
                 # billed after arming. The fills feed carries no originating
                 # subsystem, so naming one would be a guess dressed as a
                 # finding.
-                "detail": (f"{seen}, and the newest was filled {after_h:.1f}h AFTER "
-                           f"maker-only was armed. A taker leg costs ~0.75% against the "
-                           f"0.35% the spacing floor is priced on, so it is worth "
-                           f"tracing. The grid's own maker orders are post_only and are "
-                           f"rejected rather than crossed, so the likely source is a "
-                           f"MARKET order from another path - a resting stop firing, the "
-                           f"trimmer, a close, or a manual sale. This feed does not say "
-                           f"which, so check those before changing anything in the grid."),
+                "detail": (f"{seen}, filled {after_h:.1f}h AFTER maker-only was armed - "
+                           f"{when}. A taker leg costs ~0.75% against the 0.35% the "
+                           f"spacing floor is priced on, so it is worth tracing. The "
+                           f"grid's own maker orders are post_only and are rejected "
+                           f"rather than crossed, so the source is a MARKET order from "
+                           f"another path: a resting stop firing, the trimmer, a close, "
+                           f"a manual sale, or one of the other bots on this wallet. "
+                           f"WHICH cannot be said from here - orders reach Coinbase "
+                           f"with a bare uuid as their client_order_id, so no fill is "
+                           f"attributable to a subsystem. Every path that can place one: "
+                           f"{'; '.join(MARKET_ORDER_PATHS)}."),
                 "newest_taker_at": newest.isoformat(),
+                "newest_taker_age_hours": round(age_h, 2),
+                "hours_after_arming": round(after_h, 2),
+                "still_happening": age_h <= STALE_TAKER_HOURS,
+                "market_order_paths": list(MARKET_ORDER_PATHS),
                 "armed_at": armed.isoformat()}
 
     return {"name": "maker_only_holds", "status": OK,
