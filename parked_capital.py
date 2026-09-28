@@ -104,6 +104,27 @@ def split_by_cause(branches, locked_positions=None, near_exit_pct=NEAR_EXIT_PCT)
     for b in branches:
         pid = str(b.get("product_id") or "")
         alloc = _num(b.get("allocated_usd")) or 0.0
+        # A LOCK DOES NOT WAIT FOR A BRANCH TO FILL ITS RUNGS.
+        #
+        # This check used to sit BELOW the full/not-full split, so a
+        # locked branch that still had a rung free was never counted as
+        # locked. On the first live run that reported $219.64 across 2
+        # branches while grid_inventory_is_free was reporting $945.90
+        # across 7 - the same condition, two different numbers, because
+        # one of them was asking an irrelevant question first. A branch
+        # whose coin is reserved at the venue cannot sell a single unit,
+        # full or not, and a cancel frees it either way.
+        lock = locked_by_product.get(pid)
+        if lock is not None:
+            buckets["locked_at_venue"].append({
+                "product_id": pid,
+                "allocated_usd": alloc,
+                "locked_usd": _num(lock.get("locked_usd")),
+                "locked_pct": _num(lock.get("locked_pct")),
+                "was_full": _is_full(b),
+            })
+            continue
+
         full = _is_full(b)
         if full is None:
             buckets["unreadable"].append(
@@ -115,17 +136,6 @@ def split_by_cause(branches, locked_positions=None, near_exit_pct=NEAR_EXIT_PCT)
             if _is_one_fill_away(b):
                 buckets["one_fill_from_full"].append(
                     {"product_id": pid, "allocated_usd": alloc})
-            continue
-
-        # Full. Now: parked by a lock, by price, or working as designed?
-        lock = locked_by_product.get(pid)
-        if lock is not None:
-            buckets["locked_at_venue"].append({
-                "product_id": pid,
-                "allocated_usd": alloc,
-                "locked_usd": _num(lock.get("locked_usd")),
-                "locked_pct": _num(lock.get("locked_pct")),
-            })
             continue
 
         pct = _num(b.get("best_slice_net_pct"))
@@ -201,9 +211,11 @@ def split_by_cause(branches, locked_positions=None, near_exit_pct=NEAR_EXIT_PCT)
         "actionable_today_usd": _sum("locked_at_venue"),
         "lock_state_read": lock_state_read,
         "precedence": (
-            "locked_at_venue > underwater > full_but_profitable. A branch that "
-            "is both locked and underwater is counted ONCE, under locked, "
-            "because that is the only one of the two anyone can act on today."),
+            "locked_at_venue first, for EVERY branch whether or not it is full "
+            "- a reserved position cannot sell either way - then underwater, "
+            "then full_but_profitable. A branch parked twice over is counted "
+            "ONCE, under locked, because that is the only cause anyone can act "
+            "on today."),
         "two_denominators": (
             "allocated_usd is what the fleet committed to a branch. "
             "coin_reserved_usd is units x price the venue is holding. They "

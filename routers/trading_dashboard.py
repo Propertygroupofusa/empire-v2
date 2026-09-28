@@ -8689,22 +8689,10 @@ async def grid_invariants_endpoint():
             backing.get("backed_usd"),
             unallocated_cash_usd=backing.get("unallocated_cash_usd"),
             over_deployed_usd=backing.get("over_deployed_usd")))
-        rows = []
-        for b in (status.get("branches") or []):
-            slices = b.get("slices") or []
-            # `or 0` here turned an UNREADABLE slice into a 0.00% one, and
-            # 0 is not less than 0, so one failed price read made its branch
-            # look exactly like one sitting at break-even - fabricating dead
-            # capital out of a gap. Unreadable slices are dropped; a branch
-            # with nothing readable reports None and the check says so.
-            pcts = [s.get("unrealized_net_pct") for s in slices]
-            pcts = [p * 100 for p in pcts if p is not None]
-            best = max(pcts) if pcts else None
-            rows.append({"product_id": b.get("product_id"),
-                         "allocated_usd": b.get("allocated_usd"),
-                         "open_slices": len(slices),
-                         "num_levels": b.get("num_levels"),
-                         "best_slice_net_pct": best})
+        # Derived in ONE place (see invariants.branch_rows) so this page
+        # and /parked-capital cannot form different opinions about which
+        # branch is full or what its best slice is worth.
+        rows = inv.branch_rows(status)
         results.append(inv.no_dead_capital(rows))
 
         # Units, not dollars. A stop-loss or a manual sale can take coin a
@@ -9524,7 +9512,11 @@ async def get_parked_capital():
     import invariants as inv
 
     status = await crypto_grid_bot_module.get_grid_status()
-    branches = status.get("branches") or []
+    # THE SAME DERIVATION THE INVARIANTS PAGE USES. Passing the raw
+    # branches here is what put $3,234.93 into "unreadable" on this
+    # endpoint's first live output: open_slices and best_slice_net_pct
+    # are derived from `slices`, and do not exist on a raw branch.
+    branches = inv.branch_rows(status)
 
     # locked_positions stays None unless the lock state was really read.
     # An unread lock is not an absent lock, and split_by_cause says so

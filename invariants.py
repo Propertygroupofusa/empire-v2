@@ -300,6 +300,35 @@ def cash_reconciles(cash_before, cash_now, spent_on_buys, proceeds_from_sells,
 NEAR_EXIT_PCT = 1.0
 
 
+def branch_rows(status):
+    """The branch shape every capital check reads, derived ONCE.
+
+    A raw /grid-status branch carries `slices` (a list) and no
+    `open_slices` or `best_slice_net_pct` at all - those are DERIVED.
+    /parked-capital shipped passing the raw branches straight through
+    and put $3,234.93 across 8 branches into an "unreadable" bucket,
+    because every full branch is missing a key that never existed on
+    it. The invariants page had the derivation inline; nothing shared
+    it, so the second reader of the same data got a different answer.
+
+    `or 0` on an unreadable slice pct turned a gap into a 0.00%, and 0
+    is not less than 0, so one failed price read made its branch look
+    exactly like one sitting at break-even. Unreadable slices are
+    dropped; a branch with nothing readable reports None.
+    """
+    rows = []
+    for b in (status.get("branches") or []):
+        slices = b.get("slices") or []
+        pcts = [s.get("unrealized_net_pct") for s in slices]
+        pcts = [p * 100 for p in pcts if p is not None]
+        rows.append({"product_id": b.get("product_id"),
+                     "allocated_usd": b.get("allocated_usd"),
+                     "open_slices": len(slices),
+                     "num_levels": b.get("num_levels"),
+                     "best_slice_net_pct": max(pcts) if pcts else None})
+    return rows
+
+
 def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
     """A branch full of slices AND underwater is a hold, not a grid.
 

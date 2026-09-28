@@ -69,7 +69,8 @@ def test_a_branch_that_is_both_locked_and_underwater_is_counted_once():
 
 def test_the_precedence_is_stated_not_left_to_be_inferred():
     out = split_by_cause([B("ACH-USD", 400.0, 3, 3, -4.30)], [L("ACH-USD", 70.41)])
-    assert "locked_at_venue > underwater" in out["precedence"]
+    assert "locked_at_venue first" in out["precedence"]
+    assert "whether or not it is full" in out["precedence"]
 
 
 def test_the_buckets_sum_to_the_parked_total():
@@ -210,3 +211,97 @@ def test_an_unreadable_lock_is_passed_as_none_not_as_empty():
     src = _ast.get_source_segment(_ROUTER_SRC, _endpoint())
     assert "locked_positions = None" in src
     assert "locked_positions = []" in src
+
+
+# ── found by reading the endpoint's FIRST LIVE OUTPUT ──────────────────
+#
+# It reported parked $219.64 with $3,234.93 "unreadable", while
+# grid_inventory_is_free reported $945.90 locked across 7 branches and
+# no_dead_capital reported $3,912.68 full. Three numbers about the same
+# fleet, all different. Two separate defects:
+#
+#   1. The endpoint passed RAW /grid-status branches, which carry
+#      `slices` and no `open_slices` or `best_slice_net_pct` - those are
+#      derived. Every full branch therefore looked unclassifiable.
+#   2. The lock check sat BELOW the full/not-full split, so a locked
+#      branch with a rung still free was never counted as locked.
+
+def test_a_locked_branch_counts_even_with_a_rung_free():
+    """XLM was 100% reserved. It cannot sell a unit whether or not its
+    last rung has filled, and a cancel frees it either way."""
+    out = split_by_cause([B("XLM-USD", 442.88, 2, 3, -0.4)], [L("XLM-USD", 442.88)])
+    assert out["buckets"]["locked_at_venue"]["allocated_usd"] == 442.88
+    assert out["buckets"]["one_fill_from_full"]["allocated_usd"] == 0
+    assert out["actionable_today_usd"] == 442.88
+
+
+def test_a_locked_branch_records_whether_it_was_also_full():
+    out = split_by_cause([B("XLM-USD", 442.88, 2, 3, -0.4)], [L("XLM-USD", 442.88)])
+    assert out["buckets"]["locked_at_venue"]["branches"][0]["was_full"] is False
+
+
+def test_the_locked_total_matches_the_invariant_that_found_them():
+    """Two numbers about the same condition, computed in two places,
+    that disagreed live: $219.64 here against $945.90 there."""
+    locked = [L("XLM-USD", 442.88), L("ALGO-USD", 152.67), L("LINK-USD", 99.32),
+              L("SOL-USD", 92.42), L("NEAR-USD", 78.77), L("ACH-USD", 70.41),
+              L("PRIME-USD", 9.43)]
+    branches = [B("XLM-USD", 500.0, 2, 3, -0.4), B("ALGO-USD", 200.0, 3, 3, -0.5),
+                B("LINK-USD", 300.0, 2, 3, -1.0), B("SOL-USD", 250.0, 3, 3, -1.5),
+                B("NEAR-USD", 220.0, 2, 3, -0.9), B("ACH-USD", 180.0, 3, 3, -4.3),
+                B("PRIME-USD", 150.0, 1, 3, -1.4)]
+    out = split_by_cause(branches, locked)
+    assert len(out["buckets"]["locked_at_venue"]["branches"]) == 7
+    assert out["buckets"]["locked_at_venue"]["coin_reserved_usd"] == pytest.approx(945.90)
+
+
+def test_a_priced_full_branch_is_never_unreadable():
+    """The live run put every full branch in `unreadable` because the
+    key it prices on was never on a raw branch."""
+    out = split_by_cause([B("ZEC-USD", 2272.62, 3, 3, -4.63)], [])
+    assert out["buckets"]["unreadable"]["allocated_usd"] == 0
+    assert out["buckets"]["underwater"]["allocated_usd"] == 2272.62
+
+
+# ── the shared derivation both pages now read ──────────────────────────
+
+def test_branch_rows_derives_the_fields_parked_capital_needs():
+    import invariants
+    status = {"branches": [{
+        "product_id": "ZEC-USD", "allocated_usd": 2272.62, "num_levels": 3,
+        "slices": [{"unrealized_net_pct": -0.0463},
+                   {"unrealized_net_pct": -0.0501},
+                   {"unrealized_net_pct": -0.0402}],
+    }]}
+    row = invariants.branch_rows(status)[0]
+    assert row["open_slices"] == 3
+    assert row["best_slice_net_pct"] == pytest.approx(-4.02)
+
+
+def test_branch_rows_feeds_split_by_cause_without_losing_anything():
+    import invariants
+    status = {"branches": [{
+        "product_id": "ZEC-USD", "allocated_usd": 2272.62, "num_levels": 3,
+        "slices": [{"unrealized_net_pct": -0.0463}] * 3,
+    }]}
+    out = split_by_cause(invariants.branch_rows(status), [])
+    assert out["buckets"]["underwater"]["allocated_usd"] == 2272.62
+    assert out["buckets"]["unreadable"]["allocated_usd"] == 0
+
+
+def test_branch_rows_keeps_an_unpriced_slice_as_none_not_zero():
+    """0 is not less than 0, so a failed price read would look exactly
+    like a branch sitting at break-even."""
+    import invariants
+    status = {"branches": [{
+        "product_id": "X-USD", "allocated_usd": 10.0, "num_levels": 2,
+        "slices": [{"unrealized_net_pct": None}, {"unrealized_net_pct": None}],
+    }]}
+    assert invariants.branch_rows(status)[0]["best_slice_net_pct"] is None
+
+
+def test_the_endpoint_uses_the_shared_derivation():
+    src = _ast.get_source_segment(_ROUTER_SRC, _endpoint())
+    assert "inv.branch_rows(status)" in src
+    assert 'status.get("branches")' not in src, \
+        "the endpoint is reading raw branches again"
