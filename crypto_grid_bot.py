@@ -2060,6 +2060,43 @@ async def get_grid_allocated_total() -> float:
         return sum(b.allocated_usd for b in result.scalars().all())
 
 
+async def fleet_cost_basis_by_product():
+    """Real USD cost basis per COIN across the whole grid fleet.
+
+    Keyed by product_id, not bot_name: two branches can hold the same
+    coin, and "no coin over 20% of the fleet" is a statement about the
+    coin, so a concentration measured per branch would miss exactly the
+    case it exists to catch.
+
+    Cost basis (qty x entry_price) is the money that actually left the
+    wallet. Deliberately not allocated_usd, which is a plan rather than a
+    position, and not live market value, which would tighten the ceiling
+    on a coin purely because it rallied.
+
+    Returns None - never an empty dict - if the read fails. UNKNOWN and
+    "the fleet holds nothing" are different answers, and the gate that
+    consumes this treats them differently.
+    """
+    try:
+        async with get_session_factory()() as db:
+            branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
+            slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
+    except Exception as exc:
+        log.warning(f"[GRID] fleet cost basis unreadable: {exc}")
+        return None
+
+    product_by_bot = {b.bot_name: b.product_id for b in branches}
+    basis = {}
+    for s in slices:
+        if s.qty is None or s.entry_price is None:
+            continue
+        product = product_by_bot.get(s.bot_name)
+        if not product:
+            continue
+        basis[product] = basis.get(product, 0.0) + s.qty * s.entry_price
+    return basis
+
+
 async def get_grid_undeployed_reserve_total() -> float:
     """Real USD a grid branch still needs held in RESERVE for the levels
     it hasn't bought yet - its allocation MINUS the real cost basis it
@@ -5761,6 +5798,19 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             log.info(f"[GRID] {branch.bot_name}: no buy - {spend_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id, "CASH_RESERVE",
                                         spend_reason)
+            return
+
+        # The owner's own standing ceiling: no coin over 20% of the fleet.
+        # One-directional - it can only ever refuse a new buy, never sell
+        # or trim - and it fails OPEN when the fleet's basis can't be read.
+        # See concentration_gate for the live numbers that made it real.
+        import concentration_gate
+        _conc_ok, _conc_reason = concentration_gate.concentration_verdict(
+            branch.product_id, await fleet_cost_basis_by_product(), spend)
+        if not _conc_ok:
+            log.info(f"[GRID] {branch.bot_name}: 🧱 concentration ceiling - {_conc_reason}")
+            await _record_gate_decision(branch.bot_name, branch.product_id,
+                                        "CONCENTRATION", _conc_reason)
             return
 
         _gate_detail = {}

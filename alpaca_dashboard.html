@@ -507,6 +507,19 @@ function fmtPct(n) {
 
 // Semi-circle SVG gauge - real, computed value, no third-party chart lib.
 function renderGauge(containerId, pct, caption) {
+    // A gap is not a zero. A null percentage means the figure behind it
+    // could not be read this poll - draw the empty track and an em-dash,
+    // never a 0.00% arc, which reads as a real measured result and is
+    // exactly how a failed Coinbase read once showed up as "0.10% of
+    // $1,000,000" beside a legend that already said "unavailable".
+    if (pct == null || !isFinite(pct)) {
+        document.getElementById(containerId).innerHTML = `
+        <svg width="180" height="100" viewBox="0 0 180 100">
+            <path d="M 20 90 A 70 70 0 0 1 160 90" fill="none" stroke="#eef1f6" stroke-width="16" stroke-linecap="round"/>
+        </svg>
+        <div class="gauge-value" style="color:#7a869a;">&mdash;</div><div class="gauge-caption">${caption}</div>`;
+        return;
+    }
     const clamped = Math.max(0, Math.min(100, pct));
     const r = 70, cx = 90, cy = 90;
     const startAngle = Math.PI, endAngle = Math.PI - (clamped / 100) * Math.PI;
@@ -1643,6 +1656,9 @@ function fmtCombinedMomentum(history) {
 // wise or money wise." Never a promise - the confidence caveat scales
 // with how much real history the estimate is actually drawn from.
 function fmtProjection(data) {
+    // No current total means no pace. Projecting off a partial combined
+    // figure reports a crash the account never had.
+    if (data.combined_unavailable_reason) { return data.combined_unavailable_reason; }
     if (data.projected_years_to_goal == null) {
         if (data.projection_basis_days == null) {
             return 'Not enough real history yet for a pace estimate - check back once a few real snapshots have logged.';
@@ -1673,7 +1689,13 @@ function renderObservations(observations) {
 }
 
 function renderCombinedProgress(data) {
-    renderGauge('combined-goal-gauge', data.combined_progress_pct, fmtUsd(data.combined_equity) + ' of ' + fmtUsd(data.goal));
+    // No combined total when either real side failed to read - the
+    // surviving leg alone is not the combined number and must never be
+    // captioned as if it were.
+    const combinedCaption = data.combined_equity != null
+        ? fmtUsd(data.combined_equity) + ' of ' + fmtUsd(data.goal)
+        : 'Combined total unavailable this poll - one side could not be read';
+    renderGauge('combined-goal-gauge', data.combined_progress_pct, combinedCaption);
 
     const momentumEl = document.getElementById('combined-momentum');
     const momentum = fmtCombinedMomentum(data.history);

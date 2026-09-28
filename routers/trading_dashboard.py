@@ -1746,6 +1746,37 @@ def _build_progress_observations(alpaca_data, crypto_data):
     return observations
 
 
+def combine_equity(alpaca_equity, crypto_equity, goal_usd):
+    """The combined total, its progress percent, and - when there isn't
+    one - why. Returns (combined, pct, unavailable_reason).
+
+    A gap is not a zero. This used to be written inline as
+    `(alpaca_equity or 0.0) + (crypto_equity or 0.0)`, which silently
+    substituted $0.00 for a side that could not be read and then showed
+    the SURVIVING leg alone as if it were the combined total. Seen live
+    on 2026-09-28: a Coinbase read failed, the legend correctly said
+    "unavailable", and the gauge right beside it read "$1,007.47 of
+    $1,000,000 - 0.10%" against a real combined balance near $11,800.
+    The history WRITE was already guarded against exactly this; the
+    number on the screen was not.
+
+    Both real sides present, or there is no total. Lives out here as a
+    plain function so the rule is testable on its own rather than only
+    reachable through a live endpoint with two network reads behind it.
+    """
+    if alpaca_equity is None or crypto_equity is None:
+        missing = "Alpaca" if alpaca_equity is None else "Coinbase"
+        return None, None, (
+            f"{missing} could not be read this poll, so there is no combined "
+            f"total to show - the other side on its own is not it. The last "
+            f"good figure stays on the chart and this fills back in on the "
+            f"next successful read."
+        )
+    combined = alpaca_equity + crypto_equity
+    pct = round(min(100.0, (combined / goal_usd) * 100), 4)
+    return combined, pct, None
+
+
 @router.get("/combined-equity-progress")
 async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     """Real, combined progress toward the account owner's own $1,000,000
@@ -1802,8 +1833,9 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         crypto_error = str(exc)
         log.warning(f"[dashboard] combined-equity: crypto side unavailable this poll: {exc}")
 
-    combined_equity = (alpaca_equity or 0.0) + (crypto_equity or 0.0)
-    combined_progress_pct = round(min(100.0, (combined_equity / COMBINED_GOAL_USD) * 100), 4)
+    combined_equity, combined_progress_pct, combined_unavailable_reason = combine_equity(
+        alpaca_equity, crypto_equity, COMBINED_GOAL_USD
+    )
 
     # Only ever logs a real snapshot when BOTH real sides are actually
     # available this poll - a snapshot with one side silently zeroed out
@@ -1839,7 +1871,12 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     )
     excluded_legacy_snapshots = int(legacy_count_result.scalar() or 0)
 
-    projected_years_to_goal, projection_basis_days = _project_years_to_goal(history, combined_equity, COMBINED_GOAL_USD)
+    # No current total, no pace: projecting a run-rate off a partial
+    # combined figure would report a crash the account never had.
+    if combined_equity is None:
+        projected_years_to_goal, projection_basis_days = None, None
+    else:
+        projected_years_to_goal, projection_basis_days = _project_years_to_goal(history, combined_equity, COMBINED_GOAL_USD)
     observations = _build_progress_observations(alpaca_data, crypto_data)
 
     return {
@@ -1847,9 +1884,10 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         "alpaca_error": alpaca_error,
         "crypto_equity": round(crypto_equity, 2) if crypto_equity is not None else None,
         "crypto_error": crypto_error,
-        "combined_equity": round(combined_equity, 2),
+        "combined_equity": round(combined_equity, 2) if combined_equity is not None else None,
         "goal": COMBINED_GOAL_USD,
         "combined_progress_pct": combined_progress_pct,
+        "combined_unavailable_reason": combined_unavailable_reason,
         "history": [h.to_dict() for h in history],
         "excluded_legacy_snapshots": excluded_legacy_snapshots,
         "projected_years_to_goal": projected_years_to_goal,
