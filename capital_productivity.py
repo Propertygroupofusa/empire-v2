@@ -67,7 +67,20 @@ def split_branches(branches):
 
 def _bucket(branches, earned_by_product, trades_by_product, label):
     capital = sum(_f(b.get("allocated_usd")) for b in branches)
-    unreal = sum(_f(b.get("total_unrealized_net_usd")) for b in branches)
+    # AN UNREADABLE UNREALIZED IS NOT A ZERO - and _f's default made it one.
+    #
+    # total_unrealized_net_usd is None for two different reasons: the branch
+    # holds no slices (a true zero) or its price could not be read (UNKNOWN).
+    # split_branches in this same module already records an `unreadable`
+    # bucket for level counts, so the machinery and the intent were both
+    # here; only this sum fell through, and a bucket total moved by an
+    # unknown amount with nothing saying so.
+    _unpriced = [b.get("product_id") for b in branches
+                 if _f(b.get("total_unrealized_net_usd"), None) is None
+                 and (b.get("slices") or [])]
+    unreal = sum(_f(b.get("total_unrealized_net_usd")) for b in branches
+                 if not (_f(b.get("total_unrealized_net_usd"), None) is None
+                         and (b.get("slices") or [])))
     earned = sum(_f(earned_by_product.get(b.get("product_id"))) for b in branches)
     trades = sum(int(trades_by_product.get(b.get("product_id")) or 0) for b in branches)
     out = {
@@ -78,6 +91,8 @@ def _bucket(branches, earned_by_product, trades_by_product, label):
         "earned_usd": round(earned, 2),
         "trades": trades,
         "unrealized_usd": round(unreal, 2),
+        "unrealized_excludes_unpriced_branches": _unpriced,
+        "unrealized_is_complete": not _unpriced,
     }
     # Per $100 of capital, over the window. Never per day - see the
     # module docstring. None, not 0, when there is no capital to divide

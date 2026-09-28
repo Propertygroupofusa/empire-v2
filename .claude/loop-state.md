@@ -270,6 +270,17 @@ Also each pass: for every branch compute
 
 ## Reference figures — update in place
 
+**23:28Z (edcdbe8 serving).** `not_working_usd` $1,294.41 (was $1,406.77 —
+$112 more deployed), free cash $204.03, allocated $8,249.56, deployed
+$7,557.88, idle-in-branch $1,090.38, total capital $8,453.59, unrealized
+−$322.84. Free-cash trail: 19:21Z 251.74 → 20:26Z 251.27 → 21:33Z 251.45 →
+22:21Z 191.70 → 23:28Z ~204–210. The 22:21Z dip was deployment; the rise
+since is a close returning cash. **No second unexplained outflow.**
+CAUTION: money-check's `idle_usd` (892.12) is NOT the same metric as
+growth-model's `not_working_usd` (= idle_in_branch + free_cash). Do not
+compare them as if they were.
+
+
 Shortfall reference (20:26Z 28 Sep), eight short, $512.41, all flat:
 ETH 0.03160040 · ZEC 0.08720487 · XRP 69.82593202 · PEPE 8296372.54005447 ·
 BCH 0.37932324 · ONDO 9.64 · TIA 67.03 · PRIME 36.64.
@@ -459,6 +470,33 @@ whether the venue has no such account or an account holding zero.
 `(None, "no X account found on this key")` for absence. **Knowing the rule is
 not following it — and the second time, the wrong claim was in the same
 function as the sentence that refuted it.**
+
+**The fleet unrealized figure was absorbing gaps as zeros.**
+`total_unrealized_net_usd` is None for two reasons (crypto_grid_bot:7527 —
+`if current_price is not None and slices else None`): no slices (a true zero)
+or an unreadable price (UNKNOWN). Two aggregates collapsed both —
+`growth_model` via `_num(...) or 0.0`, `capital_productivity` via `_f`'s 0.0
+default — so a headline number the owner reads moved by an unknown amount, of
+either sign, with nothing saying so. **In both cases the asymmetry was the
+tell**: growth_model records an unreadable `allocated_usd` in `unreadable` two
+lines above, and capital_productivity's own `split_branches` keeps an
+`unreadable` bucket. The machinery and the intent were already there; only the
+unrealized sum fell through. Fixed in 3d22a19 — excluded and named, never
+zeroed; a sliceless branch is still counted as the true zero it is.
+
+**My first version of that fix was worse than the bug.** It used `continue`,
+dropping the whole row — which silently removed a perfectly readable
+allocation from `allocated_usd`, `deployed_usd`, `idle_in_branch`,
+`total_capital`, `not_working` and the concentration ranking. **Withholding
+one unknown field must not withhold the record that carries it.** Only the
+unknown figure is withheld now; the row stays, and a test pins each of those
+capital figures.
+
+**Don't chase a semantically equivalent mutant.** Two mutants on that fix
+survive and should: `measure_capital` returns aggregates only, so coercing the
+internal per-row None to 0.0 yields a byte-identical response, and `x or 0`
+sums the same as skipping None. Recorded in the test's own docstring so a later
+pass doesn't read them as holes and contort a test to kill them.
 
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was

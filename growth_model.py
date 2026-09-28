@@ -98,7 +98,7 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
     from the slices themselves rather than inferred from allocation -
     allocation is an intention, a slice is a position.
     """
-    rows, unreadable = [], []
+    rows, unreadable, unpriced = [], [], []
     for b in (branches or []):
         alloc = _num(b.get("allocated_usd"))
         if alloc is None:
@@ -109,14 +109,45 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
             ep, q = _num(s.get("entry_price")), _num(s.get("qty"))
             if ep is not None and q is not None:
                 deployed += ep * q
+        # AN UNREADABLE UNREALIZED IS NOT A ZERO.
+        #
+        # This was `_num(...) or 0.0`, and two lines above it an unreadable
+        # allocated_usd is recorded in `unreadable` and the branch skipped.
+        # That asymmetry was the tell: one gap failed loud, its sibling was
+        # silently absorbed into the fleet total.
+        #
+        # total_unrealized_net_usd is None for TWO different reasons (see
+        # crypto_grid_bot: `if current_price is not None and slices else
+        # None`). No slices means the unrealized really is zero. An
+        # unreadable price means it is UNKNOWN, and folding that in as zero
+        # moves the fleet figure by however much that branch was actually
+        # holding, with nothing in the payload saying so.
+        #
+        # The branch's own slice list separates them, so no guess is needed.
+        # EXCLUDED FROM THE UNREALIZED SUM ONLY - the row itself STAYS.
+        #
+        # `continue` here was wrong and would have been a worse bug than the
+        # one being fixed: this branch has a perfectly readable allocation
+        # and real slices, so dropping the whole row would quietly remove it
+        # from allocated_usd, deployed_usd, idle_in_branch, total_capital,
+        # not_working and the concentration ranking. Only the unrealized is
+        # unknown, so only the unrealized is withheld.
+        _un = _num(b.get("total_unrealized_net_usd"))
+        _slices = b.get("slices") or []
+        if _un is None and _slices:
+            unpriced.append(b.get("product_id"))
         rows.append({
             "product_id": b.get("product_id"),
             "allocated_usd": alloc,
             "deployed_usd": round(deployed, 2),
             "idle_usd": round(max(alloc - deployed, 0.0), 2),
-            "open_slices": len(b.get("slices") or []),
+            "open_slices": len(_slices),
             "num_levels": b.get("num_levels"),
-            "unrealized_usd": _num(b.get("total_unrealized_net_usd")) or 0.0,
+            # None means UNKNOWN and is carried as None, so the sums below
+            # can skip it. A branch with no slices is a TRUE zero and is
+            # counted as one - discarding that would be the opposite error.
+            "unrealized_usd": (_un if _un is not None
+                               else (None if _slices else 0.0)),
         })
     if not rows:
         return {"readable": False, "reason": "no branch had a readable allocation"}
@@ -130,8 +161,13 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
     top = by_size[:concentration_top_n]
     rest = by_size[concentration_top_n:]
     top_usd = sum(r["allocated_usd"] for r in top)
-    top_unreal = sum(r["unrealized_usd"] for r in top)
-    all_unreal = sum(r["unrealized_usd"] for r in rows)
+    # None is skipped, not coerced. A branch whose unrealized is UNKNOWN
+    # still counts for capital and concentration above; it simply cannot
+    # contribute a figure to a total of figures.
+    top_unreal = sum(r["unrealized_usd"] for r in top
+                     if r["unrealized_usd"] is not None)
+    all_unreal = sum(r["unrealized_usd"] for r in rows
+                     if r["unrealized_usd"] is not None)
 
     # SLICES OVER LEVELS IS NOT AUTOMATICALLY AN ANOMALY.
     #
@@ -218,16 +254,34 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
         "not_working_pct": round((idle_in_branch + free) / (allocated + free) * 100.0, 1)
         if (allocated + free) else None,
         "unrealized_usd": round(all_unreal, 2),
+        # WHAT THE FIGURE ABOVE LEAVES OUT. Named, not counted, so a partial
+        # total can never be read as a complete one.
+        "unrealized_excludes_unpriced_branches": unpriced,
+        "unrealized_is_complete": not unpriced,
+        "unrealized_note": (
+            "complete - every branch with open slices had a readable price"
+            if not unpriced else
+            f"PARTIAL. {len(unpriced)} branch(es) hold open slices whose price "
+            f"could not be read, so their unrealized is UNKNOWN and is excluded "
+            f"rather than counted as zero: {', '.join(str(x) for x in unpriced)}. "
+            f"The true fleet unrealized is this figure plus an unknown amount "
+            f"from those branches, of either sign."),
         "concentration": {
             "top_n": concentration_top_n,
             "products": [r["product_id"] for r in top],
             "allocated_usd": round(top_usd, 2),
             "share_pct": round(top_usd / allocated * 100.0, 1) if allocated else None,
             "unrealized_usd": round(top_unreal, 2),
+            # Divided into a total that may be partial, so it is qualified
+            # by the same flag rather than presented as a clean share.
             "share_of_unrealized_pct": round(top_unreal / all_unreal * 100.0, 1)
             if all_unreal else None,
+            "share_of_unrealized_is_complete": not unpriced,
             "rest_allocated_usd": round(sum(r["allocated_usd"] for r in rest), 2),
-            "rest_unrealized_usd": round(sum(r["unrealized_usd"] for r in rest), 2),
+            # Same skip as the two sums above. Without it a single UNKNOWN
+            # row raises TypeError and takes the whole payload down.
+            "rest_unrealized_usd": round(sum(r["unrealized_usd"] for r in rest
+                                             if r["unrealized_usd"] is not None), 2),
         },
         "idle_branches": sorted(
             [r for r in rows if r["idle_usd"] > 20],
