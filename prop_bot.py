@@ -1909,6 +1909,8 @@ async def run_prop_cycle():
     # Alpaca supports round-the-clock trading on crypto and extended hours on commodities
     now = datetime.now(ET)
     last_cycle_at = now.isoformat()
+    # Set by a kill condition below. Blocks new entries; exits always run.
+    entries_halted = None
 
     # CONTINUOUS AUTO-SCALING TO $1,000,000 — No milestones, just compound
     # Scale formula: 1.0x baseline + 0.01x per $1000 earned, capped at 5.0x
@@ -1953,7 +1955,28 @@ async def run_prop_cycle():
                                       threshold="see reason"),
                         buying_power=buying_power, equity=equity,
                         open_positions=len(open_prop_positions))
-                return
+                # A KILL CONDITION MUST STOP NEW RISK, NOT TRAP OPEN RISK.
+                #
+                # This used to `return` here, which skipped the ENTIRE rest
+                # of the cycle - including all SEVEN close_position paths.
+                # So while halted the bot could not take profit, could not
+                # cut a loser, could not manage an open position at all.
+                #
+                # Every one of the four kill conditions is a reason to stop
+                # BUYING. None of them is a reason to stop SELLING:
+                #
+                #   daily loss limit    you want out, not frozen in
+                #   buying power low    settlement restricts buying only;
+                #                       selling is always allowed in a cash
+                #                       account
+                #   equity below floor  the moment you most need to manage
+                #   too many positions  closing one is the fix
+                #
+                # Live when found: buying power $89.08 against a $150 floor
+                # on unsettled cash-account proceeds - a halt that clears
+                # itself on settlement, but could sit for a day with a real
+                # position ($197.46 of DOG) unable to exit.
+                entries_halted = _kill_detail
 
         global _last_auto_backtest_at
         now_ts = time.time()
@@ -2170,6 +2193,12 @@ async def run_prop_cycle():
         return True
 
     async def try_open(contract, config, side, price, rsi, trend, slots_remaining):
+        # The one chokepoint for NEW risk. A kill condition stops entries
+        # here rather than ending the cycle, so every exit path below
+        # stays reachable - see the note at the kill-condition check.
+        if entries_halted:
+            log.warning(f"[MANDATE] {contract} entry blocked - {entries_halted}")
+            return False
         """Wraps open_position with dollar-based sizing against whatever
         cash is actually left this cycle (tracked in cash_remaining, closed
         over from run_prop_cycle) - falls back to the fixed 1-share size
