@@ -8450,7 +8450,7 @@ async def grid_invariants_endpoint():
              "cash_available": ab.get("wallet_cash_usd"),
              "cash_on_hold": ab.get("usd_on_hold"),
              "commission_open": ab.get("open_entry_commission_usd")},
-            at=_dt.datetime.utcnow().isoformat() + "Z")
+            at=datetime.utcnow().isoformat() + "Z")
         prev = await _read_reconcile_snapshot()
         out_rec = rec.explain(prev, snap)
         out_rec["snapshot"] = snap
