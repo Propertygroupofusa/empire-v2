@@ -481,7 +481,7 @@ either sign, with nothing saying so. **In both cases the asymmetry was the
 tell**: growth_model records an unreadable `allocated_usd` in `unreadable` two
 lines above, and capital_productivity's own `split_branches` keeps an
 `unreadable` bucket. The machinery and the intent were already there; only the
-unrealized sum fell through. Fixed in 3d22a19 — excluded and named, never
+unrealized sum fell through. Fixed in ee796c3 — excluded and named, never
 zeroed; a sliceless branch is still counted as the true zero it is.
 
 **My first version of that fix was worse than the bug.** It used `continue`,
