@@ -9307,6 +9307,42 @@ DECISION_COUNT_CAP = 5000
 EDGE_RATE_MAX_SNAPSHOTS = 2000
 
 
+@router.get("/capital-productivity")
+async def get_capital_productivity(hours: float = 48.0):
+    """What each half of the fleet's capital earned, per dollar of it.
+
+    Read-only. Exists because this split was recomputed by hand from
+    /grid-status and trade history on every review pass, and a hand
+    computation beside a check is how two numbers that must agree stop
+    agreeing. Both sides come from the same sources the checks read.
+
+    hours is clamped to a sane band: under an hour of closed trades is
+    noise, and the trade table does not go back far enough for a year.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import capital_productivity
+    from models import CryptoGridTradeHistory
+
+    window = max(1.0, min(float(hours), 24.0 * 90))
+    status = await crypto_grid_bot_module.get_grid_status()
+    branches = status.get("branches") or []
+
+    since = datetime.utcnow() - timedelta(hours=window)
+    async with crypto_grid_bot_module.get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory)
+            .where(CryptoGridTradeHistory.closed_at >= since)
+        )).scalars().all()
+    trades = [{"product_id": r.product_id, "pnl": r.pnl} for r in rows]
+
+    out = capital_productivity.productivity(branches, trades, window_hours=window)
+    out["closed_trades_in_window"] = len(trades)
+    out["as_of"] = _get_utc_timestamp()
+    return JSONResponse(content=out, headers={"Cache-Control": "no-store"})
+
+
+
 @router.get("/edge-rate")
 async def edge_rate_endpoint(hours: int = 720, basis: str = "account"):
     """The fleet's edge as a rate, against a denominator that is stated.
