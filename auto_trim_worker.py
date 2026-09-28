@@ -140,6 +140,20 @@ async def _place_market_sell(session, product_id, base_size):
                             json=order, timeout=30) as r:
         payload = await r.json()
         ok = r.status in (200, 201) and payload.get("success", True)
+        if ok:
+            # This loop posts its own order rather than going through the
+            # engine, so it records its own attribution. Coinbase fills
+            # carry order_id and NOT client_order_id, so that id is the
+            # only thing a later audit can join on. Non-fatal by design:
+            # losing a row must never cost a trim.
+            try:
+                import crypto_btc_compound_bot as _engine
+                await _engine._record_order_source(
+                    ((payload.get("success_response") or {}).get("order_id")),
+                    "auto_trim", product_id, "SELL")
+            except Exception as e:
+                log.debug(f"[trim] attribution not recorded (non-fatal): "
+                          f"{type(e).__name__}: {e}")
         return ok, payload
 
 

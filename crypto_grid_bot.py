@@ -1233,7 +1233,8 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
                 outcome_out["cause"] = order_outcome.MAKER_EXPIRED
                 outcome_out["wait_seconds"] = await maker_wait_seconds()
             return None
-    fill = await engine.place_market_buy(session, usd_amount, product_id)
+    fill = await engine.place_market_buy(session, usd_amount, product_id,
+                                         source="grid_buy_market")
     if not fill:
         if outcome_out is not None:
             import order_outcome
@@ -1272,7 +1273,8 @@ async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_SELL_KEY)
             await _record_maker_expiry(session, product_id, "sell", bot_name)
             return None
-    fill = await engine.place_market_sell(session, qty, product_id)
+    fill = await engine.place_market_sell(session, qty, product_id,
+                                          source="grid_sell")
     if not fill:
         return None
     filled_qty, price = fill
@@ -7912,7 +7914,8 @@ async def close_all_grid_slices(only_bot_name: str = None,
             if not slices:
                 continue
             total_qty = sum(s.qty for s in slices)
-            fill = await engine.place_market_sell(session, total_qty, b.product_id)
+            fill = await engine.place_market_sell(session, total_qty, b.product_id,
+                                                  source="grid_close_branch")
             if not fill:
                 reason = engine._last_order_error.get(b.product_id, "real sell did not fill")
                 results.append({

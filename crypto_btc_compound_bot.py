@@ -1000,7 +1000,8 @@ def breakeven_win_rate(target_pct: float, stop_pct: float = None,
     return net_loss / (net_win + net_loss)
 
 
-async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT_ID):
+async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT_ID,
+                           source: str = None):
     """Spends usd_amount on product_id at market. Returns (filled_qty, filled_price) or None.
 
     Before placing, clamps usd_amount to the real current USD cash
@@ -1063,10 +1064,11 @@ async def place_market_buy(session, usd_amount: float, product_id: str = PRODUCT
         "side": "BUY",
         "order_configuration": {"market_market_ioc": {"quote_size": f"{usd_amount:.2f}"}},
     }
-    return await _place_and_confirm(session, path, order)
+    return await _place_and_confirm(session, path, order, source=source)
 
 
-async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
+async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID,
+                            source: str = None):
     """Sells qty of product_id at market. Returns (filled_qty, filled_price) or None.
 
     Before placing, clamps qty to the real held balance and rounds it down
@@ -1105,7 +1107,7 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID):
         "side": "SELL",
         "order_configuration": {"market_market_ioc": {"base_size": f"{qty:.{decimals}f}"}},
     }
-    return await _place_and_confirm(session, path, order)
+    return await _place_and_confirm(session, path, order, source=source)
 
 
 async def get_best_bid_ask(session, product_id: str = PRODUCT_ID):
@@ -1404,7 +1406,32 @@ def _is_permanent_order_rejection(reason: str) -> bool:
     return any(pattern in reason for pattern in _PERMANENT_REJECTION_PATTERNS)
 
 
-async def _place_and_confirm(session, path: str, order: dict):
+async def _record_order_source(order_id: str, source: str, product_id: str, side: str):
+    """Remember which subsystem asked for this order.
+
+    Coinbase fills carry order_id and NOT client_order_id - checked
+    against a real fill on 2026-09-28 before this was built, because
+    tagging client_order_id was the obvious plan and would have produced
+    a tag that never comes back. order_id is the only join key the fills
+    feed actually offers.
+
+    NEVER fatal and never blocking a trade: an attribution row is a
+    convenience for a later audit, and losing one must not cost a fill.
+    """
+    if not order_id or not source:
+        return
+    try:
+        from models import OrderAttribution
+        async with get_session_factory()() as db:
+            db.add(OrderAttribution(order_id=str(order_id), source=str(source)[:64],
+                                    product_id=product_id, side=side))
+            await db.commit()
+    except Exception as e:
+        log.debug(f"[BTC-COMPOUND] order attribution not recorded (non-fatal): "
+                  f"{type(e).__name__}: {e}")
+
+
+async def _place_and_confirm(session, path: str, order: dict, source: str = None):
     product_id = order.get("product_id")
     try:
         async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order, timeout=15) as r:
@@ -1418,6 +1445,10 @@ async def _place_and_confirm(session, path: str, order: dict):
             order_id = resp["success_response"]["order_id"]
             if product_id:
                 _last_order_error.pop(product_id, None)
+            # Recorded the moment Coinbase mints the id, before the fill
+            # poll below, so a slow or failed poll cannot lose the only
+            # link between this order and whoever asked for it.
+            await _record_order_source(order_id, source, product_id, order.get("side"))
     except Exception as e:
         log.warning(f"[BTC-COMPOUND] Order placement failed: {e}")
         if product_id:

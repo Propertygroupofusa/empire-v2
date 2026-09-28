@@ -2878,3 +2878,46 @@ class CapitalSnapshot(Base):
             "locked_usd": self.locked_usd,
             "open_branches": self.open_branches,
         }
+
+
+class OrderAttribution(Base):
+    """Which subsystem placed a given Coinbase order.
+
+    WHY THIS TABLE EXISTS. maker_only_holds can say a taker leg was
+    billed after maker-only was armed, but never which path placed it -
+    so it lists six possibilities and a reader has to guess. The obvious
+    fix was to tag client_order_id at placement.
+
+    THAT WOULD NOT HAVE WORKED, and it was checked before it was built.
+    Coinbase's /orders/historical/fills returns, per fill: commission,
+    entry_id, liquidity_indicator, order_id, price, product_id, side,
+    size, trade_id, trade_time and a dozen more - and NO client_order_id.
+    A tag written there never comes back on the fill.
+
+    What does come back is order_id, which Coinbase mints and returns in
+    success_response at placement. Recording it against the source that
+    asked for the order makes every future fill attributable by a join
+    the fills feed can actually satisfy.
+
+    Written only for orders that go through _place_and_confirm, which is
+    the engine's market-order path - exactly the orders that can produce
+    a taker fill. Maker orders are post_only and cannot cross, so they
+    are not what this is for.
+    """
+    __tablename__ = "order_attribution"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Coinbase's own id, the join key the fills feed carries.
+    order_id = Column(String, index=True, unique=True)
+    # Free text rather than an enum: a new subsystem should be able to
+    # tag itself without a migration, and an unrecognised source is far
+    # more useful than an absent one.
+    source = Column(String, index=True)
+    product_id = Column(String, index=True)
+    side = Column(String)
+    placed_at = Column(DateTime, index=True, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {"order_id": self.order_id, "source": self.source,
+                "product_id": self.product_id, "side": self.side,
+                "placed_at": self.placed_at.isoformat() + "Z" if self.placed_at else None}
