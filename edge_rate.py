@@ -52,6 +52,23 @@ BASES = {
 #: price, and small enough that a year of them is ~8,760 rows.
 SNAPSHOT_INTERVAL_SECONDS = 3600.0
 
+#: The shortest window that may be reported as a rate PER DAY.
+#:
+#: FOUND IN THIS MODULE'S OWN FIRST LIVE OUTPUT. Two snapshots an hour
+#: apart gave "$4.30 realised over 0.04 day(s) = 0.9519%/day" on the
+#: account and 2.6569%/day on working capital - roughly fifty times what
+#: the same fleet has averaged over 26 days.
+#:
+#: The grid trades in bursts. Three round trips landed inside one
+#: morning and then nothing for hours, so multiplying any single hour by
+#: 24 says nothing about a day. This module exists because a long
+#: measurement was divided by an instantaneous denominator; extrapolating
+#: a short measurement to a long period is that same error reversed, and
+#: it shipped inside the fix for the first one.
+#:
+#: A day, because "per day" is what is being claimed.
+MIN_SPAN_DAYS = 1.0
+
 
 def _num(v):
     """A finite float, or None. None means UNREADABLE and never 0.0."""
@@ -83,6 +100,16 @@ def _v(status, basis, detail, **extra):
     out = {"status": status, "basis": basis, "pct_per_day": None, "detail": detail}
     out.update(extra)
     return out
+
+
+def _too_short(days, delta, label):
+    """Why a short window is not a daily rate, and how much longer it needs."""
+    need_h = max(0.0, (MIN_SPAN_DAYS - days) * 24.0)
+    return (f"${delta:,.2f} realised across {days * 24:.1f}h of {label}. That is real, "
+            f"but it is not a rate PER DAY: this fleet trades in bursts, and "
+            f"multiplying one short window by {1.0 / max(days, 1e-9):.0f} would claim "
+            f"a daily figure no day has produced. Needs {need_h:.1f} more hours before "
+            f"a rate is reported.")
 
 
 def rate_between(a, b, basis="account"):
@@ -126,10 +153,14 @@ def rate_between(a, b, basis="account"):
                   f"nothing is not a large rate, it is no rate")
 
     delta = rb - ra
+    if days < MIN_SPAN_DAYS:
+        return _v(UNKNOWN, basis, _too_short(days, delta, label),
+                  span_days=round(days, 4), realized_delta_usd=round(delta, 2),
+                  basis_usd=round(avg, 2))
     pct = (delta / avg) / days * 100.0
     return {"status": OK, "basis": basis, "pct_per_day": pct,
             "basis_usd": round(avg, 2), "realized_delta_usd": round(delta, 2),
-            "days": round(days, 4),
+            "days": round(days, 4), "span_days": round(days, 4),
             "detail": (f"${delta:,.2f} over {days:.2f} day(s) against ${avg:,.2f} of "
                        f"{label}, averaged across the window = {pct:.4f}%/day")}
 
@@ -192,10 +223,16 @@ def series_rate(snapshots, basis="account"):
                   f"{label} averages ${avg:,.2f} across the series", snapshots=len(rows))
 
     delta = rb - ra
+    if days < MIN_SPAN_DAYS:
+        return _v(UNKNOWN, basis, _too_short(days, delta, label),
+                  span_days=round(days, 4), realized_delta_usd=round(delta, 2),
+                  basis_usd=round(avg, 2), snapshots=len(rows),
+                  first_at=_at(first).isoformat(), last_at=_at(last).isoformat())
     pct = (delta / avg) / days * 100.0
     return {"status": OK, "basis": basis, "pct_per_day": pct,
             "basis_usd": round(avg, 2), "realized_delta_usd": round(delta, 2),
-            "days": round(days, 4), "snapshots": len(rows),
+            "days": round(days, 4), "span_days": round(days, 4),
+            "snapshots": len(rows),
             "first_at": _at(first).isoformat(), "last_at": _at(last).isoformat(),
             "detail": (f"${delta:,.2f} realised over {days:.2f} day(s) against "
                        f"${avg:,.2f} of {label}, time-weighted across "

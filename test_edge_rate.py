@@ -209,3 +209,65 @@ def test_the_endpoint_says_how_long_until_a_rate_exists():
     body, _ = _src("routers/trading_dashboard.py", "edge_rate_endpoint")
     assert "if len(snaps) < 2:" in body
     assert "hour(s) from now" in body
+
+
+# ── the mirror of the mistake this module was built for ──────────────────
+
+def test_an_hour_of_data_is_not_a_daily_rate():
+    """FOUND IN MY OWN CODE, on its first live output.
+
+    /edge-rate's first real answer, from two snapshots one hour apart:
+
+        $4.30 realised over 0.04 day(s) against $10,805.44
+        = 0.9519%/day on the account, 2.6569%/day on working capital
+
+    Fifty times the rate the same fleet has averaged over 26 days. The
+    grid trades in bursts - three round trips clustered in one morning,
+    then nothing for hours - so multiplying any single hour by 24 is
+    meaningless.
+
+    This module exists because a long measurement was divided by an
+    instantaneous denominator. Extrapolating a short measurement to a
+    long period is the same error pointing the other way, and I shipped
+    it into the fix for the first one.
+    """
+    s = [snap(0, 52.40), snap(1, 56.70)]
+    r = er.series_rate(s, basis="account")
+    assert r["status"] == er.UNKNOWN
+    assert r["pct_per_day"] is None
+
+
+def test_it_says_how_much_longer_it_needs():
+    s = [snap(0, 52.40), snap(1, 56.70)]
+    r = er.series_rate(s, basis="account")
+    assert "more" in r["detail"].lower() or "needs" in r["detail"].lower()
+    assert r["span_days"] < 0.1
+
+
+def test_the_figures_are_still_shown_while_the_span_is_too_short():
+    """UNKNOWN must not hide the data - a reader watching it fill needs
+    to see the numbers accumulating."""
+    s = [snap(0, 52.40), snap(1, 56.70)]
+    r = er.series_rate(s, basis="account")
+    assert r["realized_delta_usd"] == pytest.approx(4.30)
+    assert r["snapshots"] == 2
+
+
+def test_a_full_day_is_enough():
+    s = [snap(0, 52.40), snap(24, 56.70)]
+    r = er.series_rate(s, basis="account")
+    assert r["status"] == er.OK
+    assert r["pct_per_day"] == pytest.approx(4.30 / 10000.0 * 100)
+
+
+def test_just_under_a_day_is_still_refused():
+    """A threshold that can be walked up to is not a threshold."""
+    assert er.series_rate([snap(0, 1.0), snap(23.9, 2.0)],
+                          basis="account")["status"] == er.UNKNOWN
+
+
+def test_rate_between_two_snapshots_carries_the_same_floor():
+    """The pair helper must not be a way around the series floor."""
+    r = er.rate_between(snap(0, 52.40), snap(1, 56.70), basis="account")
+    assert r["status"] == er.UNKNOWN
+    assert r["pct_per_day"] is None

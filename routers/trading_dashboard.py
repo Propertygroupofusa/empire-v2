@@ -9338,6 +9338,13 @@ async def edge_rate_endpoint(hours: int = 720, basis: str = "account"):
             f"grid cycle, so a first rate is available about "
             f"{max(0, 2 - len(snaps))} hour(s) from now. Until then this reports "
             f"UNKNOWN rather than dividing a long measurement by a single reading.")
+    elif out["rate"]["status"] == edge_rate.UNKNOWN and "span_days" in out["rate"]:
+        # Two snapshots an hour apart DID produce a rate on the first live
+        # call: 0.9519%/day on the account, 2.6569%/day on working capital,
+        # from $4.30 over 0.04 days. Roughly fifty times what this fleet has
+        # averaged over 26 days. A short window extrapolated to a day is the
+        # same error as a long one divided by an instant.
+        out["detail"] = out["rate"]["detail"]
     return out
 
 
