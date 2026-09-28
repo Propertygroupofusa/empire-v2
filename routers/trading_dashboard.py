@@ -8904,6 +8904,89 @@ async def close_one_grid_branch_endpoint(product_id: str, dry_run: bool = True,
     return result
 
 
+@router.post("/grid-status/redeploy-freed-cash")
+async def redeploy_freed_cash_endpoint(dry_run: bool = True,
+                                       source: str = None, targets: str = None):
+    """Put a closed branch's proceeds into the chosen branches. One shot.
+
+    The account owner closed ZEC-USD and said the money goes to NEAR-USD
+    and JASMY-USD. This is that instruction, made checkable: it cannot
+    fire before the sale lands, cannot fire twice, cannot spend the cash
+    reserve, and cannot push either target through the 20% concentration
+    ceiling that closing ZEC was meant to relieve.
+
+    It places NO order. It raises allocated_usd on the targets, and each
+    branch then buys its own dips through every gate the rest of the
+    fleet passes. Deciding WHERE is the whole of this; deciding WHEN
+    stays with the grid.
+
+    DRY RUN BY DEFAULT, and write-guarded like every POST here.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import redeploy_freed_cash as rfc
+    from models import CryptoGridBranch, TradingBotState
+    from sqlalchemy import select
+
+    g = crypto_grid_bot_module
+    src = (source or rfc.DEFAULT_SOURCE).strip().upper()
+    tgts = tuple(t.strip().upper() for t in targets.split(",")) if targets \
+        else rfc.DEFAULT_TARGETS
+    marker = f"redeploy_done_{src}"
+
+    async with g.get_session_factory()() as db:
+        done_row = (await db.execute(select(TradingBotState).where(
+            TradingBotState.bot_name == marker))).scalar_one_or_none()
+
+    status = await g.get_grid_status()
+    rows, report = rfc.plan(
+        status.get("branches") or [],
+        status.get("real_free_cash_usd"),
+        await g.fleet_cost_basis_by_product(),
+        source=src, targets=tgts,
+        already_done=done_row is not None)
+    report["source"] = src
+    report["targets"] = list(tgts)
+    report["plan"] = rows
+
+    if dry_run or not rows:
+        report["dry_run"] = bool(dry_run)
+        return report
+
+    written = []
+    async with g.get_session_factory()() as db:
+        for r in rows:
+            # Re-read inside the transaction: a buy or a sale between the
+            # plan and the write changes allocated_usd, and writing the
+            # planned figure over it would silently undo that trade.
+            row = (await db.execute(select(CryptoGridBranch).where(
+                CryptoGridBranch.bot_name == r["bot_name"]))).scalars().first()
+            if row is None:
+                log.warning(f"[redeploy] {r['bot_name']} vanished since the plan - skipping")
+                continue
+            before = float(row.allocated_usd or 0.0)
+            row.allocated_usd = round(before + r["add_usd"], 2)
+            row.num_levels = g._safe_num_levels_for_allocation(row.allocated_usd)
+            written.append({**r, "allocated_before": round(before, 2),
+                            "allocated_after": row.allocated_usd,
+                            "num_levels": row.num_levels})
+        if written:
+            db.add(TradingBotState(bot_name=marker, base_capital=1.0))
+        await db.commit()
+
+    for w in written:
+        await g._log_activity_safe(
+            w["bot_name"], w["product_id"], "REALLOCATE",
+            f"Received ${w['add_usd']:,.2f} from the closed {src} branch - "
+            f"allocation now ${w['allocated_after']:,.2f} across {w['num_levels']} level(s). "
+            f"No order placed; this branch buys its own dips.")
+    log.warning(f"[redeploy] {src} proceeds -> {len(written)} branch(es), "
+                f"${sum(w['add_usd'] for w in written):,.2f}")
+    report["written"] = written
+    report["dry_run"] = False
+    return report
+
+
 @router.get("/fleet-status")
 async def get_fleet_status():
     """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""

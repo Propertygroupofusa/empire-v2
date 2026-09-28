@@ -39,7 +39,8 @@ guards against - and silence must never be mistaken for a measurement.
 
 from capital_velocity import MAX_SINGLE_COIN_SHARE
 
-__all__ = ["MAX_SINGLE_COIN_SHARE", "coin_share", "concentration_verdict"]
+__all__ = ["MAX_SINGLE_COIN_SHARE", "coin_share", "concentration_verdict",
+           "headroom_usd"]
 
 
 def coin_share(product_id, cost_basis_by_product, spend_usd=0.0):
@@ -99,3 +100,34 @@ def concentration_verdict(product_id, cost_basis_by_product, spend_usd,
                        f"rest of the fleet grows or as its own slices sell at a profit.")
     return False, (f"this buy would take {product_id} from {pct_now:.1f}% to {pct_after:.1f}% "
                    f"of the fleet, through the {cap:.0f}% ceiling")
+
+
+def headroom_usd(product_id, cost_basis_by_product, max_share=MAX_SINGLE_COIN_SHARE):
+    """The most that may be added to this coin without breaching the
+    ceiling. None when it cannot be computed; 0.0 when already at or over.
+
+    Solving (basis + add) / (fleet + add) <= max_share for add gives
+
+        add <= (max_share * fleet - basis) / (1 - max_share)
+
+    because the money added lands in BOTH the numerator and the
+    denominator - it is the coin's share of a fleet that now includes it.
+    Treating the denominator as fixed understates the room by a fifth at
+    a 20% ceiling, which is a quiet way to strand cash in an allocation
+    a branch is then refused permission to spend.
+
+    This exists so a caller can size a top-up to what is allowed rather
+    than proposing a number the gate will refuse. concentration_verdict
+    remains the thing that decides; this only says how much would pass.
+    """
+    if cost_basis_by_product is None or not (0 < max_share < 1):
+        return None
+    try:
+        held = {str(k): float(v or 0.0) for k, v in dict(cost_basis_by_product).items()}
+    except (TypeError, ValueError):
+        return None
+    fleet = sum(held.values())
+    if fleet <= 0:
+        return None
+    room = (max_share * fleet - held.get(str(product_id), 0.0)) / (1.0 - max_share)
+    return max(0.0, round(room, 2))

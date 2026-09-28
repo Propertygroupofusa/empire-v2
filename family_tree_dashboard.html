@@ -4582,10 +4582,28 @@ function renderStatusStrip(d, history) {
             stripTotal.textContent = '$' + backed.toFixed(2);
             stripTotal.title = 'Coin actually held at market, plus the real USD wallet. '
                 + 'The same figure the backing invariant checks branch claims against.';
+            // Remembered so one failed poll does not blank a number that was
+            // real seconds ago. Per-tab only; nothing is persisted.
+            window.__lastBackedUsd = backed;
+            window.__lastBackedAt = Date.now();
+        } else if (window.__lastBackedUsd != null) {
+            // A GAP IS NOT A ZERO - and it is not a blank either, when the
+            // last reading is still on the screen. The venue balance read
+            // fails intermittently (seen live 2026-09-28), and blanking the
+            // headline for one bad poll trained the eye to distrust a
+            // number that was correct. Show the last REAL figure, say how
+            // old it is, and never pass it off as current. Same reasoning
+            // as loadCombinedProgress, which already refuses to destroy a
+            // built-up chart over one transient failure.
+            var ageSec = Math.round((Date.now() - window.__lastBackedAt) / 1000);
+            stripTotal.textContent = '$' + window.__lastBackedUsd.toFixed(2);
+            stripTotal.title = 'STALE - the venue balance could not be read this poll. This '
+                + 'is the last real figure, from ' + ageSec + 's ago, not a current one.';
+            var staleTag = ageSec < 90 ? '' : ' (' + Math.round(ageSec / 60) + 'm old)';
+            stripTotal.textContent = '$' + window.__lastBackedUsd.toFixed(2) + staleTag;
         } else {
-            // A gap is not a zero, and it is not the old mismatched pair
-            // either. Say the total could not be built rather than printing
-            // a number that does not match the line beneath it.
+            // Nothing real has ever been read this session, so there is
+            // genuinely nothing to show. Never the old mismatched pair.
             stripTotal.textContent = '—';
             stripTotal.title = 'The account backing could not be read this poll, so there '
                 + 'is no total to show. It fills back in on the next successful read.';
