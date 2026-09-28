@@ -9005,6 +9005,125 @@ async def redeploy_freed_cash_endpoint(dry_run: bool = True,
     return report
 
 
+@router.post("/grid-status/reconcile-slices")
+async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True,
+                                    accept_writeoff: bool = False):
+    """Bring branches' tracked units down to what the wallet actually holds.
+
+    Another subsystem sold the coin. Measured 2026-09-27/28: the
+    concentration trimmer took $885.43 of ZEC and $244.78 of XRP, and a
+    resting stop took 0.347873 ETH. None of those go through the grid, so
+    none touched a slice row, and the branches went on claiming units the
+    wallet no longer had - a sale of those slices would have been an order
+    for coin that does not exist.
+
+    THIS IS NOT A LOSS. The coin was sold and the proceeds are already in
+    the wallet as cash. What is corrected here is bookkeeping that never
+    learned about the sale. No P&L is booked either: the trim log records
+    USD and a timestamp, not units or a fill price, so a realised figure
+    would be a guess sitting where a measurement belongs.
+
+    DRY RUN BY DEFAULT. Deleting tracked cost basis is not reversible, so
+    the default answer is a priced preview per branch. Executing takes
+    dry_run=false AND accept_writeoff=true. Omit product_id to cover every
+    short branch; pass one to do a single coin.
+
+    Write-guarded like every POST on this router.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import account_census
+    import aiohttp as _aiohttp
+    import slice_reconcile
+    from models import CryptoGridSlice
+    from sqlalchemy import select
+
+    g = crypto_grid_bot_module
+    status = await g.get_grid_status()
+    async with _aiohttp.ClientSession() as _s:
+        census = await account_census.census(_s, tracked_usd=0.0)
+    if not census.get("available"):
+        raise HTTPException(
+            status_code=400,
+            detail=("the wallet holdings could not be read, so no position can be "
+                    "confirmed. A gap is not a zero, and a zero here would delete "
+                    "every slice on the fleet."))
+    wallet = {str(r.get("asset")).upper(): r.get("units")
+              for r in (census.get("holdings") or [])}
+
+    want = (product_id or "").strip().upper() or None
+    branches, skipped = [], []
+    for b in (status.get("branches") or []):
+        pid = b.get("product_id")
+        if want and pid != want:
+            continue
+        slices = b.get("slices") or []
+        if not slices:
+            continue
+        held = wallet.get(str(pid).split("-")[0].upper())
+        if held is None:
+            # Absent from the reading is UNKNOWN, never zero.
+            skipped.append({"product_id": pid, "reason": "NOT_IN_WALLET_READING"})
+            continue
+        actions, report = slice_reconcile.plan(slices, held, price=b.get("current_price"))
+        if report.get("status") != "READY":
+            continue
+        branches.append({"product_id": pid, "bot_name": b.get("bot_name"),
+                         "actions": actions, **report})
+
+    total_basis = round(sum(x["cost_basis_removed_usd"] or 0.0 for x in branches), 2)
+    out = {"branches": branches, "branch_count": len(branches),
+           "cost_basis_removed_usd": total_basis, "skipped": skipped or None}
+
+    if not branches:
+        out["detail"] = ("no branch claims more coin than the wallet holds - nothing to "
+                         "reconcile")
+        return out
+    if dry_run:
+        out["dry_run"] = True
+        out["detail"] = (
+            f"PREVIEW ONLY - nothing was changed. {len(branches)} branch(es) claim coin "
+            f"the wallet does not hold; clearing it removes ${total_basis:,.2f} of tracked "
+            f"cost basis. Not a loss - the proceeds are already in the wallet as cash. "
+            f"Re-send with dry_run=false and accept_writeoff=true to apply.")
+        return out
+    if not accept_writeoff:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"this removes ${total_basis:,.2f} of tracked cost basis across "
+                    f"{len(branches)} branch(es) and is not reversible. Re-send with "
+                    f"accept_writeoff=true if that is intended."))
+
+    applied = []
+    async with g.get_session_factory()() as db:
+        for br in branches:
+            for a in br["actions"]:
+                row = (await db.execute(select(CryptoGridSlice).where(
+                    CryptoGridSlice.id == a["slice_id"]))).scalars().first()
+                if row is None:
+                    continue
+                if a["action"] == "REMOVE":
+                    await db.delete(row)
+                else:
+                    row.qty = a["qty_after"]
+            applied.append({"product_id": br["product_id"],
+                            "units_removed": br["units_removed"],
+                            "cost_basis_removed_usd": br["cost_basis_removed_usd"]})
+        await db.commit()
+
+    for a in applied:
+        await g._log_activity_safe(
+            None, a["product_id"], "RECONCILE",
+            f"Wrote off {a['units_removed']:.8f} units another subsystem had already sold "
+            f"- ${a['cost_basis_removed_usd']:,.2f} of tracked cost basis. Not a loss: the "
+            f"proceeds were already in the wallet.")
+    log.warning(f"[reconcile] {len(applied)} branch(es), ${total_basis:,.2f} of tracked "
+                f"cost basis written off")
+    out["applied"] = applied
+    out["dry_run"] = False
+    return out
+
+
 @router.get("/fleet-status")
 async def get_fleet_status():
     """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""
