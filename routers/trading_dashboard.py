@@ -9014,6 +9014,88 @@ async def redeploy_freed_cash_endpoint(dry_run: bool = True,
     return report
 
 
+@router.post("/grid-status/free-locked-inventory")
+async def free_locked_inventory_endpoint(dry_run: bool = True):
+    """Cancel the resting stops that are holding the grid's own coin.
+
+    At 2026-09-28T09:44Z $923.23 was reserved this way across six live
+    branches - XLM $419.30, ALGO $141.64, SOL $91.50, LINK $90.11,
+    NEAR $81.29, ACH $70.14. ALGO had 0.046 units free out of 1134.35,
+    so that branch could not sell anything at all.
+
+    CANCEL ONLY. This places no order, at any price, under any argument.
+    The worst outcome available is a position left unprotected - never a
+    sale. It touches only orders this system placed (its own
+    client_order_id prefix) and only coins a grid branch tracks; a stop
+    the owner set by hand, or one on a coin no branch trades, is left
+    exactly where it is.
+
+    FAILS CLOSED, unlike every protection in this codebase: an
+    unreadable order book or an unreadable grid cancels nothing. Failing
+    open elsewhere leaves behaviour as it was; here it would move live
+    orders on a guess.
+
+    WHAT IT COSTS. Each cancelled stop is downside protection given up.
+    The branch keeps its own adaptive per-slice stop, which sells one
+    slice through the grid's own path and leaves the books consistent -
+    but that one only runs while this service runs, and a venue-side
+    order does not need us to be awake. That is the trade, and it is why
+    this is a deliberate call and not a loop.
+
+    DRY RUN BY DEFAULT. Write-guarded like every POST on this router.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import account_census
+    import aiohttp as _aiohttp
+    import free_locked_inventory as fli
+    import resting_stops_worker as rsw
+
+    tracked = None
+    try:
+        tracked, _ = await crypto_grid_bot_module.fleet_tracked_units_by_product()
+    except Exception as exc:
+        log.warning(f"[free-locked] grid unreadable: {type(exc).__name__}: {exc}")
+
+    async with _aiohttp.ClientSession() as _s:
+        # Only this system's own resting stops - open_stop_orders filters
+        # on the client_order_id prefix it writes. None means unreadable.
+        try:
+            stops = await rsw.open_stop_orders(_s)
+        except Exception as exc:
+            log.warning(f"[free-locked] open orders unreadable: {type(exc).__name__}: {exc}")
+            stops = None
+        census = await account_census.census(_s, tracked_usd=0.0)
+        holdings = (census.get("holdings") or []) if census.get("available") else None
+
+        result = fli.plan(stops, tracked, holdings)
+        out = fli.summarise(result, dry_run=dry_run)
+
+        if result.get("ok") and not dry_run:
+            done, failed = [], []
+            for a in out["actions"]:
+                if a.get("action") != fli.CANCEL:
+                    continue
+                ok, body = await rsw.cancel(_s, a["order_id"])
+                (done if ok else failed).append(a["asset"])
+                a["cancelled"] = bool(ok)
+                if not ok:
+                    # The venue's own words, not a summary of them.
+                    a["venue_response"] = body
+            out["cancelled"] = done
+            out["cancel_failed"] = failed or None
+            # Recomputed from what actually happened, never from the plan.
+            out["applied"] = True
+            log.warning(f"[free-locked] cancelled {len(done)} resting stop(s): "
+                        f"{', '.join(done) or 'none'}"
+                        + (f"; FAILED on {', '.join(failed)}" if failed else ""))
+        else:
+            out["applied"] = False
+
+    out["is_a_preview_not_an_order"] = bool(dry_run)
+    return out
+
+
 @router.post("/grid-status/reconcile-slices")
 async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True,
                                     accept_writeoff: bool = False):

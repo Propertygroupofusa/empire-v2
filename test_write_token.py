@@ -17,6 +17,28 @@ from pathlib import Path
 
 HTML = Path(__file__).with_name("family_tree_dashboard.html").read_text(encoding="utf-8")
 
+
+def strip_comments(js):
+    """Source with // line comments and /* */ blocks removed.
+
+    This check was RED for hours on a comment. The page quotes the
+    server's own refusal - "Missing x-dashboard-token header (or
+    ?token=). This endpoint changes state." - so a substring search over
+    the raw source found "token=" and "?token" in prose explaining why
+    neither may appear in a URL, and reported the page as leaking the
+    key into a query string.
+
+    A security check that cries wolf on its own documentation is one
+    people learn to ignore, which is the more expensive failure here
+    than the one it was watching for. It must run against what the page
+    can EXECUTE.
+
+    Same stripper as test_dashboard_accuracy.strip_comments, for the
+    same reason.
+    """
+    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+    return "\n".join(re.sub(r"(^|\s)//.*$", "", ln) for ln in js.split("\n"))
+
 _passed = _failed = 0
 
 
@@ -61,7 +83,7 @@ tok_block = HTML[HTML.index("const TOKEN_KEY"):HTML.index("// SELL A DOLLAR AMOU
 ok("the token is never console.logged",
    "console.log" not in tok_block and "console.warn" not in tok_block)
 ok("it never goes into a query string",
-   "token=" not in tok_block and "?token" not in HTML)
+   "token=" not in strip_comments(tok_block) and "?token" not in strip_comments(HTML))
 ok("writes go to same-origin paths only",
    all(u.startswith("'/api/") for u in re.findall(r"postGuarded\((['\"][^'\"]+)", HTML)
        ) if "postGuarded(" in HTML else True)
