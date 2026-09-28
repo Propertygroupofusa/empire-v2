@@ -180,3 +180,72 @@ if __name__ == "__main__":
             except AssertionError as e:
                 fails += 1; print(f"  FAIL {name}: {e}")
     sys.exit(1 if fails else 0)
+
+
+# ── the caps come from market_brain, the system already in the repo ────
+#
+# On 28 Sep I was about to ask the account owner to invent a
+# per-position and a total-notional number, because the apex mandate's
+# $120/$300 refused every entry. Wrong question: market_brain.py already
+# held a complete sizing discipline - a milestone ladder, a confidence
+# ladder, and a "Never exceed 60% total exposure" gate that SUMS across
+# open positions, which is the exact check prop_bot lacks. Nothing
+# imports it.
+
+def test_the_caps_are_derived_from_market_brain_not_hardcoded_here():
+    import market_brain as mb
+    caps = pc.caps_from_market_brain(1007.0)
+    assert "_unreadable" not in caps, caps
+    top = max(mb.confidence_to_alloc(s) for s in range(11))
+    assert caps["max_per_position"] == round(1007.0 * top, 2)
+    assert caps["max_total_notional"] == round(1007.0 * mb.CONFIG["max_exposure"], 2)
+    assert caps["max_open_positions"] == mb.get_milestone(1007.0)["max_pos"]
+
+
+def test_retuning_market_brain_moves_the_caps_with_it():
+    # The point of deriving rather than copying. A hand-written ladder
+    # beside the real one goes stale silently; this must not.
+    import market_brain as mb
+    before = pc.caps_from_market_brain(1007.0)["max_total_notional"]
+    original = mb.CONFIG["max_exposure"]
+    try:
+        mb.CONFIG["max_exposure"] = 0.30
+        after = pc.caps_from_market_brain(1007.0)["max_total_notional"]
+    finally:
+        mb.CONFIG["max_exposure"] = original
+    assert after < before and after == round(1007.0 * 0.30, 2)
+
+
+def test_the_six_meta_orders_through_market_brains_own_numbers():
+    caps = pc.caps_from_market_brain(1007.0)
+    allowed, total = replay(caps)
+    assert allowed == 2, allowed
+    assert total == 244.86          # vs the $734.57 that actually went out
+
+
+def test_the_ladder_scales_with_the_balance():
+    small = pc.caps_from_market_brain(600.0)
+    big = pc.caps_from_market_brain(20000.0)
+    assert big["max_total_notional"] > small["max_total_notional"]
+    assert big["max_open_positions"] >= small["max_open_positions"]
+
+
+def test_an_unreadable_ladder_refuses_and_says_why():
+    """The bug I put in this module and took back out.
+
+    caps_from_market_brain first swallowed every exception and returned
+    None, so a ModuleNotFoundError (market_brain imports `schedule`)
+    looked exactly like "the ladder has nothing to say". Gap-as-zero, in
+    the module written to stop gap-as-zero. The reason travels with the
+    refusal now, and check_order refuses on it rather than proceeding.
+    """
+    bad = {"_unreadable": "ModuleNotFoundError: No module named 'schedule'"}
+    v, why, _ = pc.check_order("META", QTY, PRICE, bad, ledger=pc.CapLedger())
+    assert v == pc.REFUSE
+    assert "unreadable" in why and "schedule" in why
+
+
+def test_a_nonsense_balance_is_unreadable_not_unlimited():
+    for bad in (0, -5, "plenty", None):
+        caps = pc.caps_from_market_brain(bad)
+        assert caps.get("_unreadable"), (bad, caps)

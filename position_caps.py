@@ -90,6 +90,8 @@ def check_order(symbol, qty, price, capital, ledger=None, open_notional=0.0,
 
     if not isinstance(capital, dict):
         return REFUSE, "no capital mandate to check against", notional
+    if capital.get("_unreadable"):
+        return REFUSE, f"sizing ladder unreadable: {capital['_unreadable']}", notional
 
     per_position = _num(capital.get("max_per_position"))
     total_cap = _num(capital.get("max_total_notional"))
@@ -144,3 +146,66 @@ def check_order(symbol, qty, price, capital, ledger=None, open_notional=0.0,
                     f"max_open_positions {int(max_open)}", notional)
 
     return ALLOW, None, notional
+
+
+# ── the numbers come from market_brain, not from me ────────────────────
+#
+# On 28 Sep I was about to ask the account owner to pick a per-position
+# and total-notional number, because the apex mandate's $120/$300 would
+# have refused every entry. That was the wrong question: the system was
+# already in the repo and nothing was running it.
+#
+# market_brain.py holds a complete, coherent sizing discipline:
+#
+#     MILESTONES            alloc % and max_pos, scaling with balance
+#     confidence_to_alloc   5%-28% of portfolio, by signal confidence
+#     can_open_position     "Never exceed 60% total exposure" - and it
+#                           SUMS alloc across every open position, which
+#                           is the exact check missing from prop_bot
+#     CONFIG["max_exposure"]                0.60
+#
+# Nothing imports market_brain. prop_bot runs its own competing
+# size_position() - "AGGRESSIVE COMPOUNDING", 20-40% of remaining cash
+# per slot times POSITION_SCALE_MULTIPLIER, with a 50% MAX_RISK_PERCENT
+# measured only against positions already FILLED. Two sizing systems,
+# one account, nothing forcing them to agree: the same bug class as the
+# two 20% checks and the hardcoded 483.00.
+#
+# These are DERIVED from market_brain's own constants at call time, never
+# copied. A hand-written ladder beside the real one goes stale silently -
+# a lesson this repo has paid for more than once.
+def caps_from_market_brain(balance):
+    """{max_per_position, max_total_notional, max_open_positions} in
+    DOLLARS, for this balance, straight off market_brain's ladder.
+
+    Returns None if market_brain cannot be read - and check_order()
+    refuses on a missing mandate, so an unreadable ladder stops trading
+    rather than quietly falling back to something looser.
+    """
+    try:
+        import market_brain as mb
+        milestone = mb.get_milestone(float(balance))
+        # The largest a single position may ever be: the top of the
+        # confidence ladder. Read off the function rather than assumed,
+        # so re-tuning confidence_to_alloc moves this with it.
+        top_alloc = max(mb.confidence_to_alloc(s) for s in range(0, 11))
+        max_exposure = float(mb.CONFIG["max_exposure"])
+        bal = float(balance)
+    except Exception as exc:
+        # A bare `return None` here hid a ModuleNotFoundError and made
+        # "the ladder is unreadable" look identical to "the ladder says
+        # nothing" - gap-as-zero, in the very module written to stop it.
+        # The reason travels with the refusal now.
+        return {"_unreadable": f"{type(exc).__name__}: {exc}"}
+    if bal <= 0 or max_exposure <= 0 or top_alloc <= 0:
+        return {"_unreadable": f"nonsensical ladder: balance={bal}, "
+                               f"max_exposure={max_exposure}, top_alloc={top_alloc}"}
+    return {
+        "max_per_position": round(bal * top_alloc, 2),
+        "max_total_notional": round(bal * max_exposure, 2),
+        "max_open_positions": milestone["max_pos"],
+        "_source": (f"market_brain milestone {milestone['label']!r}: "
+                    f"{top_alloc*100:.0f}% max per position, "
+                    f"{max_exposure*100:.0f}% max exposure, "
+                    f"{milestone['max_pos']} positions"),
+    }
