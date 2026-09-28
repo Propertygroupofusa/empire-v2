@@ -9488,6 +9488,62 @@ async def get_capital_productivity(hours: float = 48.0):
 
 
 
+@router.get("/parked-capital")
+async def get_parked_capital():
+    """Parked capital split by WHAT WOULD MOVE IT.
+
+    Read-only. Places no order and cancels nothing.
+
+    The fleet already reported both halves of this in two invariants that
+    never met: no_dead_capital says how much cannot buy, and
+    grid_inventory_is_free says some of the coin is reserved at the
+    venue. Read apart they look like one problem with one size. They are
+    not - one is released by price and one by a cancel - and the owner
+    was reading the blended figure when they asked why it never moves.
+
+    Sourced from the SAME two calls the invariants page uses, not a
+    second opinion about the same balances: two numbers that must agree,
+    computed twice from two places, is this codebase's recurring bug.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import parked_capital as pc
+    import invariants as inv
+
+    status = await crypto_grid_bot_module.get_grid_status()
+    branches = status.get("branches") or []
+
+    # locked_positions stays None unless the lock state was really read.
+    # An unread lock is not an absent lock, and split_by_cause says so
+    # rather than reporting a clean, actionable-nothing verdict.
+    locked_positions = None
+    lock_error = None
+    try:
+        import account_census
+        import aiohttp as _aiohttp
+        tracked, _prices = await crypto_grid_bot_module.fleet_tracked_units_by_product()
+        async with _aiohttp.ClientSession() as _s:
+            census = await account_census.census(_s, tracked_usd=0.0)
+        if census.get("available"):
+            verdict = inv.grid_inventory_is_free(tracked, census.get("holdings") or [])
+            if verdict.get("status") == inv.FAIL:
+                locked_positions = verdict.get("locked_positions") or []
+            elif verdict.get("status") == inv.OK:
+                locked_positions = []
+            else:
+                lock_error = verdict.get("detail")
+        else:
+            lock_error = "the account census was unavailable, so no balance could be read"
+    except Exception as exc:
+        lock_error = f"{type(exc).__name__}: {exc}"
+
+    out = pc.split_by_cause(branches, locked_positions)
+    if lock_error:
+        out["lock_read_error"] = lock_error
+    out["as_of"] = _get_utc_timestamp()
+    return JSONResponse(content=out, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/edge-rate")
 async def edge_rate_endpoint(hours: int = 720, basis: str = "account"):
     """The fleet's edge as a rate, against a denominator that is stated.
