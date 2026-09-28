@@ -9489,6 +9489,53 @@ async def get_capital_productivity(hours: float = 48.0):
 
 
 
+@router.get("/alpaca-overview/equity-curve")
+async def get_equity_curve(days: int = 180):
+    """Where the account's equity actually sits in its own history.
+
+    Read-only. Places no order.
+
+    Exists because "the account hasn't been this low in months" was
+    repeated all day on 28 Sep with nothing behind it but that session's
+    P&L. Alpaca has carried the curve the whole time at
+    /v2/account/portfolio/history; nobody was reading it.
+
+    The verdict is THREE-valued. A window shorter than
+    equity_curve.MONTHS_CLAIM_MIN_DAYS returns UNKNOWN rather than a
+    confident answer drawn from whatever history happens to exist, and
+    says explicitly that UNKNOWN is not evidence against the claim.
+    """
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
+
+    import equity_curve
+
+    window = max(7, min(int(days), 1825))
+    params = {"period": f"{window}D", "timeframe": "1D"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{ALPACA_BASE_URL}/v2/account/portfolio/history",
+                               headers=ALPACA_HEADERS, params=params) as r:
+            if r.status != 200:
+                body = await r.text()
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Alpaca portfolio history failed ({r.status}): {body[:300]}")
+            history = await r.json()
+        # The live account, not the last daily bar. A bar from this
+        # morning is a stale denominator for "where are we now".
+        account = await _fetch_alpaca_account(session)
+
+    try:
+        live_equity = float(account.get("equity"))
+    except (TypeError, ValueError):
+        live_equity = None
+
+    out = equity_curve.assess_multi_month_low(history, live_equity)
+    out["requested_days"] = window
+    out["as_of"] = _get_utc_timestamp()
+    return JSONResponse(content=out, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/parked-capital")
 async def get_parked_capital():
     """Parked capital split by WHAT WOULD MOVE IT.
