@@ -186,6 +186,9 @@
         .negative {
             color: var(--accent-loss);
         }
+        .muted {
+            color: #8a8f98;
+        }
 
         .bot-status-section {
             background: var(--bg-secondary);
@@ -670,17 +673,36 @@
             card.className = 'account-card';
 
             const profitClass = account.total_profit >= 0 ? 'positive' : 'negative';
-            const growthClass = account.growth_percent >= 0 ? 'positive' : 'negative';
+
+            // A read that failed is shown as a failed read. This card used
+            // to print a hardcoded $483.00 with 0% growth whenever the
+            // account fetch threw, which is how it reported a $10,882
+            // account as $483 for as long as it has been deployed.
+            const unread = account.available === false;
+            const hasGrowth = account.growth_percent !== null && account.growth_percent !== undefined;
+            const growthClass = hasGrowth && account.growth_percent >= 0 ? 'positive' : 'muted';
+            const growthText = hasGrowth
+                ? `${account.growth_percent >= 0 ? '+' : ''}${account.growth_percent.toFixed(1)}%`
+                : '—';
 
             const buyingPower = account.buying_power !== undefined ? `${formatCurrency(account.buying_power)}` : 'N/A';
             const equity = account.equity !== undefined && account.equity > 0 ? `Equity: ${formatCurrency(account.equity)}` : '';
+            const split = (account.cash_usd !== undefined && account.cash_usd !== null)
+                ? `Cash ${formatCurrency(account.cash_usd)} · Coin ${formatCurrency(account.coin_usd)}`
+                : '';
+            const balanceText = unread
+                ? 'unavailable'
+                : (account.balance === null || account.balance === undefined
+                    ? 'unavailable' : formatCurrency(account.balance));
 
             card.innerHTML = `
                 <div class="account-name">${account.name}</div>
                 <div class="balance-row">
                     <div class="balance-label">${key === 'alpaca' ? 'Buying Power' : 'Balance'}</div>
-                    <div class="balance-value">${key === 'alpaca' ? buyingPower : formatCurrency(account.balance)}</div>
+                    <div class="balance-value">${key === 'alpaca' ? buyingPower : balanceText}</div>
                     ${equity ? `<div class="balance-label" style="margin-top: 8px;">${equity}</div>` : ''}
+                    ${split ? `<div class="balance-label" style="margin-top: 8px;">${split}</div>` : ''}
+                    ${unread && account.detail ? `<div class="balance-label" style="margin-top: 8px; color:#c0392b;">read failed: ${account.detail}</div>` : ''}
                 </div>
                 <div class="metric-row">
                     <div class="metric">
@@ -699,8 +721,8 @@
                 <div class="metric-row">
                     <div class="metric">
                         <div class="metric-label">Growth</div>
-                        <div class="metric-value ${growthClass}">
-                            ${account.growth_percent >= 0 ? '+' : ''}${account.growth_percent.toFixed(1)}%
+                        <div class="metric-value ${growthClass}" title="${account.growth_detail || ''}">
+                            ${growthText}
                         </div>
                     </div>
                 </div>

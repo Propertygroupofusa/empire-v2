@@ -7246,71 +7246,41 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Crypto bot not available")
 
     try:
-        # Fetch Coinbase USD balance
-        coinbase_balance = 0
+        # THE ACCOUNT, FROM THE ONE SOURCE THE CHECKS ALSO READ.
+        #
+        # What stood here was a second hand-rolled Coinbase JWT call, and
+        # it could never succeed. `import aiohttp` sat further down this
+        # same function (the Alpaca block), which makes `aiohttp` a local
+        # name for the WHOLE function, so this line raised
+        # UnboundLocalError before the request was ever built. The except
+        # below then substituted a literal - 483.00 - and the dashboard
+        # served it as the balance. On 2026-09-28 the page read
+        # "Coinbase (Crypto 24/7) $483.00, total profit $0.00, growth 0%"
+        # while the real account held $10,882.46 and had banked $59.16.
+        #
+        # A failed read is not a number. It is reported as unavailable.
+        census = None
+        census_error = None
         try:
-            if crypto_coinbase_bot.COINBASE_API_KEY_NAME and crypto_coinbase_bot.COINBASE_API_PRIVATE_KEY:
-                import jwt as pyjwt
-                import uuid
-
-                key_name = crypto_coinbase_bot.COINBASE_API_KEY_NAME
-                private_key_str = crypto_coinbase_bot.COINBASE_API_PRIVATE_KEY
-
-                # Build JWT
-                dt_obj = globals()['datetime']
-                tz_obj = globals()['timezone']
-                td_obj = globals()['timedelta']
-                now = dt_obj.now(tz_obj.utc)
-                expiry = now + td_obj(minutes=1)
-                payload = {
-                    "sub": key_name,
-                    # "cdp", not "cdp_service" - the issuer is validated.
-                    "iss": "cdp",
-                    "nbf": int(now.timestamp()),
-                    "exp": int(expiry.timestamp()),
-                    "iat": int(now.timestamp()),
-                    # Must be "METHOD host/path". This was the bare path with
-                    # no method and no host, so the signature never validated
-                    # and the call could only ever return 401. Matches the form
-                    # crypto_btc_compound_bot._build_jwt uses, which works.
-                    "uri": "GET api.coinbase.com/api/v3/brokerage/accounts",
-                }
-
-                try:
-                    # Try ES256 first (ECDSA)
-                    token = pyjwt.encode(payload, private_key_str, algorithm="ES256", headers={"alg": "ES256", "kid": key_name, "nonce": str(uuid.uuid4())})
-                except Exception:
-                    # Fallback to EdDSA
-                    token = pyjwt.encode(payload, private_key_str, algorithm="EdDSA", headers={"alg": "EdDSA", "kid": key_name, "nonce": str(uuid.uuid4())})
-
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                }
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        "https://api.coinbase.com/api/v3/brokerage/accounts",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=5)
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            usd_account = next(
-                                (a for a in data.get("accounts", []) if a.get("currency") == "USD"),
-                                None
-                            )
-                            if usd_account:
-                                coinbase_balance = round(float(usd_account.get("available_balance", {}).get("value", 0)), 2)
+            import account_census
+            async with aiohttp.ClientSession() as _cs:
+                census = await account_census.census(_cs, tracked_usd=0.0)
+            if not census.get("available"):
+                census_error = census.get("detail") or "census unavailable"
+                census = None
         except Exception as e:
-            log.warning(f"Coinbase balance fetch failed, using cached: {e}")
-            coinbase_balance = getattr(crypto_coinbase_bot, 'LAST_KNOWN_BALANCE', 483.00)
-
+            census_error = f"{type(e).__name__}: {e}"
+            log.warning(f"live-dashboard account read failed: {census_error}")
         # Fetch Alpaca account data
         alpaca_buying_power = 0
         alpaca_equity = 0
         try:
-            import aiohttp
+            # NO `import aiohttp` HERE. aiohttp is imported at module
+            # level (line 26); a local import of the same name rebinds it
+            # for the entire function, so every earlier use in this
+            # function raised UnboundLocalError. That is what made the
+            # account read above impossible and pinned the page to a
+            # hardcoded 483.00 for as long as it has been deployed.
             alpaca_key = os.getenv("ALPACA_API_KEY", "")
             alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
             if alpaca_key and alpaca_secret:
@@ -7348,42 +7318,63 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
             log.warning(f"Open positions fetch failed: {e}")
 
         # Query database for closed trades (where exit_at is not None)
-        from models import CryptoTradeLog
+        # THE TRADES, FROM THE TABLE THE FLEET ACTUALLY WRITES TO.
+        #
+        # This read models.CryptoTradeLog - the OLD coinbase bot's table.
+        # The grid fleet writes CryptoGridTradeHistory, which is what
+        # /grid-status/trade-history reports. So on a day the grid closed
+        # 18 trades for $27.02 this page said "0 trades today, $0.00".
+        # Two numbers that must agree, read from two different tables.
+        #
+        # daily_profit was also the sum over a .limit(10) slice of ALL
+        # closed trades ever, which is not a day.
         recent_trades = []
         total_profit = 0.0
         win_count = 0
+        trades_today = 0
+        profit_today = 0.0
         try:
-            result = await db.execute(
-                select(CryptoTradeLog)
-                .where(CryptoTradeLog.exit_at != None)
-                .order_by(CryptoTradeLog.exit_at.desc())
-                .limit(10)
-            )
-            trades_from_db = result.scalars().all()
-            for trade in trades_from_db:
-                profit = trade.net_pnl if trade.net_pnl else (trade.gross_pnl if trade.gross_pnl else 0)
-                if profit > 0:
-                    win_count += 1
-                total_profit += profit
-                profit_pct = 0
-                if trade.entry_price and trade.entry_price > 0:
-                    profit_pct = round(((trade.exit_price - trade.entry_price) / trade.entry_price * 100), 2) if trade.exit_price else 0
+            from models import CryptoGridTradeHistory
+            from sqlalchemy import func as _func
+            totals = (await db.execute(
+                select(_func.count(CryptoGridTradeHistory.id),
+                       _func.sum(CryptoGridTradeHistory.pnl),
+                       _func.sum(case((CryptoGridTradeHistory.pnl > 0, 1), else_=0)))
+            )).one()
+            all_count = int(totals[0] or 0)
+            total_profit = float(totals[1] or 0.0)
+            win_count = int(totals[2] or 0)
+
+            midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            today = (await db.execute(
+                select(_func.count(CryptoGridTradeHistory.id),
+                       _func.sum(CryptoGridTradeHistory.pnl))
+                .where(CryptoGridTradeHistory.closed_at >= midnight)
+            )).one()
+            trades_today = int(today[0] or 0)
+            profit_today = float(today[1] or 0.0)
+
+            rows = (await db.execute(
+                select(CryptoGridTradeHistory)
+                .order_by(CryptoGridTradeHistory.closed_at.desc()).limit(10)
+            )).scalars().all()
+            for t in rows:
+                pnl = float(t.pnl or 0.0)
+                entry, exit_ = t.entry_price, t.exit_price
                 recent_trades.append({
-                    "symbol": trade.symbol or "unknown",
-                    "entry_price": round(trade.entry_price, 2) if trade.entry_price else 0,
-                    "exit_price": round(trade.exit_price, 2) if trade.exit_price else 0,
-                    "qty": round(trade.position_size, 4) if trade.position_size else 0,
-                    "profit": round(profit, 2),
-                    "profit_pct": profit_pct,
-                    "close_time": trade.exit_at.isoformat() if trade.exit_at else "unknown"
+                    "symbol": t.product_id or "unknown",
+                    "entry_price": entry,
+                    "exit_price": exit_,
+                    "qty": t.qty,
+                    "profit": round(pnl, 2),
+                    "profit_pct": round((exit_ - entry) / entry * 100, 2) if entry else 0,
+                    "close_time": t.closed_at.isoformat() if t.closed_at else "unknown",
                 })
         except Exception as e:
-            log.warning(f"Trade history query failed: {e}")
+            log.warning(f"Grid trade history query failed: {e}")
+            all_count = None
 
-        # Calculate stats from trades
-        daily_trades = len(recent_trades)
-        win_rate = round((win_count / daily_trades * 100), 1) if daily_trades > 0 else 0
-
+        win_rate = round(win_count / all_count * 100, 1) if all_count else 0
         # Bot status
         crypto_bot_active = getattr(crypto_coinbase_bot, 'BOT_RUNNING', True)
         alpaca_bot_active = True  # Assume active; could check via prop_bot
@@ -7393,11 +7384,25 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
             "accounts": {
                 "coinbase": {
                     "name": "Coinbase (Crypto 24/7)",
-                    "balance": coinbase_balance,
-                    "starting_balance": 483.00,
-                    "daily_profit": round(sum(t.get("profit", 0) for t in recent_trades), 2),
+                    # available=False is the third verdict. A failed read
+                    # gets None here, never a stand-in figure, so the page
+                    # can say "unavailable" instead of quietly lying.
+                    "available": census is not None,
+                    "detail": census_error,
+                    "balance": round(census["total_usd"], 2) if census else None,
+                    "cash_usd": round(census["cash_usd"], 2) if census else None,
+                    "coin_usd": round(census["coin_usd"], 2) if census else None,
+                    "daily_profit": round(profit_today, 2),
+                    "trades_today": trades_today,
                     "total_profit": round(total_profit, 2),
-                    "growth_percent": round((total_profit / 483.00 * 100), 2) if total_profit > 0 else 0
+                    # No recorded starting basis, so no growth figure. The
+                    # 483.00 that used to sit here was a literal, and it
+                    # was also the numerator's fallback, which is why this
+                    # read 0% no matter what the fleet did. /edge-rate
+                    # answers the rate question honestly, span floor and
+                    # all; this one stays null rather than inventing it.
+                    "growth_percent": None,
+                    "growth_detail": "no recorded starting basis - see /edge-rate for the rate, which reports UNKNOWN until it has a full day of span",
                 },
                 "alpaca": {
                     "name": "Alpaca (Stocks & Futures)",
@@ -7414,8 +7419,9 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
                 "max": 3
             },
             "trading": {
-                "recent_trades": recent_trades[::-1],  # Newest first
-                "trades_today": daily_trades,
+                "recent_trades": recent_trades,   # already newest-first
+                "trades_today": trades_today,     # closed since UTC midnight, not "the last 10 ever"
+                "trades_all_time": all_count,
                 "win_rate": win_rate,
                 "win_count": win_count
             },
