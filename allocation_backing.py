@@ -50,6 +50,52 @@ def slice_cost(s):
         return None
 
 
+def slice_entry_commission(s):
+    """What this slice's BUY leg already cost in commission. 0.0 when none.
+
+    THE TIMING HOLE THIS CLOSES, measured live 2026-09-28.
+
+    A buy debits the wallet by the spend PLUS Coinbase's commission. The
+    slice records basis = entry_price * qty, which is the spend alone, and
+    no branch's allocated_usd moves. So between buying and selling, the
+    commission has left the account and nothing in the book has recognised
+    it: the branches go on claiming cash that is already gone.
+
+    It does get booked - eventually. _grid_slice_net_pnl charges BOTH legs
+    when the slice sells and the result lands in allocated_usd, so a
+    completed round trip reconciles exactly. The gap is purely the interval
+    between the two, and it scales with how much inventory sits open.
+
+    Live figures the day this was found: $44.27 of the claim was
+    unaccounted for, against $42.22 of entry commission carried by
+    $6,934.48 of open slices at the measured 0.006088/leg - a 4.6% match,
+    and the residual is price drift between two reads. That $44.27 is also
+    why real_free_cash_usd read -$246.87 and blocked funding a new coin:
+    the fleet was budgeting cash it had already spent on commission.
+
+    ADOPTED SLICES RETURN 0.0 and must. They were written by bookkeeping
+    for coin the account already held - no order was placed, so no entry
+    commission was billed against that basis. Charging one here would
+    invent a hole the same size as the fleet's adopted inventory.
+    """
+    get = s.get if isinstance(s, dict) else (lambda k, d=None: getattr(s, k, d))
+    if get("adopted", False):
+        return 0.0
+    rate = get("entry_fee_rate", None)
+    cost = slice_cost(s)
+    if rate is None or cost is None:
+        # UNKNOWN, not zero: the caller counts these separately so an
+        # unrecorded rate reads as "not measured here" rather than "free".
+        return None
+    try:
+        r = float(rate)
+    except (TypeError, ValueError):
+        return None
+    if r <= 0:
+        return 0.0
+    return cost * r
+
+
 def backing(branches, wallet_cash):
     """{claimed, deployed_coin, wallet_cash, backed, unbacked, ...}.
 
@@ -68,6 +114,8 @@ def backing(branches, wallet_cash):
     claimed = 0.0
     deployed = 0.0
     unpriced = 0
+    entry_fees = 0.0
+    unmeasured_fee_slices = 0
     for b in branches:
         # SHAPE is fatal, VALUES are skippable. Iterating a string yields
         # characters; each one silently misses every field and the whole
@@ -89,9 +137,15 @@ def backing(branches, wallet_cash):
                 unpriced += 1
             else:
                 deployed += cost
+            fee = slice_entry_commission(s)
+            if fee is None:
+                unmeasured_fee_slices += 1
+            else:
+                entry_fees += fee
 
     claimed = round(claimed, 2)
     deployed = round(deployed, 2)
+    entry_fees = round(entry_fees, 2)
 
     if wallet_cash is None:
         return {
@@ -109,7 +163,12 @@ def backing(branches, wallet_cash):
 
     wallet = round(float(wallet_cash), 2)
     backed = round(deployed + wallet, 2)
-    unbacked = round(claimed - backed, 2)
+    gross_unbacked = round(claimed - backed, 2)
+    # Commission on the OPEN slices' buy legs has already left the wallet and
+    # is not yet booked against any allocation. It is spent, not missing, and
+    # it reconciles the moment the slice sells - so it is named and removed
+    # here rather than left to swamp a real hole. See slice_entry_commission.
+    unbacked = round(gross_unbacked - entry_fees, 2)
     pct = round(unbacked / claimed * 100, 2) if claimed else 0.0
 
     if unbacked <= BACKING_TOLERANCE_USD:
@@ -128,6 +187,14 @@ def backing(branches, wallet_cash):
                   f"${unbacked:,.2f} ({pct:.1f}%) is unaccounted for - small, but it is "
                   f"not rounding.")
 
+    if entry_fees:
+        detail += (f" ${entry_fees:,.2f} of that is commission already paid on the open "
+                   f"slices' buy legs - spent, not missing, and booked back the moment each "
+                   f"slice sells; it is excluded from the ${unbacked:,.2f} above.")
+    if unmeasured_fee_slices:
+        detail += (f" {unmeasured_fee_slices} open slice(s) carry no recorded entry fee rate, "
+                   f"so their commission is NOT deducted - the real gap is smaller than shown "
+                   f"by whatever they paid.")
     if unpriced:
         detail += (f" {unpriced} open slice(s) could not be priced and are NOT counted as "
                    f"backing, so the real gap is smaller than the figure shown by whatever "
@@ -142,5 +209,8 @@ def backing(branches, wallet_cash):
         "unbacked_usd": unbacked,
         "unbacked_pct": pct,
         "unpriced_slices": unpriced,
+        "open_entry_commission_usd": entry_fees,
+        "gross_unbacked_usd": gross_unbacked,
+        "slices_without_fee_rate": unmeasured_fee_slices,
         "detail": detail,
     }

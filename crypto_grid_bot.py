@@ -6788,6 +6788,16 @@ async def get_grid_status() -> dict:
                 "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None,
                 "unrealized_net_usd": round(net_usd, 2) if net_usd is not None else None,
                 "unrealized_net_pct": round(net_pct, 4) if net_pct is not None else None,
+                # Carried so allocation_backing can deduct the commission this
+                # slice's BUY leg already paid out of the wallet. Without these
+                # two fields slice_entry_commission() returns None for every
+                # slice and the deduction is INERT - the fix would ship, the
+                # tests would pass, and the live gap would not move a cent.
+                # adopted matters just as much: an adopted slice paid no entry
+                # commission, and charging one would invent a hole the size of
+                # the fleet's whole adopted inventory.
+                "entry_fee_rate": getattr(s, "entry_fee_rate", None),
+                "adopted": bool(getattr(s, "adopted", False)),
             })
         total_net_pct = (total_net_usd / total_cost_basis) if (current_price is not None and total_cost_basis) else None
 
