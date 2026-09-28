@@ -335,7 +335,18 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
     #
     # Same shape as the maker_only_holds fix: there a frozen number could
     # not show recency, here a volatile one hid a stable one.
+    #
+    # AND THE FORWARD HALF. "Full" is a state, not a warning: by the time
+    # a branch is in it, the capital is already parked. On 2026-09-28 the
+    # nine full branches held $3,611.79 and earned $1.65 across the two
+    # most productive days this fleet has had, while XRP sat at 9 slices
+    # on a 10-level grid with $2,240.84 behind it - 27.7% of allocated
+    # capital, one fill from joining them and taking the parked share
+    # from 44.6% to 72.3%. Nothing reported that, because every figure
+    # here described the present. One rung of lookahead is the whole
+    # difference between a reading and a warning.
     full, full_usd = [], 0.0
+    nearly, nearly_usd = [], 0.0
     for b in branches:
         n, lv = b.get("open_slices"), b.get("num_levels")
         best = b.get("best_slice_net_pct")
@@ -345,6 +356,11 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
             # Being in profit does not give a branch a spare rung.
             full.append(b.get("product_id"))
             full_usd += float(b.get("allocated_usd") or 0.0)
+        elif lv >= 1 and n == lv - 1:
+            # Exactly one rung left. Not a problem yet, and not reported
+            # as one - reported so it is not a surprise when it is.
+            nearly.append(b.get("product_id"))
+            nearly_usd += float(b.get("allocated_usd") or 0.0)
         if best is None:
             if n >= lv:
                 unreadable.append(b.get("product_id"))
@@ -363,7 +379,14 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
 
     # Always present, including on a clean verdict: a pass must not hide
     # that half the fleet cannot buy.
-    extra = {"full_usd": round(full_usd, 2), "full_branches": full}
+    extra = {"full_usd": round(full_usd, 2), "full_branches": full,
+             "nearly_full_usd": round(nearly_usd, 2), "nearly_full_branches": nearly}
+    warn = ""
+    if nearly:
+        warn = (f" ${nearly_usd:,.2f} across {len(nearly)} branch(es) is ONE fill from "
+                f"full and would take the parked figure to ${full_usd + nearly_usd:,.2f}: "
+                f"{', '.join(str(p) for p in nearly)}.")
+
     if near:
         extra["near_exit_usd"] = round(near_usd, 2)
         extra["near_exit"] = [p for p, _ in near]
@@ -385,20 +408,21 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
         if unreadable:
             detail += (f" {len(unreadable)} full branch(es) could not be priced and are in "
                        f"neither figure: {', '.join(str(u) for u in unreadable)}.")
-        return _v("no_dead_capital", FAIL, detail,
+        return _v("no_dead_capital", FAIL, detail + warn,
                   stuck_usd=round(stuck_usd, 2), branches=[p for p, _ in stuck], **extra)
 
     if unreadable:
         return _v("no_dead_capital", UNKNOWN,
                   f"{len(unreadable)} full branch(es) could not be priced, so whether their "
                   f"capital is stuck cannot be established: "
-                  f"{', '.join(str(u) for u in unreadable)}. Not read as a pass.", **extra)
+                  f"{', '.join(str(u) for u in unreadable)}. Not read as a pass." + warn,
+                  **extra)
 
     if near:
         return _v("no_dead_capital", OK,
                   f"no branch is stranded. ${near_usd:,.2f} across {len(near)} branch(es) is "
                   f"full and marginally under, but within {abs(near_exit_pct):.1f}% of a "
-                  f"profitable exit - a grid between fills: {_names(near)}.", **extra)
+                  f"profitable exit - a grid between fills: {_names(near)}." + warn, **extra)
 
     ok = "every branch can either buy a dip or sell a rise"
     if full:
@@ -406,7 +430,7 @@ def no_dead_capital(branches, near_exit_pct=NEAR_EXIT_PCT):
         ok += (f". ${full_usd:,.2f} across {len(full)} branch(es) is full on its rungs and "
                f"cannot buy until a slice sells, but every one of them can sell at a "
                f"profit, which is a grid working rather than capital stranded")
-    return _v("no_dead_capital", OK, ok, **extra)
+    return _v("no_dead_capital", OK, ok + warn, **extra)
 
 
 # ── 6. the read itself ──────────────────────────────────────────────────
