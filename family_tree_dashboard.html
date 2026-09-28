@@ -4553,7 +4553,43 @@ function renderStatusStrip(d, history) {
         var alloc = Number(d.total_allocated_usd || 0);
         var cash = Number(d.real_free_cash_usd || 0);
         var unreal = Number(d.total_unrealized_net_usd || 0);
-        document.getElementById('strip-total').textContent = '$' + (alloc + cash).toFixed(2);
+        // CRYPTO TOTAL and the line directly under it were computed from two
+        // different pairs of numbers, and neither pair agreed with the other.
+        // Caught on a screenshot 2026-09-28: the headline read $8,148.74 above
+        // a subtitle reading "$7,407.02 in coin + $1,131.93 cash", which comes
+        // to $8,538.95 - a $390.21 gap between a total and its own breakdown.
+        //
+        //   headline used  total_allocated_usd  - what the branches CLAIM
+        //              and real_free_cash_usd   - the wallet MINUS every
+        //                                         unspent branch reserve
+        //   subtitle used  deployed_coin_usd    - coin actually there
+        //              and wallet_cash_usd      - the actual wallet
+        //
+        // The headline pair cannot be a total of anything: it adds a claim to
+        // a cash figure those same claims have already been subtracted out of,
+        // so the reserves are removed twice. allocation_backing.backed_usd is
+        // the real one - coin genuinely held plus the real wallet - and it is
+        // already in the payload and already what the invariant checks.
+        //
+        // NOTE: no apostrophes in this comment on purpose. test_status_strip
+        // extracts this function by brace matching and treats a single quote
+        // as opening a string, comment or not, so one apostrophe here makes
+        // the whole function look unbalanced.
+        var backing = d.allocation_backing || {};
+        var backed = Number(backing.backed_usd);
+        var stripTotal = document.getElementById('strip-total');
+        if (isFinite(backed) && backing.backed_usd != null) {
+            stripTotal.textContent = '$' + backed.toFixed(2);
+            stripTotal.title = 'Coin actually held at market, plus the real USD wallet. '
+                + 'The same figure the backing invariant checks branch claims against.';
+        } else {
+            // A gap is not a zero, and it is not the old mismatched pair
+            // either. Say the total could not be built rather than printing
+            // a number that does not match the line beneath it.
+            stripTotal.textContent = '—';
+            stripTotal.title = 'The account backing could not be read this poll, so there '
+                + 'is no total to show. It fills back in on the next successful read.';
+        }
         // What is REALLY there, said first. The old subtitle paired a
         // negative cash figure with a much larger "working" figure, and
         // the only clue that most of the second number was a database
