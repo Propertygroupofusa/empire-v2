@@ -182,3 +182,116 @@ def correction_for(branch_claim_usd, branch_backing_usd, tolerance=TOLERANCE_USD
                       f"alone on purpose, this only ever corrects downward")
     return round(backing, 2), (f"claim ${claim:,.2f} exceeds its ${backing:,.2f} backing by "
                                f"${over:,.2f} - reduced to what is actually there")
+
+
+# The most a single pass may take off the fleet's UNSPENT claims - not off
+# its total claim. That distinction is the whole rail.
+#
+# Written first as a share of the TOTAL claim, and a test caught it being
+# decorative: corrections only ever touch the unspent portion, and on this
+# fleet unspent is $212 against a $5,369 claim, so a 5%-of-claim limit sat
+# at $268 and could never bind. The rail would have been present, tested,
+# and incapable of refusing anything.
+#
+# What it guards is a CASH READING that comes back wrong and low. If the
+# wallet reads $0 when it really holds $515, an unguarded pass zeroes every
+# unspent claim in one go. At 50% of unspent, a cash read that merely halves
+# still corrects - that is plausibly real - while a read that collapses is
+# refused and reported as a measurement to check.
+MAX_FLEET_CORRECTION_PCT = 0.50
+
+
+def fleet_corrections(branches, real_cash_usd,
+                      max_pct=MAX_FLEET_CORRECTION_PCT, tolerance=TOLERANCE_USD):
+    """Reduce over-claims so the fleet's unspent budget fits the real cash.
+
+    branches: dicts with product_id, bot_name, allocated_usd, coin_basis_usd.
+    Returns (corrections, report). corrections is [] when nothing should move.
+
+    A BRANCH'S OWN COIN IS UNTOUCHABLE. Its claim is never reduced below its
+    slice basis: that coin is real, the branch bought it, and a claim below
+    it would have the branch believe it owns less than it holds. Only the
+    UNSPENT portion - claim above coin - is a claim on shared cash, and only
+    that portion is scaled.
+
+    ONE-DIRECTIONAL. A branch claiming less than its coin (which happens the
+    moment it buys a rung, since the buy raises basis and not allocation) is
+    LEFT ALONE. Raising a claim on the strength of an arithmetic identity
+    would let a mis-measurement mint budget, and this codebase produced a
+    wrong-but-plausible measurement twice in one evening.
+    """
+    if real_cash_usd is None:
+        return [], {"status": "UNKNOWN",
+                    "detail": "real cash unreadable - a gap is not a zero, nothing moves"}
+    cash = float(real_cash_usd)
+    if cash < 0:
+        return [], {"status": "UNKNOWN",
+                    "detail": f"real cash read ${cash:,.2f}, which is not a measurement"}
+
+    rows = []
+    claimed_total = 0.0
+    unspent_total = 0.0
+    for b in branches:
+        get = b.get if isinstance(b, dict) else (lambda k, d=None: getattr(b, k, d))
+        alloc = get("allocated_usd", None)
+        basis = get("coin_basis_usd", None)
+        if alloc is None or basis is None:
+            # A branch that cannot be measured is skipped, never corrected.
+            continue
+        alloc = float(alloc)
+        basis = float(basis)
+        unspent = max(0.0, alloc - basis)
+        claimed_total += alloc
+        unspent_total += unspent
+        rows.append({"bot_name": get("bot_name", None),
+                     "product_id": get("product_id", None),
+                     "allocated_usd": alloc, "coin_basis_usd": basis,
+                     "unspent_usd": round(unspent, 2)})
+
+    if not rows:
+        return [], {"status": "UNKNOWN", "detail": "no measurable branches"}
+
+    over = unspent_total - cash
+    if over <= tolerance:
+        return [], {"status": "OK",
+                    "detail": (f"unspent claims ${unspent_total:,.2f} fit inside "
+                               f"${cash:,.2f} of real cash"
+                               + (f" by ${-over:,.2f}" if over < 0 else "")
+                               + " - nothing to correct"),
+                    "unspent_claims_usd": round(unspent_total, 2),
+                    "real_cash_usd": round(cash, 2)}
+
+    scale = cash / unspent_total if unspent_total > 0 else 0.0
+    corrections = []
+    for r in rows:
+        if r["unspent_usd"] <= 0:
+            continue
+        new_alloc = r["coin_basis_usd"] + r["unspent_usd"] * scale
+        cut = r["allocated_usd"] - new_alloc
+        if cut <= 0.01:
+            continue
+        corrections.append({**r, "new_allocated_usd": round(new_alloc, 2),
+                            "reduction_usd": round(cut, 2)})
+
+    total_cut = round(sum(c["reduction_usd"] for c in corrections), 2)
+    limit = round(unspent_total * max_pct, 2)
+    if total_cut > limit:
+        return [], {"status": "REFUSED",
+                    "detail": (f"the pass wants to remove ${total_cut:,.2f} of "
+                               f"${unspent_total:,.2f} in unspent claims, over the "
+                               f"${limit:,.2f} ({max_pct*100:.0f}%) single-pass limit. A "
+                               f"correction that large means the cash read collapsed, which "
+                               f"is a measurement to check rather than an instruction to "
+                               f"obey - nothing moved."),
+                    "would_have_cut_usd": total_cut, "limit_usd": limit,
+                    "unspent_claims_usd": round(unspent_total, 2),
+                    "real_cash_usd": round(cash, 2)}
+
+    return corrections, {
+        "status": "CORRECT",
+        "detail": (f"unspent claims ${unspent_total:,.2f} exceed ${cash:,.2f} of real cash "
+                   f"by ${over:,.2f}; reducing {len(corrections)} branch claim(s) by "
+                   f"${total_cut:,.2f} so the fleet stops budgeting money it does not have. "
+                   f"No claim goes below the coin that branch actually owns."),
+        "total_reduction_usd": total_cut, "limit_usd": limit,
+        "unspent_claims_usd": round(unspent_total, 2), "real_cash_usd": round(cash, 2)}

@@ -185,3 +185,133 @@ def test_every_identity_bucket_is_persisted():
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "routers", "trading_dashboard.py"), encoding="utf-8").read()
     assert '_RECONCILE_FIELDS = ("claimed_usd",) + tuple(__import__("reconcile").BUCKETS)' in src
+
+
+# ============================ the fleet correction, and what it may not do
+LIVE = [
+    {"bot_name": "g1", "product_id": "ZEC-USD",  "allocated_usd": 2272.62, "coin_basis_usd": 2341.45},
+    {"bot_name": "g2", "product_id": "XRP-USD",  "allocated_usd": 2240.54, "coin_basis_usd": 2240.54},
+    {"bot_name": "g3", "product_id": "XLM-USD",  "allocated_usd":  469.23, "coin_basis_usd":  400.00},
+    {"bot_name": "g4", "product_id": "NEAR-USD", "allocated_usd":  214.50, "coin_basis_usd":   71.50},
+    {"bot_name": "g5", "product_id": "BCH-USD",  "allocated_usd":  171.75, "coin_basis_usd":  231.89},
+]
+
+
+def test_todays_fleet_needs_no_correction():
+    """Measured live: unspent claims $495.02 against $515.31 of real cash.
+    Arming this must be a no-op today, and knowing that BEFORE arming is the
+    point of running it first."""
+    corr, rep = R.fleet_corrections(LIVE, real_cash_usd=515.31)
+    assert corr == []
+    assert rep["status"] == "OK"
+    assert "nothing to correct" in rep["detail"]
+
+
+def test_a_real_over_claim_is_reduced():
+    # $150 against $212.23 of unspent claims: a real shortfall, and inside
+    # the single-pass limit, so it corrects rather than refusing.
+    corr, rep = R.fleet_corrections(LIVE, real_cash_usd=150.00)
+    assert rep["status"] == "CORRECT"
+    assert corr, "an over-claim must produce corrections"
+    assert all(c["new_allocated_usd"] < c["allocated_usd"] for c in corr)
+
+
+def test_no_claim_is_ever_reduced_below_the_coin_that_branch_owns():
+    """The branch bought that coin. A claim under it would have the branch
+    believe it owns less than it holds."""
+    corr, _ = R.fleet_corrections(LIVE, real_cash_usd=1.00)
+    for c in corr:
+        assert c["new_allocated_usd"] >= c["coin_basis_usd"] - 1e-9, c
+
+
+def test_a_branch_claiming_less_than_its_coin_is_left_alone():
+    """ZEC and BCH own more coin than they claim - the moment a branch buys
+    a rung, basis rises and allocation does not. Never raised."""
+    corr, _ = R.fleet_corrections(LIVE, real_cash_usd=1.00)
+    touched = {c["product_id"] for c in corr}
+    assert "ZEC-USD" not in touched and "BCH-USD" not in touched
+
+
+def test_no_correction_ever_increases_a_claim():
+    for cash in (0.0, 1.0, 50.0, 100.0, 495.02, 515.31, 99999.0):
+        corr, _ = R.fleet_corrections(LIVE, real_cash_usd=cash)
+        for c in corr:
+            assert c["new_allocated_usd"] <= c["allocated_usd"] + 1e-9, (cash, c)
+
+
+# ------------------------------------------- the rail that matters most
+def test_a_wildly_low_cash_read_refuses_instead_of_slashing_the_fleet():
+    """This is the failure that would cost real money: the wallet read comes
+    back wrong and low, and one pass guts every allocation on the strength
+    of one bad number. A correction that large is a measurement to check."""
+    corr, rep = R.fleet_corrections(LIVE, real_cash_usd=0.0)
+    assert corr == []
+    assert rep["status"] == "REFUSED"
+    assert "rather than an instruction to obey" in rep["detail"]
+    assert "the cash read collapsed" in rep["detail"]
+    assert rep["would_have_cut_usd"] > rep["limit_usd"]
+
+
+def test_the_limit_guards_the_unspent_pool_not_the_total_claim():
+    """Written first as a share of TOTAL claim and caught by the test below
+    as decorative: corrections only touch the unspent portion, and unspent is
+    $212 of a $5,369 claim here, so a 5%-of-claim limit sat at $268 and could
+    never bind. A rail that cannot refuse anything is not a rail."""
+    _, rep = R.fleet_corrections(LIVE, real_cash_usd=0.0)
+    unspent = sum(max(0.0, r["allocated_usd"] - r["coin_basis_usd"]) for r in LIVE)
+    assert rep["limit_usd"] == pytest.approx(unspent * R.MAX_FLEET_CORRECTION_PCT, abs=0.01)
+    claimed = sum(r["allocated_usd"] for r in LIVE)
+    assert rep["limit_usd"] < claimed * 0.05, "the limit is still scaled to the wrong pool"
+
+
+def test_a_correction_inside_the_limit_still_proceeds():
+    """Cash halves from the $212.23 of unspent claims - plausible, so it
+    corrects rather than refusing."""
+    corr, rep = R.fleet_corrections(LIVE, real_cash_usd=150.0)
+    assert rep["status"] == "CORRECT"
+    assert rep["total_reduction_usd"] <= rep["limit_usd"]
+    assert corr
+
+
+def test_unreadable_cash_moves_nothing():
+    assert R.fleet_corrections(LIVE, None)[1]["status"] == "UNKNOWN"
+    assert R.fleet_corrections(LIVE, -5.0)[1]["status"] == "UNKNOWN"
+
+
+def test_an_unmeasurable_branch_is_skipped_never_corrected():
+    rows = LIVE + [{"bot_name": "bad", "product_id": "?", "allocated_usd": None,
+                    "coin_basis_usd": None}]
+    corr, _ = R.fleet_corrections(rows, real_cash_usd=100.0)
+    assert all(c["product_id"] != "?" for c in corr)
+
+
+def test_corrections_bring_the_fleet_inside_its_cash():
+    corr, rep = R.fleet_corrections(LIVE, real_cash_usd=200.0)
+    by = {c["product_id"]: c for c in corr}
+    after = sum(max(0.0, by.get(r["product_id"], {}).get("new_allocated_usd",
+                                                         r["allocated_usd"])
+                    - r["coin_basis_usd"]) for r in LIVE)
+    assert after <= 200.0 + 0.05, after
+
+
+# ------------------------------------------------------------ mutation
+def test_removing_the_single_pass_limit_would_gut_the_fleet():
+    saved = R.MAX_FLEET_CORRECTION_PCT
+    try:
+        R.MAX_FLEET_CORRECTION_PCT = 1.0
+        corr, rep = R.fleet_corrections(LIVE, real_cash_usd=0.0,
+                                        max_pct=R.MAX_FLEET_CORRECTION_PCT)
+        assert rep["status"] == "CORRECT", "the limit is not what refuses a zero cash read"
+        # every unspent dollar wiped on the strength of one bad read
+        assert sum(c["reduction_usd"] for c in corr) == pytest.approx(212.23, abs=0.05)
+    finally:
+        R.MAX_FLEET_CORRECTION_PCT = saved
+
+
+def test_removing_the_coin_floor_would_push_claims_under_real_holdings():
+    live_cash = 1.0
+    corr, _ = R.fleet_corrections(LIVE, real_cash_usd=live_cash)
+    naive = {r["product_id"]: r["allocated_usd"] * (live_cash / 495.02) for r in LIVE}
+    for c in corr:
+        assert c["new_allocated_usd"] > naive[c["product_id"]], (
+            "the coin floor is not what keeps this above the branch's holdings")

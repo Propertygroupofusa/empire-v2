@@ -1224,6 +1224,39 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # Claim reconciliation: when the fleet's UNSPENT claims exceed the
+        # cash that really exists, lower the claims until they fit. Writes
+        # one number - allocated_usd - and never an order, a slice or a coin.
+        # Fail-closed: OFF unless armed, and every rail (never raise, never
+        # below the branch's own coin, refuse a collapsed cash read) lives in
+        # reconcile.py so it holds for any caller, not just this loop.
+        try:
+            import reconcile_worker
+            import crypto_grid_bot as _rg
+
+            async def _reconcile_cash():
+                """Spendable PLUS held: money locked behind a resting order is
+                still the fleet's, and counting only available is what made
+                this drift unexplainable in the first place."""
+                try:
+                    st = await _rg.get_grid_status()
+                    ab = st.get("allocation_backing") or {}
+                    a, h = ab.get("wallet_cash_usd"), ab.get("usd_on_hold")
+                    if a is None:
+                        return None
+                    return float(a) + float(h or 0.0)
+                except Exception:
+                    return None
+
+            asyncio.create_task(reconcile_worker.loop(
+                _rg.get_session_factory, _reconcile_cash))
+            log.info("🧾 Claim reconciliation running (writes only when armed)")
+        except Exception as e:
+            try:
+                log.warning(f"claim reconciliation not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # Idle rotation: stale cash back into a branch that is trading.
         # Observes unless GRID_IDLE_ROTATION_MODE=arm. Separate from
         # GRID_AUTO_ROTATE, which stays off - see idle_rotation_worker's
