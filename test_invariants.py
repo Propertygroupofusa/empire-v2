@@ -73,10 +73,31 @@ def test_a_real_backing_breach_fails():
     assert "MORE than is really there" in r["detail"]
 
 
-def test_more_real_than_claimed_also_reports_its_direction():
+def test_an_unexplained_surplus_is_unknown_and_never_a_pass():
+    """Retargeted, not deleted. This asserted FAIL on a surplus, which was
+    the behaviour before allocation_backed learned to tell the two
+    directions apart: claiming MORE than is present is a backing breach,
+    claiming LESS is not - the branches are fully backed and something
+    else is holding the difference.
+
+    A surplus nobody can account for is still not fine, so it reads
+    UNKNOWN. It went FAIL for hours on a real $466.61 surplus that was
+    entirely explained, and a check that cries breach on a surplus is a
+    check people learn to ignore."""
     r = inv.allocation_backed(7000.00, 7429.11)
-    assert r["status"] == inv.FAIL
-    assert "less than is really there" in r["detail"]
+    assert r["status"] == inv.UNKNOWN
+    assert r["status"] != inv.OK
+    assert "MORE is present than is claimed" in r["detail"], r["detail"]
+    assert "not a hole" in r["detail"]
+
+
+def test_a_surplus_that_is_fully_explained_reads_ok():
+    """$429.11 of surplus, all of it named: unspent cash plus coin
+    deployed past what the branches claim."""
+    r = inv.allocation_backed(7000.00, 7429.11,
+                              unallocated_cash_usd=200.00,
+                              over_deployed_usd=229.11)
+    assert r["status"] == inv.OK
 
 
 # ── 4. cash reconciliation ──────────────────────────────────────────────
@@ -182,12 +203,24 @@ def test_no_check_is_incapable_of_failing():
         inv.spacing_evidence_current(0.0137, 0.0070),
         inv.allocation_backed(7429.11, 7000.00),
         inv.cash_reconciles(1194.54, 700.00, 274.18, 35.79),
+        # -1.0 exactly was this fixture for a while, and it stopped being
+        # a failing case the moment NEAR_EXIT_PCT landed on 1.0: a branch
+        # AT the boundary counts as between fills, not stuck. Moved clear
+        # of the threshold rather than the threshold moved to suit it.
         inv.no_dead_capital([{"product_id": "X", "allocated_usd": 1.0,
                               "open_slices": 3, "num_levels": 3,
-                              "best_slice_net_pct": -1.0}]),
+                              "best_slice_net_pct": -4.5}]),
         inv.read_complete(18615, False, 90000),
+        inv.maker_only_holds(37, 109, "2026-09-28T07:49:41+00:00",
+                             "2026-09-28T04:35:16+00:00"),
+        inv.coin_tracked_is_held({"ETH-USD": 0.162240}, {"ETH": 0.130640},
+                                 {"ETH-USD": 2651.0}),
+        inv.grid_inventory_is_free(
+            {"ALGO-USD": 1000.0},
+            [{"asset": "ALGO", "units": 1134.34638900,
+              "available_units": 0.04638900, "price": 0.125905}]),
     ]
-    assert [r["status"] for r in must_fail] == [inv.FAIL] * 6
+    assert [r["status"] for r in must_fail] == [inv.FAIL] * 9
     # and every public check is represented above
     checked = {r["name"] for r in must_fail}
     public = {n for n in dir(inv)

@@ -585,3 +585,112 @@ def coin_tracked_is_held(tracked_units_by_product, wallet_units_by_asset,
 
     return _v("coin_tracked_is_held", OK,
               f"every one of {len(tracked)} tracked position(s) is fully held in the wallet")
+
+
+# A lock smaller than this is a partially-filled order or a rounding
+# remainder, not a reserved position. Same shape as the shortfall
+# tolerance above and for the same reason: a check that fires on dust
+# gets muted, and a muted check protects nothing.
+INVENTORY_LOCK_TOLERANCE_PCT = 0.005
+
+
+def grid_inventory_is_free(tracked_units_by_product, wallet_holdings,
+                           tolerance_pct=INVENTORY_LOCK_TOLERANCE_PCT):
+    """Coin a branch trades with must not be reserved by another order.
+
+    THE GAP THIS CLOSES. coin_tracked_is_held sees a shortfall AFTER the
+    coin has gone. This names the condition that produces it, while it
+    can still be undone.
+
+    A resting stop-limit at the venue HOLDS the units it covers. Live at
+    2026-09-28T09:44Z, $923.23 was reserved this way across XLM, NEAR,
+    LINK, SOL, ALGO, ACH and JASMY - six of them live grid branches.
+    ALGO had 0.046 units free out of 1134.35; the whole position was
+    spoken for.
+
+    Two costs, neither of them previously reported anywhere:
+
+      1. The grid cannot sell what the venue has reserved. A branch whose
+         slice finally comes good places a sell for units the exchange is
+         holding against another order.
+      2. If one fires it sells 75% of the position in a single order
+         while the branch goes on tracking it slice by slice. That is how
+         the shortfall grew from $473.28 across 5 branches to $510.72
+         across 7.
+
+    Only coins a branch actually tracks are counted. JASMY was reserved
+    too and is not a grid branch; folding it in would inflate the figure
+    the owner would act on.
+
+    Locked units are READ, never inferred. A holding whose available
+    balance the venue did not return is UNKNOWN - a caller that cannot
+    tell "nothing locked" from "could not tell" is exactly the caller
+    that reports $0.00 reserved on a fully reserved position.
+
+    This check states a condition. It does not cancel anything: a resting
+    stop is downside protection somebody armed on purpose, and trading
+    that away is the owner's decision, not this module's.
+    """
+    tracked = tracked_units_by_product or {}
+    if not tracked:
+        return _v("grid_inventory_is_free", UNKNOWN, "no tracked positions to check")
+    if wallet_holdings is None:
+        return _v("grid_inventory_is_free", UNKNOWN,
+                  "the wallet holdings could not be read, so no position can be "
+                  "confirmed free. Not knowing is not the same as being fine.")
+
+    by_asset = {}
+    for row in wallet_holdings:
+        a = str((row or {}).get("asset") or "").upper()
+        if a:
+            by_asset[a] = row
+
+    locked, unknown = [], []
+    for product in tracked:
+        asset = str(product).split("-")[0].upper()
+        row = by_asset.get(asset)
+        if row is None:
+            unknown.append(str(product))
+            continue
+        units = _num(row.get("units"))
+        avail = _num(row.get("available_units"))
+        if units is None or avail is None:
+            unknown.append(str(product))
+            continue
+        gap = units - avail
+        if units > 0 and gap > units * tolerance_pct:
+            price = _num(row.get("price"))
+            locked.append({"product_id": str(product), "units": units,
+                           "available_units": avail,
+                           "locked_units": round(gap, 8),
+                           "locked_pct": round(gap / units * 100.0, 1),
+                           "locked_usd": round(gap * price, 2) if price else None})
+
+    if locked:
+        locked.sort(key=lambda r: -(r["locked_usd"] or 0))
+        total = sum(r["locked_usd"] for r in locked if r["locked_usd"] is not None)
+        worst = ", ".join(
+            f"{r['product_id']} has {r['locked_pct']:.0f}% reserved"
+            + (f" (${r['locked_usd']:,.2f})" if r["locked_usd"] is not None else "")
+            for r in locked)
+        return _v("grid_inventory_is_free", FAIL,
+                  f"${total:,.2f} of coin across {len(locked)} grid branch(es) is "
+                  f"reserved by resting orders at the venue and cannot be traded: "
+                  f"{worst}. A branch cannot sell units the exchange is holding "
+                  f"against another order, and if one of those orders fires it sells "
+                  f"the position out from under the slices still tracking it. "
+                  f"Cancelling a resting sell places no order and frees the units - "
+                  f"but it also gives up the protection it was armed for, so it is a "
+                  f"decision to take deliberately.",
+                  locked_usd=round(total, 2), locked_positions=locked,
+                  unreadable=unknown or None)
+
+    if unknown:
+        return _v("grid_inventory_is_free", UNKNOWN,
+                  f"{len(unknown)} tracked coin(s) have no readable available balance, so "
+                  f"it cannot be said whether their units are free: {', '.join(unknown)}. "
+                  f"An unreadable reservation is not an absent one.", unreadable=unknown)
+
+    return _v("grid_inventory_is_free", OK,
+              f"every one of {len(tracked)} tracked position(s) is free to trade - "
+              f"nothing is reserved by a resting order")

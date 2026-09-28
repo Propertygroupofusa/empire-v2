@@ -8542,9 +8542,18 @@ async def grid_invariants_endpoint():
                 wallet = {r.get("asset"): r.get("units")
                           for r in (census.get("holdings") or [])}
             results.append(inv.coin_tracked_is_held(tracked, wallet, prices))
+
+            # The CAUSE beside the symptom. coin_tracked_is_held sees a
+            # shortfall after the coin has gone; this names the coin a
+            # resting order is holding, while cancelling still undoes it.
+            # Same census read - a second one would be a second opinion
+            # about the same balances.
+            results.append(inv.grid_inventory_is_free(
+                tracked, (census.get("holdings") or []) if census.get("available") else None))
         except Exception as exc:
-            results.append({"name": "coin_tracked_is_held", "status": inv.UNKNOWN,
-                            "detail": f"could not be checked: {type(exc).__name__}: {exc}"})
+            for _name in ("coin_tracked_is_held", "grid_inventory_is_free"):
+                results.append({"name": _name, "status": inv.UNKNOWN,
+                                "detail": f"could not be checked: {type(exc).__name__}: {exc}"})
     except Exception as e:
         results.append({"name": "allocation_backed", "status": inv.UNKNOWN,
                         "detail": f"could not be checked: {type(e).__name__}: {e}"})
