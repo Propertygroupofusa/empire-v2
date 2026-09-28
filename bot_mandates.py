@@ -427,14 +427,164 @@ for _key, _names in RECORDS_AS.items():
 # ============================================================================
 
 def get_bot_mandate(bot_name: str) -> Dict:
-    """Retrieve mandate for a specific bot"""
+    """Retrieve mandate for a specific bot, under ANY of its names.
+
+    FOUR namespaces exist for one bot and this function used to accept
+    exactly one of them:
+
+        ALL_MANDATES key   apex
+        mandate["name"]    prop_bot          <- the only one accepted
+        BOT_NAME in module prop_apex         <- what rows actually carry
+        this map's key     prop_bot
+
+    A caller passing BOT_NAME - the obvious thing to pass, and what every
+    ClosedTrade row holds - got {} back, which validate_entry turns into
+    "Unknown bot: prop_apex" and REFUSES THE TRADE. Silently, on every
+    cycle, with a message that reads like a configuration error rather
+    than a lookup miss. The live callers happen to pass the string
+    literal "prop_bot", so this has not fired; it is a loaded gun rather
+    than a wound.
+
+    Resolving every known identity is one-directional: it can only ever
+    find a mandate that exists, never invent one. An unknown name still
+    returns {}.
+    """
     mandates_map = {
         "prop_bot": APEX_MANDATE,
         "crypto_coinbase_bot": CRYPTO_MANDATE,
         "alpaca_bot": ALPACA_MANDATE,
         "analytics": MONITORING_MANDATE,
     }
-    return mandates_map.get(bot_name, {})
+    if bot_name in mandates_map:
+        return mandates_map[bot_name]
+    if bot_name in ALL_MANDATES:
+        return ALL_MANDATES[bot_name]
+    for _key, _m in ALL_MANDATES.items():
+        if bot_name in (_m.get("records_as") or ()):
+            return _m
+    return {}
+
+def validate_entry_verbose(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
+                           buying_power: float, open_positions: int,
+                           total_notional: float, equity: float,
+                           direction: str = "long") -> dict:
+    """Every entry condition evaluated, with its value and its threshold.
+
+    WHY THIS EXISTS. validate_entry returns (False, "<first failure>") or
+    (True, "OK"). "OK" says nothing about WHY a trade was admitted, and a
+    rejection names only the FIRST rule that failed - so a decision log
+    built on it records either nothing or one third of the story. The
+    plan's own success criterion is "decision logs tell us WHY each trade
+    happened (not just that it happened)", and that is unanswerable from
+    a boolean and the string "OK".
+
+    This evaluates EVERY condition, never short-circuits, and returns the
+    checks in the order validate_entry applies them. validate_entry is
+    now a thin reader of this result, so the two cannot drift: the live
+    verdict and the logged reason are computed once.
+
+    Returns {"admitted", "reason", "checks": [...], "mandate", "blocked"}.
+    A check carries name, passed, value, threshold and a sentence. An
+    UNEVALUATED check (the mandate does not state that rule) is marked
+    passed=None rather than True - a rule that was never applied is not a
+    rule that was satisfied.
+    """
+    mandate = get_bot_mandate(bot_name)
+    if not mandate:
+        return {"admitted": False, "reason": f"Unknown bot: {bot_name}",
+                "checks": [], "mandate": None, "blocked": ["unknown bot"]}
+
+    checks = []
+
+    def add(name, passed, value, threshold, sentence):
+        checks.append({"name": name, "passed": passed, "value": value,
+                       "threshold": threshold, "detail": sentence})
+
+    # 1. Universe. Same concatenation validate_entry has always used.
+    if "universe" in mandate:
+        u = mandate["universe"]
+        approved = (u.get("futures", []) + u.get("crypto", []) +
+                    u.get("commodities", []) + u.get("inverse_etfs", []) +
+                    u.get("equities", []) + u.get("approved", []) +
+                    u.get("approved_pairs", []))
+        if approved:
+            ok = symbol in approved
+            add("universe", ok, symbol, f"{len(approved)} approved symbols",
+                f"{symbol} {'is' if ok else 'is NOT'} in {bot_name}'s approved universe"
+                if ok else f"{symbol} not in {bot_name}'s approved universe")
+        else:
+            add("universe", None, symbol, None,
+                "the mandate states no approved symbols - not checked")
+
+    # 2. RSI, in whichever shape this mandate declares.
+    entry = mandate.get("entry", {})
+    if isinstance(entry, dict) and "long" in entry and "short" in entry:
+        if direction == "long":
+            th = entry.get("long", {}).get("rsi_threshold_oversold", 35)
+            ok = not (rsi > th)
+            add("rsi_oversold", ok, rsi, th,
+                f"RSI {rsi:.1f} {'is' if ok else 'not'} oversold for LONG (threshold: <{th})"
+                if ok else f"RSI {rsi:.1f} not oversold for LONG (threshold: <{th})")
+        else:
+            th = entry.get("short", {}).get("rsi_threshold_overbought", 70)
+            ok = not (rsi < th)
+            add("rsi_overbought", ok, rsi, th,
+                f"RSI {rsi:.1f} {'is' if ok else 'not'} overbought for SHORT (threshold: >{th})"
+                if ok else f"RSI {rsi:.1f} not overbought for SHORT (threshold: >{th})")
+        shared = entry.get("shared", {})
+        min_bp = shared.get("min_buying_power", 150)
+        max_pos = shared.get("max_open_positions", 4)
+        max_notional_pct = shared.get("max_total_notional_pct", 0.50)
+    else:
+        th = entry.get("rsi_threshold", 30)
+        if entry.get("momentum"):
+            ok = not (rsi < th)
+            add("rsi_momentum", ok, rsi, th,
+                f"RSI {rsi:.1f} {'shows' if ok else 'not showing'} real momentum "
+                f"(threshold: >{th})" if ok else
+                f"RSI {rsi:.1f} not showing real momentum (threshold: >{th})")
+        else:
+            ok = not (rsi > th)
+            add("rsi_oversold", ok, rsi, th,
+                f"RSI {rsi:.1f} {'is' if ok else 'not'} oversold (threshold: {th})"
+                if ok else f"RSI {rsi:.1f} not oversold (threshold: {th})")
+        min_bp = entry.get("min_buying_power", 150)
+        max_pos = entry.get("max_open_positions", 2)
+        max_notional_pct = entry.get("max_total_notional_pct", 0.50)
+
+    # 3-5. Capital, concurrency, exposure.
+    ok = not (buying_power < min_bp)
+    add("buying_power", ok, buying_power, min_bp,
+        f"Buying power ${buying_power:.0f} {'clears' if ok else '<'} minimum ${min_bp}"
+        if ok else f"Buying power ${buying_power:.0f} < minimum ${min_bp}")
+
+    ok = not (open_positions >= max_pos)
+    add("open_positions", ok, open_positions, max_pos,
+        f"{open_positions} of {max_pos} positions open"
+        if ok else f"Already at max {max_pos} positions")
+
+    max_notional = equity * max_notional_pct
+    ok = not (total_notional >= max_notional)
+    add("total_notional", ok, total_notional, round(max_notional, 2),
+        f"Notional ${total_notional:.0f} of ${max_notional:.0f} "
+        f"({max_notional_pct*100:.0f}% of equity)" if ok else
+        f"Notional ${total_notional:.0f} would exceed "
+        f"{max_notional_pct*100:.0f}% of equity")
+
+    failed = [c for c in checks if c["passed"] is False]
+    blocked = [c["name"] for c in checks if c["passed"] is None]
+    return {
+        "admitted": not failed,
+        # The FIRST failure, so validate_entry's message is unchanged.
+        "reason": failed[0]["detail"] if failed else "OK",
+        "checks": checks,
+        "failed": [c["name"] for c in failed],
+        "blocked": blocked or None,
+        "mandate": mandate.get("key") or mandate.get("name") or bot_name,
+        "direction": direction,
+        "symbol": symbol,
+    }
+
 
 def validate_entry(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
                    buying_power: float, open_positions: int, total_notional: float,
@@ -442,77 +592,19 @@ def validate_entry(bot_name: str, symbol: str, rsi: float, volume_ratio: float,
     """Validate entry against bot's mandate (supports dual-direction)
 
     direction: "long" (RSI < threshold) or "short" (RSI > threshold)
+
+    A thin reader of validate_entry_verbose, which evaluates every rule
+    and returns them in this same order. Delegating rather than keeping a
+    second copy is deliberate: the live verdict and the logged reason are
+    now computed once, so a decision log can never disagree with the
+    decision it is recording. The returned message is unchanged - the
+    FIRST failing rule, or "OK".
     """
-    mandate = get_bot_mandate(bot_name)
-    if not mandate:
-        return False, f"Unknown bot: {bot_name}"
+    out = validate_entry_verbose(bot_name, symbol, rsi, volume_ratio,
+                                 buying_power, open_positions, total_notional,
+                                 equity, direction)
+    return out["admitted"], out["reason"]
 
-    # Check universe
-    if "universe" in mandate:
-        # NOTE: "commodities" was missing from this list until it was
-        # caught here - MANDATE CHECK 1 in prop_bot.py already allowed
-        # MGC/MCL/SIL (gold/oil/silver) through via its own separate
-        # futures+crypto+commodities concat, but this independent check
-        # only ever recognized futures/crypto/approved/approved_pairs, so
-        # every commodity entry was silently rejected right here with
-        # "not in prop_bot's approved universe" - real trades never placed.
-        approved = (mandate["universe"].get("futures", []) +
-                   mandate["universe"].get("crypto", []) +
-                   mandate["universe"].get("commodities", []) +
-                   mandate["universe"].get("inverse_etfs", []) +
-                   mandate["universe"].get("equities", []) +
-                   mandate["universe"].get("approved", []) +
-                   mandate["universe"].get("approved_pairs", []))
-        if approved and symbol not in approved:
-            return False, f"{symbol} not in {bot_name}'s approved universe"
-
-    # Check entry conditions
-    entry = mandate.get("entry", {})
-
-    # Handle dual-direction (crypto bot)
-    if isinstance(entry, dict) and "long" in entry and "short" in entry:
-        if direction == "long":
-            entry_rules = entry.get("long", {})
-            rsi_threshold = entry_rules.get("rsi_threshold_oversold", 35)
-            if rsi > rsi_threshold:
-                return False, f"RSI {rsi:.1f} not oversold for LONG (threshold: <{rsi_threshold})"
-        elif direction == "short":
-            entry_rules = entry.get("short", {})
-            rsi_threshold = entry_rules.get("rsi_threshold_overbought", 70)
-            if rsi < rsi_threshold:
-                return False, f"RSI {rsi:.1f} not overbought for SHORT (threshold: >{rsi_threshold})"
-
-        shared = entry.get("shared", {})
-        min_bp = shared.get("min_buying_power", 150)
-        max_pos = shared.get("max_open_positions", 4)
-        max_notional_pct = shared.get("max_total_notional_pct", 0.50)
-    else:
-        # Single-direction entry
-        rsi_threshold = entry.get("rsi_threshold", 30)
-        if entry.get("momentum"):
-            # Momentum: require RSI ABOVE the threshold (real, confirmed
-            # strength) - the opposite direction from mean-reversion's
-            # oversold check right below.
-            if rsi < rsi_threshold:
-                return False, f"RSI {rsi:.1f} not showing real momentum (threshold: >{rsi_threshold})"
-        else:
-            if rsi > rsi_threshold:
-                return False, f"RSI {rsi:.1f} not oversold (threshold: {rsi_threshold})"
-        min_bp = entry.get("min_buying_power", 150)
-        max_pos = entry.get("max_open_positions", 2)
-        max_notional_pct = entry.get("max_total_notional_pct", 0.50)
-
-    if buying_power < min_bp:
-        return False, f"Buying power ${buying_power:.0f} < minimum ${min_bp}"
-
-    if open_positions >= max_pos:
-        return False, f"Already at max {max_pos} positions"
-
-    max_notional = equity * max_notional_pct
-    if total_notional >= max_notional:
-        return False, f"Notional ${total_notional:.0f} would exceed {max_notional_pct*100:.0f}% of equity"
-
-    return True, "OK"
 
 def check_kill_condition(bot_name: str, condition: str) -> bool:
     """Check if a kill condition has been triggered"""

@@ -9124,6 +9124,40 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     return out
 
 
+@router.get("/mandates/decisions")
+async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
+                                     admitted: bool = None, limit: int = 100):
+    """Why trades did, and did not, happen. Read-only.
+
+    The refusals are the half worth reading: "nothing has traded for six
+    hours" now has an answer - which rule kept saying no, and by how much.
+    """
+    import decision_log
+    from models import TradeDecision
+    from sqlalchemy import select
+
+    since = datetime.utcnow() - timedelta(hours=max(1, int(hours)))
+    q = select(TradeDecision).where(TradeDecision.decided_at >= since)
+    if bot:
+        q = q.where(TradeDecision.bot == bot)
+    if admitted is not None:
+        q = q.where(TradeDecision.admitted == bool(admitted))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            q.order_by(TradeDecision.decided_at.desc()).limit(max(1, int(limit)))
+        )).scalars().all()
+
+    dicts = [r.to_dict() for r in rows]
+    summary = decision_log.summarise(dicts)
+    return {
+        "window_hours": int(hours),
+        "bot": bot,
+        "decisions": dicts,
+        "summary": summary,
+        "detail": summary["detail"],
+    }
+
+
 @router.get("/mandates/violations")
 async def mandate_violations_endpoint(days: int = 7):
     """Every mandate breach across every bot, measured against real rows.

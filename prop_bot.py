@@ -22,7 +22,8 @@ from sqlalchemy import select, desc, func, case
 from database import get_session_factory
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch, AlpacaBranchTradeHistory
 import bot_mandates
-from bot_mandates import APEX_MANDATE, validate_entry, MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY
+from bot_mandates import (APEX_MANDATE, validate_entry, validate_entry_verbose,
+                          MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY)
 from alpaca_mean_reversion import should_exit_position_momentum, should_exit_position
 from profit_tracker import FiveHourProfitTracker
 from opening_bar_signals import (
@@ -1817,6 +1818,29 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
         return False
 
 
+async def _record_trade_decision(verdict, **market):
+    """Persist one entry decision - admitted or refused. Best effort.
+
+    Refusals are the more valuable half: "why has nothing traded for six
+    hours" has been unanswerable while the answer was computed on every
+    cycle and discarded. See decision_log, which shapes the row.
+
+    Wrapped whole. A logging failure must never decide whether a trade
+    happens, so every error here is swallowed after being said once.
+    """
+    try:
+        import decision_log
+        from models import TradeDecision
+        row = decision_log.row_from_verdict(verdict, bot=BOT_NAME, **market)
+        if row is None:
+            return
+        async with get_session_factory()() as db:
+            db.add(TradeDecision(**row))
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[APEX_589296] decision not logged (non-fatal): {type(e).__name__}: {e}")
+
+
 def check_kill_conditions(buying_power, equity, daily_loss, open_position_count):
     """Check if any kill conditions have been triggered. Return (should_halt, reason)"""
     mandate = APEX_MANDATE
@@ -2160,16 +2184,26 @@ async def run_prop_cycle():
 
         # MANDATE CHECK 2: Entry conditions validation
         total_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
-        is_valid, mandate_reason = validate_entry(
+        _bp = await get_account_buying_power(session)
+        # Verbose, so the DECISION is recorded and not just the verdict.
+        # validate_entry short-circuits and returns "OK", which says
+        # nothing about why a trade qualified - see decision_log.
+        _verdict = validate_entry_verbose(
             bot_name="prop_bot",
             symbol=contract,
             rsi=rsi,
             volume_ratio=1.0,  # TODO: calculate from bars
-            buying_power=await get_account_buying_power(session),
+            buying_power=_bp,
             open_positions=len(open_prop_positions),
             total_notional=total_notional,
-            equity=equity
+            equity=equity,
         )
+        is_valid, mandate_reason = _verdict["admitted"], _verdict["reason"]
+        # Best-effort and AFTER the verdict exists: a logging failure must
+        # never change whether a trade happens.
+        await _record_trade_decision(_verdict, rsi=rsi, buying_power=_bp,
+                                     open_positions=len(open_prop_positions),
+                                     total_notional=total_notional, equity=equity)
         if not is_valid:
             log.warning(f"[APEX_589296] ⛔ MANDATE BLOCKED: {contract} {side} — {mandate_reason}")
             return False

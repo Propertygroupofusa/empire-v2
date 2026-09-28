@@ -1653,6 +1653,68 @@ class ClosedTrade(Base):
         }
 
 
+class TradeDecision(Base):
+    """WHY a trade did or did not happen, recorded when it was decided.
+
+    ClosedTrade already carries entry_rsi, entry_trend and entry_atr_pct -
+    and prop_bot writes NONE of them. Every one has been NULL since the
+    table was created, so the outcome is durable and the reasoning behind
+    it is not.
+
+    Worse, validate_entry could not have filled them: it short-circuits on
+    the first failing rule and returns the bare string "OK" on success, so
+    an admitted trade recorded nothing at all about why it qualified. That
+    is the gap between "a trade happened" and the plan's own criterion,
+    "decision logs tell us WHY each trade happened".
+
+    REFUSALS ARE RECORDED TOO, and they are the more valuable half. "Why
+    did nothing trade for six hours" has been unanswerable all along,
+    while the answer - which rule kept saying no, and by how much - was
+    computed and discarded on every cycle.
+
+    Append-only. Rows are cheap and the value is entirely in the history.
+    """
+    __tablename__ = "trade_decisions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot = Column(String, index=True)
+    symbol = Column(String, index=True)
+    direction = Column(String)
+    mandate = Column(String, index=True)   # which mandate judged it
+
+    admitted = Column(Boolean, index=True)
+    reason = Column(String)                # the first failing rule, or OK
+    failed_rules = Column(String, nullable=True)   # comma-separated names
+    checks_json = Column(Text, nullable=True)      # every rule, value, threshold
+
+    # The market as it looked at the moment of the decision.
+    rsi = Column(Float, nullable=True)
+    buying_power = Column(Float, nullable=True)
+    open_positions = Column(Integer, nullable=True)
+    total_notional = Column(Float, nullable=True)
+    equity = Column(Float, nullable=True)
+
+    decided_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    def to_dict(self):
+        import json as _json
+        try:
+            checks = _json.loads(self.checks_json) if self.checks_json else None
+        except (TypeError, ValueError):
+            checks = None
+        return {
+            "id": self.id, "bot": self.bot, "symbol": self.symbol,
+            "direction": self.direction, "mandate": self.mandate,
+            "admitted": self.admitted, "reason": self.reason,
+            "failed_rules": (self.failed_rules or "").split(",") if self.failed_rules else [],
+            "checks": checks,
+            "rsi": self.rsi, "buying_power": self.buying_power,
+            "open_positions": self.open_positions,
+            "total_notional": self.total_notional, "equity": self.equity,
+            "decided_at": self.decided_at.isoformat() if self.decided_at else None,
+        }
+
+
 class SweepProposal(Base):
     """Proposed transfer of platform profit into Alpaca trading capital.
 
