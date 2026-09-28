@@ -8492,15 +8492,24 @@ async def grid_invariants_endpoint():
     try:
         status = await g.get_grid_status()
         backing = status.get("allocation_backing") or {}
-        # The three components are passed so a claim that comes in UNDER the
-        # real account can be EXPLAINED rather than reported as a hole. See
+        # The components are passed so a claim that comes in UNDER the real
+        # account can be EXPLAINED rather than reported as a hole. See
         # inv.allocation_backed - it ran FAIL for hours on a surplus.
+        #
+        # COMMISSION IS DELIBERATELY NOT PASSED. There are two different
+        # "backed" figures in this codebase and they differ by exactly this
+        # term: reconcile.snapshot ADDS open commission into its backed
+        # total, allocation_backing.backed_usd does NOT - it is
+        # deployed_coin_usd + wallet_cash_usd and nothing else, and reports
+        # commission separately so it can be named in the prose. Passing it
+        # here explained $3.24 twice and left the check UNKNOWN on a $3.24
+        # remainder, which is the check doing its job. Live: surplus
+        # $466.61 = $76.41 unallocated cash + $390.20 over-deployed, exact.
         results.append(inv.allocation_backed(
             backing.get("claimed_usd"),
             backing.get("backed_usd"),
             unallocated_cash_usd=backing.get("unallocated_cash_usd"),
-            over_deployed_usd=backing.get("over_deployed_usd"),
-            open_commission_usd=backing.get("open_entry_commission_usd")))
+            over_deployed_usd=backing.get("over_deployed_usd")))
         rows = []
         for b in (status.get("branches") or []):
             slices = b.get("slices") or []

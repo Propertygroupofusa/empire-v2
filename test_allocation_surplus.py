@@ -19,24 +19,54 @@ nothing to move - the arithmetic was exact and entirely benign:
 import allocation_backing as ab
 import invariants as inv
 
-# The live fleet at 04:49Z.
-CLAIMED, BACKED = 8072.26, 8542.13
-CASH, OVER, COMM = 76.49, 390.20, 3.18
+# The live fleet at 05:30Z, against allocation_backing.backed_usd, which is
+# deployed_coin_usd + wallet_cash_usd and EXCLUDES open commission.
+CLAIMED, BACKED = 8072.26, 8538.87
+CASH, OVER = 76.41, 390.20
+# reconcile.snapshot's backed total is the other one - it ADDS commission.
+RECON_BACKED, COMM = 8542.11, 3.24
 
 
 def test_the_live_surplus_is_explained_and_passes():
     r = inv.allocation_backed(CLAIMED, BACKED, unallocated_cash_usd=CASH,
-                              over_deployed_usd=OVER, open_commission_usd=COMM)
+                              over_deployed_usd=OVER)
     assert r["status"] == inv.OK
     assert "MORE money than is claimed" in r["detail"]
-    assert r["surplus_usd"] == 469.87
-    assert r["explained_usd"] == 469.87
+    assert r["surplus_usd"] == 466.61
+    assert r["explained_usd"] == 466.61
+
+
+def test_commission_against_the_wrong_backed_figure_double_counts_it():
+    """The two backed figures differ by exactly the commission term.
+    allocation_backing.backed_usd EXCLUDES it, so passing it there explains
+    $3.24 twice - which left the live check UNKNOWN on a $3.24 remainder.
+    That is the check working; this is the bug it caught."""
+    r = inv.allocation_backed(CLAIMED, BACKED, unallocated_cash_usd=CASH,
+                              over_deployed_usd=OVER, open_commission_usd=COMM)
+    assert r["status"] == inv.UNKNOWN
+    assert r["unexplained_usd"] == -COMM
+
+
+def test_commission_belongs_with_the_backed_figure_that_includes_it():
+    """reconcile.snapshot ADDS commission into backed, so there it is a
+    real term and the same three numbers must close."""
+    r = inv.allocation_backed(CLAIMED, RECON_BACKED, unallocated_cash_usd=CASH,
+                              over_deployed_usd=OVER, open_commission_usd=COMM)
+    assert r["status"] == inv.OK
+    assert r["explained_usd"] == round(CASH + OVER + COMM, 2)
+
+
+def test_an_omitted_commission_is_simply_not_in_the_sum():
+    """Optional means absent, not zero-by-accident."""
+    r = inv.allocation_backed(CLAIMED, BACKED, unallocated_cash_usd=CASH,
+                              over_deployed_usd=OVER)
+    assert "commission" not in r["detail"]
 
 
 def test_over_claiming_is_still_a_hard_failure():
     """The direction this check exists for must not be softened."""
     r = inv.allocation_backed(BACKED, CLAIMED, unallocated_cash_usd=CASH,
-                              over_deployed_usd=OVER, open_commission_usd=COMM)
+                              over_deployed_usd=OVER)
     assert r["status"] == inv.FAIL
     assert "MORE than is really there" in r["detail"]
     assert r["gap_usd"] > 0
@@ -50,7 +80,7 @@ def test_a_surplus_with_no_components_is_unknown_not_a_pass():
 
 def test_a_partly_explained_surplus_is_unknown_and_names_the_remainder():
     r = inv.allocation_backed(CLAIMED, BACKED, unallocated_cash_usd=CASH,
-                              over_deployed_usd=0.0, open_commission_usd=COMM)
+                              over_deployed_usd=0.0)
     assert r["status"] == inv.UNKNOWN
     assert r["unexplained_usd"] == 390.20
     assert "unexplained" in r["detail"]
@@ -102,4 +132,21 @@ def test_the_components_close_the_identity_exactly():
 
 
 def test_the_identity_holds_on_the_real_fleet_numbers():
-    assert round(CASH + OVER + COMM, 2) == round(BACKED - CLAIMED, 2) == 469.87
+    assert round(CASH + OVER, 2) == round(BACKED - CLAIMED, 2) == 466.61
+    assert round(CASH + OVER + COMM, 2) == round(RECON_BACKED - CLAIMED, 2)
+
+
+def test_the_router_does_not_pass_commission_to_this_check():
+    """Asserted on the parsed tree - the comment beside the call quotes the
+    keyword verbatim while explaining why it is absent."""
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).with_name("routers")
+           / "trading_dashboard.py").read_text()
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "allocation_backed"):
+            kw = {k.arg for k in node.keywords}
+            assert "open_commission_usd" not in kw, (
+                "allocation_backing.backed_usd excludes commission - passing it "
+                "here explains the same $3.24 twice")

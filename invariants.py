@@ -214,9 +214,16 @@ def allocation_backed(claimed_usd, really_there_usd, tolerance_pct=BACKING_TOLER
     # a surplus is not a solvency problem, but an unexplained one is still
     # worth a look, and silence must not read as health.
     surplus = -gap
+    # open_commission_usd is OPTIONAL and must be passed only when the
+    # `really_there_usd` handed in ALREADY includes it. The two backed
+    # figures in this codebase differ by exactly that term -
+    # reconcile.snapshot adds it, allocation_backing.backed_usd does not -
+    # so passing it against the wrong one explains $3.24 twice. Omitted,
+    # it simply is not part of the sum.
     parts = {"unallocated cash": unallocated_cash_usd,
-             "over-deployed coin": over_deployed_usd,
-             "open commission": open_commission_usd}
+             "over-deployed coin": over_deployed_usd}
+    if open_commission_usd is not None:
+        parts["open commission"] = open_commission_usd
     known = {k: _num(v) for k, v in parts.items()}
     if any(v is None for v in known.values()):
         return _v("allocation_backed", UNKNOWN,
