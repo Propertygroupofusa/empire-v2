@@ -115,33 +115,60 @@ def test_a_branch_holding_more_slices_than_levels_is_flagged():
 # A rule that fires on code it has no opinion about is a rule nobody can
 # act on.
 
-def test_an_all_adopted_branch_over_its_levels_is_deliberate():
-    out = gm.measure_capital(
-        [B("ZEC", 2272.0, 3, [(10, 1)] * 7, adopted=True)], free_cash_usd=0)
+def _mixed(pid, levels, adopted_n, bought_n):
+    """The real live shape: N adopted slices plus M bought ones."""
+    b = B(pid, 300.0, levels, [(10, 1)] * (adopted_n + bought_n), adopted=True)
+    for i in range(bought_n):
+        b["slices"][-(i + 1)]["adopted"] = False
+    return b
+
+
+def test_adopted_plus_exactly_one_bought_is_the_designed_shape():
+    """THE LIVE SHAPE, and it took two passes to read correctly.
+    crypto_grid_bot grants an adopted-only branch ONE extra rung so it
+    can take a single dip; buying it makes the branch mixed and the cap
+    snaps back to 3. All six live branches are exactly N adopted + 1
+    bought. Requiring ALL slices to be adopted flagged every one of them
+    as unexplained - the design guarantees one is bought."""
+    out = gm.measure_capital([_mixed("ZEC", 3, 6, 1)], free_cash_usd=0)
     row = out["slices_over_levels"][0]
-    assert row["all_adopted"] is True
+    assert row["adopted_slices"] == 6
+    assert row["bought_slices"] == 1
     assert row["deliberate"] is True
-    assert "Not an anomaly" in row["why"]
+    assert "not a breach" in row["why"]
     assert out["slices_over_levels_unexplained"] == []
 
 
-def test_a_branch_that_BOUGHT_past_its_levels_is_unexplained():
-    """One paid slice among adopted ones means something bought past the
-    cap. That is the case worth looking at."""
-    b = B("X", 300.0, 3, [(10, 1)] * 7, adopted=True)
-    b["slices"][0]["adopted"] = False
-    out = gm.measure_capital([b], free_cash_usd=0)
+def test_two_bought_slices_past_the_cap_is_unexplained():
+    """The one-rung grant only ever allows ONE. Two means the clamp did
+    not snap back."""
+    out = gm.measure_capital([_mixed("X", 3, 5, 2)], free_cash_usd=0)
     row = out["slices_over_levels"][0]
-    assert row["all_adopted"] is False
+    assert row["bought_slices"] == 2
     assert row["deliberate"] is False
     assert len(out["slices_over_levels_unexplained"]) == 1
-    assert "BOUGHT past the cap" in row["why"]
+    assert "did not snap back" in row["why"]
 
 
 def test_a_wholly_unadopted_branch_over_its_levels_is_unexplained():
+    """Nothing was adopted, so no one-rung grant ever applied."""
     out = gm.measure_capital(
         [B("X", 300.0, 3, [(10, 1)] * 7, adopted=False)], free_cash_usd=0)
+    row = out["slices_over_levels"][0]
+    assert row["adopted_slices"] == 0
+    assert row["deliberate"] is False
     assert len(out["slices_over_levels_unexplained"]) == 1
+
+
+def test_all_six_live_branch_shapes_read_as_deliberate():
+    """The exact live counts at 19:07Z: BCH 3+1, SOL 3+1, PEPE 6+1,
+    LTC 6+1, ZEC 6+1, SHIB 6+1, all over a cap of 3."""
+    live = [("BCH", 3, 1), ("SOL", 3, 1), ("PEPE", 6, 1),
+            ("LTC", 6, 1), ("ZEC", 6, 1), ("SHIB", 6, 1)]
+    out = gm.measure_capital(
+        [_mixed(p, 3, a, b) for p, a, b in live], free_cash_usd=0)
+    assert len(out["slices_over_levels"]) == 6
+    assert out["slices_over_levels_unexplained"] == []
 
 
 def test_the_adopted_count_is_reported_not_just_the_verdict():
@@ -149,6 +176,7 @@ def test_the_adopted_count_is_reported_not_just_the_verdict():
     b["slices"][0]["adopted"] = False
     row = gm.measure_capital([b], free_cash_usd=0)["slices_over_levels"][0]
     assert row["adopted_slices"] == 4
+    assert row["bought_slices"] == 1
     assert row["open_slices"] == 5
 
 

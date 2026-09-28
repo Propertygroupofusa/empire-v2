@@ -166,15 +166,44 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
         entry = dict(row)
         entry["adopted_slices"] = len(adopted)
         entry["all_adopted"] = bool(sl) and len(adopted) == len(sl)
-        entry["deliberate"] = entry["all_adopted"]
+        # THE DESIGNED SHAPE IS ADOPTED + EXACTLY ONE BOUGHT. Read the
+        # code before judging this, which took two passes to get right.
+        #
+        # crypto_grid_bot grants an ADOPTED-ONLY branch one extra rung:
+        #
+        #     if branch_is_adopted_only(slices):
+        #         real_effective_levels = max(real_effective_levels,
+        #                                     len(slices) + 1)
+        #
+        # and its comment says why - "ONE rung, not a reopened ladder.
+        # The branch may take a single dip; the slice it buys is a real
+        # one, so branch_is_adopted_only() goes false on the next cycle
+        # and this clamp snaps back - it must sell before it may buy
+        # again."
+        #
+        # So the branch buys exactly one slice, immediately stops being
+        # adopted-only, and the level count drops back to the override's
+        # 3. What is left on the books is N adopted slices plus ONE
+        # bought one, over a cap of 3. That is the mechanism working.
+        #
+        # Requiring ALL slices to be adopted - the first attempt at this
+        # rule - therefore flagged all six live branches as unexplained,
+        # because the design guarantees one of them is bought. The real
+        # invariant is on the BOUGHT count: two or more past the cap
+        # would mean the clamp failed to snap back.
+        bought = entry["open_slices"] - entry["adopted_slices"]
+        entry["bought_slices"] = bought
+        entry["deliberate"] = bool(adopted) and bought <= 1
         entry["why"] = (
-            "every open slice was adopted - the adoption worker pins "
-            "num_levels to the slice count on purpose so the grid cannot "
-            "average down coin it never chose. Not an anomaly."
-            if entry["all_adopted"] else
-            "this branch holds MORE slices than rungs and not all of them "
-            "were adopted, so at least one was BOUGHT past the cap. That is "
-            "the case worth looking at.")
+            f"{entry['adopted_slices']} adopted slice(s) plus {bought} bought "
+            f"one. An adopted-only branch is granted ONE extra rung so it can "
+            f"take a single dip; buying it makes the branch mixed and the cap "
+            f"snaps back. This is that mechanism, not a breach."
+            if entry["deliberate"] else
+            f"{bought} slice(s) were BOUGHT past a cap of {entry['num_levels']} "
+            f"with {entry['adopted_slices']} adopted. The one-rung grant only "
+            f"ever allows ONE, so the clamp did not snap back. Worth looking "
+            f"at.")
         over.append(entry)
 
     return {
