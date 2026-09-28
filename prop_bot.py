@@ -1955,7 +1955,8 @@ def format_order_qty(qty):
     return f"{rounded:.9f}".rstrip("0").rstrip("."), True
 
 
-async def execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss=None, target=None):
+async def execute_futures_trade(session, contract, action, qty, price, rsi, trend,
+                                stop_loss=None, target=None, source="unlabelled"):
     """Place a real order via Alpaca. `action` is the literal order side
     ("BUY" or "SELL") - what that *means* (open a long, open a short, close
     a long, cover a short) depends on the caller's position state, tracked
@@ -1997,12 +1998,34 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     # to reckon with it rather than rediscover it in production.
     time_in_force = "day"
 
+    # WHO PLACED THIS ORDER.
+    #
+    # On 28 Sep, SIX separate orders for META - 0.163475 shares each,
+    # $748.91 each, submitted inside 48 MILLISECONDS - put 73% of a
+    # $1,007 account into one name. Nothing anywhere could say which
+    # code path sent them. Every order this bot has ever placed went out
+    # anonymous, so the only way to attribute one was to reason
+    # backwards from its size, which is how "six of eight bots bought
+    # META" got asserted and then had to be retracted.
+    #
+    # An order that cannot be traced to its caller cannot be debugged,
+    # and a duplicate-order bug is exactly the kind you only find after
+    # it has cost money. Alpaca accepts and returns client_order_id (max
+    # 128 chars, must be unique), so the caller's name rides along with
+    # the order and comes back on every fill.
+    #
+    # NOT the same as the Coinbase attempt that was abandoned: Coinbase's
+    # fills feed carries order_id and no client_order_id, so tagging
+    # there bought nothing. Alpaca returns it on the order itself.
+    client_order_id = f"{source}-{contract}-{uuid.uuid4().hex[:16]}"[:128]
+
     order = {
         "symbol": symbol,
         "qty": qty_str,
         "side": side,
         "type": "market",
         "time_in_force": time_in_force,
+        "client_order_id": client_order_id,
     }
 
     mode = "LIVE" if LIVE_TRADE else "PAPER"
@@ -2382,7 +2405,7 @@ async def run_prop_cycle():
         # fill amount).
         pnl = (price - entry) * qty if side == "long" else (entry - price) * qty
 
-        filled = await execute_futures_trade(session, contract, close_action, qty, price, rsi, trend, target=price)
+        filled = await execute_futures_trade(session, contract, close_action, qty, price, rsi, trend, target=price, source="exit_pass")
         if not filled:
             return False
 
@@ -2416,7 +2439,7 @@ async def run_prop_cycle():
         else:
             stop_loss, target = price * 1.02, price * 0.97
 
-        filled = await execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss, target)
+        filled = await execute_futures_trade(session, contract, action, qty, price, rsi, trend, stop_loss, target, source="entry_pass")
         if not filled:
             return False
 
@@ -3620,7 +3643,7 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
             entry = position["entry"]
             qty = position["qty"]
             pnl = (price - entry) * qty
-            filled = await execute_futures_trade(session, contract, "SELL", qty, price, rsi, trend, target=price)
+            filled = await execute_futures_trade(session, contract, "SELL", qty, price, rsi, trend, target=price, source="branch_exit")
             if filled:
                 open_alpaca_branch_positions.pop(branch.bot_name, None)
                 await _db_delete_branch_open(branch.bot_name, contract)
@@ -3673,7 +3696,7 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
     if qty <= 0:
         return
 
-    filled = await execute_futures_trade(session, contract, "BUY", qty, price, rsi, trend, stop_loss=price * 0.98, target=price * 1.03)
+    filled = await execute_futures_trade(session, contract, "BUY", qty, price, rsi, trend, stop_loss=price * 0.98, target=price * 1.03, source="branch_entry")
     if not filled:
         log.warning(f"[ALPACA-BRANCH] {branch.bot_name}: real buy into {contract} did not fill - will retry next cycle")
         return
@@ -3750,7 +3773,7 @@ async def _deploy_seed_into_weakest_alpaca_branch(
     qty = round(usd_amount / price, 6)
     if qty <= 0:
         return False
-    filled = await execute_futures_trade(session, contract, "BUY", qty, price, rsi, data["trend"], stop_loss=price * 0.98, target=price * 1.03)
+    filled = await execute_futures_trade(session, contract, "BUY", qty, price, rsi, data["trend"], stop_loss=price * 0.98, target=price * 1.03, source="idle_cash_sweep")
     if not filled:
         log.warning(f"[ALPACA-BRANCH] reinforcement: real buy into {target_branch.bot_name} ({contract}) did not fill")
         return False
@@ -4237,6 +4260,7 @@ async def run_opening_bar_symbol_cycle(session, contract: str, config: dict, equ
         filled = await execute_futures_trade(
             session, contract, "BUY", qty, current_price, 0.0, f"OPENING_BAR_{last_trade['qualifies_as'].upper()}",
             stop_loss=last_trade["stop_price"], target=None,
+            source="opening_bar_entry",
         )
         if filled:
             open_opening_bar_positions[contract] = {
@@ -4257,7 +4281,7 @@ async def run_opening_bar_symbol_cycle(session, contract: str, config: dict, equ
         entry = position["entry_price"]
         qty = position["qty"]
         pnl = (current_price - entry) * qty
-        filled = await execute_futures_trade(session, contract, "SELL", qty, current_price, 0.0, "OPENING_BAR_EXIT", target=current_price)
+        filled = await execute_futures_trade(session, contract, "SELL", qty, current_price, 0.0, "OPENING_BAR_EXIT", target=current_price, source="opening_bar_exit")
         if filled:
             open_opening_bar_positions.pop(contract, None)
             log.info(

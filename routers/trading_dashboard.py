@@ -718,6 +718,27 @@ async def list_withdrawals(db: AsyncSession = Depends(get_db)):
     return {"withdrawals": [w.to_dict() for w in withdrawals]}
 
 
+_KNOWN_ORDER_SOURCES = (
+    "entry_pass", "exit_pass", "branch_entry", "branch_exit",
+    "idle_cash_sweep", "opening_bar_entry", "opening_bar_exit",
+    "unlabelled",
+)
+
+
+def _order_source(client_order_id):
+    """The caller that placed an order, read off its client_order_id.
+
+    Returns None for an order this bot did not tag - one placed before
+    tagging shipped, or placed by hand. None means UNATTRIBUTABLE, which
+    is the truth about those orders; it must never be read as a default
+    source.
+    """
+    if not client_order_id:
+        return None
+    head = str(client_order_id).split("-", 1)[0]
+    return head if head in _KNOWN_ORDER_SOURCES else None
+
+
 @router.get("/trades")
 async def get_todays_trades():
     """Detail behind /status's todays_trade_count - the actual filled
@@ -734,6 +755,13 @@ async def get_todays_trades():
                 "qty": o.get("filled_qty"),
                 "price": o.get("filled_avg_price"),
                 "filled_at": o.get("filled_at"),
+                # WHICH CODE PATH SENT IT. Orders placed before the
+                # tagging went in carry Alpaca's own generated id and
+                # will not match a known source - that is honest, not a
+                # gap: those orders really are unattributable.
+                "submitted_at": o.get("submitted_at"),
+                "client_order_id": o.get("client_order_id"),
+                "source": _order_source(o.get("client_order_id")),
             }
             for o in orders
         ]
