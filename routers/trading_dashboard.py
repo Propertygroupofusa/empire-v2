@@ -8280,6 +8280,75 @@ async def set_lesson_enforcement_endpoint(payload: SetLessonEnforcementRequest):
             "min_trades_to_block": grid_learning.MIN_TRADES_TO_BLOCK}
 
 
+# One row per field. TradingBotState carries only float columns, so the
+# snapshot is stored spread across rows rather than as JSON in a text field
+# that does not exist - the same shape the fill-mix counters already use.
+_RECONCILE_PREFIX = "grid_reconcile_"
+_RECONCILE_FIELDS = ("claimed_usd",) + tuple(__import__("reconcile").BUCKETS)
+
+
+async def _read_reconcile_snapshot():
+    """The last reading, or None. None means "cannot attribute yet", which
+    the caller reports plainly rather than treating as a zero baseline.
+
+    A PARTIAL read returns None too: comparing against a snapshot that is
+    missing a bucket would attribute the residual to whichever field
+    happened to survive, which is worse than admitting there is no baseline.
+    """
+    try:
+        import reconcile as rec
+        from models import TradingBotState
+        from sqlalchemy import select as _select
+        g = crypto_grid_bot_module
+        async with g.get_session_factory()() as db:
+            rows = (await db.execute(_select(TradingBotState).where(
+                TradingBotState.bot_name.like(_RECONCILE_PREFIX + "%")))).scalars().all()
+        vals = {r.bot_name[len(_RECONCILE_PREFIX):]: r.base_capital for r in rows}
+        if any(f not in vals or vals[f] is None for f in _RECONCILE_FIELDS):
+            return None
+        return {"claimed_usd": vals["claimed_usd"],
+                "components": {b: vals[b] for b in rec.BUCKETS},
+                "backed_usd": rec.backed_from({b: vals[b] for b in rec.BUCKETS}),
+                "residual_usd": round(vals["claimed_usd"]
+                                      - rec.backed_from({b: vals[b] for b in rec.BUCKETS}), 2),
+                "unreadable": []}
+    except Exception:
+        return None
+
+
+async def _write_reconcile_snapshot(snap):
+    """Best-effort: a failed write costs the NEXT comparison, never this
+    reading, so it must not raise into the endpoint.
+
+    A snapshot with any unreadable component is NOT stored - a baseline with
+    a hole in it makes the next comparison lie.
+    """
+    if snap.get("residual_usd") is None:
+        return
+    try:
+        from models import TradingBotState
+        from sqlalchemy import select as _select
+        g = crypto_grid_bot_module
+        vals = {"claimed_usd": snap.get("claimed_usd")}
+        vals.update(snap.get("components") or {})
+        async with g.get_session_factory()() as db:
+            rows = (await db.execute(_select(TradingBotState).where(
+                TradingBotState.bot_name.like(_RECONCILE_PREFIX + "%")))).scalars().all()
+            by_name = {r.bot_name: r for r in rows}
+            for f in _RECONCILE_FIELDS:
+                v = vals.get(f)
+                if v is None:
+                    continue
+                key = _RECONCILE_PREFIX + f
+                if key in by_name:
+                    by_name[key].base_capital = float(v)
+                else:
+                    db.add(TradingBotState(bot_name=key, base_capital=float(v)))
+            await db.commit()
+    except Exception:
+        pass
+
+
 @router.get("/grid-status/invariants")
 async def grid_invariants_endpoint():
     """Every number that must agree, checked against an INDEPENDENT source.
@@ -8364,7 +8433,34 @@ async def grid_invariants_endpoint():
         results.append({"name": "allocation_backed", "status": inv.UNKNOWN,
                         "detail": f"could not be checked: {type(e).__name__}: {e}"})
 
+    # THE RECONCILIATION, and the reason it sits beside the invariants
+    # rather than inside one. An invariant answers "is this wrong". This
+    # answers "what moved", which is the half that was still costing an hour
+    # of digging per finding: the old check reported "$44.27 unaccounted" and
+    # said nothing about the $64.56 that had moved from available cash into a
+    # hold. The previous snapshot is kept in the DB so each reading can be
+    # compared to the last; the first reading after a restart says plainly
+    # that it cannot attribute anything yet rather than inventing a baseline.
+    try:
+        import reconcile as rec
+        ab = (status.get("allocation_backing") or {})
+        snap = rec.snapshot(
+            ab.get("claimed_usd"),
+            {"coin_at_cost": ab.get("deployed_coin_usd"),
+             "cash_available": ab.get("wallet_cash_usd"),
+             "cash_on_hold": ab.get("usd_on_hold"),
+             "commission_open": ab.get("open_entry_commission_usd")},
+            at=_dt.datetime.utcnow().isoformat() + "Z")
+        prev = await _read_reconcile_snapshot()
+        out_rec = rec.explain(prev, snap)
+        out_rec["snapshot"] = snap
+        await _write_reconcile_snapshot(snap)
+    except Exception as e:
+        out_rec = {"status": "UNKNOWN",
+                   "headline": f"reconciliation could not run: {type(e).__name__}: {e}"}
+
     out = inv.summarize(results)
+    out["reconciliation"] = out_rec
     return JSONResponse(content=out, headers={
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache", "Expires": "0"})
