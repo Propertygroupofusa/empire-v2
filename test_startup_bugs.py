@@ -152,11 +152,29 @@ _new = _run_across_loops(csb._get_candle_semaphore)
 ok("the shipped getter works on every loop", all(r is None for _, r in _new), f"{_new}")
 
 def _collect_ids():
-    ids = []
+    """THE SEMAPHORES THEMSELVES, not their id()s.
+
+    This used to append id(...) and drop the object. Each thread creates
+    its loop, grabs a semaphore and CLOSES the loop before the next
+    thread starts, so every semaphore was garbage before the next one was
+    made - and CPython reuses freed addresses. id() is unique only among
+    objects that are alive AT THE SAME TIME.
+
+    So the ids could collide, len(set(...)) came back 2, and this check
+    failed. It did so only inside a full-suite run, where memory pressure
+    makes the allocator recycle, and passed every time it was re-run on
+    its own. It was written off as transient twice before that was the
+    root cause. A test whose result depends on the allocator is not a
+    flaky test, it is a wrong one.
+
+    Holding all three alive makes their identities distinct by
+    construction, which is what the check was always trying to say.
+    """
+    sems = []
 
     def grab():
         async def main():
-            ids.append(id(csb._get_candle_semaphore()))
+            sems.append(csb._get_candle_semaphore())
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(main())
@@ -166,11 +184,13 @@ def _collect_ids():
         t = threading.Thread(target=grab)
         t.start()
         t.join()
-    return ids
+    return sems
 
 
-_ids = _collect_ids()
-ok("three loops get three distinct semaphores", len(set(_ids)) == 3, f"{_ids}")
+_sems = _collect_ids()
+ok("three loops get three distinct semaphores",
+   len(_sems) == 3 and len({id(s) for s in _sems}) == 3,
+   f"{[id(s) for s in _sems]}")
 
 
 def _same_loop_twice():
