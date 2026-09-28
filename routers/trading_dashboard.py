@@ -8492,8 +8492,15 @@ async def grid_invariants_endpoint():
     try:
         status = await g.get_grid_status()
         backing = status.get("allocation_backing") or {}
-        results.append(inv.allocation_backed(backing.get("claimed_usd"),
-                                             backing.get("backed_usd")))
+        # The three components are passed so a claim that comes in UNDER the
+        # real account can be EXPLAINED rather than reported as a hole. See
+        # inv.allocation_backed - it ran FAIL for hours on a surplus.
+        results.append(inv.allocation_backed(
+            backing.get("claimed_usd"),
+            backing.get("backed_usd"),
+            unallocated_cash_usd=backing.get("unallocated_cash_usd"),
+            over_deployed_usd=backing.get("over_deployed_usd"),
+            open_commission_usd=backing.get("open_entry_commission_usd")))
         rows = []
         for b in (status.get("branches") or []):
             slices = b.get("slices") or []

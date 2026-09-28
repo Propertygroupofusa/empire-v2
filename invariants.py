@@ -171,7 +171,9 @@ def spacing_evidence_current(evidence_priced_at_round_trip, measured_round_trip,
 BACKING_TOLERANCE_PCT = 0.005
 
 
-def allocation_backed(claimed_usd, really_there_usd, tolerance_pct=BACKING_TOLERANCE_PCT):
+def allocation_backed(claimed_usd, really_there_usd, tolerance_pct=BACKING_TOLERANCE_PCT,
+                      unallocated_cash_usd=None, over_deployed_usd=None,
+                      open_commission_usd=None):
     """Branch bookkeeping vs the real account. The dashboard already shows
     this; having it here makes it a scheduled check rather than a banner
     somebody has to be looking at."""
@@ -181,15 +183,69 @@ def allocation_backed(claimed_usd, really_there_usd, tolerance_pct=BACKING_TOLER
         return _v("allocation_backed", UNKNOWN, "nothing claimed - no ratio to take")
     gap = float(claimed_usd) - float(really_there_usd)
     pct = abs(gap) / float(claimed_usd)
-    direction = "MORE than is really there" if gap > 0 else "less than is really there"
-    if pct > tolerance_pct:
+
+    if pct <= tolerance_pct:
+        return _v("allocation_backed", OK,
+                  f"branches claim ${claimed_usd:,.2f}, ${really_there_usd:,.2f} really there - "
+                  f"${abs(gap):,.2f} ({pct*100:.2f}%) apart, within tolerance")
+
+    # OVER-CLAIMING is the hole this check exists for: a number in a
+    # database with nothing behind it.
+    if gap > 0:
         return _v("allocation_backed", FAIL,
                   f"branches claim ${claimed_usd:,.2f} against ${really_there_usd:,.2f} really "
-                  f"there - ${abs(gap):,.2f} ({pct*100:.2f}%) {direction}, over the "
+                  f"there - ${gap:,.2f} ({pct*100:.2f}%) MORE than is really there, over the "
                   f"{tolerance_pct*100:.2f}% tolerance.", gap_usd=round(gap, 2))
-    return _v("allocation_backed", OK,
-              f"branches claim ${claimed_usd:,.2f}, ${really_there_usd:,.2f} really there - "
-              f"${abs(gap):,.2f} ({pct*100:.2f}%) apart, within tolerance")
+
+    # UNDER-CLAIMING IS THE OPPOSITE CONDITION AND WAS BEING REPORTED AS
+    # THE SAME FAILURE. There is MORE real value than the branches claim -
+    # nobody is short a dollar. It ran FAIL for hours at about -$470 with
+    # a residual that never moved, and the arithmetic turned out to be
+    # exact and entirely benign:
+    #
+    #     unallocated cash   $76.49   real USD no branch has claimed yet
+    #     over-deployed     $390.20   coin costing more than its allocation
+    #     open commission     $3.18   buy-leg fees already paid
+    #                       -------
+    #                       $469.87   = the whole surplus, to the cent
+    #
+    # So the surplus is now EXPLAINED rather than alarmed about. Fully
+    # accounted for is OK. Not fully accounted for is UNKNOWN, never FAIL:
+    # a surplus is not a solvency problem, but an unexplained one is still
+    # worth a look, and silence must not read as health.
+    surplus = -gap
+    parts = {"unallocated cash": unallocated_cash_usd,
+             "over-deployed coin": over_deployed_usd,
+             "open commission": open_commission_usd}
+    known = {k: _num(v) for k, v in parts.items()}
+    if any(v is None for v in known.values()):
+        return _v("allocation_backed", UNKNOWN,
+                  f"branches claim ${claimed_usd:,.2f} against ${really_there_usd:,.2f} really "
+                  f"there - ${surplus:,.2f} ({pct*100:.2f}%) MORE is present than is claimed. "
+                  f"That is not a hole, but the components that would explain it were not "
+                  f"supplied, so it is not read as a pass either.",
+                  surplus_usd=round(surplus, 2))
+
+    explained = sum(known.values())
+    breakdown = " + ".join(f"${v:,.2f} {k}" for k, v in known.items() if abs(v) >= 0.005)
+    # A cent per contributing figure, floored at $1: rounding noise, not a
+    # tolerance anyone should tune.
+    slack = max(1.00, 0.01 * len(known))
+    if abs(explained - surplus) <= slack:
+        return _v("allocation_backed", OK,
+                  f"branches claim ${claimed_usd:,.2f} against ${really_there_usd:,.2f} really "
+                  f"there. The ${surplus:,.2f} difference is MORE money than is claimed, not "
+                  f"less, and it is fully accounted for: {breakdown}. Nothing is unbacked.",
+                  surplus_usd=round(surplus, 2), explained_usd=round(explained, 2))
+
+    return _v("allocation_backed", UNKNOWN,
+              f"branches claim ${claimed_usd:,.2f} against ${really_there_usd:,.2f} really "
+              f"there - ${surplus:,.2f} MORE is present than is claimed. "
+              f"{breakdown or 'No component'} accounts for ${explained:,.2f}, leaving "
+              f"${surplus - explained:,.2f} unexplained. Not a hole - nobody is short - but "
+              f"not understood either.",
+              surplus_usd=round(surplus, 2), explained_usd=round(explained, 2),
+              unexplained_usd=round(surplus - explained, 2))
 
 
 # ── 4. cash that fell without a trade to explain it ─────────────────────

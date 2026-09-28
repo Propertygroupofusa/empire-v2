@@ -131,6 +131,18 @@ def backing(branches, wallet_cash, usd_on_hold=None):
     unpriced = 0
     entry_fees = 0.0
     unmeasured_fee_slices = 0
+    # Per branch, the two halves of the difference between what it claims
+    # and what its coin cost. Kept apart because they mean opposite things
+    # and summing them first destroys the distinction:
+    #   reserve      allocation not yet spent - real cash the branch is
+    #                holding for a level it has not bought
+    #   over_deployed  coin that cost MORE than the branch claims, left
+    #                behind when an allocation was lowered under slices
+    #                already bought
+    # Together with unallocated cash they explain a claim that comes in
+    # UNDER the real account, which is not a hole - see surplus_explained.
+    unspent_reserve = 0.0
+    over_deployed = 0.0
     for b in branches:
         # SHAPE is fatal, VALUES are skippable. Iterating a string yields
         # characters; each one silently misses every field and the whole
@@ -146,21 +158,31 @@ def backing(branches, wallet_cash, usd_on_hold=None):
             claimed += float(get("allocated_usd", 0) or 0)
         except (TypeError, ValueError):
             pass
+        branch_cost = 0.0
         for s in (get("slices", None) or []):
             cost = slice_cost(s)
             if cost is None:
                 unpriced += 1
             else:
                 deployed += cost
+                branch_cost += cost
             fee = slice_entry_commission(s)
             if fee is None:
                 unmeasured_fee_slices += 1
             else:
                 entry_fees += fee
+        try:
+            branch_claim = float(get("allocated_usd", 0) or 0)
+        except (TypeError, ValueError):
+            branch_claim = 0.0
+        unspent_reserve += max(0.0, branch_claim - branch_cost)
+        over_deployed += max(0.0, branch_cost - branch_claim)
 
     claimed = round(claimed, 2)
     deployed = round(deployed, 2)
     entry_fees = round(entry_fees, 2)
+    unspent_reserve = round(unspent_reserve, 2)
+    over_deployed = round(over_deployed, 2)
 
     if wallet_cash is None:
         return {
@@ -234,5 +256,11 @@ def backing(branches, wallet_cash, usd_on_hold=None):
         "open_entry_commission_usd": entry_fees,
         "gross_unbacked_usd": gross_unbacked,
         "slices_without_fee_rate": unmeasured_fee_slices,
+        # The three things that make a claim come in UNDER the real
+        # account. Reported so the surplus can be EXPLAINED rather than
+        # alarmed about - see invariants.allocation_backed.
+        "unspent_reserve_usd": unspent_reserve,
+        "over_deployed_usd": over_deployed,
+        "unallocated_cash_usd": round(wallet + held - unspent_reserve, 2),
         "detail": detail,
     }
