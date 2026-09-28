@@ -97,10 +97,50 @@ DEFAULT_MAKER_ROUND_TRIP = 0.006
 DEFAULT_MIN_ADVERSE_SELECTION = 0.0015
 DEFAULT_ADVERSE_SELECTION_VOL_FRACTION = 0.20
 
-# Reject a coin whose top-of-book spread is wider than this. Crossing a
-# wide spread is a cost paid before the trade has done anything, and on a
-# $70 slice it is not recoverable inside a grid step.
+# Reject a coin whose top-of-book spread is too wide a share of the move
+# being attempted. Crossing a wide spread is a cost paid before the trade
+# has done anything, and on a $70 slice it is not recoverable INSIDE A GRID
+# STEP - and that last clause is the whole point.
+#
+# This was a flat 0.0015. It was derived against the 1.00% step in force at
+# the time, where 0.15% is 15% of the move. The fleet step is now 3.00% and
+# the constant never moved with it, so the gate went on refusing at 15% of a
+# step that no longer exists. Measured on the live book 2026-09-28:
+#
+#     coin    spread   net at the 3.00% step   net at the 1.00% step
+#     JASMY   0.378%          +1.61%                  -0.39%
+#     ACH     0.336%          +1.70%                  -0.30%
+#     PEPE    0.235%          +1.72%                  -0.28%
+#     SHIB    0.172%          +1.89%                  -0.11%
+#
+# Every one of them LOSES money at the step this limit was written for - the
+# gate was right - and every one CLEARS comfortably at the step actually in
+# force. JASMY and ACH are the fleet's two best earners by net profit per
+# dollar per day, and they were being refused on every cycle.
+#
+# Expressed as a fraction of the target so it cannot go stale again: the
+# rule was always "a share of the move", and now it says so. The absolute
+# value below is the backstop for a genuinely broken book, not the working
+# limit.
+DEFAULT_MAX_SPREAD_FRACTION_OF_TARGET = 0.15
+DEFAULT_MAX_SPREAD_ABSOLUTE_PCT = 0.010
+
+# Kept as the floor of the derived limit so a very tight target cannot drive
+# the gate to near-zero and refuse every real book.
 DEFAULT_MAX_SPREAD_PCT = 0.0015
+
+
+def max_spread_for(target_pct,
+                   fraction=DEFAULT_MAX_SPREAD_FRACTION_OF_TARGET,
+                   floor=DEFAULT_MAX_SPREAD_PCT,
+                   absolute=DEFAULT_MAX_SPREAD_ABSOLUTE_PCT):
+    """The widest spread worth crossing for a `target_pct` move.
+
+    Never below `floor` (so a tight target cannot collapse the gate) and
+    never above `absolute` (so a wide target cannot licence a broken book).
+    """
+    t = max(0.0, float(target_pct or 0.0))
+    return min(absolute, max(floor, fraction * t))
 
 # The book must hold this multiple of the intended position on BOTH sides
 # before entering. A $70 slice into a book showing $70 of depth IS the
@@ -162,18 +202,35 @@ def adverse_selection_pct(amplitude_pct,
 
 def total_cost_pct(amplitude_pct, fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
                    min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
-                   vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION):
-    """Everything a completed round trip pays: fees plus adverse selection."""
-    return fee_round_trip + adverse_selection_pct(amplitude_pct, min_adverse, vol_fraction)
+                   vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION,
+                   spread_pct=0.0):
+    """Everything a completed round trip pays: fees, adverse selection, and
+    the spread.
+
+    The spread used to be GATED but never PRICED - refused above a flat
+    limit and charged at zero below it, so this function's own docstring
+    ("everything a completed round trip pays") was false for the whole range
+    it admitted. Charging it here is strictly STRICTER than before: a coin
+    whose spread eats its edge is now refused by arithmetic rather than
+    passing a threshold it happened to sit under.
+
+    It does NOT double-charge adverse selection. That term subsumes the flat
+    per-side SLIPPAGE this file used to apply - price moving against the fill
+    - which is a different cost from the bid-ask gap being crossed.
+    """
+    return (fee_round_trip
+            + adverse_selection_pct(amplitude_pct, min_adverse, vol_fraction)
+            + max(0.0, float(spread_pct or 0.0)))
 
 
 def net_edge_pct(target_pct, amplitude_pct,
                  fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
                  min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
-                 vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION):
+                 vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION,
+                 spread_pct=0.0):
     """What a winning trade actually keeps, after every cost on both legs."""
     return target_pct - total_cost_pct(amplitude_pct, fee_round_trip,
-                                       min_adverse, vol_fraction)
+                                       min_adverse, vol_fraction, spread_pct)
 
 
 def breakeven_win_rate(target_pct, stop_pct, amplitude_pct,
@@ -300,7 +357,7 @@ def evaluate_coin(product_id, target_pct, stop_pct, hourly_swing_pct,
                   fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
                   min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
                   vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION,
-                  max_spread_pct=DEFAULT_MAX_SPREAD_PCT,
+                  max_spread_pct=None,
                   min_depth_ratio=DEFAULT_MIN_DEPTH_RATIO,
                   max_target_swing_multiple=DEFAULT_MAX_TARGET_SWING_MULTIPLE,
                   max_breakeven_win_rate=DEFAULT_MAX_BREAKEVEN_WIN_RATE):
@@ -349,9 +406,17 @@ def evaluate_coin(product_id, target_pct, stop_pct, hourly_swing_pct,
         return row
     spread = (best_ask - best_bid) / best_bid
     row["spread_pct"] = spread
-    if spread > max_spread_pct:
+    # The limit is a share of the MOVE being attempted, not a fixed number -
+    # see max_spread_for(). A caller that passes an explicit max_spread_pct
+    # still gets exactly that, so nothing that sets it deliberately changes.
+    effective_max_spread = (max_spread_pct if max_spread_pct is not None
+                            else max_spread_for(target_pct))
+    row["max_spread_pct"] = effective_max_spread
+    if spread > effective_max_spread:
         row["reason"] = (f"spread {spread * 100:.3f}% is over the "
-                         f"{max_spread_pct * 100:.2f}% limit - paid before the trade "
+                         f"{effective_max_spread * 100:.3f}% limit "
+                         f"({DEFAULT_MAX_SPREAD_FRACTION_OF_TARGET * 100:.0f}% of the "
+                         f"{target_pct * 100:.2f}% target) - paid before the trade "
                          f"does anything")
         return row
 
@@ -368,14 +433,19 @@ def evaluate_coin(product_id, target_pct, stop_pct, hourly_swing_pct,
     # --- economics --------------------------------------------------------
     adverse = adverse_selection_pct(hourly_swing_pct, min_adverse, vol_fraction)
     row["adverse_selection_pct"] = adverse
-    costs = total_cost_pct(hourly_swing_pct, fee_round_trip, min_adverse, vol_fraction)
+    # The spread is CHARGED here, not merely gated above. Before this it was
+    # refused past a threshold and costed at ZERO underneath it, so a coin
+    # sitting just inside the limit had its spread ignored entirely.
+    costs = total_cost_pct(hourly_swing_pct, fee_round_trip, min_adverse,
+                           vol_fraction, spread)
     edge = net_edge_pct(target_pct, hourly_swing_pct, fee_round_trip,
-                        min_adverse, vol_fraction)
+                        min_adverse, vol_fraction, spread)
     row["net_edge_pct"] = edge
     if edge <= 0:
         row["reason"] = (f"net edge {edge * 100:+.3f}% - a {target_pct * 100:.2f}% target "
                          f"does not clear {costs * 100:.2f}% of costs "
-                         f"({fee_round_trip * 100:.2f}% fees + {adverse * 100:.2f}% adverse)")
+                         f"({fee_round_trip * 100:.2f}% fees + {adverse * 100:.2f}% adverse "
+                         f"+ {spread * 100:.3f}% spread)")
         return row
 
     multiple = target_pct / hourly_swing_pct
@@ -407,7 +477,7 @@ def evaluate_grid_step(product_id, grid_pct, hourly_swing_pct,
                        fee_round_trip=DEFAULT_TAKER_ROUND_TRIP,
                        min_adverse=DEFAULT_MIN_ADVERSE_SELECTION,
                        vol_fraction=DEFAULT_ADVERSE_SELECTION_VOL_FRACTION,
-                       max_spread_pct=DEFAULT_MAX_SPREAD_PCT,
+                       max_spread_pct=None,
                        min_depth_ratio=DEFAULT_MIN_DEPTH_RATIO,
                        max_target_swing_multiple=DEFAULT_MAX_TARGET_SWING_MULTIPLE):
     """The same gates, shaped for one grid slice rather than a bracket trade.
