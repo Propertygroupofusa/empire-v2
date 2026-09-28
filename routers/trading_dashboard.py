@@ -6294,6 +6294,90 @@ async def set_opening_bar_live_mode_endpoint(payload: SetOpeningBarLiveModeReque
     return {"status": "updated", "mode_active": payload.enabled}
 
 
+class SetEquityHandoverRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/alpaca-overview/equity-handover")
+async def get_equity_handover_status():
+    """Is market_brain running the equity side, and what happens if it is.
+
+    Read-only. Exists because the switch below was described in three
+    commit messages as "flipped from the dashboard" while no route
+    existed at all - a capability claimed and never built.
+
+    It reports the flag AND the exposure the gate will measure, because
+    turning this on while the account is above market_brain's own 60%
+    ceiling means the first thing it does is refuse to enter. That is
+    the ceiling working, and a reader should see it before flipping,
+    not be surprised by it afterwards.
+    """
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    active = await prop_bot_module.is_market_brain_equities_active()
+
+    exposure = ceiling = None
+    positions_read = False
+    try:
+        import account_exposure
+        import market_brain as _mb
+        ceiling = float(_mb.CONFIG["max_exposure"])
+        async with aiohttp.ClientSession() as session:
+            account = await _fetch_alpaca_account(session)
+            positions = await _fetch_alpaca_positions(session)
+        equity = float(account.get("equity") or 0)
+        exposure = account_exposure.exposure_fraction(positions, equity)
+        positions_read = True
+    except Exception as e:
+        log.warning(f"[handover] could not read live exposure: {e}")
+
+    will_refuse = (exposure is not None and ceiling is not None and exposure >= ceiling)
+    return {
+        "market_brain_owns_equities": active,
+        "prop_bot_enters_equities": not active,
+        "exposure_now": None if exposure is None else round(exposure, 4),
+        "exposure_ceiling": ceiling,
+        "exposure_readable": positions_read and exposure is not None,
+        "would_refuse_new_equity_entries": will_refuse,
+        "detail": (
+            ("market_brain owns the equity side; prop_bot enters none."
+             if active else
+             "prop_bot still enters equities; market_brain's runner is idle.")
+            + (f" Account exposure is {exposure*100:.1f}% against a "
+               f"{ceiling*100:.0f}% ceiling, so new equity entries "
+               f"{'WILL be refused' if will_refuse else 'are within the ceiling'}."
+               if exposure is not None and ceiling is not None else
+               " Live exposure could not be read, so what the gate will do "
+               "cannot be stated - that is UNKNOWN, not 'fine'.")
+        ),
+    }
+
+
+@router.post("/alpaca-overview/equity-handover")
+async def set_equity_handover_endpoint(payload: SetEquityHandoverRequest):
+    """Hand the equity side to market_brain, or take it back.
+
+    Write-guarded by the app-wide middleware, which denies every
+    mutating request by default - so this is the account owner's to
+    call, with their token, never an agent's.
+
+    ON:  prop_bot stops ENTERING equities (its exits are untouched and
+         must stay that way - it still has to be able to close what it
+         holds) and market_brain's runner starts trading them, bounded
+         by its own milestone ladder and its 60% account-wide ceiling.
+    OFF: prop_bot resumes, the runner idles. Reversible at any time
+         without a redeploy; the runner re-reads this every cycle.
+    """
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail="prop_bot module not available")
+    await prop_bot_module.set_market_brain_equities_active(payload.enabled)
+    what = ("ENABLED - market_brain now trades equities, prop_bot enters none"
+            if payload.enabled else
+            "DISABLED - prop_bot has the equity side back")
+    log.warning(f"[dashboard] 🧠 equity handover {what}")
+    return {"status": "updated", "market_brain_owns_equities": payload.enabled}
+
+
 class SetAlpacaBranchActiveRequest(BaseModel):
     active: bool
 

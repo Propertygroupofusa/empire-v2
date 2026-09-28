@@ -177,3 +177,54 @@ def test_market_brain_does_not_self_update_by_default():
     replacement between cycles, with no review in between."""
     assert mb.SELF_UPDATE_ENABLED is False
     assert mb.check_for_updates("market_brain.py") is False
+
+
+# ── the switch must actually exist ────────────────────────────────────
+#
+# Three commit messages and a code comment said this flag was "flipped
+# from the dashboard" while NO ROUTE EXISTED. A capability claimed and
+# never built. These assert the claim against the router.
+
+ROUTER = os.path.join(ROOT, "routers", "trading_dashboard.py")
+
+
+def _routes():
+    tree = ast.parse(open(ROUTER, encoding="utf-8").read())
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            if (isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+                    and dec.args and isinstance(dec.args[0], ast.Constant)):
+                out.append((dec.func.attr.upper(), dec.args[0].value, node.name))
+    return out
+
+
+def test_the_handover_flag_is_reachable_over_http():
+    paths = [(m, p) for m, p, _ in _routes() if "equity-handover" in str(p)]
+    assert ("POST", "/alpaca-overview/equity-handover") in paths, \
+        "the flag has no route - it cannot be flipped from the dashboard"
+    assert ("GET", "/alpaca-overview/equity-handover") in paths, \
+        "there is no way to read the flag's state before changing it"
+
+
+def test_the_switch_is_write_guarded_and_the_status_read_is_not():
+    import write_guard
+    base = "/api/trading-dashboard/alpaca-overview/equity-handover"
+    assert write_guard.is_protected("POST", base) is True, \
+        "the switch is not write-guarded - an agent could flip it"
+    assert write_guard.is_protected("GET", base) is False, \
+        "reading the state should not need the write token"
+
+
+def test_the_status_read_reports_exposure_as_unknown_when_it_cannot_read_it():
+    src = open(ROUTER, encoding="utf-8").read()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "get_equity_handover_status")
+    body = ast.get_source_segment(src, fn)
+    assert "UNKNOWN, not 'fine'" in body, \
+        "an unreadable exposure must not read as a safe one"
+    assert "exposure_readable" in body
