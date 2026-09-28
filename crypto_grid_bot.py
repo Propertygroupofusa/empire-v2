@@ -2172,6 +2172,47 @@ async def fleet_cost_basis_by_product():
     return basis
 
 
+async def fleet_tracked_units_by_product():
+    """Open-slice QUANTITY per coin across the whole fleet, and each
+    coin's live price. Returns (units_by_product, price_by_product), or
+    (None, None) if the read fails - never an empty dict, which would
+    read as "the fleet holds nothing" and pass every check trivially.
+
+    Units, not dollars. Every other reconciliation here works in dollars
+    and in aggregate, which is exactly why a resting stop eating part of
+    one branch's ETH went unnoticed: the fleet-wide totals still added
+    up. See invariants.coin_tracked_is_held.
+    """
+    try:
+        async with get_session_factory()() as db:
+            branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
+            slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
+    except Exception as exc:
+        log.warning(f"[GRID] tracked units unreadable: {exc}")
+        return None, None
+
+    product_by_bot = {b.bot_name: b.product_id for b in branches}
+    units = {}
+    for sl in slices:
+        if sl.qty is None:
+            continue
+        product = product_by_bot.get(sl.bot_name)
+        if product:
+            units[product] = units.get(product, 0.0) + float(sl.qty)
+
+    prices = {}
+    if units:
+        try:
+            async with engine.aiohttp.ClientSession() as session:
+                for product in units:
+                    price, _atr = await engine.get_price_and_volatility(session, product)
+                    if price is not None:
+                        prices[product] = price
+        except Exception as exc:
+            log.warning(f"[GRID] tracked-unit pricing partial: {exc}")
+    return units, prices
+
+
 async def get_grid_undeployed_reserve_total() -> float:
     """Real USD a grid branch still needs held in RESERVE for the levels
     it hasn't bought yet - its allocation MINUS the real cost basis it

@@ -488,3 +488,88 @@ def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
                        f"{_hours_between(armed, _utcnow()):.1f}h ago - the window simply "
                        f"reaches back further than the mode does."),
             "armed_at": armed.isoformat()}
+
+
+# Tolerance: 0.5% of the tracked quantity. Exchange rounding and dust
+# differences live well inside that; a stop-loss eating a third of a
+# position does not. A percentage rather than a fixed unit count because
+# the fleet holds everything from 0.017 BTC to 5,862,000 JASMY.
+COIN_SHORTFALL_TOLERANCE_PCT = 0.005
+
+
+def coin_tracked_is_held(tracked_units_by_product, wallet_units_by_asset,
+                         prices_by_product=None,
+                         tolerance_pct=COIN_SHORTFALL_TOLERANCE_PCT):
+    """Every unit a branch claims must actually be in the wallet.
+
+    THE GAP THIS CLOSES. Every other check here compares DOLLARS, in
+    aggregate: allocation_backed sums coin at cost against the wallet,
+    reconcile names which bucket moved. None of them can see a branch
+    holding units that are gone, because a shortfall in one coin hides
+    inside a fleet-wide total that still adds up.
+
+    Live on 2026-09-28: a resting stop-loss fired on ETH-USD and sold
+    0.347873 units. Most of that was ETH no branch tracked - but 0.031600
+    of it belonged to the grid's own open slices. The branch went on
+    claiming 0.162240 ETH while the wallet held 0.130640, and the next
+    sale of its oldest slice would have been an order for coin that does
+    not exist. Nothing in the system said a word.
+
+    Keyed per COIN, because that is where the shortfall is real: the
+    wallet holds one pool per asset, several branches can draw on it, and
+    the question "is there enough ETH" cannot be answered in dollars.
+
+    A coin missing from the wallet map is UNKNOWN, not zero - an
+    unreadable balance is not an empty one, and reporting a full position
+    as a total shortfall would be the loudest false alarm this module
+    could raise.
+    """
+    tracked = tracked_units_by_product or {}
+    if not tracked:
+        return _v("coin_tracked_is_held", UNKNOWN, "no tracked positions to check")
+    if wallet_units_by_asset is None:
+        return _v("coin_tracked_is_held", UNKNOWN,
+                  "the wallet holdings could not be read, so no position can be "
+                  "confirmed. Not knowing is not the same as being fine.")
+
+    wallet = {str(k).upper(): _num(v) for k, v in dict(wallet_units_by_asset).items()}
+    prices = prices_by_product or {}
+    short, unknown = [], []
+    for product, want in tracked.items():
+        want = _num(want)
+        if want is None or want <= 0:
+            continue
+        asset = str(product).split("-")[0].upper()
+        have = wallet.get(asset)
+        if have is None:
+            unknown.append(str(product))
+            continue
+        gap = want - have
+        if gap > want * tolerance_pct:
+            usd = _num(prices.get(product))
+            short.append({"product_id": product, "tracked": want, "held": have,
+                          "short_units": round(gap, 8),
+                          "short_usd": round(gap * usd, 2) if usd else None})
+
+    if short:
+        worst = ", ".join(
+            f"{s['product_id']} claims {s['tracked']:.6f} against {s['held']:.6f} held"
+            + (f" (${s['short_usd']:,.2f} short)" if s["short_usd"] is not None else "")
+            for s in short)
+        total = sum(s["short_usd"] for s in short if s["short_usd"] is not None)
+        return _v("coin_tracked_is_held", FAIL,
+                  f"{len(short)} branch position(s) claim coin the wallet does not hold: "
+                  f"{worst}. A sale of those slices would be an order for units that do "
+                  f"not exist - the usual cause is a resting stop or a manual sale taking "
+                  f"coin the grid still has on its books.",
+                  short_usd=round(total, 2), short_positions=short,
+                  unreadable=unknown or None)
+
+    if unknown:
+        return _v("coin_tracked_is_held", UNKNOWN,
+                  f"{len(unknown)} tracked coin(s) are absent from the wallet reading, so "
+                  f"their positions cannot be confirmed: {', '.join(unknown)}. An "
+                  f"unreadable balance is not an empty one.", unreadable=unknown)
+
+    return _v("coin_tracked_is_held", OK,
+              f"every one of {len(tracked)} tracked position(s) is fully held in the wallet")

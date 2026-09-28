@@ -8527,6 +8527,24 @@ async def grid_invariants_endpoint():
                          "num_levels": b.get("num_levels"),
                          "best_slice_net_pct": best})
         results.append(inv.no_dead_capital(rows))
+
+        # Units, not dollars. A stop-loss or a manual sale can take coin a
+        # branch still has on its books, and every dollar-based check here
+        # stays happy because the fleet-wide totals still add up.
+        try:
+            import account_census
+            import aiohttp as _aiohttp
+            tracked, prices = await g.fleet_tracked_units_by_product()
+            async with _aiohttp.ClientSession() as _s:
+                census = await account_census.census(_s, tracked_usd=0.0)
+            wallet = None
+            if census.get("available"):
+                wallet = {r.get("asset"): r.get("units")
+                          for r in (census.get("holdings") or [])}
+            results.append(inv.coin_tracked_is_held(tracked, wallet, prices))
+        except Exception as exc:
+            results.append({"name": "coin_tracked_is_held", "status": inv.UNKNOWN,
+                            "detail": f"could not be checked: {type(exc).__name__}: {exc}"})
     except Exception as e:
         results.append({"name": "allocation_backed", "status": inv.UNKNOWN,
                         "detail": f"could not be checked: {type(e).__name__}: {e}"})
