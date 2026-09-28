@@ -222,6 +222,12 @@ def test_every_refusing_return_in_try_open_logs_a_decision():
     assert fn is not None, "try_open not found"
     body = ast.get_source_segment(src, fn)
     # Every early refusal that names MANDATE must record a decision.
+    #
+    # The entries-halted guard is deliberately NOT one of these: it is
+    # tagged [KILL CONDITION] because it is the consequence of a halt
+    # already decided and already recorded once at the top of the cycle.
+    # Logging a row per contract per cycle there would duplicate that one
+    # halt across every symbol scanned.
     for chunk in body.split("[MANDATE]")[1:]:
         upto = chunk.split("return False")[0]
         assert "_record_trade_decision" in upto, (
@@ -338,3 +344,74 @@ def test_the_real_model_to_dict_round_trips_through_summarise():
     out = dl.summarise([row.to_dict()])
     assert out["refused"] == 1
     assert out["top_blockers"][0]["rule"] == "kill_condition"
+
+
+# ── the dedupe keyed on a string containing a live number ────────────────
+
+def test_a_drifting_figure_in_the_reason_does_not_defeat_the_dedupe():
+    """THE LIVE FAILURE. 30 rows in nine minutes - every ~40 seconds -
+    because the reason carries the buying power to the cent and it moves
+    every cycle, so every cycle looked like a NEW reason:
+
+        Buying power critical: $90.22 < $150 | $720.42 of the $810.64...
+        Buying power critical: $90.58 < $150 | $720.06 of the $810.64...
+
+    Keying on a string that contains a live figure is keying on the
+    figure.
+    """
+    import prop_bot
+    prop_bot._last_kill_logged.update(reason=None, at=0.0)
+    seq = [f"Buying power critical: ${bp} < $150 | ${c} of the $810.64 cash"
+           for bp, c in (("90.22", "720.42"), ("90.58", "720.06"),
+                         ("89.86", "720.78"), ("89.50", "721.14"))]
+    wrote = [prop_bot._should_log_kill(r) for r in seq]
+    assert wrote == [True, False, False, False], wrote
+
+
+def test_a_different_condition_is_still_never_deduped():
+    import prop_bot
+    prop_bot._last_kill_logged.update(reason=None, at=0.0)
+    assert prop_bot._should_log_kill("Buying power critical: $90.22 < $150") is True
+    assert prop_bot._should_log_kill("Daily loss limit hit: -$60.00") is True
+    assert prop_bot._should_log_kill("Equity below survival level: $700.00 < $800") is True
+    assert prop_bot._should_log_kill("Too many open positions: 7 > 6") is True
+
+
+def test_the_key_is_the_condition_name_not_the_numbers():
+    import prop_bot
+    assert prop_bot._kill_key("Buying power critical: $90.22 < $150") == "Buying power critical"
+    assert (prop_bot._kill_key("Buying power critical: $89.86 < $150")
+            == prop_bot._kill_key("Buying power critical: $90.58 < $150"))
+    assert prop_bot._kill_key("Daily loss limit hit: -$60") != \
+        prop_bot._kill_key("Buying power critical: $90 < $150")
+
+
+def test_a_reason_with_no_colon_still_produces_a_key():
+    import prop_bot
+    assert prop_bot._kill_key("something odd happened") == "something odd happened"
+    assert prop_bot._kill_key("") == "unknown"
+    assert prop_bot._kill_key(None) == "unknown"
+
+
+def test_the_exact_figures_are_still_recorded_on_the_rows_written():
+    """Only the dedupe key is coarsened. The record must not be."""
+    row = dl.row_from_verdict(
+        dl.refusal(None, "kill_condition",
+                   "Buying power critical: $90.22 < $150", mandate="apex"),
+        bot="prop_apex", buying_power=90.22, equity=1008.46)
+    assert "90.22" in row["reason"]
+    assert row["buying_power"] == 90.22
+
+
+def test_the_halt_guard_does_not_write_a_row_per_contract():
+    """It is the consequence of a decision already recorded, not a new
+    one. A row per symbol per cycle would bury the single halt that
+    matters under its own echoes."""
+    src = (HERE / "prop_bot.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "try_open")
+    body = ast.get_source_segment(src, fn)
+    guard = body[body.index("if entries_halted:"):]
+    guard = guard[:guard.index("return False")]
+    assert "_record_trade_decision" not in guard
+    assert "[KILL CONDITION]" in guard

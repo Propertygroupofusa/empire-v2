@@ -1828,11 +1828,37 @@ _last_kill_logged = {"reason": None, "at": 0.0}
 KILL_LOG_HEARTBEAT_SECONDS = 900
 
 
+def _kill_key(reason: str) -> str:
+    """The stable identity of a halt, with the live numbers stripped out.
+
+    Deduping on the full sentence did not work: the reason carries the
+    buying power to the cent, and it drifts every cycle -
+
+        Buying power critical: $90.22 < $150 | $720.42 of the $810.64...
+        Buying power critical: $90.58 < $150 | $720.06 of the $810.64...
+        Buying power critical: $89.86 < $150 | $720.78 of the $810.64...
+
+    - so every cycle looked like a NEW reason and wrote a row. 30 rows in
+    nine minutes, which is exactly the 1,400-a-day noise the dedupe was
+    added to prevent. Keying on a string that contains a live figure is
+    keying on the figure.
+
+    The condition name before the colon is stable and is what actually
+    distinguishes one halt from another: "Buying power critical",
+    "Daily loss limit hit", "Equity below survival level", "Too many
+    open positions". A change of CONDITION is still never deduped, and
+    the exact figures are still stored on every row that is written -
+    only the dedupe key is coarsened, never the record.
+    """
+    return (reason or "").split(":", 1)[0].strip() or "unknown"
+
+
 def _should_log_kill(reason: str) -> bool:
     """True when this halt is worth another row. Never dedupes a CHANGE."""
     now = time.time()
-    if reason != _last_kill_logged["reason"]:
-        _last_kill_logged.update(reason=reason, at=now)
+    key = _kill_key(reason)
+    if key != _last_kill_logged["reason"]:
+        _last_kill_logged.update(reason=key, at=now)
         return True
     if now - _last_kill_logged["at"] >= KILL_LOG_HEARTBEAT_SECONDS:
         _last_kill_logged["at"] = now
@@ -2197,7 +2223,14 @@ async def run_prop_cycle():
         # here rather than ending the cycle, so every exit path below
         # stays reachable - see the note at the kill-condition check.
         if entries_halted:
-            log.warning(f"[MANDATE] {contract} entry blocked - {entries_halted}")
+            # Tagged KILL CONDITION, not MANDATE, because that is what it
+            # is: the consequence of a halt already decided and already
+            # recorded once at the top of the cycle. Writing a decision
+            # row per contract per cycle here would duplicate that halt
+            # across every symbol scanned. Every genuine MANDATE refusal
+            # below does record one - test_every_refusing_return_in_
+            # try_open_logs_a_decision holds that line.
+            log.warning(f"[KILL CONDITION] {contract} entry blocked - {entries_halted}")
             return False
         """Wraps open_position with dollar-based sizing against whatever
         cash is actually left this cycle (tracked in cash_remaining, closed
