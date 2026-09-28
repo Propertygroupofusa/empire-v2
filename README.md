@@ -1,200 +1,144 @@
-# DEL'S TRADING EMPIRE v2
+# Empire v2
 
-Automated trading + AI video revenue system — 99% hands-off.
-Owner: Delfine Stennis | Property Group of USA LLC
+Trading automation, trading dashboards, and video quote/order flows for Property Group of USA.
 
----
+## What is current in this repo
 
-## SYSTEMS RUNNING
+This repository currently centers on two production paths that are visible in code:
 
-| Bot | What It Does | Status |
-|-----|-------------|--------|
-| prop_bot.py | APEX $25K futures (APEX_589296) | Paper -> Live |
-| revenue_bot.py | 4-stream income (stocks, crypto, options, futures) | Paper -> Live |
-| health_monitor.py | Watches all bots, account safety thresholds | Always On |
-| main.py | Orchestrator — starts everything, restarts crashes | Always On |
-| video_revenue_api.py | AI video sales + YouTube publishing | Always On |
+- **Web app / dashboards** via `main.py`
+- **Dedicated crypto trading service** via `bot_runner.py`
 
----
+Railway starts both through `service_entrypoint.py`, which dispatches by `SERVICE_ROLE`:
 
-## TRIPLE AI SIGNAL CONFIRMATION
+- `SERVICE_ROLE=crypto-trading` → `bot_runner.py`
+- anything else / unset → `main.py`
 
-Every trade requires ALL 3 AIs to agree before executing.
+See:
 
-| AI | Role | Get Key At |
-|----|------|-----------|
-| Claude (Anthropic) | Deep reasoning + risk analysis | console.anthropic.com |
-| GPT-4o (OpenAI) | Speed + market sentiment | platform.openai.com |
-| Grok (xAI) | Real-time X/Twitter + breaking news | console.x.ai |
+- `/home/runner/work/empire-v2/empire-v2/service_entrypoint.py`
+- `/home/runner/work/empire-v2/empire-v2/bot_runner.py`
+- `/home/runner/work/empire-v2/empire-v2/railway.json`
 
-No single AI can trigger a trade alone. All 3 must confirm = execute.
+## Runtime layout
 
----
+| Component | Current role | Entrypoint |
+|---|---|---|
+| Web service | FastAPI app, dashboards, quote flow, admin/trading APIs | `python main.py` |
+| Crypto trading service | Runs the crypto grid fleet when `CRYPTO_STRATEGY_MODE=grid_fleet` | `python bot_runner.py` |
+| Railway deploy entry | Dispatches to web or crypto service by `SERVICE_ROLE` | `python service_entrypoint.py` |
 
-## ACCOUNTS
+## Key routes and dashboards
 
-| Broker | Account | Mode |
-|--------|---------|------|
-| Alpaca | Paper account | Paper -> Live |
-| OANDA | Demo | Demo -> Live |
+Grounded in `main.py`, `routers/orders.py`, and `routers/trading_dashboard.py`:
 
----
+- `GET /health` — deploy health check
+- `GET /quote` — video quote form
+- `POST /orders/request-quote` — create video quote request
+- `GET /family-tree-dashboard` — Coinbase trading dashboard UI
+- `GET /alpaca-dashboard` — Alpaca dashboard UI
+- `GET /crypto-selection-backtest-view` — crypto backtest UI
+- `GET /alpaca-selection-backtest-view` — Alpaca backtest UI
+- `GET /docs` — FastAPI docs when running locally
 
-## RULES (NON-NEGOTIABLE)
+## Local development
 
-- Paper trade 7 consecutive profitable days before going live
-- Account drops to $90K -> reduce position size
-- Account drops to $80K -> ALL trading stops automatically
-- STOP_TRADING=true kills everything instantly
-- All 3 AIs must agree before any trade fires
+Install dependencies:
 
----
-
-## GO LIVE CHECKLIST
-
-- [ ] 7 profitable paper days confirmed
-- [ ] All 3 AI keys active and responding
-- [ ] Change ALPACA_BASE_URL to api.alpaca.markets
-- [ ] Change ALPACA_LIVE_TRADE to true
-- [ ] Both Alpaca flags required — one alone does nothing
-
----
-
-## SYNTHESIA AI VIDEO SYSTEM (AI Social Media)
-
-Auto-generate AI avatar videos for client content delivery.
-
-### API
-- Endpoint: https://api.synthesia.io/v2/videos
-- Webhook events: video.completed, video.failed
-- Signature verification: HMAC SHA256 via Synthesia-Signature header
-
-### Top Avatars for Business Content
-
-| Avatar | ID | Best For |
-|--------|-----|---------|
-| Olivia (Female v3) | e49ecfaf-1d39-4561-8355-29ebf8b71a4f | Professional/Finance |
-| Hudson (Male v3) | 11af1a93-e679-41a6-9b21-4cd41d73c940 | Real Estate |
-| Alisha (Female v3) | cf0eda7e-8f3c-43de-ae08-712e242ead61 | Marketing/Social |
-| Mason (Male v3) | 72da6c7c-36b6-4824-816b-380ac2058d86 | Sales/Outreach |
-
-### Endpoints
-
-| Endpoint | Price | Use Case |
-|----------|-------|---------|
-| /generate/property-listing | $75/video | Real estate listings |
-| /generate/social-content | $50/video | Client social packages |
-| /generate/cold-call-followup | $25/video | Lead nurture |
-| /generate/payee-trust-onboarding | internal | Activation rates |
-
----
-
-## YOUTUBE AUTO-PUBLISH PIPELINE
-
-Synthesia videos auto-download and upload to YouTube — no manual steps.
-
-### Pipeline
-
-```
-Generate video (Synthesia) -> Webhook fires on completion
-  -> Download video -> Upload to YouTube -> Public/Unlisted
+```bash
+python -m pip install -r requirements.txt
 ```
 
-### Endpoints
+Run the web app locally:
 
-| Endpoint | Privacy | Use Case |
-|----------|---------|----------|
-| /publish/youtube/property-listing | public | Drives buyer traffic for wholesale deals |
-| /publish/youtube/social-content | unlisted | Client review before going live |
-
-### How to Get YouTube Credentials
-
-1. console.cloud.google.com -> new project -> enable YouTube Data API v3
-2. Create OAuth 2.0 credentials -> get CLIENT_ID + CLIENT_SECRET
-3. developers.google.com/oauthplayground -> authorize YouTube upload scope -> get REFRESH_TOKEN
-
----
-
-## ENVIRONMENT VARIABLES (set in Railway — never in code)
-
-Paste this entire block into Railway's Raw Editor (Variables tab):
-
-```
-ALPACA_API_KEY=your_alpaca_key_here
-ALPACA_SECRET_KEY=your_alpaca_secret_here
-ALPACA_BASE_URL=https://paper-api.alpaca.markets
-ALPACA_LIVE_TRADE=false
-
-ANTHROPIC_API_KEY=sk-ant-your_key_here
-OPENAI_API_KEY=sk-your_openai_key_here
-GROK_API_KEY=your_xai_key_here
-
-SYNTHESIA_API_KEY=your_synthesia_key_here
-SYNTHESIA_WEBHOOK_SECRET=your_synthesia_webhook_secret_here
-
-YOUTUBE_API_KEY=your_youtube_key_here
-YOUTUBE_CLIENT_ID=your_client_id_here
-YOUTUBE_CLIENT_SECRET=your_client_secret_here
-YOUTUBE_REFRESH_TOKEN=your_refresh_token_here
-
-STOP_TRADING=false
-EMPIRE_ACCOUNT_SIZE=100000
-EMPIRE_HARD_STOP=80000
-EMPIRE_REDUCE_AT=90000
-PROP_PROFIT_TARGET=1500
-PROP_DAILY_LOSS_LIMIT=1000
-HEALTH_CHECK_INTERVAL=60
-PORT=10000
+```bash
+python main.py
 ```
 
----
+Run the Railway-style entry locally:
 
-## FOLDER STRUCTURE
-
-```
-empire-v2/
-├── main.py                   # Entry point — starts all bots
-├── prop_bot.py               # APEX prop trading bot
-├── revenue_bot.py            # 4-stream revenue bot + triple AI
-├── ai_signal_confirm.py       # Triple AI trade confirmation
-├── health_monitor.py          # System watchdog
-├── synthesia_video_bot.py      # AI video generation
-├── video_revenue_api.py        # Video sales + YouTube endpoints
-├── youtube_upload_bot.py       # Auto-publish to YouTube
-├── requirements.txt
-├── railway.json
-├── .gitignore
-└── README.md
+```bash
+python service_entrypoint.py
 ```
 
----
+Run the dedicated crypto service locally:
 
-## REVENUE TARGETS
-
-| Source | Monthly |
-|--------|---------|
-| Trading (paper -> live, 4 streams) | $24K-60K |
-| Property listing videos | $1,500 (20/mo @ $75) |
-| Social content packages | $1,500-5,000 (5 clients) |
-| Cold call follow-up videos | $2,500 (100/mo @ $25) |
-| YouTube ad revenue (ramping) | $0-2,000 |
-
----
-
-## DEPLOY STEPS (RAILWAY)
-
-1. railway.app -> New Project -> Deploy from GitHub repo -> select `empire-v2`
-2. Variables tab -> Raw Editor -> paste the full env block above (fill in real keys)
-3. Railway auto-deploys
-4. Check Deployments -> logs for:
-
-```
-DEL'S TRADING EMPIRE — STARTING
-Empire online. 3 bots running.
+```bash
+SERVICE_ROLE=crypto-trading CRYPTO_STRATEGY_MODE=grid_fleet python service_entrypoint.py
 ```
 
-5. Hit `/health` on the deployed URL to confirm status
+Or directly:
 
----
+```bash
+CRYPTO_STRATEGY_MODE=grid_fleet python bot_runner.py
+```
 
-Built with Claude + GPT-4o + Grok + Synthesia. Deployed on Railway.
+## Deployment
+
+`railway.json` currently uses:
+
+```json
+"deploy": {
+  "startCommand": "python service_entrypoint.py"
+}
+```
+
+So production routing depends on environment:
+
+- Web service: leave `SERVICE_ROLE` unset
+- Crypto service: set `SERVICE_ROLE=crypto-trading`
+- Dedicated crypto runner: set `CRYPTO_STRATEGY_MODE=grid_fleet`
+
+## Core environment variables
+
+Common runtime controls visible in code:
+
+- `SERVICE_ROLE`
+- `CRYPTO_STRATEGY_MODE`
+- `STOP_TRADING`
+- `COINBASE_API_KEY_NAME`
+- `COINBASE_API_PRIVATE_KEY`
+- `ALPACA_API_KEY`
+- `ALPACA_SECRET_KEY`
+- `ALPACA_BASE_URL`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_PUBLISHABLE_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `HEYGAN_API_KEY`
+
+## Testing helpers in this repo
+
+These convenience scripts exist at repo root and are documented in:
+
+- `TESTING_GUIDE.md`
+- `TESTING_QUICK_REFERENCE.md`
+
+Current helper scripts:
+
+- `./test_alpaca_paper.sh`
+- `./test_alpaca_micro_live.sh`
+- `./test_crypto_paper.sh`
+- `./test_crypto_micro_live.sh`
+
+They currently run these commands:
+
+| Script | Current command |
+|---|---|
+| `test_alpaca_paper.sh` | `python alpaca_swing_bot.py` |
+| `test_alpaca_micro_live.sh` | `python alpaca_swing_bot.py` |
+| `test_crypto_paper.sh` | `python main.py` |
+| `test_crypto_micro_live.sh` | `python main.py` |
+
+## Notes on older docs and systems
+
+This repository still contains older or adjacent systems and files, including:
+
+- `ai_signal_confirm.py`
+- `video_revenue_api.py`
+- Synthesia-era video tooling
+
+They still exist in the tree, but they should not be treated as the primary deploy/runtime story unless the code path you are working on explicitly uses them.
+
+For the most detailed current operational notes, see:
+
+- `/home/runner/work/empire-v2/empire-v2/CLAUDE.md`
