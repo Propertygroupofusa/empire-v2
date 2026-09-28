@@ -690,6 +690,11 @@
             const split = (account.cash_usd !== undefined && account.cash_usd !== null)
                 ? `Cash ${formatCurrency(account.cash_usd)} · Coin ${formatCurrency(account.coin_usd)}`
                 : '';
+            // A figure served from cache says how old it is. Silence
+            // would make a 5-minute-old number look live.
+            const age = (account.stale && account.age_seconds != null)
+                ? `as of ${Math.round(account.age_seconds)}s ago`
+                : '';
             const balanceText = unread
                 ? 'unavailable'
                 : (account.balance === null || account.balance === undefined
@@ -702,6 +707,7 @@
                     <div class="balance-value">${key === 'alpaca' ? buyingPower : balanceText}</div>
                     ${equity ? `<div class="balance-label" style="margin-top: 8px;">${equity}</div>` : ''}
                     ${split ? `<div class="balance-label" style="margin-top: 8px;">${split}</div>` : ''}
+                    ${age ? `<div class="balance-label muted" style="margin-top: 6px;">${age}</div>` : ''}
                     ${unread && account.detail ? `<div class="balance-label" style="margin-top: 8px; color:#c0392b;">read failed: ${account.detail}</div>` : ''}
                 </div>
                 <div class="metric-row">

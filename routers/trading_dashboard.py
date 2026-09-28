@@ -7259,15 +7259,24 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
         # while the real account held $10,882.46 and had banked $59.16.
         #
         # A failed read is not a number. It is reported as unavailable.
+        # census_cached, not census: the venue rate-limits, and four of
+        # ten consecutive reads came back "accounts HTTP 429" on
+        # 2026-09-28. An uncached caller here would render "unavailable"
+        # on ~40% of page loads. The cached one serves the last real
+        # reading WITH ITS AGE instead, and still refuses outright when
+        # it has never had one.
         census = None
         census_error = None
+        census_age = None
         try:
             import account_census
             async with aiohttp.ClientSession() as _cs:
-                census = await account_census.census(_cs, tracked_usd=0.0)
+                census = await account_census.census_cached(_cs, tracked_usd=0.0)
             if not census.get("available"):
-                census_error = census.get("detail") or "census unavailable"
+                census_error = census.get("error") or census.get("detail") or "census unavailable"
                 census = None
+            else:
+                census_age = census.get("age_seconds")
         except Exception as e:
             census_error = f"{type(e).__name__}: {e}"
             log.warning(f"live-dashboard account read failed: {census_error}")
@@ -7389,6 +7398,12 @@ async def get_live_dashboard_data_v2(db: AsyncSession = Depends(get_db)):
                     # can say "unavailable" instead of quietly lying.
                     "available": census is not None,
                     "detail": census_error,
+                    # How old the figure is. 0.0 means read just now; a
+                    # number means the venue refused and this is the last
+                    # real reading, said out loud rather than passed off
+                    # as current.
+                    "age_seconds": census_age,
+                    "stale": bool(census and census.get("stale")),
                     "balance": round(census["total_usd"], 2) if census else None,
                     "cash_usd": round(census["cash_usd"], 2) if census else None,
                     "coin_usd": round(census["coin_usd"], 2) if census else None,

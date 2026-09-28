@@ -262,3 +262,74 @@ async def census(session, tracked_usd: float = None) -> dict:
             f"belongs to no branch, so nothing monitors, prices, or stops it."
             if total else "no priced total to reconcile against")
     return out
+
+
+# ── a reading with an age, which is not the same as a fallback ──────────
+#
+# The venue rate-limits. Measured 2026-09-28 13:53Z: FOUR of ten
+# consecutive /account-census calls came back `available: false,
+# error: "accounts HTTP 429"`. The census is right to refuse rather
+# than guess - but a caller that hits a 40% refusal rate and has
+# nothing else to say renders "unavailable" almost half the time,
+# which is a page nobody trusts.
+#
+# The honest middle is a real measurement carrying its own age. A
+# reading from 40 seconds ago IS the account, near enough, and it says
+# so out loud: stale=True, age_seconds=40. That is the opposite of the
+# 483.00 literal this module was brought in to replace - that number
+# was never measured at all and never admitted it.
+#
+# Nothing here invents a figure. With no cached reading, the refusal
+# passes straight through and the caller still shows "unavailable".
+CENSUS_TTL_SECONDS = 45.0
+_CENSUS_CACHE = {"census": None, "at": 0.0}
+
+
+async def census_cached(session, tracked_usd: float = None,
+                        max_age_seconds: float = CENSUS_TTL_SECONDS,
+                        max_stale_seconds: float = 900.0) -> dict:
+    """census(), shared across callers, with the last good reading as
+    the fallback when the venue refuses - never a fabricated one.
+
+    Returns the census dict with two extra keys on every success path:
+      stale        - False when freshly read, True when served from cache
+      age_seconds  - how old the reading is, 0.0 when fresh
+
+    A cached reading older than max_stale_seconds is not served; the
+    refusal is returned instead, so "unavailable" still means
+    unavailable rather than "here is something from an hour ago".
+    """
+    import time as _t
+    now = _t.time()
+    cached = _CENSUS_CACHE.get("census")
+    age = now - (_CENSUS_CACHE.get("at") or 0.0)
+
+    if cached is not None and age < max_age_seconds:
+        out = dict(cached)
+        out["stale"] = True
+        out["age_seconds"] = round(age, 1)
+        return out
+
+    try:
+        fresh = await census(session, tracked_usd=tracked_usd)
+    except Exception as exc:
+        fresh = {"available": False, "error": f"{type(exc).__name__}: {exc}",
+                 "detail": ""}
+
+    if fresh.get("available"):
+        _CENSUS_CACHE.update(census=fresh, at=now)
+        out = dict(fresh)
+        out["stale"] = False
+        out["age_seconds"] = 0.0
+        return out
+
+    # The read failed. Serve the last good one WITH ITS AGE, if it is
+    # recent enough to still describe the same account.
+    if cached is not None and age <= max_stale_seconds:
+        out = dict(cached)
+        out["stale"] = True
+        out["age_seconds"] = round(age, 1)
+        out["stale_reason"] = fresh.get("error") or "read failed"
+        return out
+
+    return fresh
