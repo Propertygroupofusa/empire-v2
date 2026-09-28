@@ -152,7 +152,22 @@ def should_exit_position(
         return True, reason, "profit", new_peak_pnl_pct
 
     # ========== RULE 3: RSI Exit Signal ==========
-    if direction == "long" and current_rsi >= rsi_exit_threshold and unrealized_pnl_pct > 0:
+    # current_rsi may legitimately be None: the caller can reach this
+    # function with a price but no RSI when the bar fetch failed and the
+    # exit is running off the broker's own mark instead (see
+    # prop_bot._broker_last_price). Every rule above needs only price and
+    # age and has already run; this one, and only this one, needs an RSI.
+    #
+    # Skipping it is safe in the direction that matters. It is a
+    # PROFIT-TAKING rule - it fires on a rally with the position already
+    # in profit - so an unknown RSI costs at most a slightly later exit on
+    # a winner. It never holds a loser: the stop loss, the giveback and
+    # the max hold have all already been evaluated. The alternative,
+    # comparing None to a number, raises TypeError and kills the entire
+    # exit evaluation - turning a missing RSI into a missing stop.
+    if current_rsi is None:
+        pass
+    elif direction == "long" and current_rsi >= rsi_exit_threshold and unrealized_pnl_pct > 0:
         # Long: Sell on rally when RSI gets hot
         reason = f"RSI exit signal at {current_rsi:.1f} (threshold: {rsi_exit_threshold}); profit taken at +{unrealized_pnl_pct*100:.2f}%"
         log.info(f"  📈 {log_prefix}{symbol} (LONG): {reason}")

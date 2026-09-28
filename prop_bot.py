@@ -683,6 +683,67 @@ def send_trade_alert(subject: str, body: str):
 _price_rsi_last_failure = {}
 
 
+# THE BROKER'S OWN MARK, KEPT AS A FALLBACK FOR EXIT CHECKS.
+#
+# The exit pass used to depend entirely on `scans`, which is built from
+# the 15-min-bar/RSI fetch the ENTRY rules need. When that fetch fails
+# for a symbol - a bad HTTP status, too few bars, a parse error - a held
+# position got no stop-loss check at all (see the no_scan_data refusal in
+# run_prop_cycle). That is an entry-grade data requirement gating a
+# protective path, and it is the wrong dependency: stop loss, breakeven
+# ratchet, giveback and max hold all need a PRICE, not an RSI.
+#
+# /v2/positions already tells us a current price for every position the
+# broker says we hold, and reconcile_positions_with_broker() already
+# fetches it every cycle, before the exit pass. Capturing it here costs
+# no extra request and gives the exit rules a second, independent source
+# that cannot fail for the same reason the bar fetch did.
+#
+# {contract: (price, fetched_at_utc)}. Only ever written from a real
+# broker payload; never seeded, never defaulted. A missing entry means
+# "no broker price", which stays a refusal - a gap is not a zero.
+_broker_last_price = {}
+
+# How old the broker's mark may be before the exit pass stops trusting it.
+# Two cycles' worth of slack at the ~30s cadence: long enough that a
+# single slow reconcile doesn't disarm the fallback, short enough that a
+# stalled reconcile can never let a stale price decide a real exit.
+BROKER_PRICE_MAX_AGE_SECONDS = 120
+
+
+def broker_fallback_scan(contract, now, max_age_seconds=None):
+    """The exit pass's second price source, as a function so it can be
+    tested without running a whole trading cycle.
+
+    Returns a scan-shaped dict the exit rules can consume, or None when
+    there is no broker mark fresh enough to decide a real exit on.
+
+    rsi/trend are explicitly None/"unknown" rather than invented values -
+    a fabricated RSI here would feed a real profit-taking rule with a
+    number nothing measured. "source" marks the dict so anything reading
+    it downstream can tell a broker mark from a bar-derived scan.
+    """
+    if max_age_seconds is None:
+        max_age_seconds = BROKER_PRICE_MAX_AGE_SECONDS
+    entry = _broker_last_price.get(contract)
+    if entry is None:
+        return None
+    price, seen_at = entry
+    if seen_at is None or seen_at.tzinfo is None or now.tzinfo is None:
+        # Mixing a naive and an aware datetime raises; refusing is the
+        # only safe answer, and it lands in the loud no-price refusal.
+        return None
+    age = (now - seen_at).total_seconds()
+    # A negative age means the clocks disagree, not that the price is
+    # extra fresh - refuse rather than trust it.
+    if age < 0 or age > max_age_seconds:
+        return None
+    if price is None or price <= 0:
+        return None
+    return {"price": price, "rsi": None, "trend": "unknown",
+            "source": "broker_position_mark", "age_seconds": age}
+
+
 async def get_price_rsi(session, symbol):
     """Get price and RSI for futures proxy symbol, including SMA50 for mean reversion validation.
 
@@ -1453,10 +1514,26 @@ async def reconcile_positions_with_broker(session):
         return
 
     broker_by_contract = {}
+    _seen_now = datetime.now(timezone.utc)
     for p in broker_positions:
         contract = _SYMBOL_TO_CONTRACT.get(p.get("symbol"))
         if contract:
             broker_by_contract[contract] = p
+            # Capture the broker's own mark for the exit pass's fallback
+            # (see _broker_last_price). Recorded for EVERY broker position
+            # on a tracked contract, including ones already in
+            # open_prop_positions - those are precisely the ones whose
+            # stop loss needs a price when the bar fetch fails. Anything
+            # unparseable or non-positive is left out entirely rather than
+            # stored as a zero that would read as a 100% loss.
+            try:
+                _bp = float(p.get("current_price"))
+            except (TypeError, ValueError):
+                _bp = None
+            if _bp is not None and _bp > 0:
+                _broker_last_price[contract] = (_bp, _seen_now)
+            else:
+                _broker_last_price.pop(contract, None)
 
     for contract, p in broker_by_contract.items():
         if contract in open_prop_positions:
@@ -2587,10 +2664,20 @@ async def run_prop_cycle():
                 if config is None:
                     log.error(f"[APEX_589296] ⚠️ {contract!r} in open_prop_positions is not a real FUTURES contract - skipping, needs a manual look")
                     continue
-                data = scans.get(contract)
+                # Same second price source the exit pass uses (see
+                # broker_fallback_scan). A circuit breaker that cannot
+                # close a position because an entry-grade bar fetch failed
+                # is the same bug as a stop loss that never runs, on the
+                # one path that exists to get the account OUT.
+                data = scans.get(contract) or broker_fallback_scan(contract, now)
                 if data:
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
+                else:
+                    log.error(
+                        f"[APEX_589296] 🛑 CIRCUIT BREAKER - DAILY LOSS LIMIT could not close "
+                        f"{contract}: no price from the bar fetch or the broker's "
+                        f"own mark. The position is STILL OPEN and still at risk.")
 
         if equity_floor_breached:
             log.warning(f"[APEX_589296] 🛑 EQUITY FLOOR BREACH: ${equity:.2f} < locked floor ${equity_floor:,.0f} — closing ALL positions, halting new entries")
@@ -2607,10 +2694,20 @@ async def run_prop_cycle():
                 if config is None:
                     log.error(f"[APEX_589296] ⚠️ {contract!r} in open_prop_positions is not a real FUTURES contract - skipping, needs a manual look")
                     continue
-                data = scans.get(contract)
+                # Same second price source the exit pass uses (see
+                # broker_fallback_scan). A circuit breaker that cannot
+                # close a position because an entry-grade bar fetch failed
+                # is the same bug as a stop loss that never runs, on the
+                # one path that exists to get the account OUT.
+                data = scans.get(contract) or broker_fallback_scan(contract, now)
                 if data:
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "EQUITY FLOOR BREACH")
+                else:
+                    log.error(
+                        f"[APEX_589296] 🛑 EQUITY FLOOR BREACH could not close "
+                        f"{contract}: no price from the bar fetch or the broker's "
+                        f"own mark. The position is STILL OPEN and still at risk.")
 
         # ── Pass 1: manage exits for symbols already held ────────────────
         # A long profits as price rises and exits on overbought RSI; a
@@ -2625,6 +2722,29 @@ async def run_prop_cycle():
                 log.error(f"[APEX_589296] ⚠️ {contract!r} in open_prop_positions is not a real FUTURES contract - skipping, needs a manual look")
                 continue
             data = scans.get(contract)
+            if not data:
+                # THE BAR FETCH IS NOT THE ONLY PRICE IN THE BUILDING.
+                #
+                # Before giving up on protecting this position, fall back
+                # to the mark the broker itself reported for it earlier
+                # this same cycle (see _broker_last_price). Stop loss,
+                # breakeven ratchet, giveback and max hold need a price
+                # and an age - none of them reads RSI or SMA - so an
+                # entry-grade bar fetch failing is no reason to leave a
+                # real position unprotected.
+                #
+                # rsi/trend stay None here rather than being invented.
+                # should_exit_position()'s RSI rule is skipped when rsi is
+                # None (it is a profit-taking rule, not a protective one);
+                # should_exit_position_momentum() never reads rsi at all.
+                data = broker_fallback_scan(contract, now)
+                if data:
+                    log.warning(
+                        f"[APEX_589296] ⚠️ {contract}: no scan data this cycle - "
+                        f"falling back to the broker's own mark "
+                        f"${data['price']:.2f} ({data['age_seconds']:.0f}s old) so "
+                        f"the stop loss still runs. RSI-based exits are skipped "
+                        f"until bar data returns.")
             if not data:
                 # A HELD POSITION WITH NO SCAN DATA GETS NO STOP CHECK.
                 #
@@ -2649,18 +2769,28 @@ async def run_prop_cycle():
                 # Deliberately NOT applied to the identical-looking skip
                 # in the ENTRY pass below: declining to open a position
                 # for want of data is correct and unremarkable.
+                _why_no_price = _price_rsi_last_failure.get(
+                    config.get("symbol", contract), "no recorded reason")
+                _broker_state = (
+                    "the broker reported no usable mark for it either"
+                    if _broker_last_price.get(contract) is None
+                    else f"the broker's last mark is older than "
+                         f"{BROKER_PRICE_MAX_AGE_SECONDS}s")
                 log.warning(
                     f"[APEX_589296] ⚠️ NO STOP CHECK for held {contract}: no scan data "
-                    f"this cycle, so stop-loss / max-hold / giveback were NOT "
-                    f"evaluated. The position is unprotected until data returns.")
+                    f"this cycle ({_why_no_price}) and {_broker_state}, so stop-loss / "
+                    f"max-hold / giveback were NOT evaluated. The position is "
+                    f"unprotected until a price returns.")
                 try:
                     await _record_trade_decision(_dlog.refusal(
                         contract, "no_scan_data",
-                        f"held position {contract} had no market data this cycle, so its "
-                        f"exit rules (stop loss, breakeven ratchet, giveback, max hold) "
-                        f"were not evaluated - unprotected until data returns",
+                        f"held position {contract} had no usable price this cycle from "
+                        f"either source - the bar fetch failed ({_why_no_price}) and "
+                        f"{_broker_state} - so its exit rules (stop loss, breakeven "
+                        f"ratchet, giveback, max hold) were not evaluated - "
+                        f"unprotected until a price returns",
                         mandate="apex", direction=position.get("side"),
-                        threshold="scan data required to evaluate an exit"))
+                        threshold="a live price required to evaluate an exit"))
                 except Exception:
                     pass  # never let logging a skip become a second failure
                 continue
