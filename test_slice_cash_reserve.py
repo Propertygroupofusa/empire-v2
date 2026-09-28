@@ -14,6 +14,7 @@ to prove it is the one being called.
 """
 
 import ast
+import os
 import crypto_grid_bot as G
 
 _passed = _failed = 0
@@ -97,6 +98,57 @@ for n in ast.walk(cycle):
             bad.append(n.lineno)
 ok("and the old min(slice_usd, real_balance) sizing is gone from it",
    not bad, f"still present at line(s) {bad}")
+
+# ── the deployment reserve, subtracted alongside the fee reserve ─────────
+import crypto_grid_bot as _g
+
+ok("a wallet with no deployment reserve behaves exactly as before",
+   _g.spendable_for_slice(50.0, 200.0, reserve=88.0)
+   == _g.spendable_for_slice(50.0, 200.0, reserve=88.0, deployment_reserve=0.0))
+
+ok("cash held for an unfunded coin is subtracted from what a slice may spend",
+   _g.spendable_for_slice(100.0, 200.0, reserve=88.0, deployment_reserve=50.0)[0]
+   < _g.spendable_for_slice(100.0, 200.0, reserve=88.0)[0])
+
+ok("the fee reserve is still subtracted on top of it",
+   _g.spendable_for_slice(1000.0, 200.0, reserve=88.0, deployment_reserve=50.0)[0]
+   == round(200.0 - 88.0 - 50.0, 2))
+
+ok("a slice smaller than what is left is unaffected by the reservation",
+   _g.spendable_for_slice(10.0, 500.0, reserve=88.0, deployment_reserve=50.0)[0] == 10.0)
+
+# wallet 138 - 88 fee reserve - 50 held = exactly 0 deployable
+_spend, _why = _g.spendable_for_slice(1000.0, 138.0, reserve=88.0, deployment_reserve=50.0)
+ok("when the reservation is what stops the buy, the reason says so",
+   _spend == 0.0 and "held for coins not yet funded" in _why)
+
+# and when it merely shrinks the buy under the minimum, EVERY subtraction is
+# named - blaming the fee reserve alone sends the reader hunting a shortfall
+# that is really a deliberate reservation. This one failed first.
+_spend3, _why3 = _g.spendable_for_slice(1000.0, 140.0, reserve=88.0, deployment_reserve=50.0)
+ok("a sub-minimum spend names the reservation too, not just the fee reserve",
+   _spend3 == 0.0 and "held for coins not yet funded" in _why3 and "fee reserve" in _why3)
+
+_spend2, _why2 = _g.spendable_for_slice(1000.0, 300.0, reserve=88.0, deployment_reserve=50.0)
+ok("and when it merely bounds the size, the reason names it too",
+   _spend2 > 0 and "held for coins not yet funded" in _why2)
+
+ok("a negative or missing reservation is never a credit",
+   _g.spendable_for_slice(1000.0, 200.0, reserve=88.0, deployment_reserve=-50.0)[0]
+   == _g.spendable_for_slice(1000.0, 200.0, reserve=88.0)[0]
+   == _g.spendable_for_slice(1000.0, 200.0, reserve=88.0, deployment_reserve=None)[0])
+
+ok("the reserve is read INSIDE the buy branch, not on every cycle",
+   "_dep_reserve, _dep_why = await unfunded_deployment_reserve()" in open(
+       os.path.join(os.path.dirname(os.path.abspath(__file__)), "crypto_grid_bot.py"), encoding="utf-8").read())
+
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "crypto_grid_bot.py"), encoding="utf-8").read()
+_i = _src.index("async def unfunded_deployment_reserve")
+_blk = _src[_i:_src.index("def spendable_for_slice", _i)]
+ok("an unreadable reserve FAILS OPEN - it must never stop the fleet trading",
+   'return 0.0, "reserve could not be computed' in _blk)
+ok("and it returns nothing to hold back once every target has a branch",
+   "every target coin already has a branch" in _blk)
 
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)

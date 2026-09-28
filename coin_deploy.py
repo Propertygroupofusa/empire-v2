@@ -95,3 +95,51 @@ def plan(coins, free_cash_usd, reserve_usd, held_product_ids=None,
     return rows, {"status": "FUND", "detail": detail,
                   "deployable_usd": round(deployable, 2),
                   "total_usd": total, "deferred": deferred, "already_held": already}
+
+
+# The most of the deployable cash that may be held back for coins not yet
+# funded. Half, deliberately.
+#
+# The owner authorised giving the deployer first claim so new coins are not
+# outrun by a 30-second loop, AND said "make sure the money keeps flipping".
+# Those pull against each other: a pure first claim starves every dip buy in
+# the fleet until three branches exist, and a fleet that stops buying dips
+# stops selling rises a few hours later. So this is a RESERVATION, not a
+# monopoly - the deployer gets first call on up to half, and everything
+# above that keeps flowing to branches that are already trading.
+#
+# It extinguishes itself. Once every target coin has a branch the reserve is
+# 0.00 and the sizing path is byte-for-byte what it was before.
+MAX_DEPLOYMENT_RESERVE_SHARE = 0.50
+
+
+def deployment_reserve_usd(unfunded_count, per_coin_usd, deployable_usd,
+                           max_share=MAX_DEPLOYMENT_RESERVE_SHARE):
+    """Cash to hold back from dip buys for coins not yet funded. (usd, why).
+
+    Returns 0.0 the moment there is nothing left to fund, which is what
+    makes this safe to leave switched on: it is a temporary claim on a
+    temporary shortage, not a standing tax on the fleet.
+    """
+    n = max(0, int(unfunded_count or 0))
+    if n == 0:
+        return 0.0, "every target coin already has a branch - nothing reserved"
+    if deployable_usd is None:
+        return 0.0, "deployable cash unreadable - a gap is not a zero, nothing reserved"
+    dep = float(deployable_usd)
+    if dep <= 0:
+        return 0.0, f"${dep:,.2f} deployable - nothing to reserve from"
+    needed = n * max(0.0, float(per_coin_usd or 0.0))
+    ceiling = dep * max_share
+    reserve = min(needed, ceiling)
+    reserve = int(reserve * 100) / 100.0
+    if reserve >= needed - 0.01:
+        why = (f"${reserve:,.2f} held for {n} unfunded coin(s) - the full "
+               f"${needed:,.2f} they need, inside the "
+               f"{max_share*100:.0f}% cap on ${dep:,.2f} deployable")
+    else:
+        why = (f"${reserve:,.2f} held for {n} unfunded coin(s) - capped at "
+               f"{max_share*100:.0f}% of ${dep:,.2f} deployable rather than the "
+               f"${needed:,.2f} they need, so the branches already trading keep "
+               f"buying their dips")
+    return reserve, why

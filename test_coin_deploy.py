@@ -98,3 +98,79 @@ def test_removing_the_viability_floor_would_fund_untradeable_branches():
     assert len(rows) == 3
     assert rows[0]["usd"] < D.MIN_VIABLE_BRANCH_USD, (
         "the floor is not what prevents a three-way split here")
+
+
+# ================== the deployment reserve: first claim, not a monopoly
+"""The owner authorised giving the deployer first claim on freed cash so new
+coins are not outrun by a loop that checks every 30 seconds while the
+deployer checks every 900 - and said in the same breath: make sure the money
+keeps flipping.
+
+Those pull against each other. A pure first claim starves every dip buy in
+the fleet until three branches exist, and a fleet that stops buying dips
+stops selling rises a few hours later. So it is a RESERVATION capped at half
+the deployable cash, and these tests are about that cap holding.
+"""
+
+
+def test_the_fleet_always_keeps_at_least_half_to_trade_with():
+    """The 'keep flipping' half of the instruction, as arithmetic."""
+    for dep in (24.0, 49.79, 100.0, 504.18, 5000.0):
+        r, _ = D.deployment_reserve_usd(3, 16.60, dep)
+        assert r <= dep * D.MAX_DEPLOYMENT_RESERVE_SHARE + 1e-9, (dep, r)
+        assert dep - r >= dep * 0.5 - 0.01, (dep, r)
+
+
+def test_it_reserves_only_what_the_unfunded_coins_need():
+    """With plenty of cash it takes the $49.80 for three branches and leaves
+    the other $454 alone - not half of everything."""
+    r, why = D.deployment_reserve_usd(3, 16.60, 504.18)
+    assert r == pytest.approx(49.80, abs=0.01)
+    assert "the full" in why
+
+
+def test_it_caps_rather_than_taking_everything_when_cash_is_tight():
+    r, why = D.deployment_reserve_usd(3, 16.60, 49.79)
+    assert r == pytest.approx(24.89, abs=0.01)
+    assert "keep buying their dips" in why
+
+
+def test_it_extinguishes_itself_once_every_coin_is_funded():
+    """What makes it safe to leave switched on: a temporary claim on a
+    temporary shortage, not a standing tax on the fleet."""
+    r, why = D.deployment_reserve_usd(0, 16.60, 504.18)
+    assert r == 0.0
+    assert "already has a branch" in why
+
+
+def test_it_shrinks_as_coins_get_funded():
+    three, _ = D.deployment_reserve_usd(3, 16.60, 504.18)
+    two, _ = D.deployment_reserve_usd(2, 16.60, 504.18)
+    one, _ = D.deployment_reserve_usd(1, 16.60, 504.18)
+    assert three > two > one > 0
+
+
+def test_unreadable_cash_reserves_nothing():
+    r, why = D.deployment_reserve_usd(3, 16.60, None)
+    assert r == 0.0 and "gap is not a zero" in why
+
+
+def test_no_deployable_cash_reserves_nothing():
+    assert D.deployment_reserve_usd(3, 16.60, 0.0)[0] == 0.0
+    assert D.deployment_reserve_usd(3, 16.60, -50.0)[0] == 0.0
+
+
+def test_the_reserve_is_floored_to_the_cent():
+    r, _ = D.deployment_reserve_usd(3, 16.666, 504.18)
+    assert r == round(r, 2)
+    assert r <= 3 * 16.666
+
+
+def test_removing_the_cap_would_starve_the_fleet():
+    """Mutation: at max_share 1.0 and tight cash the deployer takes the lot
+    and no branch can buy a dip."""
+    dep = 49.79
+    capped, _ = D.deployment_reserve_usd(3, 16.60, dep)
+    uncapped, _ = D.deployment_reserve_usd(3, 16.60, dep, max_share=1.0)
+    assert uncapped > capped
+    assert dep - uncapped < 1.0, "the cap is not what leaves cash for dip buys"

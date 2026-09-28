@@ -337,7 +337,54 @@ GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "70
 GRID_CASH_RESERVE_USD = float(os.getenv("GRID_CASH_RESERVE_USD", "88.0"))
 
 
-def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None):
+async def unfunded_deployment_reserve() -> tuple:
+    """Cash held back from dip buys for target coins with no branch yet.
+
+    The owner authorised giving the deployer first claim so new coins are
+    not outrun by a loop that checks every 30 seconds while the deployer
+    checks every 900 - and asked in the same breath that the money keep
+    flipping. coin_deploy.deployment_reserve_usd() is where those two are
+    reconciled: the deployer gets up to HALF the deployable cash, never all
+    of it, so branches that are already trading keep buying their dips.
+
+    Returns (usd, why). 0.0 whenever every target already has a branch,
+    which makes this safe to leave on: the sizing path below is then
+    byte-for-byte what it was before.
+
+    One indexed query, and only on the cycle where a dip has actually
+    triggered - never on every pass.
+    """
+    try:
+        import coin_deploy as _cd
+        import coin_deploy_worker as _cdw
+        targets = list(_cdw.TARGET_COINS)
+        if not targets:
+            return 0.0, "no deployment targets"
+        async with get_session_factory()() as db:
+            held = {r[0] for r in (await db.execute(
+                select(CryptoGridBranch.product_id)
+                .where(CryptoGridBranch.product_id.in_(targets)))).all()}
+        unfunded = [c for c in targets if c not in held]
+        if not unfunded:
+            return 0.0, "every target coin already has a branch"
+        free_cash = await get_real_free_cash_usd()
+        if free_cash is None:
+            return 0.0, "free cash unreadable - nothing reserved"
+        deployable = float(free_cash) - max(0.0, GRID_CASH_RESERVE_USD)
+        per_coin = deployable / max(1, len(unfunded))
+        per_coin = max(per_coin, _cd.MIN_VIABLE_BRANCH_USD)
+        return _cd.deployment_reserve_usd(len(unfunded), per_coin, deployable)
+    except Exception as e:
+        # Fail OPEN here, not closed: an unreadable reserve must not stop the
+        # fleet trading. The cost of getting this wrong is a new coin funded
+        # a cycle later, not a loss.
+        log.info(f"[GRID] deployment reserve unreadable ({type(e).__name__}) - "
+                 f"reserving nothing this cycle")
+        return 0.0, "reserve could not be computed - nothing held back"
+
+
+def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None,
+                        deployment_reserve=0.0):
     """How much of the wallet a single grid slice may actually spend.
 
     Returns (spend, reason). `spend` is 0.0 when the buy must not happen,
@@ -370,15 +417,32 @@ def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None):
         min_trade = MIN_TRADE_USD
     if real_balance is None:
         return 0.0, "real balance unavailable"
-    deployable = real_balance - max(0.0, reserve)
+    held_for_new_coins = max(0.0, float(deployment_reserve or 0.0))
+    deployable = real_balance - max(0.0, reserve) - held_for_new_coins
     if deployable <= 0:
+        if held_for_new_coins > 0:
+            return 0.0, (f"wallet ${real_balance:,.2f} less the ${reserve:,.2f} fee "
+                         f"reserve and ${held_for_new_coins:,.2f} held for coins not "
+                         f"yet funded leaves nothing - the new coin gets this one")
         return 0.0, (f"wallet ${real_balance:,.2f} is at or below the "
                      f"${reserve:,.2f} fee reserve - nothing is deployable")
     spend = min(slice_usd, deployable)
     if spend < min_trade:
+        # Name EVERY subtraction. Reporting only the fee reserve when cash is
+        # also being held for an unfunded coin sends the reader looking for a
+        # shortfall that is really a deliberate reservation.
+        _less = f"${reserve:,.2f} fee reserve"
+        if held_for_new_coins > 0:
+            _less += f" and ${held_for_new_coins:,.2f} held for coins not yet funded"
         return 0.0, (f"${spend:,.2f} spendable (wallet ${real_balance:,.2f} less the "
-                     f"${reserve:,.2f} fee reserve) is below the ${min_trade:,.2f} minimum")
-    bound = "branch allocation" if slice_usd <= deployable else "wallet less the fee reserve"
+                     f"{_less}) is below the ${min_trade:,.2f} minimum")
+    if slice_usd <= deployable:
+        bound = "branch allocation"
+    elif held_for_new_coins > 0:
+        bound = (f"wallet less the fee reserve and ${held_for_new_coins:,.2f} held for "
+                 f"coins not yet funded")
+    else:
+        bound = "wallet less the fee reserve"
     return round(spend, 2), f"${spend:,.2f}, bounded by {bound}"
 
 
@@ -5690,7 +5754,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 return
         else:
             slice_usd = branch.allocated_usd / branch.num_levels
-        spend, spend_reason = spendable_for_slice(slice_usd, real_balance)
+        _dep_reserve, _dep_why = await unfunded_deployment_reserve()
+        spend, spend_reason = spendable_for_slice(slice_usd, real_balance,
+                                                  deployment_reserve=_dep_reserve)
         if spend <= 0:
             log.info(f"[GRID] {branch.bot_name}: no buy - {spend_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id, "CASH_RESERVE",
