@@ -9758,7 +9758,15 @@ async def auto_trim_status(fresh: int = 0):
     # CONSOLIDATE are what the tail rule WOULD do, not what is scheduled.
     # The distinction is carried in `consolidation_is_preview_only` rather
     # than left for a reader to infer.
+    _protected = ()
+    try:
+        _units, _ = await crypto_grid_bot_module.fleet_tracked_units_by_product()
+        if _units:
+            _protected = {p.split("-")[0].upper() for p in _units}
+    except Exception:
+        pass
     plans = auto_trim.plan_actions(holdings, census.get("total_usd"),
+                                   actively_traded=_protected,
                                    now=now, history=history, unpriced=unpriced)
     out = auto_trim.summarise(plans, mode)
     out["rule_book"] = position_rules.book(holdings, census.get("total_usd"),

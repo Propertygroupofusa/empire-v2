@@ -187,7 +187,7 @@ def spent_today(history, now):
 def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
                buffer_pct=BUFFER_PCT, max_trim_usd=MAX_TRIM_USD,
                max_daily_usd=MAX_DAILY_TRIM_USD, min_trim_usd=MIN_TRIM_USD,
-               cooldown_hours=COOLDOWN_HOURS):
+               cooldown_hours=COOLDOWN_HOURS, actively_traded=()):
     """What to trim right now, and for every holding, why not.
 
     `holdings` is the census list: dicts with `asset`, `usd`, `units`,
@@ -201,6 +201,20 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
     """
     t = _num(total_usd)
     out = []
+    # Assets a grid branch currently holds open slices on. THIS IS THE
+    # PATH THAT ACTUALLY SELLS - auto_trim_worker calls plan_trims, and
+    # tail consolidation in plan_actions is preview-only - so the
+    # protection has to be here or it protects nothing.
+    #
+    # Measured 2026-09-28: this rule trimmed $885.43 of ZEC and $244.78 of
+    # XRP across two days while the grid went on claiming those units.
+    # Both branches were left holding coin the wallet no longer had, and
+    # a sale of their slices would have been an order for units that do
+    # not exist. Two subsystems enforcing the same 20% ceiling against
+    # different books, and neither telling the other.
+    #
+    # ONE-DIRECTIONAL: it can only ever cancel a trim, never cause one.
+    protected = {str(a).upper() for a in (actively_traded or ())}
 
     if t is None or t <= 0:
         for h in holdings or ():
@@ -242,6 +256,17 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
             out.append(rec); continue
 
         rec["excess_usd"] = round(need, 2)
+
+        # Checked before any other reason could let it through. A coin the
+        # grid is actively trading is working inventory, not a position to
+        # be sized down behind the grid's back.
+        if asset in protected:
+            rec.update(reason="ACTIVELY_TRADED",
+                       detail=(f"{asset} is {share:.2f}% of the account and ${need:,.2f} "
+                               f"over the {limit_pct:.0f}% rule, but it has open grid "
+                               f"slices on it - trimming here would sell coin the grid "
+                               f"still has on its books. Raise it with the grid instead."))
+            out.append(rec); continue
 
         last = last_trim_at(history, asset)
         if last is not None and isinstance(now, datetime):
@@ -317,7 +342,8 @@ def plan_actions(holdings, total_usd, *, now, history=(), unpriced=(),
                  max_trim_usd=MAX_TRIM_USD, max_daily_usd=MAX_DAILY_TRIM_USD,
                  min_trim_usd=MIN_TRIM_USD, cooldown_hours=COOLDOWN_HOURS,
                  max_consolidate=MAX_CONSOLIDATE_PER_PASS,
-                 min_consolidate_usd=MIN_CONSOLIDATE_USD):
+                 min_consolidate_usd=MIN_CONSOLIDATE_USD,
+                 actively_traded=()):
     """Every action available right now, across every tier - not just the ceiling.
 
     plan_trims answers "what is over 20%", which on this book is two
@@ -332,8 +358,31 @@ def plan_actions(holdings, total_usd, *, now, history=(), unpriced=(),
 
     Returns the same shape plan_trims returns, with an added `kind` of
     "TRIM" or "CONSOLIDATE" on the rows that act.
+
+    `actively_traded` is the set of assets a grid branch currently holds
+    open slices on, and NOTHING in that set is ever sold here.
+
+    WHY THAT EXCEPTION EXISTS. The TAIL rule reads "under 1% of the
+    account - too small to change it whatever it does; sell into cash".
+    That is true of a forgotten holding and false of working inventory.
+    On 2026-09-28 this loop was one pass away from selling BCH-USD
+    ($95.01), LTC-USD ($74.95) and ONDO-USD ($55.00) in full - all three
+    live grid branches, and ONDO had completed a profitable round trip
+    four hours earlier and rebought. That is not consolidating a tail, it
+    is closing somebody else's open trade without telling them.
+
+    It had already happened twice on the ceiling rule: $885.43 of ZEC and
+    $244.78 of XRP were trimmed on 2026-09-27 and 09-28 while the grid
+    went on claiming those units, leaving branches holding coin the wallet
+    no longer had. See invariants.coin_tracked_is_held, which found it.
+
+    The exception is ONE-DIRECTIONAL: it can only ever cancel a sale,
+    never cause one, and every skipped row is still returned with its
+    reason so the refusal is auditable like all the others.
     """
     import position_rules
+
+    protected = {str(a).upper() for a in (actively_traded or ())}
 
     trims = plan_trims(holdings, total_usd, now=now, history=history,
                        limit_pct=limit_pct, buffer_pct=buffer_pct,
@@ -342,6 +391,11 @@ def plan_actions(holdings, total_usd, *, now, history=(), unpriced=(),
     for r in trims:
         if r.get("act"):
             r["kind"] = "TRIM"
+        # Working inventory is never sold from here, at any tier.
+        if r["asset"] in protected and r.get("act"):
+            r.update(act=False, trim_usd=0.0, reason="ACTIVELY_TRADED",
+                     detail=(f"{r['asset']} has open grid slices on it - selling it here "
+                             f"would close a live trade the grid still has on its books"))
 
     book = position_rules.book(holdings, total_usd, unpriced=unpriced)
     by_asset = {r["asset"]: r for r in book["rows"]}
@@ -362,6 +416,15 @@ def plan_actions(holdings, total_usd, *, now, history=(), unpriced=(),
     for row in tail:
         rec = {"asset": row["asset"], "usd": row["usd"], "share_pct": row["share_pct"],
                "tier": row["tier"], "kind": "CONSOLIDATE", "act": False, "trim_usd": 0.0}
+        # Checked FIRST, before any other reason could let it through: a
+        # tail position the grid is actively trading is working inventory,
+        # not a forgotten holding.
+        if row["asset"] in protected:
+            rec.update(reason="ACTIVELY_TRADED",
+                       detail=(f"{row['asset']} has open grid slices on it - selling the "
+                               f"whole position here would close a live trade the grid "
+                               f"still has on its books"))
+            trims.append(rec); continue
         amount = _num(row["usd"]) or 0.0
         floor = _num(min_consolidate_usd) or 0.0
 

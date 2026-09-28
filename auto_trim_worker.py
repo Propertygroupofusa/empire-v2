@@ -215,7 +215,21 @@ async def check_once(session_factory, *, place=True) -> dict:
 
         holdings = census.get("holdings") or []
         total = census.get("total_usd")
-        plans = auto_trim.plan_trims(holdings, total, now=now, history=history)
+        # Coins the grid currently holds open slices on. Trimming those
+        # sells coin the grid still has on its books - see the note in
+        # plan_trims. Fails OPEN on an unreadable grid: an empty set
+        # protects nothing, which is the behaviour this loop had before.
+        protected = ()
+        try:
+            import crypto_grid_bot as _grid
+            _units, _ = await _grid.fleet_tracked_units_by_product()
+            if _units:
+                protected = {p.split("-")[0].upper() for p in _units}
+        except Exception as exc:
+            log.warning(f"[auto_trim] could not read grid positions ({type(exc).__name__}) "
+                        f"- trimming without that protection this pass")
+        plans = auto_trim.plan_trims(holdings, total, now=now, history=history,
+                                     actively_traded=protected)
         summary = auto_trim.summarise(plans, mode)
 
         for p in plans:
