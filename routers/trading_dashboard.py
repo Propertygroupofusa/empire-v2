@@ -9273,6 +9273,13 @@ async def schema_health_endpoint():
     }
 
 
+#: How many rows one summary will count. A day of kill-condition
+#: heartbeats is ~96; this leaves room for a genuinely busy window while
+#: keeping a single narrow read bounded. Past it the summary reports
+#: floors and says so.
+DECISION_COUNT_CAP = 5000
+
+
 @router.get("/mandates/decisions")
 async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
                                      admitted: bool = None, limit: int = 100):
@@ -9286,21 +9293,49 @@ async def mandate_decisions_endpoint(bot: str = None, hours: int = 24,
     from sqlalchemy import select
 
     since = datetime.utcnow() - timedelta(hours=max(1, int(hours)))
-    q = select(TradeDecision).where(TradeDecision.decided_at >= since)
-    if bot:
-        q = q.where(TradeDecision.bot == bot)
-    if admitted is not None:
-        q = q.where(TradeDecision.admitted == bool(admitted))
+
+    def _filtered(q):
+        if bot:
+            q = q.where(TradeDecision.bot == bot)
+        if admitted is not None:
+            q = q.where(TradeDecision.admitted == bool(admitted))
+        return q
+
+    # THE SUMMARY IS THE WINDOW. THE LIST IS A PAGE.
+    #
+    # These used to be the same query, so the same 24 hours read "0 of 3",
+    # "0 of 25" or "0 of 89 decision(s)" depending only on the limit the
+    # caller happened to pass - and the default limit is 100, so any
+    # busier day reported exactly 100. top_blockers was tallied over that
+    # page too, which is worse than a wrong total: it is a wrong answer to
+    # "which rule should I fix".
+    #
+    # Only the two columns the summary needs, so counting a whole window
+    # costs a narrow read rather than hydrating every row.
+    n_q = _filtered(select(TradeDecision.admitted, TradeDecision.failed_rules)
+                    .where(TradeDecision.decided_at >= since))
+    q = _filtered(select(TradeDecision).where(TradeDecision.decided_at >= since))
     async with get_session_factory()() as db:
         rows = (await db.execute(
             q.order_by(TradeDecision.decided_at.desc()).limit(max(1, int(limit)))
         )).scalars().all()
+        window = (await db.execute(
+            n_q.order_by(TradeDecision.decided_at.desc())
+               .limit(DECISION_COUNT_CAP + 1)
+        )).all()
+
+    # A window bigger than the cap makes every figure a floor, and the
+    # summary says so rather than presenting a slice as a total.
+    capped = len(window) > DECISION_COUNT_CAP
+    counted = [{"admitted": a, "failed_rules": f}
+               for a, f in window[:DECISION_COUNT_CAP]]
 
     dicts = [r.to_dict() for r in rows]
-    summary = decision_log.summarise(dicts)
+    summary = decision_log.summarise(counted, returned=len(dicts), capped=capped)
     return {
         "window_hours": int(hours),
         "bot": bot,
+        "returned": len(dicts),
         "decisions": dicts,
         "summary": summary,
         "detail": summary["detail"],

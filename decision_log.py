@@ -100,11 +100,37 @@ def explain(verdict):
     return line
 
 
-def summarise(rows):
-    """Why a bot has or has not been trading, over a set of decisions."""
+def summarise(rows, returned=None, capped=False):
+    """Why a bot has or has not been trading, over a set of decisions.
+
+    `rows` is the WHOLE WINDOW, not the page the caller is displaying.
+    `returned` is how many of them that page actually lists, and is
+    reported beside the window count rather than in place of it.
+
+    THE BUG THIS SHAPE EXISTS TO STOP. The endpoint used to hand this
+    function its limited page, so the same 24-hour window read:
+
+        limit=3   -> "0 of 3 decision(s) admitted a trade."
+        limit=25  -> "0 of 25 decision(s) admitted a trade."
+        limit=200 -> "0 of 89 decision(s) admitted a trade."
+
+    89 was the truth and the default limit is 100, so any busier day
+    silently reported exactly 100. top_blockers was worse than the
+    total: tallied over the page, the rule that refused most across a
+    day could be under-counted, or one that happened to fill the newest
+    page promoted to the top of the list a reader uses to decide what
+    to fix.
+
+    `capped` says the window was larger than the caller's safety cap, in
+    which case every figure here is a FLOOR and says so - reporting a
+    slice as an exact total is the same lie one layer down.
+    """
     rows = list(rows or ())
+    n = len(rows)
+    shown = n if returned is None else int(returned)
     if not rows:
         return {"decisions": 0, "admitted": 0, "refused": 0, "top_blockers": [],
+                "returned": shown, "capped": bool(capped),
                 "detail": ("no decisions recorded in this window - which is itself a "
                            "finding if the bot was meant to be running")}
     admitted = sum(1 for r in rows if (r.get("admitted") if hasattr(r, "get")
@@ -131,15 +157,24 @@ def summarise(rows):
             if name:
                 counts[name] = counts.get(name, 0) + 1
     top = sorted(counts.items(), key=lambda kv: -kv[1])
+    at_least = "at least " if capped else ""
+    detail = (f"{admitted} of {at_least}{n} decision(s) admitted a trade."
+              + (f" The rule refusing most often was {top[0][0]} "
+                 f"({at_least}{top[0][1]} time(s))."
+                 if top else " Nothing was refused by a named rule."))
+    if shown < n:
+        detail += f" {shown} of them are shown below."
+    if capped:
+        detail += (" The window holds more than the count cap, so these are floors, "
+                   "not totals.")
     return {
-        "decisions": len(rows),
+        "decisions": n,
         "admitted": admitted,
-        "refused": len(rows) - admitted,
+        "refused": n - admitted,
         "top_blockers": [{"rule": k, "count": v} for k, v in top],
-        "detail": (
-            f"{admitted} of {len(rows)} decision(s) admitted a trade."
-            + (f" The rule refusing most often was {top[0][0]} ({top[0][1]} time(s))."
-               if top else " Nothing was refused by a named rule.")),
+        "returned": shown,
+        "capped": bool(capped),
+        "detail": detail,
     }
 
 

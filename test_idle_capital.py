@@ -18,13 +18,48 @@ def ago(**kw):
     return (NOW - timedelta(**kw)).isoformat().replace("+00:00", "Z")
 
 
+# Which coin occupies which slot, for the test being run. branch() fills
+# it and trade() reads it, so a trade row carries the same bot_name AND
+# product_id the live feed does.
+_SLOT_COIN = {}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_slots():
+    """Slots are recycled in production; they must not leak between tests."""
+    _SLOT_COIN.clear()
+    yield
+    _SLOT_COIN.clear()
+
+
 def branch(pid, usd=69.0, open_slices=0, bot=None, created=None):
-    return {"product_id": pid, "bot_name": bot or f"grid_{pid}", "allocated_usd": usd,
+    name = bot or f"grid_{pid}"
+    _SLOT_COIN[name] = pid
+    return {"product_id": pid, "bot_name": name, "allocated_usd": usd,
             "open_slices": open_slices, "created_at": created}
 
 
-def trade(bot, when):
-    return {"bot_name": bot, "closed_at": when}
+def trade(bot, when, product=None):
+    """One closed trade, shaped like the live feed.
+
+    THIS HELPER USED TO EMIT {bot_name, closed_at} AND NOTHING ELSE, and
+    that made 13 tests in this file assert nothing for as long as it took
+    somebody to run them.
+
+    last_trade_by_branch keys on (bot_name, product_id) on purpose - slot
+    names are recycled, and PRIME-USD inherited a previous occupant's
+    record, was called "stale for 26 days" and had its whole $240.38
+    moved out seven minutes after it was created. When the key gained the
+    coin, this helper was not updated, so every lookup missed and every
+    branch came back UNKNOWN_AGE - the report tests failed against
+    correct code.
+
+    /grid-status/trade-history returns bot_name AND product_id on every
+    row, which test_the_fixture_matches_the_live_producer pins. A fixture
+    that is not the producer's shape tests a system nobody runs.
+    """
+    return {"bot_name": bot, "closed_at": when,
+            "product_id": product if product is not None else _SLOT_COIN.get(bot)}
 
 
 # ---------------------------------------------------------------- the split
@@ -220,9 +255,15 @@ def _fleet(*extra):
 
 
 def test_it_moves_the_stale_branch_into_the_one_trading_most_recently():
+    """Destinations are WAITING, so XLM and ETH are flat here.
+
+    They used to carry open_slices=3, from before rotation_plan was
+    restricted to WAITING candidates - see the note on that restriction
+    and the $240.38 it was written for.
+    """
     bs, bt = _fleet(branch("BONK", 69.23, bot="g3"),
-                    branch("XLM", 400.0, open_slices=3, bot="g10"),
-                    branch("ETH", 400.0, open_slices=3, bot="g11"))
+                    branch("XLM", 400.0, bot="g10"),
+                    branch("ETH", 400.0, bot="g11"))
     ts = bt + [trade("g3", ago(days=18)), trade("g10", ago(minutes=5)),
                trade("g11", ago(hours=9))]
     p = ic.rotation_plan(_rep(bs, ts))
@@ -235,7 +276,7 @@ def test_it_moves_the_stale_branch_into_the_one_trading_most_recently():
 def test_it_never_sends_idle_money_to_another_idle_branch():
     """Churn that pays a fee to move silence somewhere else."""
     bs, bt = _fleet(branch("BONK", 69.23, bot="g3"), branch("DEAD", 80.0, bot="g9"),
-                    branch("XLM", 400.0, open_slices=3, bot="g10"))
+                    branch("XLM", 400.0, bot="g10"))
     ts = bt + [trade("g3", ago(days=18)), trade("g9", ago(days=12)),
                trade("g10", ago(hours=1))]
     p = ic.rotation_plan(_rep(bs, ts))
@@ -245,9 +286,10 @@ def test_it_never_sends_idle_money_to_another_idle_branch():
 def test_a_waiting_branch_is_a_valid_destination_but_never_a_source():
     """It traded inside the window - it is proving the thing BONK has not.
 
-    A WORKING branch outranks it, because holding slices is stronger evidence
-    of flipping than having flipped hours ago; so this is asserted on a fleet
-    where the WAITING branch is the only candidate.
+    WAITING is the ONLY destination state. Its reason literally reads
+    "it closed a trade Nh ago", which is the evidence the worker's
+    contract asks for; WORKING means "holding open slices", a statement
+    about the present that says nothing about ever completing a trip.
     """
     # Padding is TOO_NEW - it dilutes the share denominator without being
     # either a source or a candidate, so ONDO is the only destination.
@@ -260,12 +302,34 @@ def test_a_waiting_branch_is_a_valid_destination_but_never_a_source():
     assert p["moves"][0]["to_product_id"] == "ONDO"
 
 
-def test_a_branch_holding_slices_outranks_one_that_merely_traded_recently():
-    """Holding open rungs is stronger evidence of flipping than a past fill."""
+def test_a_branch_holding_slices_is_not_a_destination_at_all():
+    """REVERSED 2026-09-28, and the reversal is the point.
+
+    This asserted that a WORKING branch outranks a WAITING one -
+    "holding open rungs is stronger evidence of flipping than a past
+    fill" - which is what rotation_plan used to do and what it was
+    changed to stop doing.
+
+    Holding slices is a statement about the present. It does not say the
+    coin has ever completed a round trip, and every WORKING branch
+    reports idle_hours 0.0, so ranking the two together put all of them
+    ahead of every branch that had actually proved itself and the
+    allocation tiebreak then picked the LARGEST. Live that sent
+    PRIME-USD's $240.38 into XLM-USD, a branch with zero completed round
+    trips in the fleet's entire history, taking it to $691.51 and third
+    largest in the fleet.
+
+    So the F-branches here hold slices and are NOT candidates; ONDO,
+    flat and traded four hours ago, is.
+    """
     bs, bt = _fleet(branch("BONK", 69.23, bot="g3"), branch("ONDO", 69.58, bot="g4"))
     ts = bt + [trade("g3", ago(days=18)), trade("g4", ago(hours=4))]
-    p = ic.rotation_plan(_rep(bs, ts))
-    assert p["moves"][0]["to_product_id"].startswith("F")
+    rep = _rep(bs, ts)
+    working = {r["product_id"] for r in rep["branches"] if r["state"] == ic.WORKING}
+    assert working and all(p.startswith("F") for p in working)
+    p = ic.rotation_plan(rep)
+    assert p["moves"][0]["to_product_id"] == "ONDO", (
+        "a slice-holding branch was chosen over one that proved a round trip")
 
 
 def test_no_branch_is_allowed_to_swallow_the_fleet():
@@ -343,3 +407,87 @@ def test_a_fleet_too_small_for_the_share_rule_refuses_rather_than_concentrating(
     p = ic.rotation_plan(_rep(bs, [trade("g3", ago(days=18)), trade("g10", ago(hours=1))]))
     assert p["moves"] == []
     assert p["refusals"][0]["reason"] == "NO_DESTINATION_UNDER_THE_SHARE_RULE"
+
+
+
+# ------------------------------------- the fixture must be the real shape
+
+def test_the_fixture_matches_the_live_producer():
+    """The keys idle_capital reads off a trade row are the keys
+    get_grid_trade_history actually emits.
+
+    Read off the producer rather than remembered: this file spent hours
+    red because its own trade rows were missing product_id, which the
+    live feed has always carried.
+    """
+    import ast
+    import inspect
+
+    from models import CryptoGridTradeHistory
+
+    # get_grid_trade_history builds recent_trades as
+    # [row.to_dict() for row in ...], so the MODEL is the producer - the
+    # function itself has no literal dict to read, which a first draft of
+    # this test learned the expensive way by asserting against the
+    # aggregate rows beside it.
+    src = inspect.getsource(CryptoGridTradeHistory.to_dict)
+    tree = ast.parse(src.lstrip())
+    emitted = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k in node.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    emitted.add(k.value)
+    for key in ("bot_name", "product_id", "closed_at"):
+        assert key in emitted, (
+            f"CryptoGridTradeHistory.to_dict no longer emits {key!r} - this "
+            f"file's trade() fixture is now lying about the producer's shape")
+
+    row = trade("g1", "2026-09-28T00:00:00Z", product="ZEC")
+    assert set(row) <= emitted, f"fixture emits keys the producer does not: {set(row) - emitted}"
+
+
+def test_a_trade_row_carries_the_coin_not_just_the_slot():
+    b = branch("ONDO", bot="g4")
+    t = trade("g4", ago(hours=1))
+    assert t["product_id"] == b["product_id"] == "ONDO"
+    assert ic.last_trade_by_branch([t]) != {}
+    assert ("g4", "ONDO") in ic.last_trade_by_branch([t])
+
+
+def test_a_recycled_slot_does_not_inherit_the_previous_coins_record():
+    """The bug the (bot_name, product_id) key exists for. PRIME-USD took
+    over slot crypto_grid_3, was called stale for 26 days, and had its
+    whole $240.38 moved out seven minutes after it was created.
+
+    Seven minutes old is inside the 6h grace, so TOO_NEW alone saves it
+    and the KEY is not what is under test - a first version of this
+    asserted only that case and passed with the coin stripped out of the
+    key. The second branch here is well past grace, where nothing but
+    the key stands between it and the previous occupant's record.
+    """
+    old_trade = trade("crypto_grid_3", ago(days=26), product="BONK")
+
+    fresh = branch("PRIME", bot="crypto_grid_3", created=ago(minutes=7))
+    r = ic.report([fresh], [old_trade], now=NOW)
+    assert r["branches"][0]["state"] == ic.TOO_NEW
+    assert r["stale"] == []
+
+    # Past the grace period, where the AGE CLAMP takes over: idle hours
+    # are capped at how long the branch has existed, so a 30h-old branch
+    # cannot be 26 days idle however the key resolves.
+    settled = branch("PRIME", bot="crypto_grid_3", created=ago(hours=30))
+    r = ic.report([settled], [old_trade], now=NOW, total_trade_count=500)
+    assert r["branches"][0]["state"] != ic.STALE, (
+        "it inherited the previous occupant's 26-day-old trade")
+    assert r["stale_usd"] == 0.0
+
+    # HONESTLY: neither case above isolates the key. Stripping the coin
+    # out of last_trade_by_branch leaves both of these passing, because
+    # grace and the age clamp fire first, and past the clamp a branch
+    # with no trades of its own is STALE by the never-traded path anyway.
+    # The key is defence in depth behind two protections that reach the
+    # live incident first; what it uniquely guarantees is the index
+    # contract, which test_a_trade_row_carries_the_coin_not_just_the_slot
+    # is the test for. Recorded rather than dressed up as coverage this
+    # file does not have.
