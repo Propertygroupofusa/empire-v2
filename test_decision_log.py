@@ -295,3 +295,46 @@ def test_a_standing_halt_still_leaves_a_trail():
     prop_bot._last_kill_logged.update(reason=r,
                                       at=_t.time() - prop_bot.KILL_LOG_HEARTBEAT_SECONDS - 1)
     assert prop_bot._should_log_kill(r) is True
+
+
+# ── the shape the endpoint actually sends ────────────────────────────────
+
+def test_summarise_accepts_the_to_dict_shape_the_endpoint_sends():
+    """THE 500. row_from_verdict stores failed_rules as a comma-joined
+    STRING; TradeDecision.to_dict splits it back into a LIST - and the
+    endpoint passes to_dict output. .split on a list raised AttributeError
+    and the endpoint returned 500.
+
+    It only fired once a row WITH failed_rules existed, so the endpoint
+    worked perfectly while the table was empty and broke the moment the
+    kill-condition logging gave it something to read. The tests fed it
+    row_from_verdict output and never the shape the caller sends.
+    """
+    out = dl.summarise([{"failed_rules": ["kill_condition"], "admitted": False}])
+    assert out["top_blockers"] == [{"rule": "kill_condition", "count": 1}]
+    assert out["refused"] == 1
+
+
+def test_summarise_still_accepts_the_row_shape():
+    out = dl.summarise([{"failed_rules": "universe,rsi_oversold", "admitted": False}])
+    assert {b["rule"] for b in out["top_blockers"]} == {"universe", "rsi_oversold"}
+
+
+def test_summarise_survives_a_row_with_no_failed_rules():
+    for empty in (None, "", []):
+        out = dl.summarise([{"failed_rules": empty, "admitted": True}])
+        assert out["top_blockers"] == []
+        assert out["admitted"] == 1
+
+
+def test_the_real_model_to_dict_round_trips_through_summarise():
+    """Built from the model itself rather than a hand-written dict, so the
+    fixture cannot drift from what the endpoint really passes."""
+    from models import TradeDecision
+    row = TradeDecision(bot="prop_apex", symbol=None, direction=None,
+                        mandate="apex", admitted=False,
+                        reason="Buying power critical: $90.94 < $150",
+                        failed_rules="kill_condition", checks_json=None)
+    out = dl.summarise([row.to_dict()])
+    assert out["refused"] == 1
+    assert out["top_blockers"][0]["rule"] == "kill_condition"

@@ -112,7 +112,22 @@ def summarise(rows):
     counts = {}
     for r in rows:
         get = r.get if hasattr(r, "get") else (lambda k, d=None: getattr(r, k, d))
-        for name in (get("failed_rules") or "").split(","):
+        # TWO SHAPES REACH HERE AND THEY ARE NOT THE SAME TYPE.
+        # row_from_verdict stores failed_rules as a comma-joined STRING,
+        # which is how it goes into the column. TradeDecision.to_dict
+        # splits it back into a LIST - and the endpoint passes to_dict
+        # output. Calling .split on the list raised AttributeError and
+        # returned a 500.
+        #
+        # It only ever fired once a row with failed_rules existed, so the
+        # endpoint worked perfectly while the table was empty and broke
+        # the moment the kill-condition logging gave it something to
+        # read. My tests fed it row_from_verdict output and never the
+        # to_dict output the caller actually sends.
+        raw = get("failed_rules")
+        names = raw.split(",") if isinstance(raw, str) else (raw or ())
+        for name in names:
+            name = str(name).strip()
             if name:
                 counts[name] = counts.get(name, 0) + 1
     top = sorted(counts.items(), key=lambda kv: -kv[1])
