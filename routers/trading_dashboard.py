@@ -35,7 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, get_session_factory
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun, GridMakerExpiry
 
 AsyncSessionLocal = get_session_factory()
 
@@ -9195,6 +9195,114 @@ async def redeploy_freed_cash_endpoint(dry_run: bool = True,
     report["written"] = written
     report["dry_run"] = False
     return report
+
+
+@router.get("/grid-status/maker-expiries")
+async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 200):
+    """Every maker-only order this fleet gave up on, newest first.
+
+    WHY THIS EXISTS. When maker-ONLY mode is on and a resting order does
+    not fill inside its wait window, grid_sell()/the buy path cancel it
+    and HOLD the slice rather than paying the taker leg out of its own
+    profit. That is deliberate. But the branch then retries next cycle,
+    and next cycle, indefinitely - so a slice can sit unsold through a
+    rise of any size, and the only trace is a GridMakerExpiry row.
+
+    Those rows were being written and NEVER READ. No endpoint exposed
+    them. That is the same shape as a fallback literal: the system knows
+    the answer and cannot say it. This is the reading side.
+
+    WHAT A ROW MEANS: one post-only order was cancelled with nothing
+    behind it, at the bid/ask recorded. _record_maker_expiry is
+    deliberately NOT called on the maker-first path where an unfilled
+    order becomes a market order - that trade happened, so "what did we
+    miss" has no meaning there. Every row here is a real hold.
+
+    WHAT AN EMPTY RESULT DOES NOT MEAN: it is not evidence that a sell
+    was attempted and filled. It is equally consistent with no sell
+    having been attempted at all. Absence here is UNKNOWN, not a pass -
+    read it beside the branch's own trigger distance.
+    """
+    try:
+        hours = max(1, min(int(hours), 720))
+    except (TypeError, ValueError):
+        hours = 24
+    try:
+        limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        limit = 200
+    since = datetime.utcnow() - timedelta(hours=hours)
+
+    try:
+        async with get_session_factory()() as db:
+            q = select(GridMakerExpiry).where(GridMakerExpiry.expired_at >= since)
+            if product_id:
+                q = q.where(GridMakerExpiry.product_id == product_id)
+            # Newest first AND the limit applied to that order, so a wide
+            # window with a small limit serves the RECENT rows rather than
+            # the oldest ones - the mistake trade-history already made.
+            q = q.order_by(GridMakerExpiry.expired_at.desc()).limit(limit)
+            rows = (await db.execute(q)).scalars().all()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(f"maker expiries unreadable: {type(exc).__name__}: {exc}. "
+                    f"This is a GAP, not an empty result - do not read it as "
+                    f"'no orders expired'."))
+
+    out = []
+    per_product = {}
+    for r in rows:
+        bid = getattr(r, "bid_at_expiry", None)
+        ask = getattr(r, "ask_at_expiry", None)
+        spread_pct = None
+        if bid and ask and bid > 0:
+            spread_pct = round((ask - bid) / bid * 100, 4)
+        stamp = getattr(r, "expired_at", None)
+        out.append({
+            "id": r.id,
+            "bot_name": r.bot_name,
+            "product_id": r.product_id,
+            "side": r.side,
+            "wait_seconds": r.wait_seconds,
+            "bid_at_expiry": bid,
+            "ask_at_expiry": ask,
+            "spread_pct_at_expiry": spread_pct,
+            "price_at_expiry": getattr(r, "price_at_expiry", None),
+            "expired_at": stamp.isoformat() + "Z" if stamp else None,
+        })
+        key = (r.product_id, r.side)
+        agg = per_product.setdefault(key, {"product_id": r.product_id, "side": r.side,
+                                           "count": 0, "newest": None, "oldest": None})
+        agg["count"] += 1
+        iso = stamp.isoformat() + "Z" if stamp else None
+        if iso:
+            if agg["newest"] is None or iso > agg["newest"]:
+                agg["newest"] = iso
+            if agg["oldest"] is None or iso < agg["oldest"]:
+                agg["oldest"] = iso
+
+    summary = sorted(per_product.values(), key=lambda a: -a["count"])
+    return {
+        "readable": True,
+        "window_hours": hours,
+        "since": since.isoformat() + "Z",
+        "product_id": product_id,
+        "returned": len(out),
+        "limit": limit,
+        "truncated": len(out) >= limit,
+        "by_product_and_side": summary,
+        "expiries": out,
+        "a_row_is": ("one post-only order cancelled with nothing behind it - the "
+                     "slice was HELD rather than sold at the taker leg. Repeated "
+                     "sell rows on one product mean that branch has been trying "
+                     "and failing to sell, which is a different fact from having "
+                     "nothing worth selling."),
+        "an_empty_result_is": ("UNKNOWN, not a pass. No rows is equally consistent "
+                               "with no sell having been attempted. Read it beside "
+                               "the branch's distance past its own sell trigger."),
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 @router.post("/grid-status/free-locked-inventory")
