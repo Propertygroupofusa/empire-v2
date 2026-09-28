@@ -65,9 +65,41 @@ ok("the failure path is debug, not an exception",
    "instrumentation must never stop the thing it measures")
 ok("it runs BEFORE the stop and sell logic, so a sale always sees fresh data",
    CYCLE.index("excursion tracking") < CYCLE.index("STOP LOSS"))
+# Retargeted 2026-09-28. This was a SUBSTRING test over the whole cycle
+# function: it asserted "_row.qty" did not appear anywhere in it. The sell
+# path elsewhere in the same function legitimately writes `slice_row.qty` to
+# keep the remainder of a PARTIALLY filled slice, and "slice_row.qty" contains
+# "_row.qty", so the old form failed on a change it was never about.
+# What it actually protects is real and is kept: the excursion instrumentation
+# must write ONLY the two excursion columns and must never mutate trading
+# state. That is now asserted on the parsed tree, scoped to the excursion
+# block itself, so it cannot be fooled by a substring or by unrelated code
+# sharing the function.
+def _excursion_try(fn_node):
+    """The try/except that guards excursion tracking, found by the log line
+    its own failure path writes rather than by position."""
+    for node in ast.walk(fn_node):
+        if not isinstance(node, ast.Try):
+            continue
+        seg = ast.get_source_segment(SRC, node) or ""
+        if "excursion tracking skipped" in seg:
+            return node
+    return None
+
+
+_exc_try = _excursion_try(func("run_grid_branch_cycle"))
+ok("the excursion block is findable", _exc_try is not None)
+_exc_targets = set()
+if _exc_try is not None:
+    for _n in ast.walk(_exc_try):
+        if isinstance(_n, ast.Assign):
+            for _t in _n.targets:
+                if isinstance(_t, ast.Attribute):
+                    _exc_targets.add(_t.attr)
 ok("it only writes the two excursion fields, never price/qty/pnl",
-   "_row.mae_pct = _exc" in CYCLE and "_row.mfe_pct = _exc" in CYCLE
-   and "_row.entry_price" not in CYCLE and "_row.qty" not in CYCLE)
+   _exc_try is not None and _exc_targets <= {"mae_pct", "mfe_pct"},
+   f"excursion block also assigns: {sorted(_exc_targets - {'mae_pct', 'mfe_pct'})}")
+ok("and it writes BOTH of them", _exc_targets >= {"mae_pct", "mfe_pct"})
 
 
 print("\nMAE is the WORST point, MFE the BEST - not swapped")

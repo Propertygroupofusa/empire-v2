@@ -1246,6 +1246,66 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
     return qty, price, (await get_effective_round_trip_fee_rate()) / 2
 
 
+# How much of a slice may be left unsold before the row is retired anyway,
+# as a FRACTION of the slice. Relative rather than absolute because this
+# fleet's quantities span eleven orders of magnitude - PEPE slices are
+# ~8,000,000 units and BTC slices are ~0.0005, so one absolute epsilon is
+# either meaningless on one end or destructive on the other.
+GRID_SELL_RESIDUAL_REL_EPSILON = 1e-6
+
+
+def grid_sell_residual(slice_qty, filled_qty, rel_epsilon: float = None):
+    """What is LEFT of a slice after a sell that may only have PARTLY filled.
+
+    Returns (residual_qty, retire). `retire` is True when the slice row
+    should be deleted; False when its qty should be reduced to
+    `residual_qty` and the row kept.
+
+    This exists because the caller used to delete the row whatever came
+    back. grid_sell() returns what ACTUALLY filled - its own docstring
+    says so - and the sell path priced the P&L with that number and then
+    retired the whole slice regardless. A partial fill therefore removed
+    units the wallet had not sold, and the branch's tracked units drifted
+    away from the coin really held.
+
+    The drift is self-reinforcing, which is why it matters: a branch that
+    is already short cannot fill the NEXT sell for its full qty either,
+    so one partial fill makes the following one more likely to be partial
+    too. That is how a branch ends up claiming coin it does not have and
+    can no longer be closed without reconcile-slices.
+
+    A fill larger than the slice is not silently accepted as "extra" - it
+    retires the slice and reports zero residual, because a negative
+    residual written back to the row would claim the branch owes coin.
+    """
+    if rel_epsilon is None:
+        rel_epsilon = GRID_SELL_RESIDUAL_REL_EPSILON
+    try:
+        slice_qty = float(slice_qty)
+    except (TypeError, ValueError):
+        # An unreadable slice qty is not a reason to delete the row. Keep
+        # it and let coin_tracked_is_held report, which is what it is for.
+        return None, False
+    if slice_qty <= 0:
+        # Nothing to keep. Retiring an empty row is the honest outcome.
+        return 0.0, True
+    try:
+        filled_qty = float(filled_qty)
+    except (TypeError, ValueError):
+        filled_qty = 0.0
+    if filled_qty != filled_qty:          # NaN
+        filled_qty = 0.0
+    if filled_qty <= 0:
+        # Nothing sold. The caller should not reach here (grid_sell returns
+        # None when nothing filled), but deleting on a zero fill would be
+        # the original bug in its worst form.
+        return slice_qty, False
+    residual = slice_qty - filled_qty
+    if residual <= slice_qty * rel_epsilon:
+        return 0.0, True
+    return residual, False
+
+
 async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
     """Real grid SELL: maker first, market fallback - unless maker-ONLY
     mode has removed the fallback. Returns (filled_qty, price,
@@ -6363,18 +6423,62 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             except Exception as e:
                 log.warning(f"[SHADOW] Failed to log position close (non-blocking): {e}")
 
-        async with get_session_factory()() as db:
-            slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
-            slice_row = slice_result.scalar_one_or_none()
-            if slice_row:
-                await db.delete(slice_row)
-            branch_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
-            fresh = branch_result.scalar_one_or_none()
-            if fresh:
-                fresh.allocated_usd += pnl
-                fresh.reference_price = filled_price
-                new_balance = fresh.allocated_usd
-            await db.commit()
+        # The venue sale above has ALREADY happened. Everything below is the
+        # ledger catching up to it, and the two are not one transaction - so
+        # this retries rather than letting one transient DB error leave coin
+        # sold with the slice still claiming it. That gap is the growing half
+        # of the tracked-vs-held drift; the partial-fill handling below is the
+        # shrinking half.
+        _residual, _retire = grid_sell_residual(oldest.qty, filled_qty)
+        _persisted = False
+        _persist_exc = None
+        for _attempt in range(3):
+            try:
+                async with get_session_factory()() as db:
+                    slice_result = await db.execute(select(CryptoGridSlice).where(CryptoGridSlice.id == oldest.id))
+                    slice_row = slice_result.scalar_one_or_none()
+                    if slice_row:
+                        if _retire:
+                            await db.delete(slice_row)
+                        elif _residual is not None:
+                            # Kept, not retired: the wallet still holds this
+                            # much of the slice. entry_price and
+                            # entry_fee_rate are deliberately untouched, so
+                            # slice_round_trip_fee_rate() still prices the
+                            # remainder against what its buy leg really paid.
+                            slice_row.qty = _residual
+                    branch_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+                    fresh = branch_result.scalar_one_or_none()
+                    if fresh:
+                        fresh.allocated_usd += pnl
+                        fresh.reference_price = filled_price
+                        new_balance = fresh.allocated_usd
+                    await db.commit()
+                _persisted = True
+                break
+            except Exception as _exc:
+                _persist_exc = _exc
+                if _attempt < 2:
+                    await asyncio.sleep(0.5 * (2 ** _attempt))
+        if not _persisted:
+            # Loud on purpose. The coin is gone and the branch still claims
+            # it; coin_tracked_is_held will report this branch short until
+            # reconcile-slices runs. Saying so here is the difference between
+            # a known discrepancy and a silent one.
+            log.error(
+                f"[GRID] {branch.bot_name}: SOLD {filled_qty:.8f} {branch.product_id} "
+                f"at the venue but could NOT write the slice back after 3 attempts "
+                f"({type(_persist_exc).__name__}: {_persist_exc}). The coin has left "
+                f"the wallet and this branch still tracks it - expect "
+                f"coin_tracked_is_held to report it short until reconcile-slices runs."
+            )
+        elif not _retire and _residual is not None:
+            log.warning(
+                f"[GRID] {branch.bot_name}: {branch.product_id} sell filled "
+                f"{filled_qty:.8f} of {oldest.qty:.8f} - PARTIAL. The slice keeps "
+                f"{_residual:.8f} rather than being retired whole, so tracked units "
+                f"still match the coin actually held."
+            )
         await _log_grid_trade(branch.bot_name, branch.product_id, oldest.entry_price,
                               filled_price, filled_qty, pnl, oldest.opened_at,
                               entry_expected_price=oldest.entry_expected_price,
@@ -6406,7 +6510,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
         # 30-min sweep before it goes back to work. Best-effort: a
         # failure here can never unwind or affect the real sale that
         # already completed above.
-        if len(slices) == 1:
+        # `_retire` matters here: a PARTIAL fill leaves the slice alive with a
+        # residual, so the branch is not flat and there is nothing to settle
+        # yet. Before partial fills were handled the slice always vanished,
+        # which made "last slice sold" and "branch now empty" the same thing.
+        # They are no longer the same thing.
+        if len(slices) == 1 and _retire:
             try:
                 async with get_session_factory()() as db:
                     fresh_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
