@@ -64,14 +64,29 @@ def _parse(ts):
 
 
 def last_trade_by_branch(trades):
-    """Newest closed_at per bot_name, from whatever window was supplied."""
+    """Newest closed_at per (bot_name, product_id), from the window supplied.
+
+    KEYED ON THE COIN TOO, not the slot alone. bot_name is a recycled slot
+    number - create_grid_branch hands out the lowest free one - so
+    "crypto_grid_3" names whatever coin happens to occupy that slot right
+    now, and the closed trades of every coin that held it before are still
+    filed under the same name.
+
+    Live on 2026-09-28: PRIME-USD was deployed into slot crypto_grid_3 at
+    03:35, inherited the previous occupant's trading record, was classified
+    STALE - "no completed round trip in 26 days" - and had its entire
+    $240.38 moved out at 03:42, seven minutes after the account owner asked
+    for it. A branch cannot be idle for longer than it has existed.
+    """
     out = {}
     for t in (trades or ()):
         if not hasattr(t, "get"):
             continue
-        bot, ca = t.get("bot_name"), _parse(t.get("closed_at"))
-        if bot and ca and (bot not in out or ca > out[bot]):
-            out[bot] = ca
+        bot, product, ca = t.get("bot_name"), t.get("product_id"), _parse(t.get("closed_at"))
+        if bot and ca:
+            key = (bot, product)
+            if key not in out or ca > out[key]:
+                out[key] = ca
     return out
 
 
@@ -98,9 +113,25 @@ def classify(branch, last_trade_at, *, now, window_starts_at=None,
                 "why": f"holding {slices} open slice(s) - this money is in the market"}
 
     created = _parse(branch.get("created_at"))
+
+    # A BRANCH CANNOT BE IDLE FOR LONGER THAN IT HAS EXISTED. This is the
+    # backstop behind every path below, and it is deliberately blunt: no
+    # matter which route computes the hours - an inherited trade record, a
+    # truncated window's lower bound - a branch younger than the staleness
+    # window is never STALE. Both routes produced "632.7 idle hours" for
+    # branches fourteen minutes old on the live fleet.
+    age_hours = None
+    if created is not None:
+        age_hours = max(0.0, (now - created).total_seconds() / 3600.0)
+        if age_hours < grace:
+            return {"state": TOO_NEW, "idle_hours": round(age_hours, 1), "at_least": False,
+                    "why": f"created {age_hours:.1f}h ago - inside the {grace:.0f}h grace period"}
+
     if last_trade_at is not None:
         hours = max(0.0, (now - last_trade_at).total_seconds() / 3600.0)
-        if hours >= stale_after:
+        if age_hours is not None:
+            hours = min(hours, age_hours)
+        if hours >= stale_after and (age_hours is None or age_hours >= stale_after):
             return {"state": STALE, "idle_hours": round(hours, 1), "at_least": False,
                     "why": (f"flat and no completed round trip for {hours / 24:.1f} days - "
                             f"past the {stale_after:.0f}h window in which 92.5% of moves "
@@ -109,17 +140,18 @@ def classify(branch, last_trade_at, *, now, window_starts_at=None,
                 "why": (f"flat, but it closed a trade {hours:.1f}h ago - a grid between "
                         f"fills, not stopped")}
 
-    # Never seen in the window.
-    if created is not None and (now - created).total_seconds() / 3600.0 < grace:
-        age = (now - created).total_seconds() / 3600.0
-        return {"state": TOO_NEW, "idle_hours": round(age, 1), "at_least": False,
-                "why": f"created {age:.1f}h ago - inside the {grace:.0f}h grace period"}
-
+    # Never seen in the window. (The grace period is applied above, before
+    # the trade lookup - down here it could not protect a branch that had
+    # inherited a previous occupant's record, which is exactly what happened.)
     if window_truncated:
         floor_h = None
         ws = _parse(window_starts_at)
         if ws is not None:
             floor_h = max(0.0, (now - ws).total_seconds() / 3600.0)
+        # The window's own reach is a floor for the FLEET, not for a branch
+        # that did not exist for most of it.
+        if floor_h is not None and age_hours is not None:
+            floor_h = min(floor_h, age_hours)
         return {"state": UNKNOWN_AGE,
                 "idle_hours": round(floor_h, 1) if floor_h is not None else None,
                 "at_least": True,
@@ -153,7 +185,7 @@ def report(branches, trades, *, now=None, total_trade_count=None,
     for b in (branches or ()):
         if not hasattr(b, "get"):
             continue
-        c = classify(b, last.get(b.get("bot_name")), now=now,
+        c = classify(b, last.get((b.get("bot_name"), b.get("product_id"))), now=now,
                      window_starts_at=starts, window_truncated=window_truncated,
                      stale_after_hours=stale_after_hours, grace_hours=grace_hours)
         usd = float(b.get("allocated_usd") or 0.0)
@@ -223,11 +255,22 @@ def rotation_plan(report_out, *, min_move_usd=None, max_dest_share_pct=None):
     total_alloc = sum(float(r.get("allocated_usd") or 0.0) for r in rows)
     stale = [r for r in rows if r.get("state") == STALE]
 
-    # Ranked by how recently each proved it can complete a round trip.
-    # WORKING branches hold slices and report idle_hours 0, so a tiebreak on
-    # allocation keeps the choice deterministic rather than dict-ordered.
+    # WAITING ONLY. The worker's contract is that stale money moves "only
+    # into a branch that has demonstrably closed a round trip", and WAITING
+    # is the only state that certifies one - its reason literally reads "it
+    # closed a trade Nh ago". WORKING means "holding open slices", which is
+    # a statement about the present, not about whether this coin has ever
+    # completed a trip.
+    #
+    # Worse, the two could not be ranked together honestly: every WORKING
+    # branch reports idle_hours 0.0, so sorting by idle_hours put all of
+    # them ahead of every branch that had actually proved itself, and the
+    # allocation tiebreak then picked the LARGEST of them. Live on
+    # 2026-09-28 that sent PRIME-USD's $240.38 into XLM-USD - a branch with
+    # zero completed round trips in the fleet's entire history - taking it
+    # to $691.51 and third-largest position in the fleet.
     candidates = [r for r in rows
-                  if r.get("state") in (WORKING, WAITING)
+                  if r.get("state") == WAITING
                   and float(r.get("allocated_usd") or 0.0) > 0]
     candidates.sort(key=lambda r: ((r.get("idle_hours") or 0.0),
                                    -float(r.get("allocated_usd") or 0.0)))
