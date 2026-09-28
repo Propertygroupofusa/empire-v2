@@ -394,6 +394,34 @@ ALL_MANDATES = {
     "monitoring": MONITORING_MANDATE,
 }
 
+# WHAT EACH BOT ACTUALLY WRITES INTO ClosedTrade.bot.
+#
+# Three namespaces were in play and none of them agreed:
+#
+#     ALL_MANDATES key   mandate["name"]       BOT_NAME in the module
+#     apex               prop_bot              prop_apex
+#     crypto             crypto_coinbase_bot   crypto_coinbase
+#     alpaca             alpaca_bot            alpaca_swing
+#
+# Any compliance query joining on the key or on `name` matches zero rows
+# and reports zero violations forever, which is the worst answer a
+# compliance check can give - a false assurance somebody acts on. The
+# planned one in .claude/MANDATE_INTEGRATION_PLAN.md joins on the key.
+#
+# Declared here rather than guessed at the query, and asserted against the
+# modules' own BOT_NAME constants by test_mandate_compliance, so a rename
+# on either side fails a test instead of silently emptying the report.
+RECORDS_AS = {
+    "apex": ["prop_apex"],
+    "crypto": ["crypto_coinbase"],
+    "alpaca": ["alpaca_swing"],
+    "monitoring": [],
+}
+for _key, _names in RECORDS_AS.items():
+    if _key in ALL_MANDATES:
+        ALL_MANDATES[_key]["records_as"] = list(_names)
+        ALL_MANDATES[_key]["key"] = _key
+
 # ============================================================================
 # MANDATE ENFORCEMENT HELPERS
 # ============================================================================

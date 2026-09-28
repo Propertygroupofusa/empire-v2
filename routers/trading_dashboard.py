@@ -9124,6 +9124,97 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     return out
 
 
+@router.get("/mandates/violations")
+async def mandate_violations_endpoint(days: int = 7):
+    """Every mandate breach across every bot, measured against real rows.
+
+    Read-only. Phase 2/4 of .claude/MANDATE_INTEGRATION_PLAN.md, built
+    against the schema this repo actually has rather than the one the plan
+    assumed - see mandate_compliance, which documents the three mismatches
+    that would have made this report zero violations forever.
+
+    A bot whose checks could not run is reported as UNKNOWN and is NOT
+    counted as compliant. That distinction is the whole point: a
+    compliance report that always says "compliant" is a false assurance.
+    """
+    import bot_mandates
+    import mandate_compliance as mc
+    from models import ClosedTrade
+    from sqlalchemy import select
+
+    since = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(ClosedTrade).where(ClosedTrade.closed_at >= since))).scalars().all()
+
+    by_bot = {}
+    for r in rows:
+        by_bot.setdefault(r.bot, []).append(r)
+
+    reports, violations = [], []
+    claimed = set()
+    for key, mandate in bot_mandates.ALL_MANDATES.items():
+        ids = mc.bot_identities(mandate)
+        mine = [t for name, ts in by_bot.items() if name in ids for t in ts]
+        claimed.update(n for n in by_bot if n in ids)
+        rep = mc.compliance(mine, mandate, bot_key=key)
+        rep["active"] = bool(mandate.get("active"))
+        reports.append(rep)
+        for v in (rep["universe_violations"] or []):
+            violations.append({"bot": key, "type": "UNIVERSE_VIOLATION", **v})
+        for v in (rep["capital_violations"] or []):
+            violations.append({"bot": key, "type": "CAPITAL_VIOLATION", **v})
+
+    # Rows belonging to no mandate at all. Silently dropping them is how a
+    # report stays clean while a bot trades outside every rule there is.
+    orphans = {n: len(ts) for n, ts in by_bot.items() if n not in claimed}
+
+    scored = [r["compliance_pct"] for r in reports if r["compliance_pct"] is not None]
+    return {
+        "window_days": int(days),
+        "trades_examined": len(rows),
+        "violations": violations,
+        "violation_count": len(violations),
+        "by_bot": reports,
+        "unmandated_bots": orphans or None,
+        "fleet_compliance_pct": round(sum(scored) / len(scored), 2) if scored else None,
+        "detail": (
+            f"{len(violations)} violation(s) across {len(rows)} closed trade(s) in "
+            f"{days} day(s)."
+            + (f" {sum(orphans.values())} trade(s) belong to bots with no mandate: "
+               f"{', '.join(sorted(orphans))}." if orphans else "")
+            + ("" if scored else
+               " No bot could be scored - every check was blocked or no bot traded. "
+               "That is not compliance.")),
+    }
+
+
+@router.get("/mandates/compliance/{bot_key}")
+async def mandate_compliance_endpoint(bot_key: str, days: int = 1):
+    """One bot's adherence, with every figure it was derived from."""
+    import bot_mandates
+    import mandate_compliance as mc
+    from models import ClosedTrade
+    from sqlalchemy import select
+
+    mandate = bot_mandates.ALL_MANDATES.get(bot_key)
+    if mandate is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(f"no mandate named {bot_key!r}. Known: "
+                    f"{', '.join(sorted(bot_mandates.ALL_MANDATES))}"))
+    ids = mc.bot_identities(mandate)
+    since = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(select(ClosedTrade).where(
+            ClosedTrade.bot.in_(sorted(ids)),
+            ClosedTrade.closed_at >= since))).scalars().all()
+    out = mc.compliance(rows, mandate, bot_key=bot_key)
+    out["window_days"] = int(days)
+    out["matched_on"] = sorted(ids)
+    return out
+
+
 @router.get("/fleet-status")
 async def get_fleet_status():
     """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""
