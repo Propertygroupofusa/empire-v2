@@ -1224,6 +1224,24 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # Coin deployment: fund PRIME, TON and APE from genuinely free cash,
+        # at the owner's instruction. All three were verified through the
+        # LIVE gate before this shipped (spread, depth, swing ceiling, net
+        # edge) rather than trusted from a ranking. Idempotent: it skips a
+        # coin that already has a branch, so it converges on the list and
+        # then does nothing. It creates branches and places no orders.
+        try:
+            import coin_deploy_worker
+            import crypto_grid_bot as _dg
+            asyncio.create_task(coin_deploy_worker.loop(_dg))
+            log.info(f"🌱 Coin deployment running, targets: "
+                     f"{', '.join(coin_deploy_worker.TARGET_COINS)}")
+        except Exception as e:
+            try:
+                log.warning(f"coin deployment not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # Claim reconciliation: when the fleet's UNSPENT claims exceed the
         # cash that really exists, lower the claims until they fit. Writes
         # one number - allocated_usd - and never an order, a slice or a coin.
