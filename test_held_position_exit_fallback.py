@@ -206,3 +206,74 @@ def test_momentum_stop_fires_off_a_broker_mark():
         max_hold_seconds=7200, trail_pct=0.02,
     )
     assert should_exit is True
+
+
+# ── the bug the first version of this fix shipped with ─────────────────
+#
+# broker_fallback_scan() originally took `now` positionally from
+# run_prop_cycle. That `now` is stamped ONCE at the top of the cycle -
+# BEFORE reconcile_positions_with_broker() records the broker's mark.
+# So seen_at was always LATER than now, the age was always negative, the
+# negative-age guard refused every call, and the fallback never fired
+# once in production. Live proof, 16:35:45Z and 16:36:24Z:
+#
+#   "the bar fetch failed (Only 17 of the required 21 15-min bars are
+#    available right now) and the broker's last mark is older than 120s"
+#
+# It was not older than 120s. It was seconds old and timestamped after
+# the clock it was being compared to. The message was wrong too, which
+# is how a refusal can look explained and be nothing of the kind.
+
+def test_a_mark_recorded_after_the_cycle_started_is_still_usable():
+    """The exact live failure: cycle stamps `now`, THEN the broker mark
+    is recorded a moment later. Measuring against a fresh clock is what
+    makes that a 2-second-old price rather than a -2-second-old one."""
+    cycle_start = datetime.now(UTC) - timedelta(seconds=3)
+    prop_bot._broker_last_price["META"] = (512.34, cycle_start + timedelta(seconds=2))
+    assert prop_bot.broker_fallback_scan("META") is not None
+
+
+def test_the_default_clock_is_a_fresh_reading_not_the_callers():
+    """No `now` argument at all must still work - that is what every
+    real call site now does."""
+    prop_bot._broker_last_price["META"] = (512.34, datetime.now(UTC))
+    data = prop_bot.broker_fallback_scan("META")
+    assert data is not None and data["price"] == 512.34
+
+
+# ── the refusal must say which thing actually went wrong ───────────────
+
+def test_a_missing_mark_is_described_as_missing():
+    assert "no mark" in prop_bot.broker_mark_state("META")
+
+
+def test_a_stale_mark_is_described_as_stale_with_its_real_age():
+    now = datetime.now(UTC)
+    _seed("META", 512.34, 300, now)
+    state = prop_bot.broker_mark_state("META")
+    assert "300s old" in state and str(prop_bot.BROKER_PRICE_MAX_AGE_SECONDS) in state
+
+
+def test_a_future_mark_is_not_described_as_stale():
+    """The first version called every refusal "older than 120s",
+    including this one. A wrong explanation is worse than none."""
+    now = datetime.now(UTC)
+    _seed("META", 512.34, -30, now)
+    state = prop_bot.broker_mark_state("META")
+    assert "clocks disagree" in state
+    assert "old" not in state.replace("older", "")
+
+
+def test_an_unusable_price_is_not_described_as_stale():
+    now = datetime.now(UTC)
+    _seed("META", 0.0, 5, now)
+    assert "unusable" in prop_bot.broker_mark_state("META")
+
+
+def test_the_state_and_the_scan_never_disagree():
+    """If the scan succeeds, the state must not be claiming a refusal
+    reason - that pairing is exactly what went wrong live."""
+    now = datetime.now(UTC)
+    _seed("META", 512.34, 5, now)
+    assert prop_bot.broker_fallback_scan("META") is not None
+    assert "bug" in prop_bot.broker_mark_state("META")

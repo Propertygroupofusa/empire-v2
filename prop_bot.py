@@ -711,7 +711,32 @@ _broker_last_price = {}
 BROKER_PRICE_MAX_AGE_SECONDS = 120
 
 
-def broker_fallback_scan(contract, now, max_age_seconds=None):
+def broker_mark_state(contract, now=None):
+    """Why broker_fallback_scan() refused, in words, for the refusal log.
+
+    Kept beside it so the two can never describe different states: the
+    first version of this said "older than 120s" for every refusal,
+    including the ones that were nothing of the kind.
+    """
+    entry = _broker_last_price.get(contract)
+    if entry is None:
+        return "the broker reported no mark for it either"
+    price, seen_at = entry
+    if price is None or price <= 0:
+        return f"the broker's mark was unusable ({price!r})"
+    if seen_at is None or seen_at.tzinfo is None:
+        return "the broker's mark carried no usable timestamp"
+    age = ((now or datetime.now(timezone.utc)) - seen_at).total_seconds()
+    if age < 0:
+        return (f"the broker's mark is timestamped {abs(age):.0f}s in the "
+                f"future - the clocks disagree")
+    if age > BROKER_PRICE_MAX_AGE_SECONDS:
+        return (f"the broker's mark is {age:.0f}s old, past the "
+                f"{BROKER_PRICE_MAX_AGE_SECONDS}s limit")
+    return "the broker's mark was usable (so this refusal is a bug)"
+
+
+def broker_fallback_scan(contract, now=None, max_age_seconds=None):
     """The exit pass's second price source, as a function so it can be
     tested without running a whole trading cycle.
 
@@ -723,6 +748,18 @@ def broker_fallback_scan(contract, now, max_age_seconds=None):
     number nothing measured. "source" marks the dict so anything reading
     it downstream can tell a broker mark from a bar-derived scan.
     """
+    # `now` DEFAULTS TO A FRESH READING, AND CALLERS SHOULD LET IT.
+    #
+    # The first version of this took `now` positionally from
+    # run_prop_cycle, which stamps it ONCE at the top of the cycle -
+    # before reconcile_positions_with_broker() records the mark. So the
+    # mark was always timestamped AFTER `now`, the age was always
+    # negative, and the negative-age guard below refused every single
+    # call. The fallback never fired once in production. Measuring
+    # against the real current time is the only thing that makes an
+    # "age" mean what the name says.
+    if now is None:
+        now = datetime.now(timezone.utc)
     if max_age_seconds is None:
         max_age_seconds = BROKER_PRICE_MAX_AGE_SECONDS
     entry = _broker_last_price.get(contract)
@@ -2669,7 +2706,7 @@ async def run_prop_cycle():
                 # close a position because an entry-grade bar fetch failed
                 # is the same bug as a stop loss that never runs, on the
                 # one path that exists to get the account OUT.
-                data = scans.get(contract) or broker_fallback_scan(contract, now)
+                data = scans.get(contract) or broker_fallback_scan(contract)
                 if data:
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
@@ -2699,7 +2736,7 @@ async def run_prop_cycle():
                 # close a position because an entry-grade bar fetch failed
                 # is the same bug as a stop loss that never runs, on the
                 # one path that exists to get the account OUT.
-                data = scans.get(contract) or broker_fallback_scan(contract, now)
+                data = scans.get(contract) or broker_fallback_scan(contract)
                 if data:
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "EQUITY FLOOR BREACH")
@@ -2737,7 +2774,7 @@ async def run_prop_cycle():
                 # should_exit_position()'s RSI rule is skipped when rsi is
                 # None (it is a profit-taking rule, not a protective one);
                 # should_exit_position_momentum() never reads rsi at all.
-                data = broker_fallback_scan(contract, now)
+                data = broker_fallback_scan(contract)
                 if data:
                     log.warning(
                         f"[APEX_589296] ⚠️ {contract}: no scan data this cycle - "
@@ -2771,11 +2808,7 @@ async def run_prop_cycle():
                 # for want of data is correct and unremarkable.
                 _why_no_price = _price_rsi_last_failure.get(
                     config.get("symbol", contract), "no recorded reason")
-                _broker_state = (
-                    "the broker reported no usable mark for it either"
-                    if _broker_last_price.get(contract) is None
-                    else f"the broker's last mark is older than "
-                         f"{BROKER_PRICE_MAX_AGE_SECONDS}s")
+                _broker_state = broker_mark_state(contract)
                 log.warning(
                     f"[APEX_589296] ⚠️ NO STOP CHECK for held {contract}: no scan data "
                     f"this cycle ({_why_no_price}) and {_broker_state}, so stop-loss / "
