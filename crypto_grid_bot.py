@@ -6685,11 +6685,11 @@ def _rotation_env_enabled():
         return None
 
 
-def _allocation_backing_block(branches, wallet_cash):
+def _allocation_backing_block(branches, wallet_cash, usd_on_hold=None):
     """Never lets a reporting problem look like a clean balance sheet."""
     try:
         import allocation_backing
-        return allocation_backing.backing(branches, wallet_cash)
+        return allocation_backing.backing(branches, wallet_cash, usd_on_hold)
     except Exception as exc:
         log.warning(f"[GRID] allocation backing check failed: {exc}")
         return {"verdict": "unknown", "detail": f"backing check failed: {exc}"}
@@ -6726,6 +6726,32 @@ async def get_grid_status() -> dict:
         for product_id in distinct_products:
             price, _atr = await engine.get_price_and_volatility(session, product_id)
             live_prices[product_id] = price
+        # USD LOCKED against the fleet's own resting orders. get_usd_balance
+        # returns AVAILABLE only, which is right for sizing a buy and wrong
+        # for backing: held money is still the account's, and the branch that
+        # committed it still counts it as unspent budget. Read here so the
+        # backing check can count it - see allocation_backing.backing().
+        # Best-effort: a failed read leaves it None, which counts as 0.0 and
+        # simply reproduces the old, conservative figure rather than
+        # inventing backing that was not confirmed.
+        usd_on_hold = None
+        try:
+            import account_census
+            _bal = await account_census.fetch_balances(session)
+            if _bal and _bal.get("available"):
+                # fetch_balances' "held" map is TOTAL (available + hold), not
+                # the hold portion - its own line is `total = avail + hold`.
+                # Passing it straight through would add the available balance
+                # to itself and inflate backing, which is the one direction a
+                # backing check must never err in: it would hide a real hole
+                # rather than report a false one.
+                _total = (_bal.get("held") or {}).get("USD")
+                _avail = (_bal.get("available_units") or {}).get("USD")
+                if _total is not None and _avail is not None:
+                    usd_on_hold = max(0.0, float(_total) - float(_avail))
+        except Exception as _e:
+            log.info(f"[GRID] USD-on-hold unavailable ({type(_e).__name__}) - "
+                     f"backing will count available cash only")
         try:
             wallet_cash_usd, _wallet_err = await engine.get_usd_balance(session)
         except Exception as exc:
@@ -6898,7 +6924,7 @@ async def get_grid_status() -> dict:
         # a branch going flat could still be re-pointed.
         "auto_rotate_env_enabled": _rotation_env_enabled(),
         "auto_rotate_fully_off": (not await is_grid_auto_rotate_active()),
-        "allocation_backing": _allocation_backing_block(out, wallet_cash_usd),
+        "allocation_backing": _allocation_backing_block(out, wallet_cash_usd, usd_on_hold),
         # The stop configuration actually in force, and what it resolves to
         # per branch. Exposed because "did that environment variable take"
         # was otherwise only answerable by watching an uptime counter.

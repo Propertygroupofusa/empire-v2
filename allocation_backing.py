@@ -96,13 +96,28 @@ def slice_entry_commission(s):
     return cost * r
 
 
-def backing(branches, wallet_cash):
+def backing(branches, wallet_cash, usd_on_hold=None):
     """{claimed, deployed_coin, wallet_cash, backed, unbacked, ...}.
 
     `branches` carry allocated_usd and their slices. `wallet_cash` is the
     real USD balance at the venue - None when it could not be read, which
     produces a verdict of "unknown" rather than a number. An unreadable
     wallet is not evidence that the claim is sound.
+
+    `usd_on_hold` is USD the venue has LOCKED against the fleet's own
+    resting orders. It IS backing and must be counted.
+
+    Measured live 2026-09-28: the wallet held $515.31 of USD, of which
+    $450.75 was available and $64.56 was locked behind a resting maker buy.
+    get_usd_balance() returns available only - correct for SIZING a buy,
+    since locked money cannot be spent twice - and this check was being fed
+    that same number. So $64.56 of real, present money vanished from the
+    backing while the branch that committed it still counted it as unspent
+    budget, and the difference showed up as an unexplained hole.
+
+    Two different questions, two different numbers: what may I spend is
+    available; what is actually behind the claim is available plus hold.
+    Conflating them is what produced a drift nobody could account for.
 
     Slices whose cost cannot be computed are COUNTED and reported in
     `unpriced_slices` rather than treated as zero, because a slice read as
@@ -162,7 +177,12 @@ def backing(branches, wallet_cash):
         }
 
     wallet = round(float(wallet_cash), 2)
-    backed = round(deployed + wallet, 2)
+    try:
+        held = round(float(usd_on_hold), 2) if usd_on_hold is not None else 0.0
+    except (TypeError, ValueError):
+        held = 0.0
+    held = max(0.0, held)
+    backed = round(deployed + wallet + held, 2)
     gross_unbacked = round(claimed - backed, 2)
     # Commission on the OPEN slices' buy legs has already left the wallet and
     # is not yet booked against any allocation. It is spent, not missing, and
@@ -174,7 +194,8 @@ def backing(branches, wallet_cash):
     if unbacked <= BACKING_TOLERANCE_USD:
         verdict = "backed"
         detail = (f"Branches claim ${claimed:,.2f}; ${backed:,.2f} is really there "
-                  f"(${deployed:,.2f} of coin, ${wallet:,.2f} of cash).")
+                  f"(${deployed:,.2f} of coin, ${wallet:,.2f} of cash"
+                  + (f", ${held:,.2f} held against resting orders" if held else "") + ").")
     elif pct >= BACKING_ALARM_PCT:
         verdict = "unbacked"
         detail = (f"Branches claim ${claimed:,.2f}. Only ${backed:,.2f} is really there - "
@@ -205,6 +226,7 @@ def backing(branches, wallet_cash):
         "claimed_usd": claimed,
         "deployed_coin_usd": deployed,
         "wallet_cash_usd": wallet,
+        "usd_on_hold": held,
         "backed_usd": backed,
         "unbacked_usd": unbacked,
         "unbacked_pct": pct,

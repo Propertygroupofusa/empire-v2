@@ -159,3 +159,43 @@ def test_a_slice_dict_shaped_like_production_is_actually_deducted():
     r = AB.backing([{"allocated_usd": 1000.0, "slices": [production_shaped]}], 96.85)
     assert r["open_entry_commission_usd"] == pytest.approx(3.15, abs=0.01)
     assert r["slices_without_fee_rate"] == 0
+
+
+# ------------------------------------------- USD locked is still backing
+def test_locked_usd_counts_as_backing():
+    """Live 2026-09-28: the wallet held $515.31 of USD - $450.75 available,
+    $64.56 locked behind a resting maker buy. get_usd_balance returns
+    available only (right for sizing a buy, wrong for backing), so $64.56 of
+    real money vanished from the check while the branch that committed it
+    still counted it as unspent budget."""
+    branches = [{"allocated_usd": 1000.0, "slices": []}]
+    without = AB.backing(branches, wallet_cash=935.44)
+    with_hold = AB.backing(branches, wallet_cash=935.44, usd_on_hold=64.56)
+    assert without["unbacked_usd"] == pytest.approx(64.56, abs=0.01)
+    assert with_hold["unbacked_usd"] == pytest.approx(0.0, abs=0.01)
+    assert with_hold["usd_on_hold"] == pytest.approx(64.56)
+    assert with_hold["verdict"] == "backed"
+
+
+def test_an_unreadable_hold_counts_as_zero_not_as_backing():
+    """Conservative on purpose: a failed read reproduces the old figure
+    rather than inventing backing nobody confirmed."""
+    b = [{"allocated_usd": 1000.0, "slices": []}]
+    assert AB.backing(b, 935.44, None)["usd_on_hold"] == 0.0
+    assert AB.backing(b, 935.44, "nonsense")["usd_on_hold"] == 0.0
+    assert AB.backing(b, 935.44, -5)["usd_on_hold"] == 0.0
+
+
+def test_the_caller_subtracts_available_before_passing_hold():
+    """fetch_balances' 'held' map is TOTAL (available + hold) - its own line
+    is `total = avail + hold`. Passing it straight through would add the
+    available balance to itself and INFLATE backing, hiding a real hole
+    instead of reporting a false one. Caught before shipping."""
+    import os
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "crypto_grid_bot.py"), encoding="utf-8").read()
+    i = src.index("usd_on_hold = None")
+    block = src[i:i + 1200]
+    assert "available_units" in block
+    assert "float(_total) - float(_avail)" in block
+    assert "max(0.0," in block
