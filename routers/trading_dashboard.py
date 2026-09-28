@@ -704,10 +704,20 @@ async def list_withdrawals(db: AsyncSession = Depends(get_db)):
 
 
 _KNOWN_ORDER_SOURCES = (
+    # prop_bot (e1ce83d)
     "entry_pass", "exit_pass", "branch_entry", "branch_exit",
     "idle_cash_sweep", "opening_bar_entry", "opening_bar_exit",
     "unlabelled",
+    # market_brain and options_trading - the two posters that were
+    # still unreadable after e1ce83d.
+    "market_brain_entry", "market_brain_exit", "options_entry",
 )
+
+# Orders placed before a poster was retagged. They carry a real tag in
+# an older scheme, and reading them as UNTAGGED would be wrong in the
+# same direction as reading a gap as a zero - it hides that something
+# did identify itself.
+_LEGACY_ORDER_PREFIXES = {"opt_": "options_entry_legacy"}
 
 
 def _order_source(client_order_id):
@@ -720,7 +730,11 @@ def _order_source(client_order_id):
     """
     if not client_order_id:
         return None
-    head = str(client_order_id).split("-", 1)[0]
+    raw = str(client_order_id)
+    for prefix, name in _LEGACY_ORDER_PREFIXES.items():
+        if raw.startswith(prefix):
+            return name
+    head = raw.split("-", 1)[0]
     return head if head in _KNOWN_ORDER_SOURCES else None
 
 

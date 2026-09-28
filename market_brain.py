@@ -21,6 +21,7 @@ Signal Architecture:
 """
 
 import os
+import uuid
 import json
 import time
 import math
@@ -1127,13 +1128,35 @@ def get_account():
     return api_call("GET", "/v2/account")
 
 
-def place_order(symbol, notional, side="buy"):
+def _client_order_id(source, symbol):
+    """Tag an order with the code path that sent it.
+
+    THE BLIND SPOT THIS CLOSES. e1ce83d tagged every prop_bot order, so
+    a duplicate there now names itself. market_brain posted to the same
+    /v2/orders with NO client_order_id at all, which means any order it
+    placed would read as UNATTRIBUTABLE on /trades - exactly the state
+    that made six identical META orders impossible to trace.
+
+    The runner is flag-gated and idle today, so this has never fired.
+    That is the reason to do it now rather than after it has.
+
+    Same scheme as prop_bot: source first so it can be read back off a
+    fill, a uuid because Alpaca rejects a duplicate id, and 128 chars
+    because Alpaca rejects anything longer. The source names here must
+    also appear in _KNOWN_ORDER_SOURCES in routers/trading_dashboard.py
+    or the dashboard decodes them to None and calls them untagged.
+    """
+    return f"{source}-{symbol}-{uuid.uuid4().hex[:16]}"[:128]
+
+
+def place_order(symbol, notional, side="buy", source="market_brain_entry"):
     body = {
         "symbol":        symbol,
         "notional":      str(round(notional, 2)),
         "side":          side,
         "type":          "market",
         "time_in_force": "gtc" if "/" in symbol else "day",
+        "client_order_id": _client_order_id(source, symbol),
     }
     result = api_call("POST", "/v2/orders", body)
     if result and result.get("id"):
@@ -1143,13 +1166,14 @@ def place_order(symbol, notional, side="buy"):
     return False
 
 
-def close_position(symbol):
+def close_position(symbol, source="market_brain_exit"):
     body = {
         "symbol":        symbol,
         "qty":           "100%",
         "side":          "sell",
         "type":          "market",
         "time_in_force": "gtc" if "/" in symbol else "day",
+        "client_order_id": _client_order_id(source, symbol),
     }
     result = api_call("POST", "/v2/orders", body)
     return result and result.get("id")

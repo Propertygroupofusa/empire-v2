@@ -14,6 +14,7 @@ Strategies:
 """
 
 import os
+import uuid
 import logging
 import asyncio
 import aiohttp
@@ -371,7 +372,21 @@ async def place_options_order(
         "legs": legs_data,
         "type": "market",  # or "limit"
         "time_in_force": time_in_force,
-        "client_order_id": f"opt_{position.strategy.value}_{datetime.now(ET).timestamp()}",
+        # TAGGED, BUT IN A SCHEME NOTHING COULD READ.
+        #
+        # This already carried a client_order_id - f"opt_{strategy}_
+        # {timestamp}" - so options orders were not untagged. They were
+        # WORSE than untagged: the dashboard's _order_source() splits on
+        # "-" and checks a known list, and this id contains no "-", so
+        # every options order decoded to None and was reported as
+        # unattributable alongside genuinely untagged ones. A tag only
+        # counts if the reader can decode it.
+        #
+        # The timestamp was also the wrong uniqueness key. Alpaca rejects
+        # a duplicate client_order_id, and two legs submitted inside the
+        # same float microsecond would collide; a uuid cannot.
+        "client_order_id": f"options_entry-{position.strategy.value}-"
+                           f"{uuid.uuid4().hex[:16]}"[:128],
     }
 
     try:
