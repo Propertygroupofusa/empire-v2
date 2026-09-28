@@ -195,8 +195,41 @@ ok("census follows pagination rather than stopping at page one",
    "has_next" in census and "cursor" in census)
 
 dash = open(os.path.join(HERE, "routers/trading_dashboard.py"), encoding="utf-8").read()
-ok("dashboard uri now names the host",
-   "GET api.coinbase.com/api/v3/brokerage/accounts" in dash)
+dash_code = code_only("routers/trading_dashboard.py")
+
+# THIS CHECK WAS RETARGETED ON 2026-09-28, AND WHY MATTERS.
+#
+# It used to assert the literal "GET api.coinbase.com/api/v3/brokerage/
+# accounts" appeared in the dashboard - the uri claim of a JWT the
+# dashboard built by hand. 28c726f deleted that whole block, correctly:
+# the live-dashboard handler now reads the account through
+# account_census instead of hand-rolling a fourth signature. The string
+# went with the code, and this check went red for six commits because
+# no full suite run happened in between.
+#
+# The old assertion was protecting something real - "the dashboard's
+# JWT names the host" - so it is not simply deleted. It is replaced by
+# the stronger statement the code now supports: THE DASHBOARD HAS NO
+# JWT OF ITS OWN TO MALFORM. The old check would have passed a
+# hand-rolled JWT that merely had the right string in it; this one
+# refuses a hand-rolled JWT at all.
+#
+# The signing property still holds, by delegation:
+#   dashboard -> account_census._auth_headers
+#              -> crypto_btc_compound_bot._auth_headers  (checked above)
+ok("dashboard hand-rolls no Coinbase JWT of its own",
+   not re.search(r"['\"]uri['\"]\s*:", dash_code))
+ok("dashboard delegates Coinbase signing to a module that is checked here",
+   "account_census._auth_headers" in dash_code
+   or "crypto_coinbase_bot._auth_headers" in dash_code)
+
+# And close the gap this file never covered: account_census is what the
+# dashboard now depends on for signing, five call sites of it, and it
+# was not checked at all.
+census_auth = code_only("account_census.py")
+ok("account_census hand-rolls no JWT either - it delegates",
+   not re.search(r"['\"]uri['\"]\s*:", census_auth)
+   and "engine._auth_headers" in census_auth)
 
 pay = open(os.path.join(HERE, "routers/payments.py"), encoding="utf-8").read()
 ok("payments uri now names the host",
