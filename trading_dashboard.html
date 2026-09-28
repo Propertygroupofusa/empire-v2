@@ -907,24 +907,49 @@
             el.textContent = sentence;
         }
 
-        function ensureAdminKey() {
-            if (!adminKey) {
-                adminKey = prompt('Enter admin key to load real account data:') || '';
+        // DO NOT ASK FOR A KEY THE PAGE DOES NOT NEED.
+        //
+        // This used to prompt() on load, before any request had been made,
+        // so opening the dashboard on a phone meant a modal in your face
+        // every time. It was gating nothing: every read endpoint this page
+        // calls (/status, /trades, /growth-model, the rest) answers 200
+        // with no key at all - the write guard is server-side middleware
+        // on MUTATING methods, and that is what actually protects the
+        // account.
+        //
+        // So the key is now asked for only when the server genuinely
+        // refuses a request, which in practice means an action that moves
+        // money. Nothing about what the server permits has changed.
+        function ensureAdminKey(force) {
+            if (!adminKey && force) {
+                adminKey = prompt('Admin key (only needed for actions that change something):') || '';
                 if (adminKey) localStorage.setItem('bmb_admin_key', adminKey);
             }
             return adminKey;
         }
 
         async function apiFetch(path, options = {}) {
-            ensureAdminKey();
-            const headers = Object.assign(
-                { 'X-Admin-Key': adminKey, 'Content-Type': 'application/json' },
-                options.headers || {}
-            );
-            const res = await fetch(API_BASE + path, Object.assign({}, options, { headers }));
+            const send = () => {
+                const headers = Object.assign(
+                    {},
+                    adminKey ? { 'X-Admin-Key': adminKey } : {},
+                    { 'Content-Type': 'application/json' },
+                    options.headers || {}
+                );
+                return fetch(API_BASE + path, Object.assign({}, options, { headers }));
+            };
+
+            let res = await send();
 
             if (res.status === 401) {
-                // Wrong/missing key - clear it so the next call re-prompts.
+                // The server really did refuse. NOW ask, once, and retry.
+                localStorage.removeItem('bmb_admin_key');
+                adminKey = '';
+                ensureAdminKey(true);
+                if (adminKey) res = await send();
+            }
+
+            if (res.status === 401) {
                 localStorage.removeItem('bmb_admin_key');
                 adminKey = '';
                 throw new Error('Unauthorized - check your admin key');
@@ -1457,7 +1482,9 @@
                 if (!confirm(confirmMsg)) return;
             }
 
-            ensureAdminKey();
+            // A real write - rewrites metadata on the live channel. This one
+            // genuinely needs the key before it starts, so it forces the ask.
+            ensureAdminKey(true);
             statusEl.textContent = 'Running... this takes about 1 second per video, so a full-channel run can take a while.';
             try {
                 const res = await fetch('https://empire-v2-production.up.railway.app/youtube/backfill-seo', {

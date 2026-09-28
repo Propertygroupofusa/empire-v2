@@ -459,9 +459,15 @@ const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashbo
 const KEY_STORAGE = 'bmb_admin_key';
 let adminKey = localStorage.getItem(KEY_STORAGE) || '';
 
-function getAdminKey() {
-    if (!adminKey) {
-        adminKey = prompt('Enter admin key to load real Alpaca data:') || '';
+// DO NOT ASK FOR A KEY THIS PAGE DOES NOT NEED.
+// Same change as trading_dashboard.html: every read this page makes
+// answers 200 with no key. The write guard is server-side middleware on
+// MUTATING methods, and that is what protects the account - not a
+// browser prompt. The key is asked for only when the server actually
+// refuses. Nothing about what the server permits has changed.
+function getAdminKey(force) {
+    if (!adminKey && force) {
+        adminKey = prompt('Admin key (only needed for actions that change something):') || '';
         if (adminKey) localStorage.setItem(KEY_STORAGE, adminKey);
     }
     return adminKey;
@@ -479,7 +485,9 @@ async function apiGet(path, timeoutMs) {
     let res;
     try {
         res = await fetch(API_BASE + path, {
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: Object.assign(
+                key ? { 'X-Admin-Key': key } : {},
+                { 'Content-Type': 'application/json' }),
             signal: controller.signal,
         });
     } catch (e) {

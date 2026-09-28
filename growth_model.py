@@ -133,12 +133,49 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
     top_unreal = sum(r["unrealized_usd"] for r in top)
     all_unreal = sum(r["unrealized_usd"] for r in rows)
 
-    # A branch holding more slices than it has rungs is a structural
-    # anomaly, not a preference: the grid is built to hold at most
-    # num_levels open positions and anything beyond that was opened by
-    # some other path.
-    over = [r for r in rows
-            if r["num_levels"] and r["open_slices"] > int(r["num_levels"])]
+    # SLICES OVER LEVELS IS NOT AUTOMATICALLY AN ANOMALY.
+    #
+    # The first version of this flagged every branch with more open
+    # slices than rungs and called it structural. Six branches lit up,
+    # and reading crypto_grid_bot showed all of it was DELIBERATE:
+    # coin_adoption_worker pins num_levels to the slice count on an
+    # ADOPTED branch precisely so the grid cannot double down on a
+    # position it never chose to buy. The comment there names ZEC and
+    # says raising the level count without changing the sizing "is what
+    # would have let ZEC spend 68.5% of the wallet averaging down its
+    # own worst position".
+    #
+    # So the check has to ask the question that actually matters: did
+    # this branch BUY its way past its rungs, or was it handed coin it
+    # never paid for? An adopted slice carries no entry fee - that is
+    # how crypto_grid_bot.branch_is_adopted_only tells them apart, and
+    # the status payload exposes it per slice as `adopted`.
+    #
+    # A rule that fires on code it has no opinion about is a rule nobody
+    # can act on.
+    over = []
+    for b in (branches or []):
+        pid = b.get("product_id")
+        row = next((r for r in rows if r["product_id"] == pid), None)
+        if row is None or not row["num_levels"]:
+            continue
+        if row["open_slices"] <= int(row["num_levels"]):
+            continue
+        sl = b.get("slices") or []
+        adopted = [s for s in sl if s.get("adopted")]
+        entry = dict(row)
+        entry["adopted_slices"] = len(adopted)
+        entry["all_adopted"] = bool(sl) and len(adopted) == len(sl)
+        entry["deliberate"] = entry["all_adopted"]
+        entry["why"] = (
+            "every open slice was adopted - the adoption worker pins "
+            "num_levels to the slice count on purpose so the grid cannot "
+            "average down coin it never chose. Not an anomaly."
+            if entry["all_adopted"] else
+            "this branch holds MORE slices than rungs and not all of them "
+            "were adopted, so at least one was BOUGHT past the cap. That is "
+            "the case worth looking at.")
+        over.append(entry)
 
     return {
         "readable": True,
@@ -167,6 +204,7 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
             [r for r in rows if r["idle_usd"] > 20],
             key=lambda r: -r["idle_usd"]),
         "slices_over_levels": over,
+        "slices_over_levels_unexplained": [r for r in over if not r["deliberate"]],
         "unreadable_branches": unreadable or None,
     }
 

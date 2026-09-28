@@ -13,9 +13,10 @@ def T(entry, qty, pnl):
     return {"entry_price": entry, "qty": qty, "pnl": pnl}
 
 
-def B(pid, alloc, levels, slices, unreal=0.0):
+def B(pid, alloc, levels, slices, unreal=0.0, adopted=False):
     return {"product_id": pid, "allocated_usd": alloc, "num_levels": levels,
-            "slices": [{"entry_price": p, "qty": q} for p, q in slices],
+            "slices": [{"entry_price": p, "qty": q, "adopted": adopted}
+                       for p, q in slices],
             "total_unrealized_net_usd": unreal}
 
 
@@ -96,11 +97,66 @@ def test_concentration_names_the_biggest_holdings_and_their_share():
 
 
 def test_a_branch_holding_more_slices_than_levels_is_flagged():
-    """The grid holds at most num_levels positions. Anything beyond that
-    was opened by some other path."""
     out = gm.measure_capital([B("X", 300.0, 3, [(10, 1)] * 7)], free_cash_usd=0)
     assert len(out["slices_over_levels"]) == 1
     assert out["slices_over_levels"][0]["open_slices"] == 7
+
+
+# ── the distinction that makes this rule actionable ────────────────────
+#
+# The first version called every slices-over-levels branch a structural
+# anomaly. Six lit up live, and all six were DELIBERATE: the adoption
+# worker pins num_levels to the slice count on an adopted branch so the
+# grid cannot average down coin it never chose to buy. The comment in
+# crypto_grid_bot names ZEC and says raising the level count without
+# changing the sizing "is what would have let ZEC spend 68.5% of the
+# wallet averaging down its own worst position".
+#
+# A rule that fires on code it has no opinion about is a rule nobody can
+# act on.
+
+def test_an_all_adopted_branch_over_its_levels_is_deliberate():
+    out = gm.measure_capital(
+        [B("ZEC", 2272.0, 3, [(10, 1)] * 7, adopted=True)], free_cash_usd=0)
+    row = out["slices_over_levels"][0]
+    assert row["all_adopted"] is True
+    assert row["deliberate"] is True
+    assert "Not an anomaly" in row["why"]
+    assert out["slices_over_levels_unexplained"] == []
+
+
+def test_a_branch_that_BOUGHT_past_its_levels_is_unexplained():
+    """One paid slice among adopted ones means something bought past the
+    cap. That is the case worth looking at."""
+    b = B("X", 300.0, 3, [(10, 1)] * 7, adopted=True)
+    b["slices"][0]["adopted"] = False
+    out = gm.measure_capital([b], free_cash_usd=0)
+    row = out["slices_over_levels"][0]
+    assert row["all_adopted"] is False
+    assert row["deliberate"] is False
+    assert len(out["slices_over_levels_unexplained"]) == 1
+    assert "BOUGHT past the cap" in row["why"]
+
+
+def test_a_wholly_unadopted_branch_over_its_levels_is_unexplained():
+    out = gm.measure_capital(
+        [B("X", 300.0, 3, [(10, 1)] * 7, adopted=False)], free_cash_usd=0)
+    assert len(out["slices_over_levels_unexplained"]) == 1
+
+
+def test_the_adopted_count_is_reported_not_just_the_verdict():
+    b = B("X", 300.0, 3, [(10, 1)] * 5, adopted=True)
+    b["slices"][0]["adopted"] = False
+    row = gm.measure_capital([b], free_cash_usd=0)["slices_over_levels"][0]
+    assert row["adopted_slices"] == 4
+    assert row["open_slices"] == 5
+
+
+def test_a_branch_within_its_levels_is_never_in_either_list():
+    out = gm.measure_capital(
+        [B("X", 300.0, 3, [(10, 1)] * 3, adopted=False)], free_cash_usd=0)
+    assert out["slices_over_levels"] == []
+    assert out["slices_over_levels_unexplained"] == []
 
 
 def test_a_branch_within_its_levels_is_not_flagged():
