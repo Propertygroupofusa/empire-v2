@@ -8280,6 +8280,78 @@ async def set_lesson_enforcement_endpoint(payload: SetLessonEnforcementRequest):
             "min_trades_to_block": grid_learning.MIN_TRADES_TO_BLOCK}
 
 
+@router.get("/grid-status/invariants")
+async def grid_invariants_endpoint():
+    """Every number that must agree, checked against an INDEPENDENT source.
+
+    Built after a run of defects that were all found the same way - the
+    account owner noticed a figure that looked wrong and someone went
+    digging. Each check here is one of those defects turned into a standing
+    statement that fails loudly the moment it stops being true.
+
+    Read-only. Returns 200 with status FAIL when an invariant is broken:
+    the check ran and has an answer, which is not an HTTP error.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    g = crypto_grid_bot_module
+    import invariants as inv
+    results = []
+
+    # The fee rate everything else is priced against, checked three ways:
+    # what the floor uses, what the panel reports, and what Coinbase billed.
+    try:
+        floor_leg = await g.worst_case_leg_fee_rate()
+        mix = await g.get_fill_mix()
+        reported = (mix.get("overall") or {}).get("maker_round_trip_fee_rate")
+        reported_leg = (reported / 2) if reported else None
+        measured_leg = None
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                fills = await g.engine.get_recent_fills_summary(session, limit=250)
+            # Only a sample large enough to conclude from. A starved sample
+            # is UNKNOWN, which the check reports as such rather than as a pass.
+            if fills.get("enough_to_conclude"):
+                measured_leg = fills.get("real_leg_fee_rate")
+        except Exception:
+            measured_leg = None
+        results.append(inv.fee_rate_agreement(floor_leg, reported_leg, measured_leg))
+        results.append(inv.spacing_evidence_current(
+            g.SPACING_EVIDENCE_PRICED_AT_ROUND_TRIP,
+            (measured_leg * 2) if measured_leg is not None else None))
+    except Exception as e:
+        results.append({"name": "fee_rate_agreement", "status": inv.UNKNOWN,
+                        "detail": f"could not be checked: {type(e).__name__}: {e}"})
+
+    # Branch bookkeeping against the real account, and capital that can
+    # neither buy nor sell - both read off the status payload the dashboard
+    # shows, so the check cannot drift from what is on screen.
+    try:
+        status = await g.get_grid_status()
+        backing = status.get("allocation_backing") or {}
+        results.append(inv.allocation_backed(backing.get("claimed_usd"),
+                                             backing.get("backed_usd")))
+        rows = []
+        for b in (status.get("branches") or []):
+            slices = b.get("slices") or []
+            best = max((s.get("unrealized_net_pct") or 0) * 100 for s in slices) if slices else None
+            rows.append({"product_id": b.get("product_id"),
+                         "allocated_usd": b.get("allocated_usd"),
+                         "open_slices": len(slices),
+                         "num_levels": b.get("num_levels"),
+                         "best_slice_net_pct": best})
+        results.append(inv.no_dead_capital(rows))
+    except Exception as e:
+        results.append({"name": "allocation_backed", "status": inv.UNKNOWN,
+                        "detail": f"could not be checked: {type(e).__name__}: {e}"})
+
+    out = inv.summarize(results)
+    return JSONResponse(content=out, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/money-check")
 async def grid_money_check_endpoint():
     """Every dollar in the fleet that is not currently earning, and the one

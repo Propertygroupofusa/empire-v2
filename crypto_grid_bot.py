@@ -1581,6 +1581,20 @@ AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
 # branch below it is raised, a branch above it is left alone.
 FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.025"))
 
+# The round-trip fee the table above was priced at. Stated as a CHECKABLE
+# CONSTANT rather than left in the prose, because the prose cannot be
+# verified and this can: invariants.spacing_evidence_current() compares it
+# against the fee actually being billed and fails when they diverge.
+#
+# This is not decoration. The table ranks 1.0/2.0/2.5/3.0% by net-per-trip
+# at this fee. Re-run at the 0.70% round trip now measured, the same model
+# scores 10.2 / 22.1 / 21.6 / 23.0 - the ordering FLATTENS and 2.0% pulls
+# level with 2.5%, where at 1.37% it was a clear last. The constant that
+# sets the fleet minimum is still defensible; the evidence under it is
+# priced at a cost the account no longer pays, and nothing would have said
+# so. Re-measure before moving FLEET_MIN_STEP_PCT on the strength of it.
+SPACING_EVIDENCE_PRICED_AT_ROUND_TRIP = 0.0137
+
 # ---- THE STOP LOSS ----
 #
 # Sell a slice that has fallen this far below its own entry, at a loss, on
