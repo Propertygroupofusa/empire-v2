@@ -51,8 +51,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import concentration_gate
+
 # --- the limit itself -------------------------------------------------
-LIMIT_PCT = 20.0          # the owner's rule
+# The owner's rule. Derived from the one constant, never restated: this
+# read 20.0 beside capital_velocity.MAX_SINGLE_COIN_SHARE = 0.20 and
+# fleet_capital_allocator.MAX_BRANCH_SHARE = 0.35 - three numbers for one
+# ceiling with nothing forcing them to agree.
+LIMIT_PCT = concentration_gate.MAX_SINGLE_COIN_SHARE * 100
 BUFFER_PCT = 0.5          # trim to 19.5%, so a small tick does not re-fire
 
 # --- bounds on a single pass ------------------------------------------
@@ -119,27 +125,15 @@ def _num(v):
     return f
 
 
-def excess_usd(holding_usd, total_usd, limit_pct=LIMIT_PCT, buffer_pct=BUFFER_PCT):
-    """Dollars to sell so the holding lands at (limit - buffer) of the account.
-
-    Returns 0.0 when the holding is already at or under the limit, and
-    None when the inputs cannot be trusted. The caller must treat None as
-    "do nothing", never as zero: a total that failed to read is not the
-    same as a position that is within its limit.
-    """
-    u = _num(holding_usd)
-    t = _num(total_usd)
-    if u is None or t is None or t <= 0 or u < 0:
-        return None
-    lim = _num(limit_pct)
-    buf = _num(buffer_pct) or 0.0
-    if lim is None or lim <= 0 or lim > 100:
-        return None
-    if (u / t) * 100.0 <= lim:
-        return 0.0
-    target_share = max(lim - buf, 0.0)
-    need = u - t * target_share / 100.0
-    return max(need, 0.0)
+# ONE BOOK, ONE FORMULA. These ARE concentration_gate's functions, not
+# copies of them, because a copy is how the trimmer and the buy gate came
+# to give answers eleven points apart on the same coin - this file
+# measuring market value against the whole account while the gate
+# measured cost basis against grid coin only. On 2026-09-28 that read ZEC
+# at 19.33% here and 31.00% there. Rebinding either name is now a visible
+# change rather than a slow divergence nobody notices.
+share_pct = concentration_gate.share_pct
+excess_usd = concentration_gate.excess_usd
 
 
 def last_trim_at(history, asset):

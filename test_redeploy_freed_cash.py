@@ -73,7 +73,18 @@ def test_the_proceeds_split_between_near_and_jasmy():
     rows, rep = rd.plan(FLEET_AFTER_SALE, PROCEEDS, BASIS)
     assert [r["product_id"] for r in rows] == ["NEAR-USD", "JASMY-USD"]
     assert rep["share_usd"] == pytest.approx(1096.71, abs=0.01)
-    assert rows[0]["allocated_after"] == pytest.approx(177.12 + 1096.71, abs=0.01)
+    # The ceiling caps the add below the full share, and that cap is
+    # TIGHTER than it used to be. Retargeted 2026-09-28 with the book,
+    # not weakened: headroom is now (20% of total - held), a plain
+    # subtraction, because the account book's denominator does not grow
+    # when cash becomes coin. The old divisor form would have allowed
+    # $1,129.09 into NEAR, taking it to $1,259.63 of a $5,169.06 book -
+    # 24.4%, straight through the 20% ceiling this function exists to
+    # respect. 130.54 + 903.27 = 1,033.81 = exactly 20.0%.
+    assert rows[0]["allocated_after"] == pytest.approx(177.12 + 903.27, abs=0.01)
+    assert rows[0]["ceiling_headroom_usd"] == pytest.approx(903.27, abs=0.01)
+    held_after = 130.54 + rows[0]["ceiling_headroom_usd"]
+    assert held_after == pytest.approx(0.20 * sum(BASIS.values()), abs=0.01)
 
 
 def test_the_share_is_floored_so_the_last_branch_finds_its_money():

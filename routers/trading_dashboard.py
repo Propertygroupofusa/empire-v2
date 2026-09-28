@@ -8969,7 +8969,9 @@ async def redeploy_freed_cash_endpoint(dry_run: bool = True,
     rows, report = rfc.plan(
         status.get("branches") or [],
         status.get("real_free_cash_usd"),
-        await g.fleet_cost_basis_by_product(),
+        # The one book: whole account at market value, same as the buy
+        # gate and auto_trim. Was grid cost basis over grid coin only.
+        await g.account_market_book(),
         source=src, targets=tgts,
         already_done=done_row is not None)
     report["source"] = src

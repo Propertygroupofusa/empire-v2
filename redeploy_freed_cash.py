@@ -68,15 +68,18 @@ def _num(v):
         return None
 
 
-def plan(branches, free_cash_usd, cost_basis_by_product,
+def plan(branches, free_cash_usd, account_book,
          source=DEFAULT_SOURCE, targets=DEFAULT_TARGETS,
          reserve_usd=RESERVE_USD, already_done=False,
          min_share_usd=MIN_SHARE_USD):
     """What to add to which branch. Returns (rows, report). Moves nothing.
 
     `branches` is the live branch list - dicts with product_id,
-    allocated_usd and slices. `cost_basis_by_product` is what the
-    concentration ceiling measures against.
+    allocated_usd and slices. `account_book` is {ASSET: market value}
+    for the WHOLE account, cash included - the one book the ceiling is
+    measured against, shared with auto_trim and the buy gate. It used to
+    be grid cost basis over grid coin only, which answered a different
+    question by eleven points on the same coin.
 
     Every refusal names its own arithmetic, so nobody has to re-derive it
     from the outside.
@@ -138,7 +141,7 @@ def plan(branches, free_cash_usd, cost_basis_by_product,
     #    would pass", and the verdict still decides.
     rows, refusals, capped = [], [], []
     for product in funded:
-        room = concentration_gate.headroom_usd(product, cost_basis_by_product)
+        room = concentration_gate.coin_headroom_usd(product, account_book)
         add = share if room is None else min(share, room)
         if add < min_share_usd:
             refusals.append({
@@ -149,7 +152,7 @@ def plan(branches, free_cash_usd, cost_basis_by_product,
             continue
         add = int(add * 100) / 100.0
         ok, why = concentration_gate.concentration_verdict(
-            product, cost_basis_by_product, add)
+            product, account_book, add)
         if not ok:
             refusals.append({"product_id": product, "usd": add, "reason": why})
             continue

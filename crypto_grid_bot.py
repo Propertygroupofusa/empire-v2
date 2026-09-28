@@ -2135,6 +2135,48 @@ async def get_grid_allocated_total() -> float:
         return sum(b.allocated_usd for b in result.scalars().all())
 
 
+_ACCOUNT_BOOK_CACHE = {"book": None, "at": 0.0}
+ACCOUNT_BOOK_TTL_SECONDS = 60.0
+
+
+async def account_market_book(max_age_seconds=ACCOUNT_BOOK_TTL_SECONDS):
+    """{ASSET: market value usd} for the WHOLE account, cash included.
+
+    The one book the concentration ceiling is measured against, for the
+    buy gate here and for auto_trim alike - see concentration_gate's
+    module docstring for why it is this book and not grid cost basis.
+
+    Returns None when the account cannot be read. None is load-bearing:
+    the gate fails OPEN on None, and an empty dict would instead mean
+    "the account holds nothing", which is a different decision.
+
+    Cached briefly because this runs on every buy across a 23-branch
+    fleet and the figure it produces moves on price, not on the cycle.
+    A stale-by-a-minute denominator cannot flip a 20% verdict; a
+    per-buy balance sweep would cost more than the check is worth.
+    """
+    import time as _t
+    now = _t.time()
+    cached = _ACCOUNT_BOOK_CACHE.get("book")
+    if cached is not None and (now - _ACCOUNT_BOOK_CACHE["at"]) < max_age_seconds:
+        return cached
+    try:
+        import account_census
+        import concentration_gate
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession() as _s:
+            census = await account_census.census(_s, tracked_usd=0.0)
+        if not census.get("available"):
+            return None
+        book = concentration_gate.book_from_holdings(census.get("holdings") or [])
+    except Exception as exc:
+        log.warning(f"[GRID] account book unreadable ({type(exc).__name__}: {exc}) - "
+                    f"concentration not checked this cycle")
+        return None
+    _ACCOUNT_BOOK_CACHE.update(book=book, at=now)
+    return book
+
+
 async def fleet_cost_basis_by_product():
     """Real USD cost basis per COIN across the whole grid fleet.
 
@@ -5918,11 +5960,29 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
 
         # The owner's own standing ceiling: no coin over 20% of the fleet.
         # One-directional - it can only ever refuse a new buy, never sell
-        # or trim - and it fails OPEN when the fleet's basis can't be read.
-        # See concentration_gate for the live numbers that made it real.
+        # or trim - and it fails OPEN when the account can't be read.
+        #
+        # Measured against the WHOLE ACCOUNT at market value, which is
+        # the same book auto_trim uses. It used to read grid cost basis
+        # over grid coin only, so the two answered one question eleven
+        # points apart: ZEC 31.00% here against 19.33% there.
+        # A coin on the way out takes no new dollars, by NAME rather
+        # than by a percentage that happens to be high. Moving the
+        # ceiling to the account book dropped ZEC from 31.00% to 19.33%,
+        # which removed the side effect that had been refusing ZEC buys
+        # while the owner is trying to exit it. Refuse-only; an empty
+        # exit list cannot bite. See crypto_grid_bot_exits.
+        import crypto_grid_bot_exits
+        _exit_ok, _exit_reason = crypto_grid_bot_exits.exit_verdict(branch.product_id)
+        if not _exit_ok:
+            log.info(f"[GRID] {branch.bot_name}: 🚪 exiting - {_exit_reason}")
+            await _record_gate_decision(branch.bot_name, branch.product_id,
+                                        "EXITING", _exit_reason)
+            return
+
         import concentration_gate
         _conc_ok, _conc_reason = concentration_gate.concentration_verdict(
-            branch.product_id, await fleet_cost_basis_by_product(), spend)
+            branch.product_id, await account_market_book(), spend)
         if not _conc_ok:
             log.info(f"[GRID] {branch.bot_name}: 🧱 concentration ceiling - {_conc_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id,

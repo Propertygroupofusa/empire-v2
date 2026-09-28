@@ -93,10 +93,19 @@ def test_the_gate_never_recommends_selling():
 
 
 def test_a_coin_the_fleet_does_not_hold_is_measured_on_the_buy_alone():
+    """Retargeted 2026-09-28 when the book changed, not weakened.
+
+    This asserted 50 / (total + 50) - correct on the old coin-only cost
+    basis book, where the money spent landed in both the numerator and
+    the denominator. On the account book it does not: buying coin with
+    cash from the same account moves dollars from the USD row to the
+    coin row and leaves the total exactly where it was. So the
+    denominator is the total, unchanged.
+    """
     allow, _ = gate.concentration_verdict("NEW-USD", FLEET, 50.0)
     assert allow is True
     share = gate.coin_share("NEW-USD", FLEET, 50.0)
-    assert share == pytest.approx(50.0 / (sum(FLEET.values()) + 50.0))
+    assert share == pytest.approx(50.0 / sum(FLEET.values()))
 
 
 def test_garbage_in_is_unknown_not_a_crash():
