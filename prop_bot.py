@@ -1819,6 +1819,27 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
         return False
 
 
+# The last kill-condition reason written, and when. A halt repeats every
+# cycle - roughly 1,400 times a day on a 60s loop - and 1,400 identical
+# rows is noise, not a record. Written when the REASON CHANGES, or once
+# every KILL_LOG_HEARTBEAT_SECONDS so a standing halt still leaves a
+# trail rather than going silent after the first entry.
+_last_kill_logged = {"reason": None, "at": 0.0}
+KILL_LOG_HEARTBEAT_SECONDS = 900
+
+
+def _should_log_kill(reason: str) -> bool:
+    """True when this halt is worth another row. Never dedupes a CHANGE."""
+    now = time.time()
+    if reason != _last_kill_logged["reason"]:
+        _last_kill_logged.update(reason=reason, at=now)
+        return True
+    if now - _last_kill_logged["at"] >= KILL_LOG_HEARTBEAT_SECONDS:
+        _last_kill_logged["at"] = now
+        return True
+    return False
+
+
 async def _record_trade_decision(verdict, **market):
     """Persist one entry decision - admitted or refused. Best effort.
 
@@ -1916,6 +1937,22 @@ async def run_prop_cycle():
                        else None)
                 log.critical(f"[KILL CONDITION] Halting bot: {halt_reason}"
                              + (f" | {why}" if why else ""))
+                # A HALT IS A DECISION, and the most important one there
+                # is: it stops the cycle BEFORE the scanner, so try_open
+                # is never reached and none of the entry-path logging can
+                # fire. Without this the decision log stays permanently
+                # empty while the bot halts every cycle - which is exactly
+                # what it did, on buying power $90.94 against a $150
+                # floor, and the log said nothing because nothing had
+                # been "decided" as far as it was concerned.
+                _kill_detail = halt_reason + (f" | {why}" if why else "")
+                if _should_log_kill(_kill_detail):
+                    await _record_trade_decision(
+                        _dlog.refusal(None, "kill_condition", _kill_detail,
+                                      mandate="apex", value=buying_power,
+                                      threshold="see reason"),
+                        buying_power=buying_power, equity=equity,
+                        open_positions=len(open_prop_positions))
                 return
 
         global _last_auto_backtest_at

@@ -227,3 +227,71 @@ def test_every_refusing_return_in_try_open_logs_a_decision():
         assert "_record_trade_decision" in upto, (
             "a MANDATE refusal returns without logging a decision:\n"
             + upto[:200])
+
+
+# ── a halt is a decision, and it stops the cycle before the entry path ────
+
+def test_a_fleet_wide_refusal_reads_without_a_symbol():
+    """A kill condition has no symbol. "?" read like a missing field
+    rather than a deliberate absence."""
+    line = dl.explain(dl.refusal(None, "kill_condition",
+                                 "Buying power critical: $90.94 < $150"))
+    assert line.startswith("the account REFUSED")
+    assert "?" not in line
+
+
+def test_a_kill_condition_row_is_well_formed_without_a_symbol():
+    row = dl.row_from_verdict(
+        dl.refusal(None, "kill_condition", "Buying power critical: $90.94 < $150",
+                   mandate="apex", value=90.94),
+        bot="prop_apex", buying_power=90.94, equity=1008.46)
+    assert row is not None
+    assert row["symbol"] is None
+    assert row["failed_rules"] == "kill_condition"
+    assert row["buying_power"] == 90.94
+
+
+def test_the_halt_is_logged_before_the_cycle_returns():
+    """The halt stops the cycle BEFORE the scanner, so try_open is never
+    reached and no entry-path logging can fire. Without this the log
+    stays permanently empty while the bot halts every cycle - which is
+    exactly what happened, on buying power $90.94 against a $150 floor.
+    """
+    src = (HERE / "prop_bot.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_prop_cycle")
+    body = ast.get_source_segment(src, fn)
+    head = body[:body.index("[KILL CONDITION]")]
+    tail = body[body.index("[KILL CONDITION]"):]
+    logged = tail.index("_record_trade_decision")
+    returned = tail.index("return")
+    assert logged < returned, "the cycle returns before the halt is recorded"
+
+
+def test_a_repeating_halt_does_not_write_a_row_every_cycle():
+    """1,400 identical rows a day is noise, not a record."""
+    import importlib
+    import prop_bot
+    prop_bot._last_kill_logged.update(reason=None, at=0.0)
+    r = "Buying power critical: $90.94 < $150"
+    assert prop_bot._should_log_kill(r) is True, "the first one must be written"
+    assert prop_bot._should_log_kill(r) is False
+    assert prop_bot._should_log_kill(r) is False
+
+
+def test_a_changed_halt_reason_is_never_deduped():
+    import prop_bot
+    prop_bot._last_kill_logged.update(reason=None, at=0.0)
+    assert prop_bot._should_log_kill("Buying power critical: $90.94 < $150") is True
+    assert prop_bot._should_log_kill("Daily loss limit hit: -$60.00") is True, (
+        "a different reason is a different decision")
+
+
+def test_a_standing_halt_still_leaves_a_trail():
+    """Deduping must not make a permanent halt go silent after one row."""
+    import time as _t
+    import prop_bot
+    r = "Buying power critical: $90.94 < $150"
+    prop_bot._last_kill_logged.update(reason=r,
+                                      at=_t.time() - prop_bot.KILL_LOG_HEARTBEAT_SECONDS - 1)
+    assert prop_bot._should_log_kill(r) is True

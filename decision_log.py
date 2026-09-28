@@ -82,7 +82,9 @@ def explain(verdict):
     if not isinstance(verdict, dict) or "admitted" not in verdict:
         return "no decision was recorded"
     checks = verdict.get("checks") or []
-    sym = verdict.get("symbol") or "?"
+    # A fleet-wide refusal - a kill condition - has no symbol. "?" read
+    # like a missing field rather than a deliberate absence.
+    sym = verdict.get("symbol") or "the account"
     if not verdict.get("admitted"):
         failed = [c for c in checks if c.get("passed") is False]
         why = "; ".join(c.get("detail") or c.get("name") for c in failed)
