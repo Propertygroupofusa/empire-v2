@@ -629,9 +629,32 @@ async def refresh_real_fee_rate(session) -> float:
                 )
                 row = result.scalar_one_or_none()
                 if row is None:
-                    db.add(TradingBotState(bot_name=REAL_FEE_RATE_STATE_KEY, base_capital=real_rate))
+                    db.add(TradingBotState(bot_name=REAL_FEE_RATE_STATE_KEY,
+                                           base_capital=real_rate,
+                                           starting_capital=_cached_real_maker_fee_rate))
                 else:
                     row.base_capital = real_rate
+                    # THE MAKER LEG MUST PERSIST TOO. It used to live only in
+                    # this process's memory while the taker round trip was
+                    # saved and reloaded - an asymmetry with real consequences,
+                    # because worst_case_leg_fee_rate() returns the TAKER leg
+                    # the moment the maker rate is None:
+                    #
+                    #   floor with a measured maker leg   0.90%
+                    #   floor without it                  1.70%
+                    #
+                    # so a restart, or any worker that had not itself fetched
+                    # the fee tier, silently near-doubled the spacing floor.
+                    # Observed live 2026-09-28: one worker computed the 0.90%
+                    # floor while another reported maker_round_trip_fee_rate as
+                    # 0.015 - the taker rate wearing the maker label - from the
+                    # same deploy, same second.
+                    #
+                    # Written only when there is something to write: a failed
+                    # tier fetch leaves the last good measurement in place
+                    # rather than erasing it. A gap is not a zero.
+                    if _cached_real_maker_fee_rate is not None:
+                        row.starting_capital = float(_cached_real_maker_fee_rate)
                 await db.commit()
         except Exception as e:
             # Best-effort persistence only - the in-process cache is already
@@ -928,9 +951,13 @@ async def expected_leg_fee_rate(product_id: str = None) -> float:
     deep keeps maker, and a coin nothing has been measured about behaves
     exactly as before. Calling with no product_id is unchanged.
     """
-    global _cached_real_maker_fee_rate
-    if await is_maker_orders_active() and _cached_real_maker_fee_rate is not None:
-        maker = _cached_real_maker_fee_rate
+    # The durable measurement: this process's copy, else the persisted one.
+    # A worker that never fetched the fee tier used to price every sell at
+    # the TAKER leg here, which is the estimate _pick_profitable_slice_to_sell
+    # uses - so the same slice looked sellable or not depending on which
+    # worker asked.
+    maker = await get_effective_maker_leg_fee_rate()
+    if await is_maker_orders_active() and maker is not None:
         if product_id is None:
             return maker
         taker = (await get_effective_round_trip_fee_rate()) / 2
@@ -1021,8 +1048,9 @@ async def get_fill_mix() -> dict:
     legs = total_maker + total_taker
     maker_rate = (total_maker / legs) if legs else None
     real_round_trip = await get_effective_round_trip_fee_rate()
-    maker_leg = (_cached_real_maker_fee_rate
-                 if _cached_real_maker_fee_rate is not None else real_round_trip / 2)
+    _measured_maker = await get_effective_maker_leg_fee_rate()
+    maker_leg = (_measured_maker if _measured_maker is not None
+                 else real_round_trip / 2)
     taker_leg = real_round_trip / 2
     out["overall"] = {
         "maker_legs": int(total_maker), "taker_legs": int(total_taker), "legs": int(legs),
@@ -1058,8 +1086,8 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
             qty, price = fill
             log.info(f"[GRID] {product_id}: real MAKER buy filled {qty:.8f} @ ${price:,.6f} (cheaper fee)")
             await _record_fill_leg(GRID_FILL_MIX_BUY_KEY, True)
-            return qty, price, (_cached_real_maker_fee_rate
-                                if _cached_real_maker_fee_rate is not None
+            _leg = await get_effective_maker_leg_fee_rate()
+            return qty, price, (_leg if _leg is not None
                                 else (await get_effective_round_trip_fee_rate()) / 2)
         if await is_maker_only_active():
             # No fallback, by design. A buy that does not happen costs
@@ -1096,8 +1124,8 @@ async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
             filled_qty, price = fill
             log.info(f"[GRID] {product_id}: real MAKER sell filled {filled_qty:.8f} @ ${price:,.6f} (cheaper fee)")
             await _record_fill_leg(GRID_FILL_MIX_SELL_KEY, True)
-            return filled_qty, price, (_cached_real_maker_fee_rate
-                                       if _cached_real_maker_fee_rate is not None
+            _leg = await get_effective_maker_leg_fee_rate()
+            return filled_qty, price, (_leg if _leg is not None
                                        else (await get_effective_round_trip_fee_rate()) / 2)
         if await is_maker_only_active():
             log.info(f"[GRID] {product_id}: maker sell did not fill and maker-ONLY mode is on - "
@@ -1419,6 +1447,38 @@ async def fee_safe_floor_pct() -> float:
     return max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + leg * 2)
 
 
+async def get_effective_maker_leg_fee_rate():
+    """The measured maker LEG rate: this process's observation, else the
+    last one persisted, else None.
+
+    None means "nothing has ever measured this", which is NOT zero and not
+    a licence to assume the cheap path - every caller treats None as "price
+    the taker leg". That is the whole reason this returns None rather than
+    a default.
+
+    Mirrors get_effective_round_trip_fee_rate() deliberately. The two rates
+    are measured in the same call, by the same fee-tier lookup, and used by
+    the same floor; only one of them being durable is what let the floor
+    move between workers and across restarts without anything changing in
+    the market.
+    """
+    global _cached_real_maker_fee_rate
+    if _cached_real_maker_fee_rate is not None:
+        return _cached_real_maker_fee_rate
+    try:
+        async with get_session_factory()() as db:
+            result = await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name == REAL_FEE_RATE_STATE_KEY))
+            row = result.scalar_one_or_none()
+            if row is not None and row.starting_capital and row.starting_capital > 0:
+                _cached_real_maker_fee_rate = float(row.starting_capital)
+                return _cached_real_maker_fee_rate
+    except Exception as e:
+        log.warning(f"[GRID] could not read the persisted maker leg rate: "
+                    f"{type(e).__name__}: {e}")
+    return None
+
+
 async def worst_case_leg_fee_rate() -> float:
     """The highest per-leg fee a single leg can really pay.
 
@@ -1447,11 +1507,19 @@ async def worst_case_leg_fee_rate() -> float:
     maker orders can ever cost MORE than paying taker on both legs.
     """
     taker_leg = (await get_effective_round_trip_fee_rate()) / 2
-    if _cached_real_maker_fee_rate is None:
+    # The DURABLE measurement, not just this process's copy. Both guards in
+    # the docstring above still hold exactly as written: None (nothing ever
+    # measured) prices taker, maker-only being off prices taker, and the
+    # result is clamped to the taker leg. The only change is that a measured
+    # rate now survives a restart and reaches every worker, instead of the
+    # floor quietly reverting to 1.70% because this particular process had
+    # not happened to fetch the fee tier yet.
+    maker_leg = await get_effective_maker_leg_fee_rate()
+    if maker_leg is None:
         return taker_leg
     if not await is_maker_only_active():
         return taker_leg
-    return min(float(_cached_real_maker_fee_rate), taker_leg)
+    return min(float(maker_leg), taker_leg)
 
 
 # ── THE DEADLOCK THIS RESOLVES ──────────────────────────────────────────
@@ -6794,7 +6862,7 @@ async def get_grid_status() -> dict:
         # Maker (post-only limit) orders: roughly half the fee of the market
         # orders this bot has always used. Off until turned on deliberately.
         "maker_orders_active": await is_maker_orders_active(),
-        "real_maker_fee_rate": _cached_real_maker_fee_rate,
+        "real_maker_fee_rate": await get_effective_maker_leg_fee_rate(),
         "maker_order_wait_seconds": await maker_wait_seconds(),
         # Maker-ONLY: the market fallback removed entirely. This is the one
         # thing that legitimately lets the spacing floor above come down off
@@ -6829,7 +6897,7 @@ async def get_grid_status() -> dict:
         # runs out of band, so this is a database row, not a measurement.
         "horizon": await _never_fails(horizon_study.latest, "horizon"),
         "floor_priced_against": ("maker (the market fallback is removed)"
-                                 if _maker_only and _cached_real_maker_fee_rate is not None
+                                 if _maker_only and (await get_effective_maker_leg_fee_rate()) is not None
                                  else "taker (an unfilled maker order still becomes a market order)"),
         "branches": out,
     }
