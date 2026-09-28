@@ -2626,6 +2626,43 @@ async def run_prop_cycle():
                 continue
             data = scans.get(contract)
             if not data:
+                # A HELD POSITION WITH NO SCAN DATA GETS NO STOP CHECK.
+                #
+                # This `continue` skipped the entire exit evaluation -
+                # stop loss, breakeven ratchet, giveback, max hold, all of
+                # it - for any held position missing from this cycle's
+                # scan, and said nothing at all. The branch just above,
+                # for an unknown contract, at least logs an error; this
+                # one was silent.
+                #
+                # That is the difference between "nothing to do" and "I
+                # could not tell", on the one code path whose whole job is
+                # to limit a loss. A position can sit through any number
+                # of cycles this way with its stop never once evaluated,
+                # and nothing anywhere reports it.
+                #
+                # The skip itself stays - an exit cannot be decided
+                # without a price. What changes is that it is now visible,
+                # loudly and in the decision log, so an unprotected
+                # position can be seen rather than inferred.
+                #
+                # Deliberately NOT applied to the identical-looking skip
+                # in the ENTRY pass below: declining to open a position
+                # for want of data is correct and unremarkable.
+                log.warning(
+                    f"[APEX_589296] ⚠️ NO STOP CHECK for held {contract}: no scan data "
+                    f"this cycle, so stop-loss / max-hold / giveback were NOT "
+                    f"evaluated. The position is unprotected until data returns.")
+                try:
+                    await _record_trade_decision(_dlog.refusal(
+                        contract, "no_scan_data",
+                        f"held position {contract} had no market data this cycle, so its "
+                        f"exit rules (stop loss, breakeven ratchet, giveback, max hold) "
+                        f"were not evaluated - unprotected until data returns",
+                        mandate="apex", direction=position.get("side"),
+                        threshold="scan data required to evaluate an exit"))
+                except Exception:
+                    pass  # never let logging a skip become a second failure
                 continue
             price, rsi, trend = data["price"], data["rsi"], data["trend"]
             latest_signals[contract] = {
