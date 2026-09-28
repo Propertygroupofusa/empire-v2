@@ -9550,6 +9550,74 @@ async def get_equity_curve(days: int = 180):
     return JSONResponse(content=out, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/growth-model")
+async def get_growth_model(hours: float = 720.0):
+    """The edge, the capital, the rate, and what compounding does.
+
+    Read-only. Three measurements kept apart on purpose, because the
+    single blended "how are we doing" number hides which of them is
+    actually the constraint:
+
+      EDGE     what one closed round trip nets, from real trades.
+      CAPITAL  how much money is working and what the rest is doing.
+      RATE     realised profit over a stated span, then compounded -
+               and UNKNOWN when the span is too short to support it.
+
+    The ceiling figure is labelled a ceiling in the payload, not a
+    forecast: capital can be idle precisely because its branch found
+    nothing worth buying.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import growth_model as gmod
+    from models import CryptoGridTradeHistory
+
+    window = max(1.0, min(float(hours), 24.0 * 365))
+    status = await crypto_grid_bot_module.get_grid_status()
+
+    since = datetime.utcnow() - timedelta(hours=window)
+    async with crypto_grid_bot_module.get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory)
+            .where(CryptoGridTradeHistory.closed_at >= since)
+        )).scalars().all()
+
+    trades = [{"entry_price": r.entry_price, "qty": r.qty, "pnl": r.pnl,
+               "closed_at": r.closed_at} for r in rows]
+
+    # The span is what the TRADES cover, not what was asked for. Asking
+    # for 720h of a fleet that is 26 days old and dividing by 30 would
+    # understate the rate on a denominator no data supports.
+    stamps = [t["closed_at"] for t in trades if t["closed_at"] is not None]
+    span_days = ((max(stamps) - min(stamps)).total_seconds() / 86400.0) if len(stamps) > 1 else 0.0
+
+    edge = gmod.measure_edge(trades)
+    capital = gmod.measure_capital(
+        status.get("branches") or [],
+        free_cash_usd=status.get("real_free_cash_usd") or 0.0)
+
+    realised = edge.get("total_pnl_usd") if edge.get("readable") else None
+    total_capital = capital.get("total_capital_usd") if capital.get("readable") else None
+    rate = gmod.project(realised, total_capital, span_days)
+
+    # The working rate is measured on the capital that CAN buy, which is
+    # the only half with evidence behind it.
+    working = None
+    if capital.get("readable") and rate.get("readable"):
+        working = rate.get("monthly_pct")
+    ceiling = gmod.ceiling_if_idle_worked(capital, working) if working is not None else {
+        "readable": False, "reason": "no measured rate to price idle capital at"}
+
+    return JSONResponse(content={
+        "window_hours_requested": window,
+        "edge": edge,
+        "capital": capital,
+        "rate": rate,
+        "ceiling": ceiling,
+        "as_of": _get_utc_timestamp(),
+    }, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/parked-capital")
 async def get_parked_capital():
     """Parked capital split by WHAT WOULD MOVE IT.
