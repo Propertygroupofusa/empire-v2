@@ -1227,7 +1227,11 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
             log.info(f"[GRID] {product_id}: maker buy did not fill and maker-ONLY mode is on - "
                      f"passing this cycle rather than paying the taker leg")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_BUY_KEY)
-            await _record_maker_expiry(session, product_id, "buy", bot_name)
+            await _record_maker_expiry(
+                session, product_id, "buy", bot_name,
+                reason=engine._last_order_error.get(
+                    product_id, "the order rested at the bid and no seller crossed"),
+                order_rested=engine._last_order_rested.get(product_id))
             if outcome_out is not None:
                 import order_outcome
                 outcome_out["cause"] = order_outcome.MAKER_EXPIRED
@@ -1340,7 +1344,11 @@ async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
                      f"holding the slice rather than paying the taker leg out of its own "
                      f"profit. Reason: {_why}")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_SELL_KEY)
-            await _record_maker_expiry(session, product_id, "sell", bot_name)
+            await _record_maker_expiry(
+                session, product_id, "sell", bot_name, reason=_why,
+                # .get, so a product the engine said nothing about this cycle
+                # lands as None (UNKNOWN) rather than defaulting to a claim.
+                order_rested=engine._last_order_rested.get(product_id))
             return None
     fill = await engine.place_market_sell(session, qty, product_id,
                                           source="grid_sell")
@@ -1385,15 +1393,22 @@ _EXPIRY_SCAN_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_SCAN_MAX", "200"))
 _EXPIRY_MIN_RESOLVED = int(os.getenv("GRID_EXPIRY_MIN_RESOLVED", "20"))
 
 
-async def _record_maker_expiry(session, product_id: str, side: str, bot_name: str = None):
-    """Anchor one cancelled post-only order. Never raises - this is
-    instrumentation and must not be able to stop the thing it measures.
+async def _record_maker_expiry(session, product_id: str, side: str, bot_name: str = None,
+                               reason: str = None, order_rested: bool = None):
+    """Anchor one maker-ONLY cycle that ended without a trade. Never raises -
+    this is instrumentation and must not be able to stop the thing it
+    measures.
 
-    Called ONLY where maker-only actually cancelled with nothing behind it.
     Deliberately NOT called on the maker-first path, where an unfilled order
     becomes a market order: that trade happened, so "what did we miss" has no
     meaning there, and mixing the two would put filled cycles in the ledger
     of unfilled ones.
+
+    order_rested says whether an order was ever actually on the book. It is
+    passed in from the engine's own structural record rather than inferred
+    here, and None is a real value meaning UNKNOWN - the docstring this
+    function used to carry asserted every row was a rested order, which was
+    untrue for two of place_maker_sell's three None returns.
     """
     try:
         bid, ask = await engine.get_best_bid_ask(session, product_id)
@@ -1405,6 +1420,7 @@ async def _record_maker_expiry(session, product_id: str, side: str, bot_name: st
                 bot_name=bot_name, product_id=product_id, side=side,
                 wait_seconds=await maker_wait_seconds(),
                 bid_at_expiry=bid, ask_at_expiry=ask,
+                reason=reason, order_rested=order_rested,
                 # Mid at BOTH ends, so drift is one instrument measured
                 # twice. Anchoring on the bid and resolving on the mid would
                 # book half the spread as a move the market never made.
@@ -1446,6 +1462,28 @@ async def _resolve_maker_expiries(session):
             prices = {}
             touched = 0
             for row in rows:
+                # A ROW THAT NEVER PLACED AN ORDER HAS NOTHING TO RESOLVE.
+                #
+                # The whole measurement is "would this order have filled had
+                # it been left to rest?" - which is not a question about a
+                # cycle where no order was ever created. Retired here rather
+                # than filtered out of the scan, because retiring costs no
+                # book read and DRAINS the backlog, while filtering would
+                # leave these rows unresolved forever.
+                #
+                # This is a throughput fix as much as a correctness one. The
+                # scan is oldest-first and 200 rows wide against a backlog
+                # growing by ~2,600 no-order rows a day; left in, they would
+                # consume the whole scan window and the rows the study can
+                # actually use would never be reached, let alone resolved
+                # inside the 8-book-read budget.
+                #
+                # order_rested is None (UNKNOWN) is deliberately NOT retired:
+                # those rows predate the column and may well have been real
+                # rests. An unknown is not a no.
+                if row.order_rested is False:
+                    row.resolved_at = now
+                    continue
                 age = (now - row.expired_at).total_seconds() if row.expired_at else 0
                 # Past the final horizon with gaps still open, this row can
                 # never fill them - a restart or an unreadable book cost it
@@ -1500,20 +1538,63 @@ async def get_maker_expiry_drift() -> dict:
         async with get_session_factory()() as db:
             # Bounded for the same reason summary() is: this is served in a
             # live status payload and must not grow into a slow query.
+            # TWO QUERIES, ON PURPOSE.
+            #
+            # `recent` is the honest mix of what is being written lately, and
+            # is what the excluded counts are reported from. `rows` is the
+            # study sample and admits ONLY rows where an order actually
+            # rested, because the question this table exists to answer -
+            # should a resting rung be given longer? - is meaningless for a
+            # cycle where nothing was ever on the book.
+            #
+            # Filtering in SQL rather than in Python because a single capped
+            # query would starve: ALGO and QNT were writing ~2,600 no-order
+            # rows a day between them, so the 5,000-row window would have
+            # held almost no usable rows within about two days while still
+            # reporting a confident mean.
+            recent = (await db.execute(
+                select(GridMakerExpiry)
+                .order_by(GridMakerExpiry.expired_at.desc())
+                .limit(5000))).scalars().all()
             rows = (await db.execute(
                 select(GridMakerExpiry)
+                .where(GridMakerExpiry.order_rested.is_(True))
                 .order_by(GridMakerExpiry.expired_at.desc())
                 .limit(5000))).scalars().all()
     except Exception as e:
         return {"available": False, "error": f"{type(e).__name__}: {e}"}
-    if not rows:
+    if not recent:
         return {"available": False, "expiries": 0,
-                "note": "no post-only order has expired unfilled yet"}
+                "note": "no maker-only cycle has ended unfilled yet"}
 
-    out = {"available": True, "expiries": len(rows),
-           "buy": sum(1 for r in rows if r.side == "buy"),
-           "sell": sum(1 for r in rows if r.side == "sell"),
+    _no_order = sum(1 for r in recent if r.order_rested is False)
+    _unknown = sum(1 for r in recent if r.order_rested is None)
+    out = {"available": True,
+           # Counted over the recent window, not the study sample, so the
+           # denominator is never quietly the filtered number.
+           "expiries": len(recent),
+           "buy": sum(1 for r in recent if r.side == "buy"),
+           "sell": sum(1 for r in recent if r.side == "sell"),
+           "sample": len(rows),
+           "excluded_no_order_placed": _no_order,
+           "excluded_unknown_whether_rested": _unknown,
+           "sample_is": (
+               "only cycles where an order was really on the book and nobody "
+               "crossed it. A cycle that never placed an order cannot say "
+               "whether resting longer would have helped, and counting it as "
+               "a zero-benefit sample would drag every mean toward nothing."),
            "horizons": {}}
+    if not rows:
+        # Said out loud rather than left to read as a quiet zero: an empty
+        # sample here is UNKNOWN, not a finding, and right after this column
+        # shipped it is simply the whole history sitting in the unknown
+        # bucket because nothing before it recorded the fact.
+        out["sample_note"] = (
+            f"no row in this window is confirmed to have rested "
+            f"({_no_order} placed no order, {_unknown} predate the "
+            f"order_rested column and are UNKNOWN). Every verdict below is "
+            f"withheld until confirmed rows accumulate - this is a missing "
+            f"measurement, not a negative result.")
     for _sec, tag in _EXPIRY_HORIZONS:
         vals = [getattr(r, f"cancel_benefit_{tag}_pct") for r in rows
                 if getattr(r, f"cancel_benefit_{tag}_pct") is not None]
@@ -7882,12 +7963,35 @@ async def _per_coin_execution() -> dict:
                     e["filled"] += 1
             for row in (await db.execute(select(GridMakerExpiry))).scalars().all():
                 if row.expired_at and row.expired_at >= epoch and row.product_id:
-                    e = out.setdefault(row.product_id, {"filled": 0, "expired": 0, "completed": 0})
-                    e["expired"] += 1
+                    e = out.setdefault(row.product_id, {"filled": 0, "expired": 0,
+                                                        "completed": 0, "no_order": 0})
+                    # AN EXPIRY IS ONLY AN ATTEMPT IF SOMETHING WAS ATTEMPTED.
+                    #
+                    # Every row used to count here, and `attempted` below is
+                    # filled + expired. So a coin that placed no orders at all
+                    # showed thousands of attempts - ALGO and QNT between them
+                    # were adding ~2,600 a day - and the funnel read as a fleet
+                    # working hard and getting no fills, when the truth was
+                    # that no order was ever sent. That is the opposite
+                    # diagnosis, and it is the one number the owner reads to
+                    # find the bottleneck.
+                    #
+                    # UNKNOWN (None) still counts as an attempt: those rows
+                    # predate order_rested and may well have been real rests.
+                    # Only a confirmed False is excluded.
+                    if row.order_rested is False:
+                        e["no_order"] += 1
+                    else:
+                        e["expired"] += 1
     except Exception as e:
         log.debug(f"[GRID] per-coin execution counts unavailable: {type(e).__name__}: {e}")
         return {}
     for e in out.values():
+        # Kept as filled + expired. It does not fold in no_order, because a
+        # cycle that never placed an order is not an attempt that failed -
+        # it is an attempt that never happened, and the two want different
+        # fixes. Reported alongside so it is visible rather than deleted.
+        e.setdefault("no_order", 0)
         e["attempted"] = e["filled"] + e["expired"]
     return out
 

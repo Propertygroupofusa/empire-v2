@@ -9336,6 +9336,7 @@ async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 2
         if bid and ask and bid > 0:
             spread_pct = round((ask - bid) / bid * 100, 4)
         stamp = getattr(r, "expired_at", None)
+        rested = getattr(r, "order_rested", None)
         out.append({
             "id": r.id,
             "bot_name": r.bot_name,
@@ -9347,11 +9348,25 @@ async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 2
             "spread_pct_at_expiry": spread_pct,
             "price_at_expiry": getattr(r, "price_at_expiry", None),
             "expired_at": stamp.isoformat() + "Z" if stamp else None,
+            "reason": getattr(r, "reason", None),
+            "order_rested": rested,
         })
         key = (r.product_id, r.side)
         agg = per_product.setdefault(key, {"product_id": r.product_id, "side": r.side,
-                                           "count": 0, "newest": None, "oldest": None})
+                                           "count": 0, "rested": 0, "no_order_placed": 0,
+                                           "unknown_whether_rested": 0,
+                                           "newest": None, "oldest": None})
         agg["count"] += 1
+        # THREE BUCKETS, NOT TWO. A row that never placed an order is not a
+        # weak version of a rung that rested and went untaken; it is a
+        # different event with a different fix, and before this split both
+        # were counted as "tried and failed to sell".
+        if rested is True:
+            agg["rested"] += 1
+        elif rested is False:
+            agg["no_order_placed"] += 1
+        else:
+            agg["unknown_whether_rested"] += 1
         iso = stamp.isoformat() + "Z" if stamp else None
         if iso:
             if agg["newest"] is None or iso > agg["newest"]:
@@ -9370,11 +9385,16 @@ async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 2
         "truncated": len(out) >= limit,
         "by_product_and_side": summary,
         "expiries": out,
-        "a_row_is": ("one post-only order cancelled with nothing behind it - the "
-                     "slice was HELD rather than sold at the taker leg. Repeated "
-                     "sell rows on one product mean that branch has been trying "
-                     "and failing to sell, which is a different fact from having "
-                     "nothing worth selling."),
+        "a_row_is": ("one maker-ONLY cycle that ended without a trade - the slice "
+                     "was HELD rather than sold at the taker leg. READ order_rested "
+                     "BEFORE READING THE COUNT: true means an order really sat on "
+                     "the book and nobody crossed it; false means no order was ever "
+                     "created (usually the coin is reserved by a resting order, or "
+                     "the branch holds less than one tradeable unit); null means "
+                     "UNKNOWN, which covers every row written before the column "
+                     "existed. A bare count mixes all three and was read once as "
+                     "'that branch has been trying and failing to sell' when in "
+                     "fact it had never placed an order at all."),
         "an_empty_result_is": ("UNKNOWN, not a pass. No rows is equally consistent "
                                "with no sell having been attempted. Read it beside "
                                "the branch's distance past its own sell trigger."),

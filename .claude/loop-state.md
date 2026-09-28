@@ -177,6 +177,15 @@ does not.
 
 ## Retractions — carry forward until stale
 
+**A maker-expiry row count is not evidence that orders existed — nor that they
+didn't.** Rows were written on all three None paths, so the 441 QNT / 429 ALGO
+counts cannot by themselves support "orders that never existed". That
+conclusion rests on the direct balance reads (ALGO available 0.046389 of
+1134.346389, XLM 0.0 of 1980.766, QNT dust) and stands on those. The row
+counts do not add to it. `order_rested` makes the split measurable from the
+next rows onward; every row written before then is NULL = UNKNOWN, not zero.
+
+
 1. Artifact v1's 0.1183%/day "professional band" claim — **withdrawn**, 26
    days of profit over one instant's denominator.
 2. `/edge-rate`'s first answer, 0.9519%/day from $4.30 over 0.04 days —
@@ -376,12 +385,22 @@ reminder, not a trading task. Do not absorb it, do not act on it.
 
 ## Worth building next, in order
 
-1. Read the first live output of e1221eb / 0af01f1 / cba0fb4. Look for
+1. **PARTLY DONE.** Railway logs are not readable from the container, so
+   this is being read through endpoints instead. The dashboard prefix is
+   `/api/trading-dashboard` — a bare `/grid-status/...` 404s, and that 404
+   is NOT evidence of a failed deploy. `/health` reports the serving commit.
+   Still to read: 
    "NO MAKER SELL PLACED", "REFUSING to sell", "sell filled X of Y — PARTIAL",
    and "SOLD X ... could NOT write the slice back after 3 attempts" (report
    that one loudly).
-2. Give `GridMakerExpiry` a nullable `reason` column so `/maker-expiries` can
-   split the counts.
+2. ~~Give `GridMakerExpiry` a nullable `reason` column so `/maker-expiries`
+   can split the counts.~~ **DONE** — and it was bigger than a label. See
+   "A row is not an order" below. Shipped with `reason` AND a structural
+   `order_rested` flag, a partitioned study, and a resolver that drains
+   no-order rows. Follow-up still open: `grid_buy` sets
+   `outcome_out["cause"] = order_outcome.MAKER_EXPIRED` for every None
+   reason, including the ones where no order was placed — a third consumer
+   of the same conflation, left alone because other code branches on it.
 3. Check every other `unreadable` entry by direct balance read.
 4. Watch free cash. A second unexplained outflow is report-loudly.
 5. Read the unrealized formula — confirm a phantom rung inflates it.
@@ -398,6 +417,45 @@ reminder, not a trading task. Do not absorb it, do not act on it.
 15. None of the new endpoints has a dashboard surface.
 
 ## Standing lessons
+
+**Four consumers, one false premise.** The same conflation reached four
+places, and the fourth was the worst: `_per_coin_execution` computes
+`attempted = filled + expired` from every `GridMakerExpiry` row, so ALGO and
+QNT were adding ~2,600 phantom attempts a day to the funnel the owner reads
+to find the bottleneck. It showed a fleet trying hard and not filling; the
+truth was no order was ever sent. **When a wrong fact is found, grep for
+every reader of it before calling the fix done** — the model docstring, the
+recorder docstring, the study, the resolver backlog, the funnel counts and one
+test all rested on it.
+
+**A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
+"one post-only order that rested its whole window". `_record_maker_expiry` was
+called on all three of `place_maker_sell`'s None returns, and two of those
+never create an order. So the table that exists to answer *"should a resting
+rung be given longer?"* was being filled with cycles where nothing ever
+rested — at ~2,600/day from ALGO and QNT alone, against a 5,000-row study
+window, which is days from a confident mean computed entirely off non-events.
+Three separate places asserted the false claim: the model docstring, the
+recorder's docstring, and a test that matched on the docstring text and so
+went red when the truth was written down. **Where a comment states a
+precondition, check the call sites against it rather than trusting it — and
+never let a test assert a docstring.**
+
+**Prefer a structural flag to a readable reason.** The fix carries both:
+`reason` (the human sentence) and `order_rested` (True/False/NULL). A study
+that decided what it was measuring by matching on `reason` text would be one
+reworded log line away from silently reclassifying its whole sample.
+
+**Filtering junk out of a capped query is not enough — drain it.** The
+resolver scans oldest-first, 200 rows wide, 8 book reads per cycle, over
+`resolved_at IS NULL`. Excluding no-order rows from the *study* while leaving
+them in the *backlog* would have meant the scan window never reached a usable
+row. They are now retired on sight at zero book-read cost.
+
+**A 404 is not a failed deploy.** Three endpoints read as gone before the
+prefix (`/api/trading-dashboard`) turned out to be the whole story. Check
+`/health`'s `commit` field before concluding anything about what is serving.
+
 
 - An unknown balance can never generate an order. Accounting and inventory
   gates come before speed.

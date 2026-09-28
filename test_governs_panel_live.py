@@ -220,12 +220,89 @@ ok("four horizons, not one",
 ok("every resolved column is nullable, so a row is usable while filling in",
    MODELS.split("class GridMakerExpiry")[1].split("\nclass ")[0].count("nullable=True") >= 12)
 
-ok("it is anchored only where maker-only actually cancelled",
-   '_record_maker_expiry(session, product_id, "buy"' in BOT
-   and '_record_maker_expiry(session, product_id, "sell"' in BOT)
+# ANCHORED ON THE TREE, NOT ON THE CALL'S SPELLING.
+#
+# These two checks used to match the literal text
+# '_record_maker_expiry(session, product_id, "buy"'. That broke the moment
+# the call grew keyword arguments and wrapped across lines - a rename of
+# nothing, a reformat of one call, and the guard goes quiet or red for a
+# reason that has nothing to do with what it protects.
+#
+# They also asserted a claim that turned out to be FALSE: the docstring said
+# the recorder fired "only where maker-only actually cancelled", when in
+# fact it fired on all three of place_maker_sell's None returns, two of
+# which never place an order. The test was encoding the wrong belief, so it
+# went red when the belief was corrected. What is asserted now is the part
+# that was always true and always mattered.
+import ast as _ast
+_GRID_TREE = _ast.parse(BOT)
+
+
+def _fn(name):
+    for _n in _ast.walk(_GRID_TREE):
+        if isinstance(_n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and _n.name == name:
+            return _n
+    return None
+
+
+def _rec_calls(node):
+    return [c for c in _ast.walk(node)
+            if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+            and c.func.id == "_record_maker_expiry"]
+
+
+_all_rec = _rec_calls(_GRID_TREE)
+_buy_fn, _sell_fn = _fn("grid_buy"), _fn("grid_sell")
+
+ok("it is anchored on exactly the two maker-only paths",
+   len(_all_rec) == 2
+   and _buy_fn is not None and len(_rec_calls(_buy_fn)) == 1
+   and _sell_fn is not None and len(_rec_calls(_sell_fn)) == 1,
+   f"found {len(_all_rec)} call sites in the module")
+
+
+def _sides(node):
+    out = []
+    for c in _rec_calls(node or _GRID_TREE):
+        for a in c.args:
+            if isinstance(a, _ast.Constant) and a.value in ("buy", "sell"):
+                out.append(a.value)
+        for k in c.keywords:
+            if k.arg == "side" and isinstance(k.value, _ast.Constant):
+                out.append(k.value.value)
+    return out
+
+
+ok("each side is recorded from its own leg",
+   _sides(_buy_fn) == ["buy"] and _sides(_sell_fn) == ["sell"])
+
+
+def _under_maker_only(fn):
+    """True when EVERY call sits inside an `if ... is_maker_only_active()`
+    test. Stated as 'never outside' rather than 'appears inside', because a
+    guard that only looks for one correct instance passes a mutant that adds
+    a second, wrong one beside it."""
+    if fn is None:
+        return False
+    guarded = []
+    for n in _ast.walk(fn):
+        if isinstance(n, _ast.If):
+            cond = _ast.dump(n.test)
+            if "is_maker_only_active" in cond:
+                guarded.extend(id(c) for c in _rec_calls(n))
+    return bool(_rec_calls(fn)) and all(id(c) in guarded for c in _rec_calls(fn))
+
+
 ok("NOT on the maker-first path, where a market order still traded",
-   BOT.count('_record_maker_expiry(session, product_id, "') == 2,
-   "an order that fell back to market DID trade; it has no 'what did we miss'")
+   _under_maker_only(_buy_fn) and _under_maker_only(_sell_fn),
+   "an order that fell back to market DID trade; it has no 'what did we "
+   "miss'. Every anchor must sit under the maker-ONLY branch, which is the "
+   "branch with no fallback behind it.")
+
+ok("and every anchor states whether an order was ever really on the book",
+   all(any(k.arg == "order_rested" for k in c.keywords) for c in _all_rec),
+   "a row that cannot say this was being fed into a study about how long "
+   "orders should rest, where it is not weak evidence but none")
 ok("mid price at BOTH ends, so the spread is not booked as a move",
    "(bid + ask) / 2.0" in REC and "(bid + ask) / 2.0" in RES)
 

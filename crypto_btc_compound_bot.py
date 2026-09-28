@@ -1287,6 +1287,12 @@ async def _place_maker_order(session, order: dict, wait_seconds: int):
     ever left behind for a caller's fallback to double up on."""
     path = "/api/v3/brokerage/orders"
     product_id = order.get("product_id")
+    if product_id:
+        # Clear first. A verdict left over from a previous cycle read back as
+        # this call's fact is the same error as a stale balance: it is not
+        # this order's answer, so absent (UNKNOWN) is the correct state until
+        # one of the returns below sets it.
+        _last_order_rested.pop(product_id, None)
     try:
         async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path),
                                 json=order, timeout=15) as r:
@@ -1294,10 +1300,18 @@ async def _place_maker_order(session, order: dict, wait_seconds: int):
             if r.status not in (200, 201) or not resp.get("success"):
                 reason = _describe_order_rejection(resp)
                 log.info(f"[BTC-COMPOUND] {product_id}: maker order not accepted ({reason}) - caller will fall back")
+                if product_id:
+                    # Refused outright. Nothing rested; post_only rejection is
+                    # the venue declining to create the order at all.
+                    _last_order_rested[product_id] = False
                 return None
             order_id = resp["success_response"]["order_id"]
     except Exception as e:
         log.warning(f"[BTC-COMPOUND] {product_id}: maker order placement failed: {type(e).__name__}: {e}")
+        # Deliberately NOT False. The POST may have reached Coinbase and
+        # created an order before the connection broke - a gap is not a zero,
+        # and claiming "nothing rested" here could be flatly untrue. Left
+        # absent so it reads as UNKNOWN.
         return None
 
     fill = await _await_fill(session, order_id, wait_seconds)
@@ -1311,7 +1325,15 @@ async def _place_maker_order(session, order: dict, wait_seconds: int):
             log.info(f"[BTC-COMPOUND] {product_id}: maker order filled as it was being cancelled - keeping the real fill")
             return late
         log.info(f"[BTC-COMPOUND] {product_id}: maker order did not fill in {wait_seconds}s - cancelled, falling back")
+        if product_id:
+            # THE ONLY CASE THE EXPIRY STUDY IS ABOUT. A real order sat on the
+            # book for its whole window and no counterparty crossed it, so
+            # "would it have filled had we waited longer?" is a question the
+            # price history can actually answer.
+            _last_order_rested[product_id] = True
         return None
+    if product_id:
+        _last_order_rested[product_id] = True
     return fill
 
 
@@ -1322,20 +1344,29 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
 
     Applies the same real-balance and minimum-size clamps place_market_buy
     already does - a maker order is still real money leaving the account."""
+    # Every return below this line means NO ORDER WAS CREATED. The sell side
+    # carried the identical defect until the caller started asking why, and
+    # the asymmetry was the tell: one path recorded its reason and its mirror
+    # fell through silently. Marking them keeps a buy-side expiry row from
+    # claiming a rung rested when none was ever placed.
+    _last_order_rested.pop(product_id, None)
     real_usd, _ = await get_usd_balance(session)
     if real_usd is not None and real_usd < usd_amount:
         usd_amount = real_usd
     if usd_amount < MIN_TRADE_USD:
+        _last_order_rested[product_id] = False
         return None
 
     bid, ask = await get_best_bid_ask(session, product_id)
     if bid is None:
+        _last_order_rested[product_id] = False
         return None
     decimals = await get_product_size_decimals(session, product_id)
     qty = usd_amount / bid
     factor = 10 ** decimals
     qty = math.floor(qty * factor) / factor
     if qty <= 0:
+        _last_order_rested[product_id] = False
         return None
 
     order = {
@@ -1357,6 +1388,9 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     back). Applies the same real-balance and precision clamps
     place_market_sell already does."""
     base_currency = product_id.split("-")[0]
+    # Cleared at the top so no later reader can mistake a previous cycle's
+    # verdict for this one's; every return below sets its own.
+    _last_order_rested.pop(product_id, None)
     real_balance, _bal_err = await get_asset_balance(session, base_currency)
     if real_balance is None:
         # Same rule, no exception. This is the opportunistic maker path and
@@ -1366,6 +1400,7 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
             f"[GRID] {product_id}: REFUSING to rest a maker sell - the real "
             f"{base_currency} balance could not be read ({_bal_err}). Not "
             f"placed; retried next cycle.")
+        _last_order_rested[product_id] = False
         return None
     if real_balance < qty:
         qty = real_balance
@@ -1377,8 +1412,13 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         # message for a None return is "maker sell did not fill", and
         # "did not fill" is false here - no order ever existed to fill.
         # That wording sent a four-hour investigation after a resting
-        # order that was never resting: 441 QNT rows and 429 ALGO rows
-        # in one day, every one of them this branch, not a patient bid.
+        # order that was never resting: 441 QNT rows and 429 ALGO rows in
+        # one day. Attributing all of them to THIS branch was an inference
+        # from the balances (ALGO available 0.046 of 1134.3, QNT dust), not
+        # a measurement - the rows themselves could not say. GridMakerExpiry
+        # now carries order_rested, so the split is read rather than
+        # reasoned; until those rows accumulate, the attribution is a strong
+        # inference and nothing more.
         log.warning(
             f"[GRID] {product_id}: NO MAKER SELL PLACED - after clamping to "
             f"the available {base_currency} balance ({real_balance:.10f}) and "
@@ -1389,6 +1429,7 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         _last_order_error[product_id] = (
             f"nothing sellable: available {real_balance:.10f} floors to 0 at "
             f"{decimals} decimals")
+        _last_order_rested[product_id] = False
         return None
 
     bid, ask = await get_best_bid_ask(session, product_id)
@@ -1398,6 +1439,7 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
             f"[GRID] {product_id}: NO MAKER SELL PLACED - the order book was "
             f"unreadable, so there is no ask to rest at. No order created.")
         _last_order_error[product_id] = "order book unreadable: no ask"
+        _last_order_rested[product_id] = False
         return None
 
     order = {
@@ -1414,6 +1456,24 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
 
 
 _last_order_error = {}
+
+# DID AN ORDER ACTUALLY REST? Keyed by product_id, set on every return path
+# of the maker helpers below. True means Coinbase minted an order id and the
+# order sat on the book for its whole window before being cancelled. False
+# means no order was ever created. ABSENT means UNKNOWN - and absent is a
+# real third answer here, not a synonym for False.
+#
+# This exists because GridMakerExpiry rows were being written on all three
+# of place_maker_sell's None paths, two of which never place an order. The
+# expiry table is the evidence base for "should a resting rung be given
+# longer?", so a row where nothing rested is not a weak data point in that
+# study - it is not a data point at all, and at ~2,600 such rows a day from
+# ALGO and QNT alone it was on course to be the entire 5,000-row window.
+#
+# A separate structural flag rather than matching on _last_order_error's
+# text, because a guard that reads a human-readable string is one wording
+# change away from silently reclassifying every row.
+_last_order_rested = {}
 
 
 def _describe_order_rejection(resp: dict) -> str:

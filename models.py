@@ -1351,8 +1351,21 @@ class RegimeCrossing(Base):
 
 
 class GridMakerExpiry(Base):
-    """One post-only order that rested its whole window, filled nothing, and
-    was cancelled with NO market order behind it.
+    """One maker-ONLY cycle that ended without a sale, anchored so the price
+    that followed can be measured.
+
+    THE HEADLINE USED TO SAY "one post-only order that rested its whole
+    window". That was false for two rows in three. _record_maker_expiry is
+    called on every None return from place_maker_sell, and two of those
+    three returns never create an order at all - nothing sellable after the
+    balance clamp, or an unreadable book. ALGO and QNT alone were writing
+    ~2,600 such rows a day, so the 5,000-row study window was days away from
+    being made entirely of orders that never existed.
+
+    order_rested is the fix. Only rows with order_rested True are rows this
+    study can speak about; False means no order was created; NULL means
+    UNKNOWN, which covers every row written before the column existed and is
+    a third answer, never a synonym for False.
 
     This is the ledger of the trades that did not happen, and it exists
     because the trades that did happen cannot answer the question it asks.
@@ -1393,6 +1406,24 @@ class GridMakerExpiry(Base):
     ask_at_expiry = Column(Float, nullable=True)
     price_at_expiry = Column(Float)
     expired_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # WHAT ENDED, AND WHETHER ANYTHING WAS EVER ON THE BOOK.
+    #
+    # reason is the human-readable why, straight from the engine's own record
+    # of the failure. order_rested is the machine-readable one, and they are
+    # two columns rather than one because a study that decides what it is
+    # measuring by matching on a sentence is one reworded log line away from
+    # silently reclassifying its whole sample.
+    #
+    # order_rested: True  - an order id was minted, the order sat for its
+    #                       whole window, nobody crossed it. The only rows
+    #                       "should the rung have rested longer?" applies to.
+    #               False - no order was ever created.
+    #               NULL  - UNKNOWN. Pre-existing rows, and the one live path
+    #                       that genuinely cannot tell (the POST raised after
+    #                       it may already have reached the venue).
+    reason = Column(String, nullable=True)
+    order_rested = Column(Boolean, nullable=True, index=True)
 
     # Many horizons rather than one, because "too aggressive" and
     # "protective" can be the same row at different distances: a fill that
