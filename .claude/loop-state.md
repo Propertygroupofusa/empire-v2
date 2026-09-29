@@ -494,6 +494,42 @@ Two things, both new:
 written before the column existed. Zero rows in this window confirm a sell
 ever rested.
 
+
+**CORRECTION — "ABOVE REFERENCE" IS THE WRONG BAR, measured 03:32Z.** The
+table above ("Only 5 of 23 branches are ABOVE their reference") used the wrong
+threshold. A branch does not sell at its reference price; it sells at
+`reference_price * (1 + grid_pct)`. Against the actual trigger, **only 2 of 23
+branches are ready**, and both are still exactly the inventory-blocked ones:
+
+| branch | vs **trigger** | (vs reference, the old bar) | why it cannot sell |
+|---|---:|---:|---|
+| QNT | **+33.40%** | +37.4% | holds dust, floors to 0 at 3 dp |
+| ALGO | **+4.73%** | +7.9% | 1134.3 of 1134.35 LOCKED |
+| ONDO | −0.90% | +2.1% | below its trigger |
+| BTC | −1.19% | +0.27% | below its trigger |
+| ETH | −1.42% | +0.44% | below its trigger |
+| XLM | −1.71% | +1.23% | below its trigger |
+| TON | −2.46% | +0.46% | below its trigger |
+
+**This does not change the conclusion, it strengthens it:** every branch that
+can actually sell right now is one that cannot reach its coin. And it retires
+the TON/BTC line above — they were described as "parked under the 1.0% net
+floor", but they are not even at their grid trigger, so the net floor was never
+the binding constraint for them.
+
+**XLM answered, not assumed.** XLM vanished from `orders-not-placed` inside a
+2h window despite being fully locked. Cause: it fell below its own sell trigger
+(price 0.226314, reference 0.223554, grid 3.00% → trigger 0.230261), so it stops
+attempting and therefore stops being blocked. **A branch disappearing from the
+blocked ledger can mean it got fixed OR that it stopped trying — check which.**
+
+**Lesson: I measured against the wrong denominator for hours and the sweep
+instruction encoded it.** The per-pass sweep line already said to compute
+`current_price / (reference_price * (1 + grid_pct)) - 1` — the right formula —
+and the reference table was built from a different, looser one. **When a stored
+figure and the instruction that produces it disagree, the figure is the one to
+distrust.**
+
 ## Grid config
 
 3 levels × 2.5% spacing · real round-trip fee 1.5% · effective 0.7%
