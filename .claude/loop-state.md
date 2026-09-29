@@ -685,6 +685,54 @@ exactly ONE crypto mode at a time — currently `grid_fleet`. Dead code.
 sites) and `crypto_btc_compound_bot`'s own loop (2). Both are dormant under
 `grid_fleet`. Tag them BEFORE changing `CRYPTO_STRATEGY_MODE`, not after.
 
+
+**THE PARKED-SELL PATH FIRED FOR THE FIRST TIME — 04:10Z and 04:15Z, both
+PROFITABLE.** Book 133 → 135.
+
+| closed | coin | pnl | entry → exit | reason |
+|---|---|---:|---|---|
+| 04:10:52Z | LINK-USD | **+$1.31** | 14.343 → 14.667 | `parked_sell` |
+| 04:15:34Z | TON-USD | **+$0.83** | 1.533 → 1.5595 | `parked_sell` |
+
+**CORRECTION — and this corrects my own correction from 03:32Z, which was
+wrong.** I wrote: *"it retires the TON/BTC line — they were described as
+parked under the 1.0% net floor, but they are not even at their grid trigger,
+so the net floor was never the binding constraint for them."* That conflated
+two different bars. **There are TWO sell routes, not one:**
+
+1. **Grid trigger** — `price >= reference_price * (1 + grid_pct)`. Measured
+   against the BRANCH REFERENCE.
+2. **Parked sell** — for a branch that is full (`len(slices) >= num_levels`)
+   or adopted-only: the best sellable slice's net P&L over **its own basis**
+   must be `>= GRID_PARKED_MIN_NET_PCT` (1.0%). It does not look at the
+   reference at all. `crypto_grid_bot.py:6653`. The code comment says it was
+   built for eleven branches that could not reach the reference trigger.
+
+TON sold via route 2 at +$0.83 while sitting **−2.89% below its grid
+trigger**. So the ORIGINAL description ("parked under the 1.0% net floor")
+was right, my correction was wrong, and the 1.0% floor was exactly the
+binding constraint — TON cleared it. **Do not "fix" this back.**
+
+**Both routes, measured 04:22Z:**
+
+- **17 of 23 branches are PARKED** (full or adopted-only) and therefore use
+  route 2, not route 1.
+- **3 are above their grid trigger**: QNT +41.43%, ALGO +5.00%, ONDO +0.70%.
+- **Of the parked ones, only 2 have a slice ≥ +1.0% GROSS over entry** (an
+  UPPER BOUND — fees not applied, so the net figure is lower): LINK +2.67%,
+  QNT +51.55%.
+
+**The conclusion is unchanged and now rests on both bars instead of one:**
+very little is in profit by either route, and the two branches best placed on
+either one — QNT (+51.55% over entry, +41.43% over trigger) and ALGO (+5.00%
+over trigger) — are still exactly the inventory-blocked pair. QNT holds dust;
+ALGO is locked.
+
+**Lesson: I corrected a right statement into a wrong one by checking it
+against one bar when the system has two.** Before retiring an explanation,
+find the code path it names — the parked gate was 130 lines from the trigger
+computation I did read.
+
 ## Grid config
 
 3 levels × 2.5% spacing · real round-trip fee 1.5% · effective 0.7%
