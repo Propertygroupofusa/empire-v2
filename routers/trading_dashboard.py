@@ -8729,42 +8729,32 @@ async def grid_invariants_endpoint():
 
                 # THE WALLET MAP FOR THIS CHECK IS NOT census()'s holdings.
                 #
-                # It used to be, and the asset-balance endpoint's own
-                # docstring already said why that is wrong: census drops
-                # assets it cannot price and rolls anything under the dust
-                # threshold into an unnamed count. A coin absent from that
-                # list is classified UNREADABLE rather than short - correct
-                # defence given the input - so the three LARGEST shortfalls
-                # in the fleet sat in a footnote while the headline named
-                # only the six smaller ones. QNT-USD alone was $149.54
-                # short, more than any coin in that headline.
+                # census drops assets it cannot price and rolls anything
+                # under the dust threshold into an unnamed count. A coin
+                # absent from that list is classified UNREADABLE rather than
+                # short - correct defence given the input - so the three
+                # LARGEST shortfalls in the fleet sat in a footnote while
+                # the headline named only the six smaller ones. QNT-USD
+                # alone was $149.54 short, more than any coin in it.
                 #
-                # fetch_balances is unfiltered by price and dust, and the
-                # per-currency read covers the one thing it still cannot
-                # express: a real zero, which `total > 0` drops. That is
-                # exactly the case that matters most - a branch claiming
-                # units of a coin the account holds NONE of.
-                _bal = await account_census.fetch_balances(_s)
-                _assets = sorted({str(p).split("-")[0].upper()
-                                  for p in (tracked or {})})
-                _direct = {}
-                for _a in _assets:
-                    if _a in (_bal.get("held") or {}):
-                        continue          # the map already speaks for it
-                    if crypto_btc_compound_bot_module is None:
-                        # Said plainly rather than surfacing as an
-                        # AttributeError from the except below: the engine
-                        # not importing is a different fact from the venue
-                        # not answering, and both end as "unreadable".
-                        _direct[_a] = (None, "engine module not importable")
-                        continue
-                    try:
-                        _direct[_a] = await crypto_btc_compound_bot_module.get_asset_balance(_s, _a)
-                    except Exception as _e:
-                        # Absent, not zero. The helper leaves it out and the
-                        # check reports it unreadable, which is the truth.
-                        _direct[_a] = (None, f"{type(_e).__name__}: {_e}")
-                wallet = account_census.wallet_units_for(_bal, _assets, _direct)
+                # ONE ACCOUNT READ, NOT FIVE. The first version of this fix
+                # called fetch_balances again and then get_asset_balance per
+                # missing asset - and get_asset_balance paginates the WHOLE
+                # account list to find one currency, so it turned a single
+                # read into about five, got rate-limited, and left this
+                # check reporting UNKNOWN with no positions at all. Blind is
+                # worse than under-reported.
+                #
+                # fetch_balances already sees every account including the
+                # ones holding exactly zero; it was discarding them. They
+                # now come back in held_including_zero at no extra cost, and
+                # a real zero is exactly what the filtered map could not
+                # express.
+                # The census already made this read; it now carries the
+                # unfiltered map through, so this costs no request at all.
+                _assets = sorted({str(pid).split("-")[0].upper()
+                                  for pid in (tracked or {})})
+                wallet = account_census.wallet_units_for(census, _assets)
             results.append(inv.coin_tracked_is_held(tracked, wallet, prices))
 
             # The CAUSE beside the symptom. coin_tracked_is_held sees a

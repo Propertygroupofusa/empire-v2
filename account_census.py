@@ -120,7 +120,7 @@ async def fetch_balances(session) -> dict:
     # The venue is the authority on this and it already says so per
     # account. Both figures are reported; `held` keeps its old meaning so
     # no existing caller changes behaviour.
-    held, available = {}, {}
+    held, available, held_all = {}, {}, {}
     for a in accounts:
         cur = a.get("currency")
         if not cur:
@@ -134,10 +134,29 @@ async def fetch_balances(session) -> dict:
 
         avail = _f("available_balance")
         total = avail + _f("hold")
+        # EVERY account the venue listed, INCLUDING the ones holding zero.
+        #
+        # `held` below keeps its exact meaning and its `total > 0` filter,
+        # because every existing caller depends on it. This one does not
+        # filter, and that is the whole difference: a currency the venue
+        # lists with a balance of exactly 0.0 is a CONFIRMED ZERO, which is
+        # the largest shortfall a branch can have, and the filtered map
+        # cannot express it. TIA-USD and PRIME-USD were invisible to the
+        # shortfall check for precisely this reason.
+        #
+        # It costs NOTHING: these rows are already in hand and were being
+        # discarded. The first attempt at this fix re-read the account list
+        # once per missing asset instead - and since get_asset_balance
+        # paginates the WHOLE list for one currency, that turned one read
+        # into about five per call, got rate-limited, and left the check
+        # reporting UNKNOWN with no positions at all. Blind is worse than
+        # under-reported.
+        held_all[cur] = held_all.get(cur, 0.0) + total
         if total > 0:
             held[cur] = held.get(cur, 0.0) + total
             available[cur] = available.get(cur, 0.0) + avail
     return {"available": True, "held": held, "available_units": available,
+            "held_including_zero": held_all,
             "pages": pages, "accounts_seen": len(accounts)}
 
 
@@ -164,15 +183,21 @@ def wallet_units_for(balances, assets, direct=None):
       - `total > 0` in fetch_balances, which cannot represent a real zero
         and so hid TIA and PRIME after they went to exactly nothing
 
-    `balances` is fetch_balances()'s result (unfiltered by price or dust).
-    `direct` is {asset: (units, reason)} from a per-currency read, used only
-    for assets the map cannot speak for. A direct read of 0.0 is a CONFIRMED
-    ZERO and lands as 0.0; a failed one stays absent, because an unreadable
-    balance is still not an empty one and that rule is the whole point.
+    `balances` is fetch_balances()'s result. Its `held_including_zero` map
+    is preferred when present: it lists every account the venue reported,
+    including those holding exactly zero, at no extra API cost.
+
+    `direct` is {asset: (units, reason)} from a per-currency read, and is now
+    only a fallback for an older payload without that map. A direct read of
+    0.0 is a CONFIRMED ZERO and lands as 0.0; a failed one stays absent,
+    because an unreadable balance is still not an empty one and that rule is
+    the whole point.
     """
     if not balances or not balances.get("available"):
         return None
-    held = balances.get("held") or {}
+    # Prefer the unfiltered map. `held` drops any account at exactly zero,
+    # which is the single case this function exists to represent.
+    held = balances.get("held_including_zero") or balances.get("held") or {}
     direct = direct or {}
     out = {}
     for asset in assets or ():
@@ -292,6 +317,20 @@ async def census(session, tracked_usd: float = None) -> dict:
         "dust_usd": round(sum(r["usd"] for r in rows if r["usd"] < DUST_USD), 2),
         "dust_assets": sum(1 for r in rows if r["usd"] < DUST_USD),
         "accounts_pages": bal["pages"],
+        # THE UNFILTERED MAP, CARRIED THROUGH.
+        #
+        # Everything above this line is the census's own job - what the
+        # account is WORTH - and to do it it drops unpriced assets and rolls
+        # dust into an unnamed count. That makes `holdings` the wrong input
+        # for "does this account hold X at all", which is a different
+        # question and the one the shortfall check asks.
+        #
+        # Passing this through costs nothing: fetch_balances already
+        # produced it. A caller that needs the honest units map no longer
+        # has to make a SECOND account read to get it - which is what broke
+        # coin_tracked_is_held once, by turning one read into several and
+        # being rate-limited into reporting UNKNOWN.
+        "held_including_zero": bal.get("held_including_zero"),
     }
     # THE WARNING GOES ABOVE THE TOTAL, NOT BESIDE IT. A census that priced
     # half the account and printed a confident number is what produced

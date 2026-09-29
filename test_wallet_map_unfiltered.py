@@ -30,6 +30,7 @@ is still not an empty one, and that rule is the whole point.
 
 Behavioural: the helper is pure over plain dicts.
 """
+import ast
 import sys
 
 failures = []
@@ -47,9 +48,17 @@ import account_census as ac
 import invariants as inv
 
 
-def bal(held, available=True):
+def bal(held, available=True, zeros=None):
+    """A fetch_balances/census payload. `held` is the FILTERED map (accounts
+    with a balance); `zeros` are currencies the venue lists at exactly 0.0,
+    which the filtered map drops and held_including_zero keeps."""
+    all_map = dict(held)
+    for z in (zeros or ()):
+        all_map[z] = 0.0
     return {"available": available, "held": dict(held),
-            "available_units": dict(held), "pages": 1, "accounts_seen": 9}
+            "available_units": dict(held),
+            "held_including_zero": all_map,
+            "pages": 1, "accounts_seen": 9}
 
 
 print("== the map answers for what it can, and only that ==")
@@ -64,19 +73,38 @@ ok("an asset the map cannot speak for and nobody read is ABSENT",
    f"got {m} - inventing a 0.0 here would report a full position as a "
    f"total shortfall, the loudest false alarm available")
 
-# THE CASE THE WHOLE CHANGE EXISTS FOR.
-m = ac.wallet_units_for(bal({"ETH": 0.5}), ["ETH", "TIA"],
-                        direct={"TIA": (0.0, None)})
-ok("a direct read of 0.0 lands as a CONFIRMED ZERO",
+# THE CASE THE WHOLE CHANGE EXISTS FOR, and it must now cost NO extra read:
+# fetch_balances already saw the zero-balance account and was discarding it.
+m = ac.wallet_units_for(bal({"ETH": 0.5}, zeros=["TIA"]), ["ETH", "TIA"])
+ok("a venue-listed ZERO comes through the payload, with no direct read",
    m == {"ETH": 0.5, "TIA": 0.0},
-   f"got {m} - `total > 0` drops a real zero from the map, and a real zero "
-   f"is the MAXIMUM possible shortfall")
+   f"got {m} - `total > 0` drops a real zero from the filtered map, and a "
+   f"real zero is the MAXIMUM possible shortfall")
 
-m = ac.wallet_units_for(bal({"ETH": 0.5}), ["ETH", "TIA"],
+ok("the unfiltered map is PREFERRED over the filtered one",
+   ac.wallet_units_for(bal({"ETH": 0.5}, zeros=["TIA"]), ["TIA"]) == {"TIA": 0.0},
+   "reading `held` here would drop the zero and lose the whole point")
+
+# The direct-read fallback still works for an older payload that has no
+# held_including_zero at all.
+_old_payload = {"available": True, "held": {"ETH": 0.5}}
+m = ac.wallet_units_for(_old_payload, ["ETH", "TIA"], direct={"TIA": (0.0, None)})
+ok("a payload without the unfiltered map still accepts a direct read",
+   m == {"ETH": 0.5, "TIA": 0.0}, f"got {m}")
+
+m = ac.wallet_units_for(_old_payload, ["ETH", "TIA"],
                         direct={"TIA": (None, "HTTP 500")})
 ok("a FAILED direct read leaves the asset absent, never zero",
    m == {"ETH": 0.5},
    f"got {m} - this is the distinction the check depends on")
+
+# AND the venue simply not listing the account at all is still absent:
+# a currency in neither map and with no direct read cannot be called zero.
+m = ac.wallet_units_for(bal({"ETH": 0.5}, zeros=["TIA"]), ["ETH", "TIA", "DOGE"])
+ok("a currency the venue never listed stays ABSENT, not zero",
+   m == {"ETH": 0.5, "TIA": 0.0},
+   f"got {m} - TIA is a confirmed zero, DOGE is an unknown, and collapsing "
+   f"them would report a position nobody can see as a total shortfall")
 
 ok("an unreadable balance sheet gives None, not an empty map",
    ac.wallet_units_for(bal({}, available=False), ["ETH"]) is None,
@@ -111,8 +139,8 @@ ok("and they are NOT counted in the shortfall",
 
 # AFTER: the unfiltered map plus direct reads can express both.
 new_map = ac.wallet_units_for(
-    bal({"ETH": 0.11595757, "QNT": 0.00097323}),
-    ["ETH", "QNT", "TIA"], direct={"TIA": (0.0, None)})
+    bal({"ETH": 0.11595757, "QNT": 0.00097323}, zeros=["TIA"]),
+    ["ETH", "QNT", "TIA"])
 r2 = inv.coin_tracked_is_held(tracked, new_map, prices)
 _short_new = {s["product_id"] for s in (r2.get("short_positions") or [])}
 ok("with the unfiltered map, all three are real shortfalls",
@@ -134,7 +162,8 @@ ok("the reported total grows to include them",
 # is still unreadable, not short.
 r3 = inv.coin_tracked_is_held(
     tracked,
-    ac.wallet_units_for(bal({"ETH": 0.11595757, "QNT": 0.00097323}),
+    ac.wallet_units_for({"available": True,
+                         "held": {"ETH": 0.11595757, "QNT": 0.00097323}},
                         ["ETH", "QNT", "TIA"],
                         direct={"TIA": (None, "timeout")}),
     prices)
@@ -142,6 +171,141 @@ ok("a coin whose direct read FAILED is still unreadable, not short",
    (r3.get("unreadable") or []) == ["TIA-USD"],
    f"got {r3.get('unreadable')} - the fix must not turn every gap into a "
    f"shortfall; that would be the opposite error")
+
+
+print("== the payload that feeds it is actually built that way ==")
+
+# THE GAP THESE CLOSE. Every check above hands wallet_units_for a
+# hand-built payload, so the code that PRODUCES that payload was never
+# exercised - two mutants survived on exactly that: one refiltering the
+# zero rows back out of fetch_balances, one dropping the key from census.
+# A fixture that constructs the thing under test's input is a fixture that
+# cannot test how the input is made.
+import asyncio
+
+
+class _R:
+    def __init__(self, payload):
+        self._p = payload
+        self.status = 200
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self):
+        return self._p
+
+    async def text(self):
+        return ""
+
+
+class _S:
+    def __init__(self, payload):
+        self._p = payload
+
+    def get(self, *a, **k):
+        return _R(self._p)
+
+
+_accounts = {"accounts": [
+    {"currency": "ETH", "available_balance": {"value": "0.5"},
+     "hold": {"value": "0"}},
+    # THE ROW THAT MATTERS: the venue lists it, and it holds exactly zero.
+    {"currency": "TIA", "available_balance": {"value": "0"},
+     "hold": {"value": "0"}},
+], "has_next": False}
+
+# No Coinbase credentials in this container, so the real _auth_headers
+# raises and fetch_balances returns its error payload. Stubbed so the ROW
+# PROCESSING - the part this test is about - actually runs.
+_orig_headers = ac._auth_headers
+ac._auth_headers = lambda *a, **k: {}
+try:
+    _bal_real = asyncio.get_event_loop().run_until_complete(
+        ac.fetch_balances(_S(_accounts)))
+finally:
+    ac._auth_headers = _orig_headers
+
+ok("the stubbed fetch actually reached the row processing",
+   bool(_bal_real.get("available")),
+   f"got {_bal_real} - if this is unavailable the three checks below are "
+   f"vacuous, which is how they first passed against a None")
+
+ok("fetch_balances still filters `held` at total > 0",
+   _bal_real.get("held") == {"ETH": 0.5},
+   f"got {_bal_real.get('held')} - existing callers depend on this meaning")
+ok("but it now ALSO emits every account, zeros included",
+   _bal_real.get("held_including_zero") == {"ETH": 0.5, "TIA": 0.0},
+   f"got {_bal_real.get('held_including_zero')} - these rows were already in "
+   f"hand and were being discarded; a real zero is the largest shortfall a "
+   f"branch can have")
+
+m = ac.wallet_units_for(_bal_real, ["ETH", "TIA"])
+ok("and the two compose end to end", m == {"ETH": 0.5, "TIA": 0.0},
+   f"got {m}")
+
+# census must carry it through, or the router is back to a second read.
+_census_src = None
+for n in ast.walk(ast.parse(open("account_census.py", encoding="utf-8").read())):
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "census":
+        _census_src = ast.get_source_segment(
+            open("account_census.py", encoding="utf-8").read(), n)
+ok("census carries held_including_zero in its payload",
+   _census_src is not None and '"held_including_zero"' in _census_src,
+   "without it the caller must make a SECOND account read to get the honest "
+   "map, which is precisely what got rate-limited")
+
+
+print("== the check costs ONE account read, not five ==")
+
+# THE TEST THAT WOULD HAVE CAUGHT THE REGRESSION I SHIPPED.
+#
+# The first version of this fix called fetch_balances again and then
+# get_asset_balance once per missing asset. get_asset_balance PAGINATES THE
+# WHOLE ACCOUNT LIST to find one currency, so "three extra reads" was really
+# about five full account walks per invariants call. Coinbase rate-limited
+# them, wallet_units_for got an unavailable payload, and coin_tracked_is_held
+# went from FAIL with $471.01 across six positions to UNKNOWN with none.
+#
+# Blind is worse than under-reported, and nothing in the test suite noticed -
+# every check was on the pure helper, none on what the call site costs.
+import ast
+
+ROUTER_SRC = open("routers/trading_dashboard.py", encoding="utf-8").read()
+ROUTER = ast.parse(ROUTER_SRC)
+
+_block = None
+for n in ast.walk(ROUTER):
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        seg = ast.get_source_segment(ROUTER_SRC, n) or ""
+        if "coin_tracked_is_held(" in seg and "grid_inventory_is_free(" in seg:
+            _block = seg
+ok("the invariants endpoint was located", _block is not None)
+
+if _block is not None:
+    sub = ast.parse(_block.strip())
+
+    def _calls(name):
+        return sum(1 for c in ast.walk(sub)
+                   if isinstance(c, ast.Call)
+                   and ((isinstance(c.func, ast.Attribute) and c.func.attr == name)
+                        or (isinstance(c.func, ast.Name) and c.func.id == name)))
+
+    ok("it NEVER calls get_asset_balance", _calls("get_asset_balance") == 0,
+       "that function paginates the entire account list for ONE currency; "
+       "calling it per missing asset is what got rate-limited")
+    ok("it reads the account list at most once",
+       _calls("fetch_balances") + _calls("census") <= 1,
+       f"fetch_balances={_calls('fetch_balances')} census={_calls('census')} - "
+       f"census already performs the read and now carries the unfiltered map "
+       f"through, so a second call buys nothing and costs a request")
+    ok("and it feeds the check the census result, not its holdings list",
+       "wallet_units_for(census" in _block,
+       "census().holdings is the filtered view that hid the three largest "
+       "shortfalls in the first place")
 
 
 print()
