@@ -342,6 +342,69 @@ out = run(d, BASE_SNAP)
 ok("an unavailable realized_edge is a gap, not a quiet pass",
    "realized_edge unavailable" in out, out)
 
+# PARKED_DUST: a branch full on its rungs whose only qualifying slice is too
+# small to matter. Measured live on LINK-USD: 0.01 LINK (fourteen cents) was
+# the sole slice clearing the exit floor, against ~$91 locked in the branch.
+# The escape hatch asked "does any slice clear the floor" and never asked
+# "is selling it worth doing", so the branch reported itself escapable while
+# staying locked.
+d = healthy()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["num_levels"] = 2
+b["slices"] = [
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 0.01, "entry_price": 14.34,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": 0.0134},
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 3.0, "entry_price": 15.21,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": -0.0447},
+]
+out = run(d, BASE_SNAP)
+ok("PARKED_DUST when the only qualifying slice is worth cents", "PARKED_DUST" in out)
+ok("and it contrasts that against what stays locked", "locked in the branch" in out, out)
+
+# The same branch with a REAL qualifying slice is not a finding: this alarm
+# must not fire on every parked branch that happens to have a way out.
+d2 = healthy()
+b2 = d2["/api/trading-dashboard/grid-status"]["branches"][0]
+b2["num_levels"] = 2
+b2["slices"] = [
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 3.0, "entry_price": 14.34,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": 0.0134},
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 3.0, "entry_price": 15.21,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": -0.0447},
+]
+ok("but NOT when that slice is a real position",
+   "PARKED_DUST" not in run(d2, BASE_SNAP))
+
+# And not on a branch that still has room to buy - it is not parked at all.
+d3 = healthy()
+b3 = d3["/api/trading-dashboard/grid-status"]["branches"][0]
+b3["num_levels"] = 9
+b3["slices"] = [
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 0.01, "entry_price": 14.34,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": 0.0134},
+]
+ok("and not on a branch that can still buy", "PARKED_DUST" not in run(d3, BASE_SNAP))
+
+# PARKED_RETRY_LOOP: the escape sell keeps being refused. From outside this
+# looks exactly like a healthy quiet branch, which is why it is read off the
+# feed rather than inferred from the branch looking unchanged.
+d = healthy()
+d["/api/trading-dashboard/live-ops"]["gate"]["data"]["events"] = [
+    {"event_type": "PARKED_SELL_NOFILL", "product_id": "LINK-USD",
+     "created_at": "2026-09-29T18:00:00", "message": "did not fill"},
+    {"event_type": "PARKED_SELL_NOFILL", "product_id": "LINK-USD",
+     "created_at": "2026-09-29T18:01:00", "message": "did not fill"},
+]
+out = run(d, BASE_SNAP)
+ok("PARKED_RETRY_LOOP when an escape sell will not fill",
+   "PARKED_RETRY_LOOP" in out, out)
+ok("and it names the coin", "LINK-USD" in out, out)
+
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]
 out = run(d, BASE_SNAP)

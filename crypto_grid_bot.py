@@ -6976,12 +6976,29 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             slices, price, real_fee_rate, exit_leg_rate, GRID_PARKED_MIN_NET_PCT)
         if _parked_slice is not None:
             _parked_sell = True
+            _notional = (_parked_slice.qty or 0) * (_parked_slice.entry_price or 0)
             log.info(
                 f"[GRID] {branch.bot_name}: parked ({len(slices)} slices / "
                 f"{branch.num_levels} levels - cannot buy), and a slice is "
                 f"+{_pct * 100:.2f}% net of fees. Selling on its own "
                 f"merit rather than waiting for a {grid_pct * 100:.2f}% rise "
                 f"off a reference it will never rebuy from.")
+            # DURABLE, because a protection whose firing cannot be observed is
+            # indistinguishable from one that never fires. The escape hatch is
+            # the only way out of a parked branch, and until now nothing but a
+            # Railway log line said whether it had ever tried. The notional is
+            # recorded with it: a branch whose only qualifying slice is dust
+            # reports itself escapable while staying locked, and that is
+            # invisible unless the size is written down next to the verdict.
+            await _record_gate_decision(
+                branch.bot_name, branch.product_id, "PARKED_SELL",
+                f"+{_pct * 100:.2f}% net on ${_notional:,.2f} of basis "
+                f"({len(slices)}/{branch.num_levels} rungs full)")
+        elif _parked:
+            await _record_gate_decision(
+                branch.bot_name, branch.product_id, "PARKED_NO_EXIT",
+                f"{len(slices)}/{branch.num_levels} rungs full and not one "
+                f"slice clears the {GRID_PARKED_MIN_NET_PCT * 100:.2f}% floor")
 
     # Hoisted so the exit can be NAMED, not just taken. All three entries to
     # this block used to collapse into "stop_loss" or "profit_target", which
@@ -7020,6 +7037,16 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
+            # A parked branch that cannot fill its escape sell is stuck in a
+            # retry loop: the gate passes every cycle, the order does not
+            # fill, and the cycle returns here having done nothing. That is
+            # the same outward shape as a healthy quiet branch, so it is
+            # written down rather than left to a log line nobody reads.
+            if _parked_sell:
+                await _record_gate_decision(
+                    branch.bot_name, branch.product_id, "PARKED_SELL_NOFILL",
+                    f"escape sell of {oldest.qty:g} did not fill - branch "
+                    f"stays full on its rungs")
             return
         filled_qty, filled_price, sell_leg_fee = fill
         # Priced with the rate THIS slice's buy leg really paid plus the rate

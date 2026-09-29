@@ -208,6 +208,18 @@ def main():
                  f"{len(errs)} cycle error(s) still on the feed, none new since "
                  f"last pass.")
 
+        # A parked branch whose escape sell will not fill is in a retry loop:
+        # the gate passes every cycle, the order is refused, the cycle returns
+        # having done nothing. From outside that looks exactly like a healthy
+        # quiet branch, which is why it is read off the feed rather than
+        # inferred from the branch looking unchanged.
+        nofill = [e for e in events if e.get("event_type") == "PARKED_SELL_NOFILL"]
+        if nofill:
+            coins = sorted({e.get("product_id") for e in nofill if e.get("product_id")})
+            flag(CRITICAL, "PARKED_RETRY_LOOP",
+                 f"{len(nofill)} escape sell(s) did not fill on {', '.join(coins)} "
+                 f"- the gate keeps passing and the branch keeps not leaving.")
+
     # ---- 3. The alarm can actually reach a human ---------------------------
     #
     # A queue that holds alerts and reports success is worse than no queue.
@@ -256,6 +268,36 @@ def main():
                      f"{money(unc)} across {stops.get('uncovered_count')} asset(s) "
                      f"has no automatic exit from either layer{moved}{same}: "
                      f"{', '.join(names[:14])}")
+
+    # ---- 4b. A parked branch whose only way out is dust --------------------
+    #
+    # The escape hatch asks whether ANY slice clears the floor. It does not
+    # ask whether selling that slice is worth doing. Measured live: LINK-USD
+    # sat full on 3 rungs with its only qualifying slice holding 0.01 LINK -
+    # fourteen cents of basis against ~$90 locked in the two real slices.
+    # Selling it releases nothing and may not even clear the exchange's
+    # minimum, so the branch reports itself escapable while staying locked.
+    # Reported, not acted on: the floor is the owner's and is not touched.
+    for b in branches:
+        sl = b.get("slices") or []
+        lv = b.get("num_levels") or 0
+        if not sl or len(sl) < lv:
+            continue
+        qual = [s2 for s2 in sl if (s2.get("unrealized_net_pct") or 0) >= 0.010]
+        if not qual:
+            continue
+        book = sum((s2.get("qty") or 0) * (s2.get("entry_price") or 0) for s2 in sl)
+        best = max(qual, key=lambda s2: (s2.get("qty") or 0) * (s2.get("entry_price") or 0))
+        notional = (best.get("qty") or 0) * (best.get("entry_price") or 0)
+        # A dollar is below any plausible exchange minimum, so this is a
+        # reporting threshold for a monitor - not a trading threshold, and
+        # nothing in the fleet's own gates is changed by it.
+        if notional < 1.00:
+            flag(WARN, "PARKED_DUST",
+                 f"{b['product_id']} is full on its rungs and its ONLY slice "
+                 f"clearing the exit floor holds {money(notional)} of basis "
+                 f"against {money(book)} locked in the branch. Selling it "
+                 f"releases nothing - this branch has no real way out.")
 
     # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
     #
