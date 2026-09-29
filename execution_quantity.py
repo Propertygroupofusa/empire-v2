@@ -77,6 +77,21 @@ REFUSED = "REFUSED"
 # Machine-readable, because the old reason was prose and every consumer
 # had to pattern-match sentences to tell one cause from another.
 BELOW_BASE_INCREMENT = "BELOW_BASE_INCREMENT"
+# THE WALLET AND THE REQUEST ARE DIFFERENT CONSTRAINTS.
+#
+# Found 2026-09-29 by reading the live payload rather than the code: LINK-USD
+# reported "0.22 available is less than one tradeable unit of 0.01". It is
+# not - 0.22 is twenty-two units. The message named raw_available while the
+# decision was made on min(requested, available), so when the REQUEST was the
+# sub-increment side the message blamed the wallet and told the reader to
+# wait for inventory that was already there.
+#
+# They need different answers: a wallet under one unit becomes sellable when
+# inventory grows; a request under one unit is the caller asking for dust and
+# no amount of waiting fixes it. Nothing branches on these codes - they are
+# reported, not dispatched on - so splitting them costs nothing and the
+# combined message cost a wrong diagnosis.
+REQUEST_BELOW_BASE_INCREMENT = "REQUEST_BELOW_BASE_INCREMENT"
 BELOW_BASE_MIN_SIZE = "BELOW_BASE_MIN_SIZE"
 BELOW_QUOTE_MIN_SIZE = "BELOW_QUOTE_MIN_SIZE"
 METADATA_UNAVAILABLE = "METADATA_UNAVAILABLE"
@@ -236,12 +251,24 @@ def plan_order_quantity(*, requested_quantity, available_quantity, price,
                   quote_min_size=qms, price=px, notional=notional)
 
     if executable <= 0:
+        # WHICH SIDE ACTUALLY BOUND. The wallet takes precedence when both
+        # are under one unit, because raising the request would not help.
+        if avail < inc:
+            return QuantityPlan(
+                decision=DUST, reason=BELOW_BASE_INCREMENT,
+                detail=(f"{avail} available is less than one tradeable unit "
+                        f"of {inc} (requested {req}). This is a real holding "
+                        f"the venue's rules cannot express yet, not a failed "
+                        f"sale and not an empty wallet. It becomes sellable "
+                        f"again once inventory reaches {inc}."),
+                executable_quantity=Decimal(0), **common)
         return QuantityPlan(
-            decision=DUST, reason=BELOW_BASE_INCREMENT,
-            detail=(f"{avail} available is less than one tradeable unit of "
-                    f"{inc}. This is a real holding the venue's rules cannot "
-                    f"express yet, not a failed sale and not an empty wallet. "
-                    f"It becomes sellable again once inventory reaches {inc}."),
+            decision=DUST, reason=REQUEST_BELOW_BASE_INCREMENT,
+            detail=(f"{req} was requested, which is less than one tradeable "
+                    f"unit of {inc}. The wallet is not the constraint - "
+                    f"{avail} is available, which is {avail / inc:f} units. "
+                    f"Waiting for inventory will not change this; the "
+                    f"requested size is what is under the increment."),
             executable_quantity=Decimal(0), **common)
 
     if bms is not None and executable < bms:

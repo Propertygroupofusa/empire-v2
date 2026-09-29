@@ -221,6 +221,44 @@ ok("an unreadable figure renders UNKNOWN, not 0",
 
 print("== the floor is not reimplemented ==")
 import ast
+print("== the message names the side that actually bound ==")
+# FOUND IN THE LIVE PAYLOAD, not in the code. LINK-USD reported
+# "0.22 available is less than one tradeable unit of 0.01". It is not -
+# that is twenty-two units. The message reported raw_available while the
+# decision was made on min(requested, available), so a sub-increment
+# REQUEST was reported as an empty wallet, telling the reader to wait for
+# inventory that was already sitting there.
+p = eq.plan_order_quantity(requested_quantity="0.005", available_quantity="0.22",
+                           price=None, base_increment="0.01",
+                           base_min_size=None, quote_min_size=None)
+ok("a sub-increment request is still DUST", p.decision == eq.DUST, p.decision)
+ok("but it is the REQUEST that is blamed",
+   p.reason == eq.REQUEST_BELOW_BASE_INCREMENT, p.reason)
+ok("and the available balance is preserved exactly",
+   str(p.raw_available) == "0.22", str(p.raw_available))
+ok("and the request is preserved exactly",
+   str(p.requested_quantity) == "0.005", str(p.requested_quantity))
+p = eq.plan_order_quantity(requested_quantity="1000", available_quantity="0.00097323",
+                           price=None, base_increment="0.001",
+                           base_min_size=None, quote_min_size=None)
+ok("a sub-increment WALLET is still blamed on the wallet",
+   p.reason == eq.BELOW_BASE_INCREMENT, p.reason)
+# Both under one unit: the wallet is the deeper constraint, because
+# lowering the request cannot help and raising it cannot either.
+p = eq.plan_order_quantity(requested_quantity="0.0005", available_quantity="0.0009",
+                           price=None, base_increment="0.01",
+                           base_min_size=None, quote_min_size=None)
+ok("when both are under one unit the wallet wins",
+   p.reason == eq.BELOW_BASE_INCREMENT, p.reason)
+# Exactly one unit available, sub-unit request: the wallet is fine.
+p = eq.plan_order_quantity(requested_quantity="0.005", available_quantity="0.01",
+                           price=None, base_increment="0.01",
+                           base_min_size=None, quote_min_size=None)
+ok("one whole unit available is not a wallet problem",
+   p.reason == eq.REQUEST_BELOW_BASE_INCREMENT, p.reason)
+ok("the two reasons are different strings",
+   eq.REQUEST_BELOW_BASE_INCREMENT != eq.BELOW_BASE_INCREMENT)
+
 import inspect
 tree = ast.parse(inspect.getsource(eq))
 # AST, not substring: the module's docstring QUOTES the buggy

@@ -942,6 +942,40 @@ Same distinction as restart_recovery's unread-vs-zero.
 expose them then, so that was a NON-READ, not a clean result.** Do not
 record that first look as evidence of anything.
 
+### THE MESSAGE NAMED THE WRONG NUMBER — found by reading the live payload
+
+The moment `order_refusals` shipped it reported, for real:
+
+    ALGO-USD  0.046389 available < one unit of 0.1   correct
+    QNT-USD   0.00097323 available < one unit of 0.001  correct
+    LINK-USD  0.22 available < one unit of 0.01     **WRONG - that is 22 units**
+
+LINK-USD's real `base_increment` IS `0.01` (measured against the venue), so
+the increment was right and the MESSAGE was wrong. `execution_quantity`
+decided on `min(requested, available)` floored, but reported
+`raw_available`. When the sub-increment side was the REQUEST, the message
+blamed the wallet and told the reader to wait for inventory that was
+already sitting there.
+
+Split into two reason codes, because they need different answers:
+`BELOW_BASE_INCREMENT` (the wallet holds under one unit — it becomes
+sellable as inventory grows) and `REQUEST_BELOW_BASE_INCREMENT` (the wallet
+is fine; the caller asked for dust — waiting changes nothing). Both details
+now name BOTH numbers. When both are under one unit the WALLET wins, since
+changing the request cannot help. Nothing branches on these codes — they
+are reported, not dispatched on — so splitting them was free.
+
+**STILL OPEN: why does something request a sub-increment LINK quantity?**
+The live payload will now say so directly. If a SLICE carries less than one
+increment, that slice can never close — the QNT situation at slice level
+rather than wallet level. Read `order_refusals.by_product` after the deploy
+and find out; do not guess.
+
+**THE LESSON: the first read of grid-status showed no refusals and that
+proved nothing, because grid-status did not expose them yet.** The finding
+came from making the thing observable and then LOOKING. A deployed fix is
+not an exercised fix.
+
 ### §7/§8 — THE BLOCKER IS §1's PERSISTENCE, not the transport
 
 Measured 2026-09-29: there is **no WebSocket client anywhere in the repo** —
