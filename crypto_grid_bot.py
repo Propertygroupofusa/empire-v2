@@ -8326,6 +8326,14 @@ async def close_all_grid_slices(only_bot_name: str = None,
     }
 
 
+# A capped list must be able to say it is capped. 50 was the only value this
+# function ever served and nothing in the payload admitted it: with 132
+# completed trades the window covered 2.5 days and hid 82 of them, while
+# `recent_trades` read like the whole book. The ceiling exists because this is
+# served in a live status payload, not because 50 is meaningful.
+GRID_TRADE_HISTORY_MAX_ROWS = int(os.getenv("GRID_TRADE_HISTORY_MAX_ROWS", "1000"))
+
+
 async def get_grid_trade_history(limit_recent: int = 50) -> dict:
     """Real, per-branch trade-history aggregation - the direct grid-side
     counterpart to crypto_family_tree_bot.get_coin_trade_history() /
@@ -8411,6 +8419,13 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
             })
         coins.sort(key=lambda coin: coin["total_pnl"], reverse=True)
 
+        try:
+            limit_recent = int(limit_recent)
+        except (TypeError, ValueError):
+            limit_recent = 50
+        if limit_recent <= 0:
+            limit_recent = 50
+        limit_recent = min(limit_recent, GRID_TRADE_HISTORY_MAX_ROWS)
         recent_result = await db.execute(
             select(CryptoGridTradeHistory).order_by(desc(CryptoGridTradeHistory.closed_at)).limit(limit_recent)
         )
@@ -8431,6 +8446,26 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
         "branch_coins": branch_coins,
         "coins": coins,
         "recent_trades": recent_trades,
+        # WHAT recent_trades LEAVES OUT, said out loud.
+        #
+        # Without these a 50-row slice of a 132-trade book reads as the book,
+        # and any distribution taken off it is a distribution of whatever
+        # happens to be recent. That is not a hypothetical: the four-way
+        # exit_reason split shipped at 00:16Z and one hour later exactly ONE
+        # of the 50 rows had been written under it - a reader who took the
+        # counts at face value would have concluded the new labels were never
+        # being used.
+        "recent_trades_returned": len(recent_trades),
+        "recent_trades_limit": limit_recent,
+        "recent_trades_truncated": total_trade_count > len(recent_trades),
+        "recent_trades_omitted": max(total_trade_count - len(recent_trades), 0),
+        "recent_trades_is": (
+            f"the {len(recent_trades)} most recently CLOSED trades, newest "
+            f"first" + ("" if total_trade_count <= len(recent_trades) else
+                        f" - {total_trade_count - len(recent_trades)} older "
+                        f"completed trades are NOT in this list. Raise `limit` "
+                        f"(ceiling {GRID_TRADE_HISTORY_MAX_ROWS}) before "
+                        f"reading any distribution off these rows.")),
         "total_trade_count": total_trade_count,
         "total_realized_pnl": round(total_realized_pnl, 2),
         "overall_win_rate": overall_win_rate,

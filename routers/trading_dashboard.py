@@ -7749,10 +7749,18 @@ async def get_grid_status_endpoint():
 
 
 @router.get("/grid-status/trade-history")
-async def get_grid_trade_history_endpoint():
+async def get_grid_trade_history_endpoint(limit: int = 50):
+    """Closed grid round trips, newest first, plus the fleet rollups.
+
+    `limit` is now askable. It was hardcoded to the function's default of 50
+    and the payload said nothing about being capped, so a 50-row slice of a
+    132-trade book read as the book. The response carries
+    recent_trades_truncated and recent_trades_omitted; read them before
+    taking any distribution off these rows.
+    """
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
-    data = await crypto_grid_bot_module.get_grid_trade_history()
+    data = await crypto_grid_bot_module.get_grid_trade_history(limit_recent=limit)
     # Force fresh data on every request - prevent browser caching stale trade history
     return JSONResponse(
         content=data,
