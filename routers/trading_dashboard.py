@@ -35,7 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, get_session_factory
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun, GridMakerExpiry
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun, GridMakerExpiry, GridOrderNotPlaced
 
 AsyncSessionLocal = get_session_factory()
 
@@ -9347,6 +9347,127 @@ async def asset_balance(currency: str):
     }
 
 
+@router.get("/grid-status/orders-not-placed")
+async def orders_not_placed(product_id: str = None, hours: int = 24, limit: int = 200):
+    """Every maker-only cycle where NO ORDER REACHED THE VENUE, newest first.
+
+    The companion to /maker-expiries, and the reason that endpoint can now be
+    trusted. These two were one table: a cycle that placed nothing was
+    recorded as an expired rung, so "this branch has tried and failed to sell
+    N times" was indistinguishable from "this branch has not placed an order
+    in N cycles". Those are opposite diagnoses and ALGO, QNT and PRIME were
+    producing ~2,600 of the second a day while reading as the first.
+
+    READ available_units AND size_decimals, NOT JUST THE COUNT. They separate
+    the two real causes, which need different fixes:
+
+      locked   - available_units is a small fraction of what the branch holds.
+                 The coin is behind a resting order. Freeing inventory helps.
+      dust     - available_units is tiny in absolute terms and floors to zero
+                 at size_decimals. There is nothing to free; the branch is
+                 trying to sell coin it does not meaningfully have.
+
+    A NULL in either is UNKNOWN - the balance read itself can fail, and there
+    is then no figure. Never read a NULL as a zero.
+    """
+    if hours is None or hours <= 0:
+        hours = 24
+    if limit is None or limit <= 0 or limit > 2000:
+        limit = 200
+    since = datetime.utcnow() - timedelta(hours=hours)
+
+    try:
+        async with get_session_factory()() as db:
+            q = select(GridOrderNotPlaced).where(GridOrderNotPlaced.blocked_at >= since)
+            if product_id:
+                q = q.where(GridOrderNotPlaced.product_id == product_id)
+            # Newest first AND the limit applied to that order, so a wide
+            # window with a small limit serves the RECENT rows.
+            q = q.order_by(GridOrderNotPlaced.blocked_at.desc()).limit(limit)
+            rows = (await db.execute(q)).scalars().all()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(f"blocked orders unreadable: {type(exc).__name__}: {exc}. "
+                    f"This is a GAP, not an empty result - do not read it as "
+                    f"'every order was placed'."))
+
+    out, per = [], {}
+    for r in rows:
+        stamp = getattr(r, "blocked_at", None)
+        avail = getattr(r, "available_units", None)
+        dec = getattr(r, "size_decimals", None)
+        asked = getattr(r, "requested_qty", None)
+        # The share of the requested size the venue would actually release.
+        # None when either figure is missing - a ratio against an unknown is
+        # not a small number, it is not a number.
+        frac = None
+        if avail is not None and asked not in (None, 0):
+            try:
+                frac = round(avail / asked * 100.0, 6)
+            except ZeroDivisionError:
+                frac = None
+        out.append({
+            "id": r.id,
+            "bot_name": r.bot_name,
+            "product_id": r.product_id,
+            "side": r.side,
+            "reason": getattr(r, "reason", None),
+            "available_units": avail,
+            "size_decimals": dec,
+            "requested_qty": asked,
+            "available_pct_of_requested": frac,
+            "blocked_at": stamp.isoformat() + "Z" if stamp else None,
+        })
+        key = (r.product_id, r.side)
+        agg = per.setdefault(key, {"product_id": r.product_id, "side": r.side,
+                                   "count": 0, "newest": None, "oldest": None,
+                                   "min_available_units": None,
+                                   "max_available_units": None,
+                                   "available_unknown_rows": 0})
+        agg["count"] += 1
+        if avail is None:
+            agg["available_unknown_rows"] += 1
+        else:
+            lo, hi = agg["min_available_units"], agg["max_available_units"]
+            agg["min_available_units"] = avail if lo is None else min(lo, avail)
+            agg["max_available_units"] = avail if hi is None else max(hi, avail)
+        iso = stamp.isoformat() + "Z" if stamp else None
+        if iso:
+            if agg["newest"] is None or iso > agg["newest"]:
+                agg["newest"] = iso
+            if agg["oldest"] is None or iso < agg["oldest"]:
+                agg["oldest"] = iso
+
+    return {
+        "readable": True,
+        "window_hours": hours,
+        "since": since.isoformat() + "Z",
+        "product_id": product_id,
+        "returned": len(out),
+        "limit": limit,
+        "truncated": len(out) >= limit,
+        "by_product_and_side": sorted(per.values(), key=lambda a: -a["count"]),
+        "blocked": out,
+        "a_row_is": ("one maker-only cycle where NO ORDER REACHED THE VENUE. "
+                     "Not an unfilled order - there was no order. A count here "
+                     "is a count of cycles the branch could not even attempt, "
+                     "which is the opposite diagnosis from a rung that rested "
+                     "and went untaken (see /grid-status/maker-expiries)."),
+        "an_empty_result_is": ("UNKNOWN, not a pass. No rows is equally "
+                               "consistent with no sell having been attempted "
+                               "at all. Read it beside the branch's distance "
+                               "past its own sell trigger."),
+        "how_to_read_it": ("available_units far below the branch's holdings "
+                           "means LOCKED - the coin sits behind a resting "
+                           "order and freeing inventory helps. available_units "
+                           "tiny in absolute terms, flooring to zero at "
+                           "size_decimals, means DUST - there is nothing to "
+                           "free. NULL in either field is UNKNOWN, never zero."),
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @router.get("/grid-status/maker-expiries")
 async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 200):
     """Every maker-only order this fleet gave up on, newest first.
@@ -9458,16 +9579,18 @@ async def maker_expiries(product_id: str = None, hours: int = 24, limit: int = 2
         "truncated": len(out) >= limit,
         "by_product_and_side": summary,
         "expiries": out,
-        "a_row_is": ("one maker-ONLY cycle that ended without a trade - the slice "
-                     "was HELD rather than sold at the taker leg. READ order_rested "
-                     "BEFORE READING THE COUNT: true means an order really sat on "
-                     "the book and nobody crossed it; false means no order was ever "
-                     "created (usually the coin is reserved by a resting order, or "
-                     "the branch holds less than one tradeable unit); null means "
-                     "UNKNOWN, which covers every row written before the column "
-                     "existed. A bare count mixes all three and was read once as "
-                     "'that branch has been trying and failing to sell' when in "
-                     "fact it had never placed an order at all."),
+        "a_row_is": ("one maker-ONLY cycle where a rung may have rested and was "
+                     "given up on - the slice was HELD rather than sold at the "
+                     "taker leg. CONFIRMED NON-ORDERS NO LONGER LAND HERE: they "
+                     "are refused at the write site and written to "
+                     "/grid-status/orders-not-placed instead, which is what makes "
+                     "this table's count mean what it says. order_rested true "
+                     "means an order really sat on the book and nobody crossed it; "
+                     "null means UNKNOWN and covers rows written before the column "
+                     "existed plus the one live path that cannot tell (a POST that "
+                     "raised after it may already have reached the venue). false "
+                     "appears only on legacy rows written between the flag "
+                     "shipping and the split."),
         "an_empty_result_is": ("UNKNOWN, not a pass. No rows is equally consistent "
                                "with no sell having been attempted. Read it beside "
                                "the branch's distance past its own sell trigger."),

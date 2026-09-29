@@ -1344,29 +1344,58 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
 
     Applies the same real-balance and minimum-size clamps place_market_buy
     already does - a maker order is still real money leaving the account."""
-    # Every return below this line means NO ORDER WAS CREATED. The sell side
-    # carried the identical defect until the caller started asking why, and
-    # the asymmetry was the tell: one path recorded its reason and its mirror
-    # fell through silently. Marking them keeps a buy-side expiry row from
-    # claiming a rung rested when none was ever placed.
+    # EVERY RETURN BELOW THIS LINE MEANS NO ORDER WAS CREATED, AND EACH ONE
+    # NOW SAYS SO IN ITS OWN WORDS.
+    #
+    # The sell side carried the identical defect until the caller started
+    # asking why, and the asymmetry was the tell: one path recorded its reason
+    # and its mirror fell through silently. Leaving these silent stopped being
+    # merely untidy once non-orders got their own ledger: the caller defaults
+    # a missing reason to "the order rested at the bid and no seller crossed",
+    # so a row in the NOT-PLACED table would have carried text asserting the
+    # order rested. A ledger row that contradicts the table it sits in is
+    # worse than no row.
+    #
+    # _last_order_error is cleared here too, not just _last_order_rested -
+    # without that, a stale sentence from an earlier cycle is readable as this
+    # call's reason.
     _last_order_rested.pop(product_id, None)
+    _last_order_error.pop(product_id, None)
+    _last_order_block.pop(product_id, None)
+    _asked_usd = usd_amount
     real_usd, _ = await get_usd_balance(session)
     if real_usd is not None and real_usd < usd_amount:
         usd_amount = real_usd
     if usd_amount < MIN_TRADE_USD:
+        _last_order_error[product_id] = (
+            f"below the minimum trade size: asked for ${_asked_usd:.2f}, "
+            f"${usd_amount:.2f} available to spend, against a "
+            f"${MIN_TRADE_USD:.2f} floor")
         _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {"requested_qty": None,
+                                         "available_units": real_usd}
         return None
 
     bid, ask = await get_best_bid_ask(session, product_id)
     if bid is None:
+        _last_order_error[product_id] = "order book unreadable: no bid"
         _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {"available_units": real_usd}
         return None
     decimals = await get_product_size_decimals(session, product_id)
     qty = usd_amount / bid
     factor = 10 ** decimals
     qty = math.floor(qty * factor) / factor
     if qty <= 0:
+        _last_order_error[product_id] = (
+            f"nothing buyable: ${usd_amount:.2f} at ${bid:,.10f} floors to 0 "
+            f"at {decimals} decimals")
         _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {
+            "available_units": real_usd,
+            "size_decimals": decimals,
+            "requested_qty": usd_amount / bid,
+        }
         return None
 
     order = {
@@ -1391,6 +1420,13 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     # Cleared at the top so no later reader can mistake a previous cycle's
     # verdict for this one's; every return below sets its own.
     _last_order_rested.pop(product_id, None)
+    _last_order_block.pop(product_id, None)
+    # The size the CALLER asked for, captured before any clamping. `qty` is
+    # rebound below - clamped to the available balance, then floored to the
+    # product's decimals - so by the time the nothing-sellable branch is
+    # reached it is 0.0, and recording that as the requested size would say
+    # nothing at all.
+    _asked_qty = qty
     real_balance, _bal_err = await get_asset_balance(session, base_currency)
     if real_balance is None:
         # Same rule, no exception. This is the opportunistic maker path and
@@ -1401,6 +1437,10 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
             f"{base_currency} balance could not be read ({_bal_err}). Not "
             f"placed; retried next cycle.")
         _last_order_rested[product_id] = False
+        # available_units deliberately absent: the read FAILED, so there is
+        # no figure to record. An absent key is UNKNOWN; a 0.0 here would be
+        # the unreadable-balance-as-zero bug this path exists to prevent.
+        _last_order_block[product_id] = {"requested_qty": _asked_qty}
         return None
     if real_balance < qty:
         qty = real_balance
@@ -1430,6 +1470,11 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
             f"nothing sellable: available {real_balance:.10f} floors to 0 at "
             f"{decimals} decimals")
         _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {
+            "available_units": real_balance,
+            "size_decimals": decimals,
+            "requested_qty": _asked_qty,
+        }
         return None
 
     bid, ask = await get_best_bid_ask(session, product_id)
@@ -1440,6 +1485,11 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
             f"unreadable, so there is no ask to rest at. No order created.")
         _last_order_error[product_id] = "order book unreadable: no ask"
         _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {
+            "available_units": real_balance,
+            "size_decimals": decimals,
+            "requested_qty": _asked_qty,
+        }
         return None
 
     order = {
@@ -1474,6 +1524,20 @@ _last_order_error = {}
 # text, because a guard that reads a human-readable string is one wording
 # change away from silently reclassifying every row.
 _last_order_rested = {}
+
+# WHY NO ORDER WAS CREATED, AS FIELDS RATHER THAN AS A SENTENCE.
+#
+# _last_order_error already carries the human-readable reason, and that stays.
+# This carries the same fact structurally, because the rejection ledger has to
+# be queryable: "how much was actually available, and what did it floor to?"
+# is the question that separates a branch whose coin is locked from one
+# holding dust, and answering it by parsing a formatted string is the exact
+# pattern that has misfired repeatedly in this repo.
+#
+# Keys are product_id. Values are dicts with whichever of available_units,
+# size_decimals and requested_qty the blocking path actually knew. Missing
+# keys are UNKNOWN, never zero.
+_last_order_block = {}
 
 
 def _describe_order_rejection(resp: dict) -> str:

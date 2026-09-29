@@ -1350,6 +1350,60 @@ class RegimeCrossing(Base):
     alerted = Column(Boolean, default=False, index=True)
 
 
+class GridOrderNotPlaced(Base):
+    """One maker-only cycle where NO ORDER WAS EVER CREATED, and why.
+
+    THIS TABLE EXISTS TO KEEP GridMakerExpiry HONEST. That table answers one
+    question - should a resting rung be given longer before it is cancelled?
+    - and every row in it is a data point in that study. A cycle where no
+    order was placed is not a weak data point there; it is not a data point
+    at all, and ALGO, QNT and PRIME were producing ~2,600 of them a day
+    against a 5,000-row study window.
+
+    The two are now separated at the write site: an expiry row is refused for
+    a confirmed non-order, and the non-order is written here instead.
+
+    WHY order_rested IS STILL THREE-STATE AND THIS TABLE IS NOT THE THIRD.
+    A row lands here only on a CONFIRMED False - the venue refused the order,
+    or the size floored to nothing, or the book had no ask. The genuinely
+    unknown case (place_maker_order's POST raised after it may already have
+    reached the venue, so an order may exist whose id never came back) is NOT
+    written here, because "no order was created" would be a claim the
+    evidence cannot support. Those stay in GridMakerExpiry with
+    order_rested NULL, where the study excludes them BY NAME rather than
+    counting them. Three states, three destinations, and none of them a
+    silent drop.
+
+    WHY THE FIELDS AND NOT JUST THE SENTENCE. reason carries the engine's own
+    words, and it is the readable one. available_units and size_decimals
+    carry the same fact in a form that can be queried: "the branch holds
+    1134.35 but only 0.046 is free" and "it holds dust that floors to zero at
+    three decimals" are different problems with different fixes, and telling
+    them apart by matching on formatted text is the pattern that has misfired
+    repeatedly in this repo. A NULL in any of them is UNKNOWN - the balance
+    read itself can fail, and there is then no figure to record.
+
+    NO DRIFT LADDER HERE, deliberately. GridMakerExpiry resolves prices at
+    nine horizons to ask what the market did after a rung was given up on.
+    Nothing was given up on here, so there is nothing to measure afterwards.
+    """
+    __tablename__ = "grid_order_not_placed"
+
+    id = Column(Integer, primary_key=True, index=True)
+    bot_name = Column(String, index=True, nullable=True)
+    product_id = Column(String, index=True)
+    side = Column(String)                              # "buy" | "sell"
+
+    # The engine's own sentence, from _last_order_error.
+    reason = Column(String, nullable=True)
+    # The same fact as fields. NULL is UNKNOWN in every one of them.
+    available_units = Column(Float, nullable=True)     # what the venue would release
+    size_decimals = Column(Integer, nullable=True)     # what it had to floor to
+    requested_qty = Column(Float, nullable=True)       # the size the caller asked for
+
+    blocked_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class GridMakerExpiry(Base):
     """One maker-ONLY cycle that ended without a sale, anchored so the price
     that followed can be measured.

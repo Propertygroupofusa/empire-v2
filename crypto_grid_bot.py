@@ -53,7 +53,7 @@ import coin_rotation as rotation
 import opportunity_signals as signals
 import horizon_study
 from database import get_session_factory
-from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, RegimeCrossing, TradingBotState, CryptoTreeBranch, BotPosition
+from models import CryptoGridBranch, CryptoGridSlice, CryptoGridTradeHistory, GridMakerExpiry, GridOrderNotPlaced, RegimeCrossing, TradingBotState, CryptoTreeBranch, BotPosition
 
 # ── SHADOW MODE INTEGRATION ────────────────────────────────────────────────
 # Non-invasive learning validation: observes every trade without affecting execution
@@ -1231,7 +1231,8 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
                 session, product_id, "buy", bot_name,
                 reason=engine._last_order_error.get(
                     product_id, "the order rested at the bid and no seller crossed"),
-                order_rested=engine._last_order_rested.get(product_id))
+                order_rested=engine._last_order_rested.get(product_id),
+                block_detail=engine._last_order_block.get(product_id))
             if outcome_out is not None:
                 import order_outcome
                 outcome_out["cause"] = order_outcome.MAKER_EXPIRED
@@ -1348,7 +1349,8 @@ async def grid_sell(session, qty: float, product_id: str, bot_name: str = None):
                 session, product_id, "sell", bot_name, reason=_why,
                 # .get, so a product the engine said nothing about this cycle
                 # lands as None (UNKNOWN) rather than defaulting to a claim.
-                order_rested=engine._last_order_rested.get(product_id))
+                order_rested=engine._last_order_rested.get(product_id),
+                block_detail=engine._last_order_block.get(product_id))
             return None
     fill = await engine.place_market_sell(session, qty, product_id,
                                           source="grid_sell")
@@ -1393,8 +1395,36 @@ _EXPIRY_SCAN_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_SCAN_MAX", "200"))
 _EXPIRY_MIN_RESOLVED = int(os.getenv("GRID_EXPIRY_MIN_RESOLVED", "20"))
 
 
+async def _record_order_not_placed(product_id: str, side: str, bot_name: str = None,
+                                   reason: str = None, detail: dict = None):
+    """One cycle where the venue never received an order. Never raises.
+
+    Separate table from GridMakerExpiry on purpose - see GridOrderNotPlaced's
+    own docstring. No book read here and no price anchor: there is no rung to
+    measure the market against, so taking a quote would cost an API call to
+    record a number with no question attached to it.
+    """
+    detail = detail or {}
+    try:
+        async with get_session_factory()() as db:
+            db.add(GridOrderNotPlaced(
+                bot_name=bot_name, product_id=product_id, side=side,
+                reason=reason,
+                # .get, so a path that did not know a figure records NULL
+                # (UNKNOWN) rather than a fabricated zero.
+                available_units=detail.get("available_units"),
+                size_decimals=detail.get("size_decimals"),
+                requested_qty=detail.get("requested_qty"),
+            ))
+            await db.commit()
+    except Exception as e:
+        log.debug(f"[GRID] not-placed row failed for {product_id} (ignored): "
+                  f"{type(e).__name__}: {e}")
+
+
 async def _record_maker_expiry(session, product_id: str, side: str, bot_name: str = None,
-                               reason: str = None, order_rested: bool = None):
+                               reason: str = None, order_rested: bool = None,
+                               block_detail: dict = None):
     """Anchor one maker-ONLY cycle that ended without a trade. Never raises -
     this is instrumentation and must not be able to stop the thing it
     measures.
@@ -1410,6 +1440,27 @@ async def _record_maker_expiry(session, product_id: str, side: str, bot_name: st
     function used to carry asserted every row was a rested order, which was
     untrue for two of place_maker_sell's three None returns.
     """
+    # THE INVARIANT, ENFORCED HERE RATHER THAN BY THE SCHEMA.
+    #
+    # An expiry row is never written for a CONFIRMED non-order. That is the
+    # whole separation: GridMakerExpiry is the study of rungs that rested,
+    # and a cycle that placed nothing cannot belong to it.
+    #
+    # Enforced in code and not as an assert or a NOT NULL column, for two
+    # reasons. First, this function is instrumentation and must never be able
+    # to stop the thing it measures - an assert on a live sell path would do
+    # exactly that. Second, order_rested has THREE states: a NOT NULL column
+    # cannot represent the genuinely unknown one, and forcing it would turn
+    # an unread into a no, which is the bug this whole line of work started
+    # from.
+    #
+    # False -> the other table. None (UNKNOWN) stays here, where the study
+    # excludes it by name instead of counting it.
+    if order_rested is False:
+        await _record_order_not_placed(product_id, side, bot_name,
+                                       reason=reason, detail=block_detail)
+        return
+
     try:
         bid, ask = await engine.get_best_bid_ask(session, product_id)
         if bid is None or ask is None:
@@ -8007,6 +8058,18 @@ async def _per_coin_execution() -> dict:
                     e = out.setdefault(row.product_id, {"filled": 0, "expired": 0, "completed": 0})
                     e["completed"] += 1
                     e["filled"] += 1
+            # NON-ORDERS NOW LIVE IN THEIR OWN TABLE, so this reads both.
+            #
+            # New blocked cycles are written to grid_order_not_placed. The
+            # order_rested is False rows below are the legacy ones, written
+            # between the flag shipping and the split; dropping them would
+            # silently lose that history, and double-counting is impossible
+            # because no row is ever written to both.
+            for row in (await db.execute(select(GridOrderNotPlaced))).scalars().all():
+                if row.blocked_at and row.blocked_at >= epoch and row.product_id:
+                    e = out.setdefault(row.product_id, {"filled": 0, "expired": 0,
+                                                        "completed": 0, "no_order": 0})
+                    e["no_order"] += 1
             for row in (await db.execute(select(GridMakerExpiry))).scalars().all():
                 if row.expired_at and row.expired_at >= epoch and row.product_id:
                     e = out.setdefault(row.product_id, {"filled": 0, "expired": 0,
