@@ -355,6 +355,38 @@ def main():
                  f"{len(reachable)} profitable slice(s) reachable this pass - "
                  f"expect them to retire shortly.")
 
+    # ---- 11b. Bought coin quietly becoming "adopted" ------------------------
+    #
+    # THE SECOND DETECTOR FOR TODAY'S FAILURE, independent of LOST_FILL. When
+    # a buy filled and its insert raised, the coin sat unclaimed in the wallet
+    # until coin_adoption_worker.topup_once picked it up and wrote it as an
+    # ADOPTED slice - a price nobody paid, with no entry_fee_rate. That is not
+    # cosmetic: _slice_rate resolves an adopted slice to the EXIT LEG ONLY,
+    # which is correct for coin that was never bought and wrong for coin that
+    # was. Each such slice understates its round trip by one maker leg, so its
+    # net reads better than reality and the parked-sell floor clears early.
+    #
+    # LOST_FILL catches the moment the row goes missing. This catches the
+    # consequence arriving later, on a pass where no buy leg moved at all -
+    # so a missed LOST_FILL does not mean the damage goes unseen.
+    no_fee = [(p, s) for p, s in slices
+              if s.get("adopted") and s.get("entry_fee_rate") is None]
+    book = sum((s.get("qty") or 0) * (s.get("entry_price") or 0) for _, s in no_fee)
+    cur["adopted_nofee_usd"] = round(book, 2)
+    prev_book = prev.get("adopted_nofee_usd")
+    if prev_book is not None and book > prev_book + 0.01:
+        flag(CRITICAL, "ADOPTED_GREW",
+             f"coin priced without a fee rate grew {money(prev_book)} -> "
+             f"{money(book)}. Real bought coin is being written as ADOPTED, "
+             f"which prices its round trip at the exit leg only.")
+    elif no_fee:
+        # A level, not a change - stated so the standing cost is never a
+        # surprise, at the maker leg the fleet actually pays.
+        flag(INFO, "ADOPTED_NOFEE",
+             f"{len(no_fee)} adopted slice(s), {money(book)} of book, carry no "
+             f"fee rate - their round trips are understated by about "
+             f"{money(book * 0.0035)} in total.")
+
     # ---- 12. ALPACA - the half of the account nobody was watching ----------
     #
     # Every check above is the crypto grid. The stock side has its own

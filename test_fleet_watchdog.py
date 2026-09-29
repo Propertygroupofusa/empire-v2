@@ -135,7 +135,7 @@ def run(routes, prev_snapshot=None):
 BASE_SNAP = {"at": "2026-09-29T10:00:00Z", "buy_legs": 10, "sell_legs": 5,
              "slice_count": 1, "realized": 100.0, "stuck": 0, "inv_failed": 0,
              "uncovered_usd": 0, "cycle_errors": [], "reachable": [],
-             "alpaca_equity": 2000.0, "populated": 1}
+             "alpaca_equity": 2000.0, "populated": 1, "adopted_nofee_usd": 0.0}
 
 print("\n-- the control: a healthy fleet must raise NOTHING --")
 # THE CONTROL MUST PASS FOR THE RIGHT REASON. The healthy fixture serves the
@@ -226,6 +226,17 @@ d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
      "unrealized_net_pct": 0.0})
 ok("SECTION1_SILENT when a bought slice carries no state",
    "SECTION1_SILENT" in run(d, BASE_SNAP))
+
+# ADOPTED_GREW - real bought coin quietly rewritten as adopted. The second
+# detector for the day's failure, independent of LOST_FILL: it catches the
+# consequence arriving on a later pass where no buy leg moved at all.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    {"opened_at": "2026-09-29T12:00:00Z", "qty": 10.0, "entry_price": 50.0,
+     "entry_fee_rate": None, "adopted": True, "slice_state": None,
+     "unrealized_net_pct": 0.0})
+ok("ADOPTED_GREW when fee-less adopted book grows",
+   "ADOPTED_GREW" in run(d, dict(BASE_SNAP, adopted_nofee_usd=0.0)))
 
 # ALPACA_FLOOR / HALT / BP - the half of the account nothing watched.
 d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["equity"] = 800.0
