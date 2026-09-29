@@ -41,7 +41,7 @@ def plan(**kw):
     base = dict(requested_quantity="1E+30", available_quantity="1",
                 price="100", base_increment="0.001")
     base.update(kw)
-    return eq.plan_sell_quantity(**base)
+    return eq.plan_order_quantity(**base)
 
 
 print("== A. the live QNT case: dust, not a failure ==")

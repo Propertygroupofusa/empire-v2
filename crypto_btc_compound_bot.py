@@ -55,6 +55,7 @@ from database import get_session_factory
 from models import BotPosition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+import execution_quantity as _eq
 log = logging.getLogger("crypto_btc_compound_bot")
 
 
@@ -706,6 +707,62 @@ async def get_product_size_decimals(session, product_id: str) -> int:
         return 8
 
 
+# Product rules are static per market, so they are fetched once and kept.
+# Only SUCCESSES are cached: caching a failure would let one blip disable a
+# product until restart, and the whole point of failing closed is that it
+# recovers as soon as the venue answers again.
+_PRODUCT_RULES_CACHE = {}
+
+
+async def get_product_rules(session, product_id: str):
+    """Every size rule the venue publishes for this market, or None.
+
+    None means UNKNOWN and the caller must refuse. That is the difference
+    between this and get_product_size_decimals, which returns 8 on any
+    failure - the most permissive value on the venue - and so turns an
+    unreadable product into an order sized against a guess. ALGO-USD's real
+    base_increment is 0.1; sized at 8 decimals the venue rejects it.
+
+    base_min_size and quote_min_size may legitimately be absent: the public
+    Exchange API publishes neither while this brokerage API publishes both.
+    Absent means the rule is not asserted, never that it is satisfied, and
+    the increment floor applies either way.
+    """
+    cached = _PRODUCT_RULES_CACHE.get(product_id)
+    if cached is not None:
+        return cached
+    path = f"/api/v3/brokerage/products/{product_id}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path,
+                               headers=_auth_headers("GET", path), timeout=15) as r:
+            if r.status != 200:
+                log.warning(f"[GRID] {product_id}: product rules unreadable "
+                            f"(HTTP {r.status}). No order will be sized against "
+                            f"a guess.")
+                return None
+            data = await r.json()
+    except Exception as e:
+        log.warning(f"[GRID] {product_id}: product rules fetch failed "
+                    f"({type(e).__name__}: {e}). No order will be sized "
+                    f"against a guess.")
+        return None
+    inc = data.get("base_increment")
+    if not inc:
+        # The one field with no safe default. Without it there is no way to
+        # know what sizes this market accepts.
+        log.warning(f"[GRID] {product_id}: the venue returned no "
+                    f"base_increment. Refusing rather than assuming one.")
+        return None
+    rules = {
+        "base_increment": inc,
+        "base_min_size": data.get("base_min_size") or None,
+        "quote_min_size": data.get("quote_min_size") or None,
+        "product_id": product_id,
+    }
+    _PRODUCT_RULES_CACHE[product_id] = rules
+    return rules
+
+
 async def _fetch_candles(session, product_id: str):
     """Fetches ~25 hours of 5-minute candles (Coinbase's public,
     unauthenticated market-data endpoint - same one crypto_coinbase_bot.py
@@ -1114,9 +1171,33 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID,
         log.info(f"[BTC-COMPOUND] {product_id}: clamping sell qty {qty:.8f} -> real held balance {real_balance:.8f}")
         qty = real_balance
 
-    decimals = await get_product_size_decimals(session, product_id)
-    factor = 10 ** decimals
-    qty = math.floor(qty * factor) / factor
+    # A PROTECTION PATH, SIZED BY THE VENUE'S REAL RULES.
+    #
+    # The increment and any minimum SIZE are enforced. The minimum order
+    # VALUE deliberately is not: evaluating it needs a live price, and this
+    # function is the forced-exit path - the same one whose comment above
+    # says that leaving a position open was judged the larger risk than
+    # selling unverified. Adding a book read here would give a protection a
+    # new way to fail, and a sale under the venue's notional floor is
+    # rejected loudly rather than lost quietly.
+    #
+    # Unreadable rules still refuse. There is no safe guess for what sizes a
+    # market accepts, and the old 8-decimal fallback produced orders the
+    # venue rejects outright on any product with a coarser increment.
+    _rules = await get_product_rules(session, product_id)
+    if _rules is None:
+        log.warning(
+            f"[BTC-COMPOUND] {product_id}: NOT SELLING - the product's size "
+            f"rules could not be read. Refusing to size an order against a "
+            f"guess.")
+        _last_order_error[product_id] = (
+            "product rules unreadable: refusing to size an order against a guess")
+        return None
+    _plan = _eq.plan_order_quantity(
+        requested_quantity=qty, available_quantity=qty, price=None,
+        base_increment=_rules["base_increment"],
+        base_min_size=_rules["base_min_size"], quote_min_size=None)
+    qty = float(_plan.executable_quantity)
 
     if qty <= 0:
         log.warning(f"[BTC-COMPOUND] {product_id}: nothing sellable after balance/precision clamp (qty was {qty})")
@@ -1133,7 +1214,8 @@ async def place_market_sell(session, qty: float, product_id: str = PRODUCT_ID,
         "client_order_id": str(uuid.uuid4()),
         "product_id": product_id,
         "side": "SELL",
-        "order_configuration": {"market_market_ioc": {"base_size": f"{qty:.{decimals}f}"}},
+        # The planner's own string, so the format cannot disagree with the floor.
+        "order_configuration": {"market_market_ioc": {"base_size": _plan.order_size_string}},
     }
     return await _place_and_confirm(session, path, order, source=source)
 
@@ -1382,19 +1464,39 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
         _last_order_rested[product_id] = False
         _last_order_block[product_id] = {"available_units": real_usd}
         return None
-    decimals = await get_product_size_decimals(session, product_id)
-    qty = usd_amount / bid
-    factor = 10 ** decimals
-    qty = math.floor(qty * factor) / factor
-    if qty <= 0:
+    # Same rules, buy side. `available` here is the units the cash can
+    # afford; the caller already decided how much cash to commit. The bid is
+    # read above, so the venue's minimum order VALUE can be enforced too.
+    rules = await get_product_rules(session, product_id)
+    if rules is None:
+        log.warning(
+            f"[GRID] {product_id}: NO MAKER BUY PLACED - the product's size "
+            f"rules could not be read. Refusing to size an order against a "
+            f"guess; retried next cycle.")
         _last_order_error[product_id] = (
-            f"nothing buyable: ${usd_amount:.2f} at ${bid:,.10f} floors to 0 "
-            f"at {decimals} decimals")
+            "product rules unreadable: refusing to size an order against a guess")
+        _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {"available_units": real_usd}
+        return None
+    _affordable = usd_amount / bid
+    plan = _eq.plan_order_quantity(
+        requested_quantity=_affordable, available_quantity=_affordable,
+        price=bid, base_increment=rules["base_increment"],
+        base_min_size=rules["base_min_size"],
+        quote_min_size=rules["quote_min_size"])
+    qty = float(plan.executable_quantity)
+    if not plan.should_execute:
+        log.warning("[GRID] NO MAKER BUY PLACED - " +
+                    _eq.log_line(product_id, plan, maker_only=True))
+        _last_order_error[product_id] = f"{plan.reason}: {plan.detail}"
         _last_order_rested[product_id] = False
         _last_order_block[product_id] = {
             "available_units": real_usd,
-            "size_decimals": decimals,
-            "requested_qty": usd_amount / bid,
+            "requested_qty": _affordable,
+            "decision": plan.decision,
+            "reason": plan.reason,
+            "base_increment": str(plan.base_increment) if plan.base_increment is not None else None,
+            "executable_quantity": str(plan.executable_quantity),
         }
         return None
 
@@ -1403,7 +1505,10 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
         "product_id": product_id,
         "side": "BUY",
         "order_configuration": {"limit_limit_gtc": {
-            "base_size": f"{qty:.{decimals}f}",
+            # The planner's own string. Formatting separately is how a
+            # correctly floored size becomes an invalid one - and `decimals`
+            # no longer exists here at all.
+            "base_size": plan.order_size_string,
             "limit_price": f"{bid:.10f}".rstrip("0").rstrip("."),
             "post_only": True,
         }},
@@ -1423,7 +1528,7 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     _last_order_block.pop(product_id, None)
     # The size the CALLER asked for, captured before any clamping. `qty` is
     # rebound below - clamped to the available balance, then floored to the
-    # product's decimals - so by the time the nothing-sellable branch is
+    # product's base_increment - so by the time the not-executable branch is
     # reached it is 0.0, and recording that as the requested size would say
     # nothing at all.
     _asked_qty = qty
@@ -1442,44 +1547,33 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         # the unreadable-balance-as-zero bug this path exists to prevent.
         _last_order_block[product_id] = {"requested_qty": _asked_qty}
         return None
-    if real_balance < qty:
-        qty = real_balance
-    decimals = await get_product_size_decimals(session, product_id)
-    factor = 10 ** decimals
-    qty = math.floor(qty * factor) / factor
-    if qty <= 0:
-        # NOTHING WAS PLACED. Said out loud because the caller's own
-        # message for a None return is "maker sell did not fill", and
-        # "did not fill" is false here - no order ever existed to fill.
-        # That wording sent a four-hour investigation after a resting
-        # order that was never resting: 441 QNT rows and 429 ALGO rows in
-        # one day. Attributing all of them to THIS branch was an inference
-        # from the balances (ALGO available 0.046 of 1134.3, QNT dust), not
-        # a measurement - the rows themselves could not say. GridMakerExpiry
-        # now carries order_rested, so the split is read rather than
-        # reasoned; until those rows accumulate, the attribution is a strong
-        # inference and nothing more.
+    # THE VENUE'S OWN RULES, OR NOTHING. get_product_size_decimals returns
+    # 8 on any failure, which is the most permissive value on the venue, so
+    # an unreadable product used to become an order sized against a guess.
+    # This refuses instead. A refusal costs one cycle; an order sized on a
+    # guess is rejected by the venue at best.
+    rules = await get_product_rules(session, product_id)
+    if rules is None:
         log.warning(
-            f"[GRID] {product_id}: NO MAKER SELL PLACED - after clamping to "
-            f"the available {base_currency} balance ({real_balance:.10f}) and "
-            f"flooring to {decimals} decimals there is nothing sellable. This "
-            f"is not an unfilled order; no order was created. Usually means "
-            f"the coin is reserved by a resting order, or the branch holds "
-            f"less than one tradeable unit.")
+            f"[GRID] {product_id}: NO MAKER SELL PLACED - the product's size "
+            f"rules could not be read, so there is no way to know what size "
+            f"this market accepts. Refusing rather than guessing; retried "
+            f"next cycle.")
         _last_order_error[product_id] = (
-            f"nothing sellable: available {real_balance:.10f} floors to 0 at "
-            f"{decimals} decimals")
+            "product rules unreadable: refusing to size an order against a guess")
         _last_order_rested[product_id] = False
         _last_order_block[product_id] = {
             "available_units": real_balance,
-            "size_decimals": decimals,
             "requested_qty": _asked_qty,
         }
         return None
 
+    # The book is read BEFORE sizing now, because the venue's minimum order
+    # VALUE cannot be evaluated without a price - and the ask is the price
+    # this sell would get.
     bid, ask = await get_best_bid_ask(session, product_id)
     if ask is None:
-        # Also not a fill failure - the book could not be read at all.
+        # Not a fill failure - the book could not be read at all.
         log.warning(
             f"[GRID] {product_id}: NO MAKER SELL PLACED - the order book was "
             f"unreadable, so there is no ask to rest at. No order created.")
@@ -1487,17 +1581,48 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         _last_order_rested[product_id] = False
         _last_order_block[product_id] = {
             "available_units": real_balance,
-            "size_decimals": decimals,
             "requested_qty": _asked_qty,
         }
         return None
+
+    plan = _eq.plan_order_quantity(
+        requested_quantity=_asked_qty, available_quantity=real_balance,
+        price=ask, base_increment=rules["base_increment"],
+        base_min_size=rules["base_min_size"],
+        quote_min_size=rules["quote_min_size"])
+
+    if not plan.should_execute:
+        # DUST IS NOT A FAILED SALE. The old message here was "nothing
+        # sellable ... floors to 0 at N decimals", which reads as a failure
+        # and put branches at 0/3 over a holding the venue's rules simply
+        # cannot express yet. The reason is now a code, the raw quantity is
+        # preserved exactly, and the line carries every figure the decision
+        # used.
+        log.warning("[GRID] NO MAKER SELL PLACED - " +
+                    _eq.log_line(product_id, plan, target_price=None,
+                                 maker_only=True))
+        _last_order_error[product_id] = f"{plan.reason}: {plan.detail}"
+        _last_order_rested[product_id] = False
+        _last_order_block[product_id] = {
+            "available_units": real_balance,
+            "requested_qty": _asked_qty,
+            "decision": plan.decision,
+            "reason": plan.reason,
+            "base_increment": str(plan.base_increment) if plan.base_increment is not None else None,
+            "executable_quantity": str(plan.executable_quantity),
+        }
+        return None
+
+    qty = float(plan.executable_quantity)
 
     order = {
         "client_order_id": str(uuid.uuid4()),
         "product_id": product_id,
         "side": "SELL",
         "order_configuration": {"limit_limit_gtc": {
-            "base_size": f"{qty:.{decimals}f}",
+            # The planner's own string: formatting it separately is how a
+            # correctly floored size becomes an invalid one.
+            "base_size": plan.order_size_string,
             "limit_price": f"{ask:.10f}".rstrip("0").rstrip("."),
             "post_only": True,
         }},

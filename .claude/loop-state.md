@@ -740,6 +740,77 @@ against one bar when the system has two.** Before retiring an explanation,
 find the code path it names — the parked gate was 130 lines from the trigger
 computation I did read.
 
+
+## EXECUTION REBUILD — in progress (owner spec, 26 sections)
+
+**Section 3/4 landed. The rest is not built yet.** Do not report the whole
+spec as done.
+
+**What the owner's named bug actually was.** The log line
+`available 0.0009732300 floors to 0 at 3 decimals` is QNT-USD, and the
+venue's REAL `base_increment` for QNT-USD is `0.001` (measured
+2026-09-29). So 0.00097323 genuinely IS under one tradeable unit — the old
+arithmetic was right about QNT even though its method was wrong. What it
+got wrong was the WORDS: a confirmed non-order was called "nothing
+sellable", which reads as a failure, and the branch then showed 0/3.
+
+**The real bug the spec's §3 is pointing at, and it is worse than QNT:**
+
+1. **`get_product_size_decimals` FAILS OPEN** — returns 8 on a non-200, a
+   timeout, or any exception. Eight is the most permissive value on the
+   venue, so an unreadable product became an order sized against a guess.
+   ALGO-USD's real increment is 0.1; sized at 8 decimals the venue rejects
+   it outright. **This is the live safety bug**, and §22 forbids it.
+2. **Float arithmetic against a decimal rule.** Measured: `0.29` at a
+   `0.01` increment floors to **0.28** in float, `0.29` exactly — one whole
+   increment, on the increment six of these products use.
+   (NOTE: my first example, 2.675 at 0.001, does NOT fail — `2.675*1000` is
+   exactly `2675.0`. I asserted it before measuring it. Use 0.29.)
+3. **A decimal COUNT standing in for the increment.** Equivalent only while
+   the increment is a power of ten. **All 23 fleet products are powers of
+   ten today (measured)** — so this has produced no wrong number yet. A
+   `0.05` increment would floor `0.07` to `0.07`, which is not a multiple
+   of `0.05`.
+4. **No notional floor at all.** Every product publishes a minimum order
+   VALUE (`min_market_funds` = 1 on the Exchange API).
+
+**ALREADY EXISTED — do not rebuild:** `resting_stops.round_down(value,
+increment)` is exactly the spec's `floor_to_increment`: exact Decimal,
+arbitrary increment, raises on a bad one. The stop path has used it all
+along; the execution path simply never called it. `execution_quantity`
+imports it, and a test asserts via AST that it is imported, not redefined,
+and that `math` is never imported there.
+
+**Shipped:** `execution_quantity.py` (pure, no I/O) + `get_product_rules()`
+(cached, successes only) wired into all three sizers —
+`place_maker_sell`, `place_maker_buy`, `place_market_sell`.
+
+**BEHAVIOUR CHANGE THE OWNER SHOULD KNOW:** an unreadable product now
+REFUSES instead of trading at 8 decimals. That is §22's requirement and the
+safe direction, but if the products endpoint is flaky it will show up as
+skipped cycles rather than rejected orders. Watch `product rules
+unreadable` in `_last_order_error`.
+
+**Deliberate exception:** `place_market_sell` passes `quote_min_size=None`.
+It is the forced-exit path, evaluating a notional floor needs a live price,
+and giving a protection a new way to fail is worse than a loud venue
+rejection. Pinned by a test so it is not "fixed" without that reasoning.
+
+**Two APIs, different fields — do not mix them.** `api.exchange.coinbase.com`
+(public) publishes `base_increment` and `min_market_funds` but NEITHER
+`base_min_size` nor `quote_min_size`. `/api/v3/brokerage/products/{id}`
+(what the bot uses) publishes both minimums. Absent means the rule is not
+asserted, NEVER that it passed.
+
+**NOT built yet (§1, 2, 5–10, 12–24):** the three-slice state machine with
+per-slice targets, event-driven fill→next-order, cycle rotation,
+idempotency keys, restart reconciliation, the dashboard and the speed
+metrics. `CryptoGridSlice` already carries a per-slice `entry_price`, and
+`_pick_profitable_slice_to_sell` + `_grid_slice_net_pnl` + `_slice_rate`
+already compute per-slice net economics — so §5's per-slice targets are
+closer than the spec assumes. The GRID TRIGGER is the part that uses one
+global `reference_price` for all slices.
+
 ## Grid config
 
 3 levels × 2.5% spacing · real round-trip fee 1.5% · effective 0.7%

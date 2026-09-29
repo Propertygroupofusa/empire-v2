@@ -122,6 +122,22 @@ class FakeSession:
 ACCEPTED = {"success": True, "success_response": {"order_id": "oid-1"}}
 
 
+def rules(base_increment, base_min_size=None, quote_min_size=None):
+    """The product-rule dict the engine now reads instead of a decimal count.
+
+    The engine used to size orders from a helper that returns 8 on ANY
+    failure, so an unreadable product became an order sized against a
+    guess. It now reads get_product_rules, which returns None and refuses.
+    These cases stub the new call for exactly the reason they stubbed the
+    old one: they are testing the CAUSE CLASSIFIER, not the venue.
+
+    The increments below are the exact equivalents of the decimal counts
+    this file used before: 8 -> 0.00000001, 2 -> 0.01.
+    """
+    return {"base_increment": base_increment, "base_min_size": base_min_size,
+            "quote_min_size": quote_min_size, "product_id": PID}
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # grid_buy, end to end: real engine branch -> real flag -> real classifier
 # ─────────────────────────────────────────────────────────────────────────
@@ -163,7 +179,7 @@ def case_below_minimum():
         1.0,
         engine_patches=dict(get_usd_balance=aval((1.0, None)),
                             get_best_bid_ask=aval((100.0, 100.1)),
-                            get_product_size_decimals=aval(8)))
+                            get_product_rules=aval(rules("0.00000001"))))
 
 
 def case_no_bid():
@@ -172,7 +188,7 @@ def case_no_bid():
         50.0,
         engine_patches=dict(get_usd_balance=aval((50.0, None)),
                             get_best_bid_ask=aval((None, None)),
-                            get_product_size_decimals=aval(8)))
+                            get_product_rules=aval(rules("0.00000001"))))
 
 
 def case_floors_to_zero():
@@ -181,7 +197,7 @@ def case_floors_to_zero():
         50.0,
         engine_patches=dict(get_usd_balance=aval((50.0, None)),
                             get_best_bid_ask=aval((1e9, 1.1e9)),
-                            get_product_size_decimals=aval(2)))
+                            get_product_rules=aval(rules("0.01"))))
 
 
 def case_post_raised():
@@ -190,7 +206,7 @@ def case_post_raised():
         50.0,
         engine_patches=dict(get_usd_balance=aval((50.0, None)),
                             get_best_bid_ask=aval((100.0, 100.1)),
-                            get_product_size_decimals=aval(8),
+                            get_product_rules=aval(rules("0.00000001")),
                             _auth_headers=lambda *a, **k: {}),
         session=FakeSession(raises=ConnectionResetError("connection reset")))
 
@@ -201,7 +217,7 @@ def case_really_expired():
         50.0,
         engine_patches=dict(get_usd_balance=aval((50.0, None)),
                             get_best_bid_ask=aval((100.0, 100.1)),
-                            get_product_size_decimals=aval(8),
+                            get_product_rules=aval(rules("0.00000001")),
                             _auth_headers=lambda *a, **k: {},
                             _await_fill=aval(None),
                             cancel_order=aval(True)),
@@ -309,18 +325,18 @@ SELL_CASES = (
     # sized off a number nothing confirmed.
     ("BALANCE_READ_FAILED",
      dict(get_asset_balance=aval((None, "HTTP 500 from /accounts")),
-          get_product_size_decimals=aval(2),
+          get_product_rules=aval(rules("0.01")),
           get_best_bid_ask=aval((100.0, 100.1)))),
     # NO_SELLABLE_INVENTORY - the balance floors to zero at the product's
     # own precision, so there is nothing to sell.
     ("NO_SELLABLE_INVENTORY",
      dict(get_asset_balance=aval((0.0046, None)),
-          get_product_size_decimals=aval(2),
+          get_product_rules=aval(rules("0.01")),
           get_best_bid_ask=aval((100.0, 100.1)))),
     # NO_ASK - the book would not read, so there is no ask to rest at.
     ("NO_ASK",
      dict(get_asset_balance=aval((10.0, None)),
-          get_product_size_decimals=aval(2),
+          get_product_rules=aval(rules("0.01")),
           get_best_bid_ask=aval((None, None)))),
 )
 

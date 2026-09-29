@@ -172,13 +172,17 @@ class QuantityPlan:
         }
 
 
-def plan_sell_quantity(*, requested_quantity, available_quantity, price,
+def plan_order_quantity(*, requested_quantity, available_quantity, price,
                        base_increment, base_min_size=None, quote_min_size=None):
     """What may actually be sold, or why nothing may be.
 
-    `available_quantity` is the wallet's AVAILABLE units - not held units.
-    Coin behind a resting order cannot be sold, and sizing against held
-    produces an order the venue refuses.
+    For a SELL, `available_quantity` is the wallet's AVAILABLE units - not
+    held units. Coin behind a resting order cannot be sold, and sizing
+    against held produces an order the venue refuses.
+
+    For a BUY, it is the units the cash can afford (usd / bid). The venue's
+    size rules are identical on both sides, so one planner serves both; the
+    caller has already decided how much cash to commit.
 
     None anywhere that matters is UNKNOWN and REFUSES. That is the whole
     point: the function this replaces turned an unreadable product into
