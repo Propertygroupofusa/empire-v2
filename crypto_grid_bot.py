@@ -5747,6 +5747,15 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
     import trading_profile as _tp
     _profile = await get_trading_profile()
     if not _tp.net_edge_gate_enabled(_profile):
+        # RECORDED, for the same reason the DB toggle below is, and it was
+        # missed when that one was fixed: this path also returns True, so the
+        # buy goes in with no economic check. Writing nothing made a whole
+        # profile's worth of real buys invisible to every counter that reads
+        # gate verdicts - including the fill rate, which counts attempts from
+        # the verdicts that allowed them and so could not count these at all.
+        _reason = (f"profile {_profile}: economic gates off - ${slice_usd:,.2f} buy "
+                   f"allowed with NO economic check")
+        await _record_gate_decision(bot_name, product_id, "GATE_DISABLED", _reason)
         return True, f"profile {_profile}: economic gates off"
     if not await is_net_edge_gate_active():
         # RECORDED, not silent. A disabled gate used to return here writing

@@ -53,6 +53,132 @@ NOT_CAPTURED = {
     "time_to_fill_seconds": "not meaningful for market orders; they fill on submission",
 }
 
+# ── EXECUTION COUNTS ─────────────────────────────────────────────────────
+#
+# The event-type groups and the arithmetic that reads them live together, on
+# purpose. They were apart - the names in the dashboard router, the sum
+# inline beside them - and they drifted: `filled = submitted - rejected`
+# stayed put while three more ways for a buy to produce no fill were added,
+# so each new one was counted as a FILL.
+#
+# Anything added to NO_FILL_EVENTS is subtracted from fills automatically.
+# That is the whole point of keeping them in one place.
+
+#: The venue refused the order.
+ORDER_REJECTED_EVENTS = ("ORDER_REJECTED",)
+
+#: Every OTHER way an attempted buy ends with no fill. A maker order nobody
+#: crossed, a cycle that created no order, and one whose fate is unknown are
+#: not rejections - and they are not fills either.
+NO_FILL_EVENTS = ("MAKER_EXPIRED", "ORDER_NOT_PLACED", "ORDER_NO_FILL")
+
+#: Gate verdicts that ALLOWED the buy, so an order attempt followed. Read
+#: from _net_edge_gate_ok's return value, not from how the verdict reads:
+#:   GATE_OBSERVE - observe mode records what the microstructure veto WOULD
+#:                  have blocked and lets the buy through. It is the default
+#:                  mode, so leaving it out lost most attempts.
+#:   GATE_DISABLED - the gate is switched off and the buy goes in with no
+#:                  economic check. Very much an attempt.
+GATE_ALLOWED_EVENTS = ("GATE_PASS", "GATE_OBSERVE", "GATE_DISABLED")
+
+#: Recorded AFTER an allowing verdict, on a path that returns without
+#: placing anything. The attempt was counted and never made.
+POST_GATE_BLOCK_EVENTS = ("LESSON_BLOCK",)
+
+#: Every event type execution_counts reads, for the caller's query.
+EXECUTION_OUTCOME_EVENTS = (ORDER_REJECTED_EVENTS + NO_FILL_EVENTS
+                            + POST_GATE_BLOCK_EVENTS)
+
+
+def execution_counts(gate_tally, outcome_tally):
+    """How many buys were attempted, and how many of them actually filled.
+
+    Two count-by-event-type dicts in, one report out. Pure, so the
+    arithmetic can be tested without a database.
+
+    THE BUG THIS REPLACES. It was `filled = submitted - rejected`, with
+    `submitted` counted as GATE_PASS alone. That is right only if a
+    rejection is the one way a buy can fail, and under maker-ONLY mode -
+    where an unfilled maker order has no market fallback - it is not even
+    the common way. A maker order nobody crossed, a cycle that created no
+    order, and one whose fate is unknown all came out as FILLS. So did a
+    gate pass that a later check blocked before anything reached the venue.
+    And GATE_OBSERVE, which also lets the buy through, was left out of the
+    attempt count entirely, so a real attempt read as no attempt at all.
+
+    Every figure could only ever be too flattering, which is the specific
+    failure this fleet's telemetry has been burned by before.
+    """
+    gate_tally = gate_tally or {}
+    outcome_tally = outcome_tally or {}
+
+    def _n(names):
+        return sum(int(outcome_tally.get(n, 0) or 0) for n in names)
+
+    rejected = _n(ORDER_REJECTED_EVENTS)
+    post_gate_blocked = _n(POST_GATE_BLOCK_EVENTS)
+    allowed = sum(int(gate_tally.get(n, 0) or 0) for n in GATE_ALLOWED_EVENTS)
+    attempted = allowed - post_gate_blocked
+    no_fill = rejected + _n(NO_FILL_EVENTS)
+
+    # NOT max(0, ...). A clamp prints a plausible number for an impossible
+    # one: more no-fill outcomes than attempts means an outcome was recorded
+    # whose attempt was not counted, and that is a finding about this
+    # telemetry rather than a rounding problem. None with a reason attached,
+    # the same rule every other unavailable figure in this module follows.
+    if no_fill > attempted:
+        # Covers attempted == 0 with outcomes on the books, which is the
+        # loudest version of the same thing.
+        filled = fill_rate = None
+        integrity = (f"UNCOUNTABLE: {no_fill} no-fill outcomes against {attempted} "
+                     f"counted attempts. An outcome was recorded whose attempt was "
+                     f"not, so the attempt counting is what needs fixing - do not "
+                     f"read a fill rate out of this. Two known causes: a buy allowed "
+                     f"without any verdict being written, and a verdict that fell "
+                     f"just before the start of this window while its outcome fell "
+                     f"just after")
+    elif attempted <= 0:
+        filled = fill_rate = None
+        integrity = (f"nothing to measure - {allowed} allowing gate verdicts less "
+                     f"{post_gate_blocked} blocked after the gate leaves no attempt "
+                     f"in this window. Reads the same whether the fleet was quiet or "
+                     f"was buying on a path that writes no verdict, so it is not "
+                     f"evidence of either")
+    else:
+        filled = attempted - no_fill
+        fill_rate = round(filled / attempted * 100, 1)
+        integrity = None
+
+    return {
+        "attempted": attempted,
+        # The same number under the name this dict carried before, so an
+        # older reader of the JSON does not silently lose the field.
+        "submitted": attempted,
+        "rejected": rejected,
+        # Each no-fill broken out, because they say completely different
+        # things about the fleet and one total hides which. A maker expiry
+        # is the mode working as designed; a non-order is a clamp or a book
+        # that would not read; an unknown fate is a connection that broke
+        # with an order possibly live at the venue.
+        "maker_expired": _n(("MAKER_EXPIRED",)),
+        "not_placed": _n(("ORDER_NOT_PLACED",)),
+        "unknown_fate": _n(("ORDER_NO_FILL",)),
+        "blocked_after_gate": post_gate_blocked,
+        "no_fill": no_fill,
+        "filled": filled,
+        "fill_rate_pct": fill_rate,
+        "integrity": integrity,
+        "note": ("Attempted is the gate verdicts that ALLOWED a buy - a pass, an "
+                 "observe-mode verdict, or a disabled gate, all three of which let "
+                 "the buy through - less the ones a later check blocked before any "
+                 "order was placed. Filled is "
+                 "what is left after EVERY no-fill outcome, not just rejections: a "
+                 "maker order nobody crossed, a cycle that created no order and one "
+                 "whose fate is unknown are none of them fills. Counting rejections "
+                 "alone reported each of those as a successful fill, which under "
+                 "maker-only mode is the usual outcome rather than a rare one."),
+    }
+
 
 def _safe_div(a, b):
     return None if not b else a / b
