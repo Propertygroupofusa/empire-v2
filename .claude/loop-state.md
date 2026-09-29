@@ -1182,6 +1182,47 @@ unprofitable slices are being stepped over by design.
 gross 3.211%, net 2.566% on $2,324.96 notional, mean slice $40.09. The
 edge is real; the turnover is what is missing.
 
+### §5 IS WIRED — every new slice carries its OWN take-profit target
+
+`slice_target.target_price()` is now called at the buy, and
+`target_price`/`target_reason` are stamped on the slice.
+
+**WHICH SELL ROUTE — this is the standing trap, so it is written into the
+code.** There are two and they are different questions: (1) the GRID
+trigger, `price >= reference_price * (1 + grid_pct)`, a BRANCH-level
+condition that knows nothing about this slice; (2) the PARKED sell, where
+THIS slice's net over ITS OWN basis clears `GRID_PARKED_MIN_NET_PCT` and
+the reference is never read. **slice_target answers exactly (2)**, so that
+is what is recorded and `target_reason` says so in words — a bare number
+would read as whichever route the reader had in mind.
+
+Priced with the rate this round trip will REALLY pay: the buy leg's actual
+recorded `buy_leg_fee` plus the expected exit leg, never one assumed rate
+for both. Rounded **UP** to the venue's price tick — down would give away
+the edge the target was computed to earn.
+
+**`quote_increment` added to `get_product_rules`** — free, same response —
+and `None` when absent, never a guessed tick.
+
+**A bug caught by RUNNING it, not reading it:** `round_target_up` returns a
+**Decimal**, `target_price` is a Float column, and `_grid_slice_net_pnl`
+raises `TypeError` on a Decimal exit price. Cast with `float()` at the
+boundary. It would have surfaced only on a live buy.
+
+**Verified through the REAL formula, not slice_target's own arithmetic:**
+across four entry/rate/tick shapes the unrounded target nets EXACTLY 1.0%
+through `_grid_slice_net_pnl`, and every rounded one still clears it.
+
+**It fails to None.** The whole computation sits in a try, initialised
+before it — a recorded fact must never be able to lose a fill that already
+happened.
+
+**TWO OF MY OWN TESTS WERE WRONG AND MUTANTS FOUND BOTH:**
+`target_reason is not None` passed against `target_reason=None`, because an
+`ast.Constant(None)` node is not Python `None` — PRESENT IS NOT POPULATED,
+again. And "initialised before the try" was satisfied by the except block's
+identical tuple assign; it now compares line numbers.
+
 ### §24's JOIN KEY IS WIRED — `order_id` now reaches the slice
 
 `_last_order_id` (crypto_btc_compound_bot) records the venue's own order id

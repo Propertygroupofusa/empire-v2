@@ -757,6 +757,16 @@ async def get_product_rules(session, product_id: str):
         "base_increment": inc,
         "base_min_size": data.get("base_min_size") or None,
         "quote_min_size": data.get("quote_min_size") or None,
+        # The PRICE tick, as distinct from base_increment's SIZE step. Free
+        # here - it is in the same response - and needed by slice_target to
+        # round a sell target UP to a price the venue will actually accept.
+        # Rounding a sell target DOWN would give away the edge it was
+        # computed to earn, which is why slice_target has its own rounding
+        # rather than reusing resting_stops.round_price.
+        #
+        # None when absent, never a guessed tick: a target rounded to an
+        # invented increment is a price the venue may refuse.
+        "quote_increment": data.get("quote_increment") or None,
         "product_id": product_id,
     }
     _PRODUCT_RULES_CACHE[product_id] = rules

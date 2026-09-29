@@ -274,6 +274,115 @@ _rested = [n for n in ast.walk(_esrc) if isinstance(n, ast.Call)
 ok("  as often as its sibling _last_order_rested",
    len(_pops) >= len(_rested), f"{len(_pops)} vs {len(_rested)}")
 
+print("== §5: each slice carries its OWN take-profit target ==")
+_tp = _kw.get("target_price"); _tr = _kw.get("target_reason")
+ok("the buy records a target_price", _tp is not None, str(sorted(_kw)))
+# NOT "is not None": an ast.Constant(None) node is not Python None, so
+# `target_reason=None` satisfied that and the mutant survived. Present is
+# not populated - assert the VALUE.
+ok("and a target_reason beside it",
+   isinstance(_tr, ast.Name) and _tr.id == "_target_reason",
+   ast.dump(_tr)[:70] if _tr is not None else "absent")
+ok("  the target itself is a real value too",
+   isinstance(_tp, ast.Name) and _tp.id == "_target_price",
+   ast.dump(_tp)[:70] if _tp is not None else "absent")
+# And the reason must name the route, not be a bare label.
+_reason_asgn = [n for n in ast.walk(FN) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "_target_reason"
+                        for t in n.targets)]
+_joined = [n for a in _reason_asgn for n in ast.walk(a) if isinstance(n, ast.JoinedStr)]
+ok("  and it is built from the real numbers, not a constant string",
+   bool(_joined), f"{len(_reason_asgn)} assignment(s), no f-string")
+_rtext = " ".join(c.value for j in _joined for c in j.values
+                  if isinstance(c, ast.Constant) and isinstance(c.value, str))
+ok("  naming the parked-sell route explicitly", "parked_sell" in _rtext, _rtext[:80])
+_assigns_tp = [n for n in ast.walk(FN) if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Tuple) and any(
+                   isinstance(e, ast.Name) and e.id == "_target_price" for e in t.elts)
+                   for t in n.targets)]
+# BEFORE the try, by line number. The except block assigns the same tuple,
+# so merely finding one is satisfied by deleting the initialisation - and
+# then a raise before the first assignment reaches the insert unbound.
+_tries_all = [n for n in ast.walk(FN) if isinstance(n, ast.Try)
+              and any(isinstance(x, ast.Name) and x.id == "slice_target"
+                      for x in ast.walk(n))]
+ok("it is initialised before the try, not only in the except",
+   bool(_assigns_tp) and bool(_tries_all)
+   and min(a.lineno for a in _assigns_tp) < min(t.lineno for t in _tries_all),
+   f"init at {[a.lineno for a in _assigns_tp]}, try at {[t.lineno for t in _tries_all]}")
+_tries = [n for n in ast.walk(FN) if isinstance(n, ast.Try)
+          and any(isinstance(x, ast.Name) and x.id == "slice_target"
+                  for x in ast.walk(n))]
+ok("the whole computation sits inside a try", bool(_tries),
+   "a recorded fact must never lose a fill that already happened")
+
+print("== it is priced with THIS slice's own round trip ==")
+_calls = [n for n in ast.walk(FN) if isinstance(n, ast.Call)
+          and isinstance(n.func, ast.Attribute) and n.func.attr == "target_price"]
+ok("target_price is called once", len(_calls) == 1, str(len(_calls)))
+if _calls:
+    _args = _calls[0].args
+    ok("  from the FILL price, not the expected one",
+       _args and isinstance(_args[0], ast.Name) and _args[0].id == "filled_price",
+       getattr(_args[0], "id", "?") if _args else "-")
+    ok("  at the floor, not an invented edge",
+       len(_args) > 2 and isinstance(_args[2], ast.Name)
+       and _args[2].id == "GRID_PARKED_MIN_NET_PCT",
+       getattr(_args[2], "id", "?") if len(_args) > 2 else "-")
+# The rate must combine the REAL buy leg with the expected sell leg.
+_rate = [n for n in ast.walk(FN) if isinstance(n, ast.Assign)
+         and any(isinstance(t, ast.Name) and t.id == "_rt_rate" for t in n.targets)]
+ok("the round trip rate is built, not assumed", len(_rate) == 1, str(len(_rate)))
+if _rate:
+    _names = {n.id for n in ast.walk(_rate[0]) if isinstance(n, ast.Name)}
+    ok("  from the buy leg's real recorded rate", "buy_leg_fee" in _names, str(sorted(_names)))
+    ok("  plus the expected exit leg", "_exit_leg" in _names, str(sorted(_names)))
+
+print("== rounded UP, and cast at the Float boundary ==")
+_round = [n for n in ast.walk(FN) if isinstance(n, ast.Call)
+          and isinstance(n.func, ast.Attribute) and n.func.attr == "round_target_up"]
+ok("the target is rounded up", len(_round) == 1, str(len(_round)))
+# round_target_up returns a Decimal; target_price is a Float column and
+# _grid_slice_net_pnl raises TypeError on a Decimal exit price.
+_floats = [n for n in ast.walk(FN) if isinstance(n, ast.Call)
+           and isinstance(n.func, ast.Name) and n.func.id == "float"
+           and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                   and c.func.attr == "round_target_up" for c in ast.walk(n))]
+ok("  and cast to float, because the column and its readers are floats",
+   len(_floats) == 1, str(len(_floats)))
+import slice_target as _st
+from decimal import Decimal as _D
+ok("  (round_target_up really does return a Decimal)",
+   isinstance(_st.round_target_up(23.1889, "0.001"), _D))
+
+print("== the recorded target really nets the floor ==")
+# Through the REAL formula the live sell uses, not slice_target's own.
+from crypto_grid_bot import _grid_slice_net_pnl as _net, GRID_PARKED_MIN_NET_PCT as _FLOOR
+for entry, rate, tick in ((22.80, 0.0070, "0.001"), (0.15, 0.0070, "0.0001"),
+                          (84194.59, 0.0035, "0.01"), (8.412e-05, 0.0070, "0.00000001")):
+    t = _st.target_price(entry, rate, _FLOOR)
+    ok(f"entry {entry:g} at rate {rate}: unrounded nets exactly the floor",
+       abs(_net(1.0, entry, t, rate) / entry - _FLOOR) < 1e-9, "")
+    r = float(_st.round_target_up(t, tick))
+    ok(f"  rounded to {tick} still clears it",
+       _net(1.0, entry, r, rate) / entry >= _FLOOR, "")
+    ok(f"  and rounding went UP for {entry:g}", r >= t, f"{r!r} < {t!r}")
+
+print("== the venue's price tick is read, never guessed ==")
+_esrc2 = ast.parse(open("crypto_btc_compound_bot.py").read())
+_rules = [n for n in ast.walk(_esrc2) if isinstance(n, ast.Dict)
+          and any(isinstance(k, ast.Constant) and k.value == "base_increment" for k in n.keys)]
+ok("get_product_rules publishes a quote_increment", 
+   any(isinstance(k, ast.Constant) and k.value == "quote_increment"
+       for d in _rules for k in d.keys), "")
+for d in _rules:
+    for k, v in zip(d.keys, d.values):
+        if isinstance(k, ast.Constant) and k.value == "quote_increment":
+            ok("  and it is None when absent, never a guessed tick",
+               isinstance(v, ast.BoolOp) and isinstance(v.op, ast.Or)
+               and isinstance(v.values[-1], ast.Constant) and v.values[-1].value is None,
+               ast.dump(v)[:90])
+
 print()
 if failures:
     print("FAILED %d check(s): %s" % (len(failures), ", ".join(failures)))

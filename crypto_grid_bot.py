@@ -42,6 +42,7 @@ import os
 import zlib
 from decimal import Decimal as _Decimal, InvalidOperation
 import slice_lifecycle as _sl
+import slice_target
 import random
 import sys
 import time
@@ -6576,6 +6577,54 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             except Exception as e:
                 log.warning(f"[SHADOW] Failed to log order (non-blocking): {e}")
 
+        # ---- §5: THIS SLICE'S OWN TAKE-PROFIT TARGET ----
+        #
+        # WHICH SELL ROUTE THIS IS, because conflating the two is the standing
+        # trap. There are two, and they are not the same question:
+        #   (1) the GRID trigger, price >= reference_price * (1 + grid_pct) -
+        #       a BRANCH-level condition that knows nothing about this slice;
+        #   (2) the PARKED sell, where THIS slice's NET over ITS OWN basis
+        #       clears GRID_PARKED_MIN_NET_PCT and the reference is never read.
+        # slice_target answers exactly (2): the price at which this slice nets
+        # a given edge over its own entry. So that is what is recorded, and
+        # target_reason says so rather than leaving a bare number to be read
+        # as whichever route the reader had in mind.
+        #
+        # Priced with the rate THIS round trip will really pay - the buy leg's
+        # actual recorded rate plus the expected sell leg - not one assumed
+        # rate for both. Same input _slice_rate derives for the live sell.
+        _target_price, _target_reason = None, None
+        try:
+            _exit_leg = await expected_leg_fee_rate(branch.product_id)
+            _rt_rate = ((buy_leg_fee or 0.0) + _exit_leg
+                        if _exit_leg is not None else None)
+            _target_price = slice_target.target_price(
+                filled_price, _rt_rate, GRID_PARKED_MIN_NET_PCT)
+            if _target_price is not None:
+                # UP to the venue's price tick. Down would give away the very
+                # edge the target was computed to earn.
+                _rules_for_tick = await engine.get_product_rules(session, branch.product_id)
+                _tick = (_rules_for_tick or {}).get("quote_increment")
+                if _tick:
+                    # float() at the boundary, deliberately. round_target_up
+                    # returns a Decimal (it must, to round exactly), and
+                    # target_price is a Float column whose readers do float
+                    # arithmetic - _grid_slice_net_pnl raises TypeError on a
+                    # Decimal exit price. Caught by running it, not by reading.
+                    _target_price = float(
+                        slice_target.round_target_up(_target_price, _tick))
+                _target_reason = (f"parked_sell floor {GRID_PARKED_MIN_NET_PCT*100:.2f}% "
+                                  f"net over this slice's own basis at a "
+                                  f"{_rt_rate*100:.3f}% round trip")
+        except Exception as _e:
+            # A target is a RECORDED FACT, not a decision - nothing trades on
+            # it yet. It must never be able to lose a fill that already
+            # happened, so it fails to None (UNKNOWN) and the slice is still
+            # written.
+            log.warning(f"[GRID] {branch.bot_name}: target price unavailable "
+                        f"(non-fatal): {type(_e).__name__}: {_e}")
+            _target_price, _target_reason = None, None
+
         async with get_session_factory()() as db:
             # entry_fee_rate records the rate this leg REALLY paid (maker or
             # taker), so this slice can be priced honestly when it later sells.
@@ -6648,7 +6697,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                    # every order-attempt entry point, so a
                                    # previous cycle's id can never be read
                                    # here as this order's.
-                                   order_id=engine._last_order_id.get(branch.product_id)))
+                                   order_id=engine._last_order_id.get(branch.product_id),
+                                   target_price=_target_price,
+                                   target_reason=_target_reason))
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             fresh = result.scalar_one_or_none()
             if fresh:
