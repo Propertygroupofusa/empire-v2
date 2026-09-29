@@ -585,6 +585,33 @@ orphaned hash still answered "commit" to cat-file, because the object
 survives in the local store long after nothing points at it. cat-file
 proves the object exists; only ancestry proves the history contains it.
 
+**The split is done (5210a6f): confirmed non-orders have their own table.**
+`GridOrderNotPlaced` / `grid_order_not_placed`, read at
+`GET /grid-status/orders-not-placed`. Routing is at the write site:
+`_record_maker_expiry` refuses `order_rested is False` and hands it to
+`_record_order_not_placed`. True → expiry table and the study uses it; None →
+expiry table and the study excludes it by name; False → the new table.
+
+**Why the invariant is NOT `assert` and NOT a NOT NULL column.** Three
+reasons, all of which matter: (1) this is instrumentation and must never stop
+the thing it measures, and an assert on a live sell path does; (2)
+`order_rested` has three states and a NOT NULL column cannot hold the
+unknown one — the POST can raise after it may already have reached the venue;
+(3) **`main.py`'s migration loop adds every column as nullable regardless of
+the model's own `nullable=False`**, because a NOT NULL `ALTER TABLE ADD
+COLUMN` fails on Postgres against a populated table — so the declaration
+would not take effect and the model and schema would silently disagree.
+There is no Alembic in this repo. Any real constraint needs a hand-written
+migration plus a backfill decision.
+
+**`capital_velocity.py` already exists** and already rejected notional
+turnover as the ranking metric, on live data: LINK ran 7 round trips for 25¢,
+NEAR ran 4 for $6.82. The centrepiece is net profit per dollar per day, not
+trips or notional. Do not scaffold a second metrics engine; `growth_ledger`
+already tracks a `capital_velocity` field and `concentration_gate` imports
+`MAX_SINGLE_COIN_SHARE` from it. **`opportunity_events` does not exist** —
+no table, no model.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those
