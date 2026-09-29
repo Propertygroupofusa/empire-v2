@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Everything the fleet can tell you, checked every pass, against LAST pass.
+
+WHY THIS EXISTS, and it is not a nice-to-have. On 2026-09-29 a one-word bug
+(a loop variable shadowing a module) made every filled buy raise, get
+swallowed by an outer handler, and leave no slice row. It ran for FIVE HOURS.
+The evidence was in the data the whole time: `fill_mix.buy.legs` was climbing
+while the slice count stood still. Both numbers were pulled every fifteen
+minutes and nobody ever subtracted one from the other.
+
+That is the lesson this script encodes. A watcher with a fixed list of
+questions is blind to everything not on the list, and the most valuable
+signal is almost never a level - it is a DELTA that does not add up. So this
+keeps a snapshot between runs and checks CONSERVATION: coin bought must equal
+slices written, cash that left must equal coin that arrived, a counter that
+moves must move for a reason somebody can name.
+
+Three other things were found by the account owner sending screenshots,
+which is the clearest possible proof that this was not being watched:
+  - the alert queue had 67 alerts pending and 0 ever sent, because
+    ALERT_WEBHOOK_URL was absent from the process. An alarm nobody can
+    receive is not an alarm.
+  - $6,238.70 of coin had no automatic exit from either layer.
+  - the grid reported ZEC "down $357" while the real wallet was UP $519 on
+    it, because an ADOPTED basis is a price nobody paid. Reporting that as a
+    loss nearly drove a real decision.
+Each of those is a check below.
+
+Exit codes:  0 = quiet, 1 = UNREADABLE (a gap, never a zero), 2 = REPORTABLE.
+A gap is never silently treated as healthy; if a feed cannot be read, that is
+exit 1 and it says which feed.
+
+Usage:  python3 scripts/fleet_watchdog.py [--json] [--state PATH]
+"""
+import argparse
+import datetime
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+BASE = os.getenv("EMPIRE_BASE", "https://empire-v2-production.up.railway.app")
+API = BASE + "/api/trading-dashboard"
+DEFAULT_STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             ".fleet_watchdog_state.json")
+
+CRITICAL, WARN, INFO = "CRITICAL", "WARN", "INFO"
+findings = []
+gaps = []
+
+
+def flag(level, code, msg):
+    findings.append({"level": level, "code": code, "message": msg})
+
+
+def money(x):
+    if x is None:
+        return "UNKNOWN"
+    sign = "+" if x > 0 else ("-" if x < 0 else "")
+    return f"{sign}${abs(x):,.2f}"
+
+
+def get(path, timeout=45):
+    """Fetch one feed. A failure is recorded as a GAP and returns None.
+
+    Never returns {} on failure: an empty dict reads downstream as "nothing
+    is wrong", which is the exact confusion this whole script exists to
+    prevent.
+    """
+    url = path if path.startswith("http") else API + path
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
+        gaps.append(f"{path}: {type(e).__name__}: {e}")
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--state", default=DEFAULT_STATE)
+    args = ap.parse_args()
+
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    prev = {}
+    if os.path.exists(args.state):
+        try:
+            prev = json.load(open(args.state))
+        except (ValueError, OSError):
+            prev = {}  # a corrupt snapshot is a missing snapshot, not a zero
+
+    grid = get("/grid-status")
+    ops = get("/live-ops")
+    inv = get("/grid-status/invariants")
+    alerts = get("/alert-queue")
+    stops = get("/resting-stops")
+    health = get(BASE + "/health")
+
+    if grid is None:
+        print("UNREADABLE: /grid-status could not be read - no check is possible.")
+        for g in gaps:
+            print("  gap:", g)
+        return 1
+
+    branches = grid.get("branches") or []
+    slices = [(b["product_id"], s) for b in branches for s in (b.get("slices") or [])]
+    fill_mix = (grid.get("fill_mix") or {}).get("buy") or {}
+    cur = {
+        "at": now,
+        "buy_legs": fill_mix.get("legs"),
+        "slice_count": len(slices),
+        "populated": sum(1 for _, s in slices if s.get("slice_state")),
+        "skip_buy": (grid.get("maker_only_skipped_cycles") or {}).get("buy"),
+        "expiry_buy": (grid.get("maker_expiry_drift") or {}).get("buy"),
+        "commit": (health or {}).get("commit"),
+    }
+
+    # ---- 1. CONSERVATION: coin bought must equal slices written ------------
+    #
+    # THE CHECK THAT WOULD HAVE CAUGHT THE FIVE-HOUR BUG. Both writers of the
+    # buy fill-mix counter sit inside grid_buy immediately before it returns a
+    # fill, so an increment PROVES a fill happened and the caller went on to
+    # the insert. If the book did not grow to match, the row was lost between
+    # the two - which is a silent, money-shaped defect.
+    #
+    # Sales shrink the book, so this compares against the NET change and only
+    # complains when buys outrun the book's growth. It is deliberately quiet
+    # about the other direction: the book growing without a buy leg is what
+    # adoption does, and that is check 5.
+    if (prev.get("at") and prev.get("buy_legs") is not None
+            and cur["buy_legs"] is not None):
+        legs_delta = cur["buy_legs"] - prev["buy_legs"]
+        if legs_delta > 0:
+            # Slices opened since the last snapshot, counted by timestamp so a
+            # sale in the same window cannot mask a lost buy.
+            since = prev.get("at") or ""
+            new_slices = [s for _, s in slices if (s.get("opened_at") or "") > since]
+            if len(new_slices) < legs_delta:
+                flag(CRITICAL, "LOST_FILL",
+                     f"{legs_delta} buy leg(s) filled since {since} but only "
+                     f"{len(new_slices)} slice row(s) appeared. Coin was bought "
+                     f"that the book did not record.")
+
+    # ---- 2. Any cycle error at all -----------------------------------------
+    if ops is not None:
+        try:
+            events = ops["gate"]["data"]["events"]
+        except (KeyError, TypeError):
+            events = []
+            gaps.append("/live-ops: gate.data.events missing")
+        errs = [e for e in events if e.get("event_type") == "CYCLE_ERROR"]
+        seen = set(prev.get("cycle_errors") or [])
+        fresh = [e for e in errs if e.get("created_at") not in seen]
+        cur["cycle_errors"] = [e.get("created_at") for e in errs][:50]
+        if fresh:
+            for e in fresh[:5]:
+                flag(CRITICAL, "CYCLE_ERROR",
+                     f"{e.get('created_at')} {e.get('product_id')}: {e.get('message')}")
+        elif errs:
+            flag(WARN, "CYCLE_ERROR_STANDING",
+                 f"{len(errs)} cycle error(s) still on the feed, none new since "
+                 f"last pass.")
+
+    # ---- 3. The alarm can actually reach a human ---------------------------
+    #
+    # A queue that holds alerts and reports success is worse than no queue.
+    if alerts is not None:
+        counts = alerts.get("counts") or {}
+        pending, sent = counts.get("pending"), counts.get("sent")
+        if not alerts.get("channel_configured"):
+            flag(CRITICAL, "ALARM_DEAD",
+                 f"No alert channel configured ({(alerts.get('channel_diagnosis') or {}).get('expected_variable')} "
+                 f"absent) - {pending} alert(s) held, {sent} ever delivered. "
+                 f"Nothing reaches anyone.")
+        elif pending and not sent:
+            flag(CRITICAL, "ALARM_STUCK",
+                 f"{pending} alert(s) pending and {sent} sent - the channel is "
+                 f"configured but nothing is going out.")
+
+    # ---- 4. Coin with no automatic exit ------------------------------------
+    if stops is not None:
+        unc = stops.get("uncovered_usd")
+        if unc:
+            prev_unc = prev.get("uncovered_usd")
+            moved = ("" if prev_unc is None
+                     else f" (was {money(prev_unc)})")
+            level = CRITICAL if (prev_unc is not None and unc > prev_unc) else WARN
+            flag(level, "NO_EXIT",
+                 f"{money(unc)} across {stops.get('uncovered_count')} asset(s) has "
+                 f"no automatic exit from either layer{moved}: "
+                 f"{', '.join((stops.get('uncovered') or [])[:14])}")
+        cur["uncovered_usd"] = unc
+
+    # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
+    #
+    # The grid marks an adopted slice against a reference price nobody paid,
+    # so a branch made entirely of adopted slices can show a large "loss"
+    # while the real wallet is up on that coin. Reported as a caveat, never
+    # as a loss, because a real decision was nearly made on one of these.
+    for b in branches:
+        sl = b.get("slices") or []
+        if not sl:
+            continue
+        u = b.get("total_unrealized_net_usd") or 0.0
+        if u < -25 and all(s.get("adopted") for s in sl):
+            flag(INFO, "ADOPTED_BASIS",
+                 f"{b['product_id']} shows {money(u)} unrealized, but every slice "
+                 f"is ADOPTED - that is measured against a price nobody paid. "
+                 f"Check the real cost basis before calling it a loss.")
+
+    # ---- 6. Invariants ------------------------------------------------------
+    if inv is not None:
+        failed = inv.get("failed")
+        prev_failed = prev.get("inv_failed")
+        cur["inv_failed"] = failed
+        if failed:
+            level = CRITICAL if (prev_failed is not None and failed > prev_failed) else WARN
+            flag(level, "INVARIANT",
+                 f"{failed} invariant(s) BROKEN"
+                 + ("" if prev_failed is None else f" (was {prev_failed})")
+                 + f": {inv.get('headline')}")
+
+    # ---- 7. Is the loop actually running -----------------------------------
+    hb = grid.get("heartbeat") or {}
+    age = hb.get("age_seconds")
+    if age is None:
+        gaps.append("heartbeat age unreadable")
+    elif age > 300:
+        flag(CRITICAL, "STALLED",
+             f"last cycle was {age:.0f}s ago - the fleet loop is not running.")
+
+    # ---- 8. A pushed fix that never went live ------------------------------
+    #
+    # A deploy can fail and leave the previous commit serving, which looks
+    # exactly like a healthy system running the wrong code.
+    head = os.popen("git -C %s rev-parse --short HEAD 2>/dev/null"
+                    % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).read().strip()
+    served = (health or {}).get("commit")
+    if head and served and not served.startswith(head) and not head.startswith(served):
+        flag(WARN, "DEPLOY_LAG",
+             f"serving {served} but local HEAD is {head} - a push has not gone "
+             f"live. If this persists past ~15 minutes the build may have failed.")
+
+    # ---- 9. Stuck slices ----------------------------------------------------
+    stuck = [(p, s["qty"]) for p, s in slices
+             if s.get("qty") and 0 < s["qty"] < 0.011 and abs(s["qty"] - 0.01) < 1e-12]
+    cur["stuck"] = len(stuck)
+    if prev.get("stuck") is not None and len(stuck) > prev["stuck"]:
+        flag(CRITICAL, "STUCK_ROSE",
+             f"slices stuck below one tradeable unit rose {prev['stuck']} -> {len(stuck)}")
+
+    # ---- 10. Section 1 stamping, once a buy really lands -------------------
+    #
+    # Only meaningful on a slice the BUY path wrote. An adopted row has these
+    # NULL correctly, so judging §1 by the whole book reports a false failure.
+    # FIRST RUN HAS NO BASELINE, and an absent baseline is a GAP, not a zero.
+    # Without this guard `prev.get("at")` is "" and every slice ever bought
+    # reads as new - the first run of this script reported 29 silent failures
+    # that did not exist. A delta check with no previous snapshot must say so
+    # and check nothing, exactly like every other gap here.
+    bought = [s for _, s in slices if s.get("entry_fee_rate") and not s.get("adopted")]
+    baseline = prev.get("at")
+    if not baseline:
+        gaps.append("no previous snapshot - delta checks skipped this run")
+        recent_bought = []
+    else:
+        recent_bought = [s for s in bought if (s.get("opened_at") or "") > baseline]
+    if recent_bought:
+        unstamped = [s for s in recent_bought if not s.get("slice_state")]
+        if unstamped:
+            flag(CRITICAL, "SECTION1_SILENT",
+                 f"{len(unstamped)} newly BOUGHT slice(s) carry no slice_state - "
+                 f"the state write did not run on a row its own insert created.")
+        else:
+            flag(INFO, "SECTION1_OK",
+                 f"{len(recent_bought)} newly bought slice(s) fully stamped.")
+
+    # ---- report -------------------------------------------------------------
+    try:
+        json.dump(cur, open(args.state, "w"))
+    except OSError as e:
+        gaps.append(f"could not save snapshot: {e}")
+
+    if args.json:
+        print(json.dumps({"at": now, "findings": findings, "gaps": gaps,
+                          "snapshot": cur}, indent=1))
+    else:
+        print(f"fleet watchdog {now}   serving={served or 'UNKNOWN'}")
+        print(f"  slices {cur['slice_count']} | buy legs {cur['buy_legs']} | "
+              f"§1 populated {cur['populated']} | stuck {cur['stuck']}")
+        if not findings and not gaps:
+            print("  quiet - every conservation check balanced.")
+        for f in sorted(findings, key=lambda f: [CRITICAL, WARN, INFO].index(f["level"])):
+            print(f"  {f['level']:8s} {f['code']:18s} {f['message']}")
+        for g in gaps:
+            print(f"  GAP      {'':18s} {g}")
+
+    if gaps and not findings:
+        return 1
+    if any(f["level"] == CRITICAL for f in findings):
+        return 2
+    return 2 if findings else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

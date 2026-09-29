@@ -8184,6 +8184,14 @@ async def get_grid_status() -> dict:
                 "filled_quantity": getattr(s, "filled_quantity", None),
                 "average_fill_price": getattr(s, "average_fill_price", None),
                 "execution_reason": getattr(s, "execution_reason", None),
+                # WRITTEN SINCE 5b9d62d AND NEVER SERVED. The first slice §1
+                # ever stamped (BTC-USD, 2026-09-29T15:55:45Z) came back with
+                # every field populated except this one, which reads as a
+                # failed write and is not: the insert passes order_side="BUY",
+                # the column holds it, and only this serialiser was missing it.
+                # A field that is stored but not served is indistinguishable
+                # from one that was never written.
+                "order_side": getattr(s, "order_side", None),
                 "entry_fee_rate": getattr(s, "entry_fee_rate", None),
                 "adopted": bool(getattr(s, "adopted", False)),
             })
