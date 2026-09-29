@@ -1519,11 +1519,26 @@ class CryptoGridTradeHistory(Base):
     # trips a day, so the ~250 trades that experiment wants is about a year
     # of data. Recorded now because the cost is nothing and the data only
     # accumulates if collection starts before it is needed.
-    # "profit_target" | "stop_loss" | "close_all" (a forced market exit the
-    # owner asked for - not a target and not a stop, and it used to be written
-    # as None, which made a perfectly known reason read as UNKNOWN).
-    # None still means genuinely unrecorded and is never a synonym for any of
-    # the three.
+    # FOUR VALUES, EACH A DIFFERENT EVENT:
+    #
+    #   "profit_target" - the rise trigger fired: price reached
+    #                     reference * (1 + grid_pct). The target was hit.
+    #   "parked_sell"   - the branch was FULL and could not buy, and a slice
+    #                     cleared GRID_PARKED_MIN_NET_PCT on its own merit.
+    #                     A different threshold and a different mechanism;
+    #                     the target was precisely NOT what was reached.
+    #   "stop_loss"     - the stop chose the slice. A loss taken on purpose.
+    #   "close_all"     - a forced market exit the owner asked for, at the
+    #                     taker rate. Neither a target nor a stop.
+    #
+    # profit_target and parked_sell shared a label until 2026-09-29, which
+    # made that word mean "not a stop" and left the question the parked-sell
+    # gate exists to answer - is it earning its keep? - unaskable from this
+    # table. close_all was written as None, so a perfectly known reason read
+    # as UNKNOWN.
+    #
+    # None still means genuinely unrecorded and is never a synonym for any
+    # of the four.
     exit_reason = Column(String, nullable=True)
     entry_spread_pct = Column(Float, nullable=True)  # live spread when the order was placed
     entry_gate_json = Column(Text, nullable=True)    # the gate's full diagnostic at entry

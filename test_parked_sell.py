@@ -35,8 +35,45 @@ ok("parked means as many slices as levels",
 ok("a branch that can still buy keeps the full spacing gate",
    "price >= branch.reference_price * (1 + grid_pct)" in CYCLE)
 ok("the stop still takes precedence", "_stop_slice is None" in CYCLE)
-ok("the gate names all three conditions rather than falling through",
-   "_stop_slice is not None or _parked_sell or (price >=" in CYCLE)
+# ON THE TREE, NOT THE SPELLING.
+#
+# This matched the literal text
+# "_stop_slice is not None or _parked_sell or (price >=". The property it
+# protects is real - the gate must name all three ways in rather than let
+# one fall through - but hoisting the third condition into a named
+# _rise_hit variable preserved that property exactly while breaking the
+# string, so the guard went red for a reformat. Asserted structurally now.
+def _sell_gate():
+    """The `if` in the cycle whose test is an OR naming the stop and the
+    parked-sell gate. Found by what it decides, not by how it is typed."""
+    for n in ast.walk(TREE):
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if n.name != "run_grid_branch_cycle":
+            continue
+        for x in ast.walk(n):
+            if isinstance(x, ast.If) and isinstance(x.test, ast.BoolOp) \
+                    and isinstance(x.test.op, ast.Or):
+                d = ast.dump(x.test)
+                if "_stop_slice" in d and "_parked_sell" in d:
+                    return x.test
+    return None
+
+
+_gate = _sell_gate()
+ok("the sell gate is an OR over the ways in, not a fallthrough",
+   _gate is not None)
+if _gate is not None:
+    _ops = [ast.dump(o) for o in _gate.values]
+    ok("the gate names all three conditions rather than falling through",
+       len(_gate.values) == 3
+       and any("_stop_slice" in o for o in _ops)
+       and any("_parked_sell" in o for o in _ops)
+       and any(("_rise_hit" in o) or ("reference_price" in o) for o in _ops),
+       f"{len(_gate.values)} operand(s): a third way in that is not named "
+       f"here is a sale this gate cannot account for")
+    ok("the rise condition is still one of them, hoisted or inline",
+       any(("_rise_hit" in o) or ("reference_price" in o) for o in _ops))
 
 # --- it cannot realize a loss ---------------------------------------------
 ok("the slice is still chosen by the function that refuses losses",

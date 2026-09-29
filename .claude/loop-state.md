@@ -560,6 +560,19 @@ logged no exit_reason, so every owner-requested close landed as None. It is
 a market exit at the taker rate — neither target nor stop — and now records
 `"close_all"`. Third legal value; None still means genuinely unrecorded.
 
+**A default branch is not a diagnosis.** Once the close reason was finally
+readable, 49 of 50 rows said `profit_target` and none said `stop_loss` — and
+`profit_target` turned out to be the *else* of `if _stop_slice is not None`.
+Three paths enter the sell block (stop, parked-sell gate, rise trigger) and
+two shared one label, so the word meant "not a stop". A parked sell fires
+when the branch is FULL and cannot buy, on a slice clearing
+`GRID_PARKED_MIN_NET_PCT` — its own log line says it sells "rather than
+waiting for a rise off a reference it will never rebuy from", i.e. the
+target is precisely what was NOT reached. **When one value dominates a
+distribution, check whether it is the fallthrough before reading anything
+into it.** Fixed in b9e1523: four values, `profit_target` now gated on
+`_rise_hit`.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those

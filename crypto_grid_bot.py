@@ -6456,7 +6456,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                     f"merit rather than waiting for a {grid_pct * 100:.2f}% rise "
                     f"off a reference it will never rebuy from.")
 
-    if _stop_slice is not None or _parked_sell or (price >= branch.reference_price * (1 + grid_pct) and slices):
+    # Hoisted so the exit can be NAMED, not just taken. All three entries to
+    # this block used to collapse into "stop_loss" or "profit_target", which
+    # made profit_target mean "not a stop" rather than "the target was hit".
+    _rise_hit = bool(slices and price >= branch.reference_price * (1 + grid_pct))
+    if _stop_slice is not None or _parked_sell or _rise_hit:
         if _stop_slice is not None:
             # The stop deliberately bypasses _pick_profitable_slice_to_sell.
             # That function's whole job is to refuse a losing sale; here the
@@ -6513,7 +6517,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 # from an ordinary sale that happened to lose". It was in
                 # scope here all along (assigned well above this block); the
                 # two write sites simply disagreed.
-                exit_reason = 'stop_loss' if _stop_slice is not None else 'profit_target'
+                # Same three-way as the persisted ledger below. The two
+                # sites disagreeing is what produced the P&L-sign version
+                # in the first place, so they are kept identical.
+                exit_reason = ('stop_loss' if _stop_slice is not None
+                               else 'profit_target' if _rise_hit
+                               else 'parked_sell')
 
                 shadow_manager.on_position_closed(
                     client_order_id=order_id,
@@ -6590,12 +6599,32 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                               filled_price, filled_qty, pnl, oldest.opened_at,
                               entry_expected_price=oldest.entry_expected_price,
                               exit_expected_price=price,
+                              # THREE WAYS IN, THREE NAMES OUT.
+                              #
                               # _stop_slice is set only when the stop chose this
                               # slice, so it is the honest source of the reason -
                               # not the sign of the P&L, which cannot tell a stop
                               # from an ordinary sale that happened to lose.
+                              #
+                              # The other two are NOT the same event, and calling
+                              # both "profit_target" made that word mean "not a
+                              # stop". A parked sell happens when the branch is
+                              # full, cannot buy, and a slice clears
+                              # GRID_PARKED_MIN_NET_PCT on its own merit - its own
+                              # log line says it sells "rather than waiting for a
+                              # rise off a reference it will never rebuy from", so
+                              # the target was precisely NOT what was hit. They
+                              # have different thresholds and different reasons to
+                              # exist, and a later experiment asking whether the
+                              # parked-sell gate earns its keep cannot ask it at
+                              # all while the two share a label.
+                              #
+                              # _rise_hit wins over _parked_sell when both are
+                              # true: the target genuinely was reached, so saying
+                              # so is the more truthful of the two.
                               exit_reason=("stop_loss" if _stop_slice is not None
-                                           else "profit_target"),
+                                           else "profit_target" if _rise_hit
+                                           else "parked_sell"),
                               mae_pct=getattr(oldest, "mae_pct", None),
                               mfe_pct=getattr(oldest, "mfe_pct", None),
                               entry_atr_pct=getattr(oldest, "entry_atr_pct", None),

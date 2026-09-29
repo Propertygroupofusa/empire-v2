@@ -160,6 +160,40 @@ ok("a close-all trade records close_all, not nothing",
    any("close_all" in v for v in _reason_values),
    f"exit_reason expressions at the log sites: {len(_reason_values)}")
 
+# A PARKED SELL IS NOT A TARGET HIT.
+#
+# Three distinct paths enter the sell block - the stop, the parked-sell
+# gate, and the rise trigger - and the first version of this collapsed the
+# last two into "profit_target", which made that word mean "not a stop".
+# A parked sell fires when the branch is FULL and cannot buy, on a slice
+# clearing GRID_PARKED_MIN_NET_PCT; its own log line says it sells "rather
+# than waiting for a rise off a reference it will never rebuy from", so
+# the target is precisely what was NOT reached. Different threshold,
+# different mechanism. While they share a label, "is the parked-sell gate
+# earning its keep?" cannot be asked of this table at all - which is the
+# question the column was added to make askable.
+_all_reason_exprs = [ast.dump(a) for a in assigns] + _reason_values
+ok("parked_sell is recorded as its own reason, at every site",
+   all("parked_sell" in v for v in _all_reason_exprs
+       if "stop_loss" in v and "profit_target" in v),
+   "every site that distinguishes a stop from a target must also "
+   "distinguish a parked sell from a target")
+ok("and the rise trigger is what earns the name profit_target",
+   all("_rise_hit" in v for v in _all_reason_exprs
+       if "profit_target" in v),
+   "profit_target must be gated on the rise condition actually being "
+   "met, not left as the fallthrough for everything that is not a stop")
+
+# The two sites must agree. Them disagreeing is what produced the
+# P&L-sign version that shipped in the first place.
+_three_way = [v for v in _all_reason_exprs if "stop_loss" in v]
+ok("every exit_reason expression names all three live outcomes",
+   bool(_three_way) and all(
+       all(k in v for k in ("stop_loss", "profit_target", "parked_sell"))
+       for v in _three_way),
+   f"{len(_three_way)} expression(s) decide a stop; each must decide all "
+   f"three, or the two write sites disagree again")
+
 # The persisted ledger call must pass it too - surfacing a field that is
 # never written is no better than writing one that is never read.
 logged = []
