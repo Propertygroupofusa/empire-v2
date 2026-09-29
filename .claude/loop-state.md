@@ -612,6 +612,34 @@ already tracks a `capital_velocity` field and `concentration_gate` imports
 `MAX_SINGLE_COIN_SHARE` from it. **`opportunity_events` does not exist** —
 no table, no model.
 
+**EXERCISED at 00:16Z (5cdf245 serving): the split works and the fields pay
+off immediately.** Expiry table's newest `order_rested=False` row is
+00:15:06.802 and stopped moving; the not-placed table gained five rows through
+00:15:48. Guard routes correctly; the 228 False rows in the expiry table are
+legacy. UNKNOWN and unimportant: one ALGO pair 114ms apart across the cutover
+(expiry .802 / not-placed .916) — double-write or deploy straddle cannot be
+told from here, and nothing has double-written since.
+
+**The locked-vs-dust split, per row, from the new fields:**
+
+| coin | held | available | locked | min tick | short by |
+|---|---:|---:|---:|---:|---:|
+| XLM | 1980.77 | 0.0 | 1980.77 | 1e-8 | everything |
+| ALGO | 1134.35 | 0.046389 | 1134.3 | 0.1 | 0.0536 (≈¢0.72) |
+| QNT | 0.00097323 | 0.00097323 | **0.0** | 0.001 | 0.0000268 (≈¢0.63) |
+
+XLM and ALGO are LOCKED — `free-locked-inventory` is the remedy. ALGO has a
+second bind: its free crumb (0.046389) is itself below the 0.1 tick, so even
+the unlocked part is unsellable. **QNT is DUST, not locked** — it is short of
+a tradeable size by 0.0000268 QNT, about six tenths of a cent. TIA also now
+appears in the not-placed table (00:15:48).
+
+**Do not read my own derived labels without checking them.** The first version
+of that table labelled QNT "LOCKED" from an inline heuristic
+(`asked > available*100`), contradicting the authoritative locked=0.0 already
+measured. A convenience rule beat the data that was already in hand. Use the
+direct balance read's `locked_units`, never a guess from ratios.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those
