@@ -1211,7 +1211,33 @@ component — and that is a legitimate thing for it to be.
 machinery is not an asset. Same family as "a guard no mutant can kill is
 not a protection."
 
-### EVERY PROFITABLE SLICE IS UNSELLABLE — measured 11:30Z
+### THE SELL ROUTE IS NOT BROKEN — it fired twice at 11:49Z/11:50Z
+
+    11:49:19Z  NEAR-USD  @ $4.91 (entry $4.82)  +$0.78  parked_sell
+    11:50:12Z  HBAR-USD  @ $0.12 (entry $0.12)  +$0.78  parked_sell
+
+Both profitable, both the parked route. Book 140 -> 142, slices 80 -> 78,
+parked_sell 6 -> 8. **stop_loss still 1** (ONDO only). The HBAR slice was
+the 06:28:50Z buy — a 5h21m round trip.
+
+**THE WATCHER STAYED QUIET AND WAS RIGHT TO.** It reports NEW LABEL TYPES
+only, and parked_sell was already known. This is exactly the caveat the
+loop prompt carries: **when the book count rises, read the new rows
+yourself.** Two sells are not "nothing new".
+
+**THIS REFINES THE 11:30Z FINDING — it does not contradict it.** The 7
+slices that were profitable-and-blocked at 11:30Z are STILL blocked and
+STILL 7 (QNT x2, ALGO, LINK x2, XLM, TIA — reserved or short). NEAR and
+HBAR were NOT among them; they crossed the 1.0% floor between 11:30Z and
+11:49Z as prices rose, and sold within a cycle or two of becoming eligible.
+
+So state it correctly: **the parked-sell MECHANISM is healthy and fires
+promptly.** What is stuck is a specific, persistent set of 7 slices sitting
+behind reserved resting orders and the coin shortfall. Do not say "the sell
+side is broken" — say "these seven are unreachable, and everything else
+sells when it qualifies."
+
+### THE SEVEN THAT REMAIN UNREACHABLE — measured 11:30Z, unchanged at 12:02Z
 
 7 of 80 open slices already clear the 1.0% parked-sell floor. **Not one of
 them can be sold**, and the blockers are two things already tracked
