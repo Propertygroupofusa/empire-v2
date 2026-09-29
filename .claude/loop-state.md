@@ -28,11 +28,15 @@ refreshes baselines first.
   threshold.
 - Never sell a red position. ZEC-USD is the ONE authorised exception and
   even that order is the owner's to place.
-- **Never arm `GRID_ADOPTED_STOP_MODE`.** It exists as of 3ab8dec, off by
-  default. Armed, it sells red adopted positions automatically — the limit
-  above by proxy. The switch is the owner's alone, in Railway. Reporting that
-  it is off, and what arming would do at today's prices, is this loop's job.
-  Throwing it is not.
+- **Never change `GRID_ADOPTED_STOP_MODE` on your own initiative — either
+  way.** It exists as of 3ab8dec and sells red adopted positions when armed,
+  which is the limit above by proxy. **The owner authorised arming it on 29
+  Sep and is setting it in Railway themselves; the loop cannot reach Railway
+  (403, no credential) and there is no DB toggle or write endpoint.** So this
+  cuts both directions now: do not disarm it because this line once read
+  "never arm", and do not re-arm it if the owner turns it off. Reporting its
+  state, and what it would sell at TODAY's prices, is the loop's job.
+  Deciding it is not.
 - Never call a write-guarded endpoint, including `free-locked-inventory`
   and `POST /alpaca-overview/equity-handover`.
 - Never ask for or echo the write token.
