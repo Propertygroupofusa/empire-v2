@@ -530,6 +530,48 @@ and the reference table was built from a different, looser one. **When a stored
 figure and the instruction that produces it disagree, the figure is the one to
 distrust.**
 
+
+**/fills-by-source, FIRST LIVE READ 03:47Z — and it found something.**
+87 orders / 120 fills over 24h, $4,852.32 notional, **$21.20 commission**,
+113 MAKER and 7 TAKER fills across 16 products, not truncated.
+**0 of 87 orders attributed.** `attribution_table_error` was None and
+`attribution_started_at` was None, which together mean the table is not
+unreadable — it is EMPTY. Not one row has ever been written.
+
+Why, traced through the live order paths:
+
+| path | tags itself? | runs? |
+|---|---|---|
+| grid market buy/sell/close-branch | YES (`grid_buy_market`, `grid_sell`, `grid_close_branch`) | **no** — the fleet is maker-only, so the market path never executes |
+| `auto_trim_worker._place_market_sell` | YES (`auto_trim`) | only on a trim; none in the window |
+| **`resting_stops_worker.place()`** | **NO** | **yes** |
+| grid maker buy/sell | n/a | yes, but post-only cannot take liquidity, so it cannot make a TAKER fill |
+
+So the one live path that could produce a TAKER fill was the only one
+recording nothing. **Fixed** — `place()` now records `source="resting_stop"`,
+mirroring auto_trim's own pattern, whose comment already said a loop that
+bypasses the engine must record its own attribution.
+
+**This is the likeliest explanation of the ACH outflow, and from the next
+stop fill onward it becomes checkable rather than inferred.** A stop resting
+at the venue fills while this service is asleep, so its fill is exactly the
+one the account cannot reconstruct from its own logs. **NOT proven for the
+existing ACH event** — no row exists for it and none can be created
+retroactively.
+
+**Latent, NOT live — do not treat as urgent.** `crypto_mean_reversion_bot`
+calls `engine.place_market_buy(product_id=..., quantity=..., reason=...)`
+with no `session`. The engine's signature is
+`place_market_buy(session, usd_amount, product_id, source)` — no `quantity`,
+no `reason`, and `session` is required positionally, so every one of those
+calls would raise `TypeError`. It is never imported or started by anything
+(`grep` finds it only in a comment in `fee_floor.py`), and `main.py` runs
+exactly ONE crypto mode at a time — currently `grid_fleet`. Dead code.
+
+**Deliberately left untagged:** `crypto_family_tree_bot` (5 market-order
+sites) and `crypto_btc_compound_bot`'s own loop (2). Both are dormant under
+`grid_fleet`. Tag them BEFORE changing `CRYPTO_STRATEGY_MODE`, not after.
+
 ## Grid config
 
 3 levels × 2.5% spacing · real round-trip fee 1.5% · effective 0.7%

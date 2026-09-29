@@ -122,6 +122,33 @@ async def place(session, product_id, plan):
                             json=order, timeout=30) as r:
         body = await r.json()
         ok = r.status in (200, 201) and body.get("success", True)
+        if ok:
+            # THE ONE LIVE ORDER PATH THAT TAGGED NOTHING.
+            #
+            # Found by /fills-by-source on its first live read: 7 TAKER
+            # fills in 24h and an attribution table with zero rows. The
+            # grid's market path tags itself but maker-only means it never
+            # runs, and auto_trim's own loop already records its source -
+            # its comment says a loop that bypasses the engine must. This
+            # one bypassed the engine and did not.
+            #
+            # It matters more here than anywhere else. A stop resting at
+            # the venue fills without this service being awake, so its
+            # fill is the one the account cannot explain from its own
+            # logs - and an unexplained 11,745.30-unit ACH outflow on
+            # 2026-09-29 has exactly that shape. Coinbase fills carry
+            # order_id and NOT client_order_id, so this row is the only
+            # thing a later audit can join on.
+            #
+            # Non-fatal by design: losing a row must never cost a stop.
+            try:
+                import crypto_btc_compound_bot as _engine
+                await _engine._record_order_source(
+                    ((body.get("success_response") or {}).get("order_id")),
+                    "resting_stop", product_id, "SELL")
+            except Exception as e:
+                log.debug(f"[resting-stops] attribution not recorded "
+                          f"(non-fatal): {type(e).__name__}: {e}")
         return ok, body
 
 
