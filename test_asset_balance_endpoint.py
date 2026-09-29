@@ -173,6 +173,26 @@ if fn is not None:
     ok("it reports how many accounts were scanned",
        "accounts_seen" in keys,
        "an absence is only real if the scan was complete")
+
+    # WHETHER A CURRENCY SPANS MORE THAN ONE ACCOUNT, as a countable fact.
+    #
+    # The two reads on this page resolve such a currency DIFFERENTLY:
+    # fetch_balances sums across accounts, get_asset_balance returns the
+    # first match and stops. The direct read would then under-report - and
+    # it is the read that gates the sell-refusal path and the "nothing
+    # sellable" branch, so under-reporting there refuses to sell coin that
+    # exists.
+    #
+    # Reported as counts, not a verdict, and deliberately NOT yet acted on:
+    # summing in get_asset_balance would be wrong if the extra accounts are
+    # separate portfolios, because it would then OVERSTATE what is sellable
+    # from the trading portfolio. Measure before changing a live sell path.
+    ok("it reports how many distinct CURRENCIES were seen",
+       "currencies_seen" in keys,
+       "accounts_seen alone cannot say whether any currency is duplicated")
+    ok("and the difference between the two is surfaced directly",
+       "accounts_exceed_currencies" in keys,
+       "zero rules the problem out for this account; non-zero says look")
     ok("it states what it does NOT answer",
        "what_this_does_not_say" in keys)
     ok("it carries a verdict in words", "verdict" in keys)

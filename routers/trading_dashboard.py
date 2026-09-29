@@ -9368,6 +9368,24 @@ async def asset_balance(currency: str):
         "venue_lists_no_such_account": (True if _absent else
                                         (False if direct_units is not None else None)),
         "accounts_seen": bal.get("accounts_seen"),
+        # DISTINCT CURRENCIES vs ACCOUNTS. If these differ, at least one
+        # currency spans more than one account - and that matters here
+        # because the two reads on this page resolve such a currency
+        # DIFFERENTLY: fetch_balances SUMS across accounts
+        # (`held[cur] = held.get(cur, 0.0) + total`) while get_asset_balance
+        # returns the FIRST match and stops (`if account.get("currency") ==
+        # currency: return ...`). The direct read would then under-report,
+        # and it is the read that gates the sell-refusal path and the
+        # "nothing sellable" branch - so an under-report there refuses to
+        # sell coin that genuinely exists.
+        #
+        # Reported as a plain count rather than a verdict: equal counts rule
+        # the problem out for this account, unequal counts say to look.
+        "currencies_seen": len(bal.get("held_including_zero")
+                               or bal.get("held") or {}),
+        "accounts_exceed_currencies": (
+            (bal.get("accounts_seen") or 0)
+            - len(bal.get("held_including_zero") or bal.get("held") or {})),
         "pages": bal.get("pages"),
         "reads_disagree": _disagreement,
         "verdict": _verdict,
