@@ -143,6 +143,50 @@ def main():
                      f"{len(new_slices)} slice row(s) appeared. Coin was bought "
                      f"that the book did not record.")
 
+    # ---- 1b. THE MIRROR: a sale that fills must retire a slice -------------
+    #
+    # The buy check above exists because a lost buy ran for five hours. The
+    # sell side has the identical shape and nobody has looked at it: if
+    # fill_mix.sell.legs rises and the book does not SHRINK to match, coin
+    # left the wallet and the slice it belonged to is still on the books -
+    # which would overstate holdings and could sell the same coin twice.
+    sell_mix = (grid.get("fill_mix") or {}).get("sell") or {}
+    cur["sell_legs"] = sell_mix.get("legs")
+    if (prev.get("at") and prev.get("sell_legs") is not None
+            and cur["sell_legs"] is not None and prev.get("slice_count") is not None):
+        sold = cur["sell_legs"] - prev["sell_legs"]
+        if sold > 0:
+            # Buys grow the book in the same window, so compare the NET move
+            # against what both sides did rather than the raw count.
+            bought = (cur["buy_legs"] or 0) - (prev.get("buy_legs") or 0)
+            expected = prev["slice_count"] + bought - sold
+            if cur["slice_count"] > expected:
+                flag(CRITICAL, "SELL_NOT_RETIRED",
+                     f"{sold} sell leg(s) filled but the book only fell to "
+                     f"{cur['slice_count']} where {expected} was due - coin left "
+                     f"the wallet and its slice is still open.")
+
+    # ---- 1c. Realized P&L must never go backwards --------------------------
+    #
+    # A normal grid exit only ever sells ABOVE its own entry, so realized P&L
+    # is monotonic by design. If it falls, something closed a position
+    # OUTSIDE that rule - an emergency exit, a retirement, a liquidation -
+    # and that books a real loss that the "realized cannot go negative"
+    # reassurance would otherwise hide.
+    if ops is not None:
+        try:
+            realized = ops["headline"]["data"].get("realized_usd")
+        except (KeyError, TypeError):
+            realized = None
+            gaps.append("/live-ops: headline.data.realized_usd missing")
+        cur["realized"] = realized
+        if (prev.get("realized") is not None and realized is not None
+                and realized < prev["realized"] - 0.005):
+            flag(CRITICAL, "REALIZED_FELL",
+                 f"realized P&L fell {money(prev['realized'])} -> {money(realized)}. "
+                 f"A normal exit cannot do that - something forced a close and "
+                 f"booked a real loss.")
+
     # ---- 2. Any cycle error at all -----------------------------------------
     if ops is not None:
         try:
@@ -276,6 +320,33 @@ def main():
         else:
             flag(INFO, "SECTION1_OK",
                  f"{len(recent_bought)} newly bought slice(s) fully stamped.")
+
+    # ---- 11. Profit that is reachable and still is not selling -------------
+    #
+    # THE OWNER'S ACTUAL QUESTION - is it doing the thing at the time it
+    # should. A slice that clears the parked-sell floor and is NOT blocked by
+    # reserved or short inventory should retire within a cycle or two. One
+    # that sits across passes means the sell path is not acting on money it
+    # could take, and that is different from "inventory is locked".
+    if inv is not None:
+        import re as _re
+        det = {c.get("name"): (c.get("detail") or "") for c in (inv.get("checks") or [])}
+        blocked = set(_re.findall(r"([A-Z0-9]+-USD)", det.get("grid_inventory_is_free", "")))
+        blocked |= set(_re.findall(r"([A-Z0-9]+-USD)", det.get("coin_tracked_is_held", "")))
+        FLOOR = 0.010  # GRID_PARKED_MIN_NET_PCT
+        reachable = [(p, s) for p, s in slices
+                     if (s.get("unrealized_net_pct") or 0) >= FLOOR and p not in blocked]
+        cur["reachable"] = sorted({f"{p}|{s.get('opened_at')}" for p, s in reachable})
+        held = set(prev.get("reachable") or []) & set(cur["reachable"])
+        if held:
+            flag(WARN, "IDLE_PROFIT",
+                 f"{len(held)} slice(s) cleared the +{FLOOR*100:.1f}% floor, are NOT "
+                 f"reserved or short, and did not sell across two passes: "
+                 f"{', '.join(sorted(h.split('|')[0] for h in held)[:6])}")
+        elif reachable:
+            flag(INFO, "REACHABLE",
+                 f"{len(reachable)} profitable slice(s) reachable this pass - "
+                 f"expect them to retire shortly.")
 
     # ---- report -------------------------------------------------------------
     try:
