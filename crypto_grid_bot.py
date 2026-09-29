@@ -1206,10 +1206,14 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
     record it and be priced honestly later.
 
     `outcome_out`, when given, is filled with why there was no fill -
-    order_outcome.MAKER_EXPIRED for a maker order nobody took inside its
-    window (routine under maker-only), or REJECTED for one the venue
-    actually refused. The caller used to have to guess, and guessed
-    "rejected" for both. Same detail_out pattern as _net_edge_gate_ok."""
+    order_outcome.MAKER_EXPIRED for a maker order that really did rest for
+    its whole window and nobody took (routine under maker-only),
+    NO_ORDER_CREATED when the venue never received an order at all,
+    NO_FILL when whether an order rested is UNKNOWN, or REJECTED for one
+    the venue actually refused. The caller used to have to guess, and
+    guessed "rejected" for all of them; then this function guessed
+    "expired" for all of them, which hid the non-orders in the one cause
+    that counts as routine. Same detail_out pattern as _net_edge_gate_ok."""
     if await is_maker_orders_active():
         fill = await engine.place_maker_buy(session, usd_amount, product_id,
                                             await maker_wait_seconds())
@@ -1224,19 +1228,45 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
             # No fallback, by design. A buy that does not happen costs
             # nothing and the dip will still be there next cycle; a taker
             # buy costs 0.75% and would make the spacing floor a lie.
-            log.info(f"[GRID] {product_id}: maker buy did not fill and maker-ONLY mode is on - "
-                     f"passing this cycle rather than paying the taker leg")
+            #
+            # ONE read of the engine's verdict, used by BOTH the ledger row
+            # and the outcome reported to the caller. Read twice they could
+            # disagree, and "the expiry table says it rested, the event feed
+            # says no order existed" is a contradiction no reader can
+            # resolve. Three states: True rested, False never placed, None
+            # UNKNOWN - and None stays None all the way down.
+            _rested = engine._last_order_rested.get(product_id)
+            _why = engine._last_order_error.get(product_id)
+            if not _why:
+                # The old default asserted a resting order unconditionally.
+                # It is only true when one actually rested; on the UNKNOWN
+                # path _last_order_error was cleared and never set, so that
+                # default was writing a claim the code did not have.
+                _why = ("the order rested at the bid and no seller crossed"
+                        if _rested is True else
+                        "no reason recorded - whether an order was ever placed "
+                        "is UNKNOWN")
+            log.info(
+                f"[GRID] {product_id}: no maker buy completed and maker-ONLY mode is on - "
+                f"passing this cycle rather than paying the taker leg. Reason: {_why}")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_BUY_KEY)
             await _record_maker_expiry(
-                session, product_id, "buy", bot_name,
-                reason=engine._last_order_error.get(
-                    product_id, "the order rested at the bid and no seller crossed"),
-                order_rested=engine._last_order_rested.get(product_id),
+                session, product_id, "buy", bot_name, reason=_why,
+                order_rested=_rested,
                 block_detail=engine._last_order_block.get(product_id))
             if outcome_out is not None:
                 import order_outcome
-                outcome_out["cause"] = order_outcome.MAKER_EXPIRED
-                outcome_out["wait_seconds"] = await maker_wait_seconds()
+                # NOT hardcoded to MAKER_EXPIRED. Three of place_maker_buy's
+                # returns never place an order (below the minimum size, no
+                # bid, a size that floors to zero) and a fourth cannot say.
+                # Labelling those "maker expired" put them in BENIGN_CAUSES,
+                # where a branch too poor to trade or a book that will not
+                # read is filed as the mode working as designed.
+                outcome_out["cause"] = order_outcome.cause_for_maker_only_no_fill(_rested)
+                if _rested is True:
+                    outcome_out["wait_seconds"] = await maker_wait_seconds()
+                else:
+                    outcome_out["detail"] = _why
             return None
     fill = await engine.place_market_buy(session, usd_amount, product_id,
                                          source="grid_buy_market")
@@ -6246,8 +6276,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 detail=_outcome.get("detail"),
                 wait_seconds=_outcome.get("wait_seconds"))
             if order_outcome.is_execution_fault(_outcome.get("cause")):
-                log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} "
-                            f"did not fill - will retry next cycle")
+                # _msg, not a generic sentence. It carries WHICH fault this
+                # was; the old wording said "did not fill" for a cycle where
+                # no order was ever created, and threw away the reason the
+                # engine had already recorded.
+                log.warning(f"[GRID] {branch.bot_name}: {branch.product_id}: {_msg} "
+                            f"- will retry next cycle")
             else:
                 log.info(f"[GRID] {branch.bot_name}: {_msg}")
             await _record_gate_decision(branch.bot_name, branch.product_id, _event, _msg)
