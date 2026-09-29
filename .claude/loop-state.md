@@ -31,12 +31,19 @@ refreshes baselines first.
 - **Never change `GRID_ADOPTED_STOP_MODE` on your own initiative — either
   way.** It exists as of 3ab8dec and sells red adopted positions when armed,
   which is the limit above by proxy. **The owner authorised arming it on 29
-  Sep and is setting it in Railway themselves; the loop cannot reach Railway
-  (403, no credential) and there is no DB toggle or write endpoint.** So this
-  cuts both directions now: do not disarm it because this line once read
-  "never arm", and do not re-arm it if the owner turns it off. Reporting its
-  state, and what it would sell at TODAY's prices, is the loop's job.
-  Deciding it is not.
+  Sep and throws it themselves.** This cuts both directions now: do not disarm
+  it because this line once read "never arm", and do not re-arm it if the owner
+  turns it off. Reporting its state, and what it would sell at TODAY's prices,
+  is the loop's job. Deciding it is not.
+  **ALL THREE DOORS ARE SHUT TO THE LOOP — measured, do not retry them.** The
+  Railway variable: `backboard.railway.app` is 403, no credential is held, no
+  CLI installed. `POST /grid-status/adopted-stop` (added 8ed313b — the DB half
+  exists so the OWNER can throw it from the dashboard instead of Railway plus a
+  restart): 401 `write_guard`, "Missing x-dashboard-token header. This endpoint
+  changes state." Calling a write-guarded endpoint and asking for that token
+  are each already forbidden below. A direct DB write: no credential, and it
+  would be routing around the guard. There is no fourth door; report the state
+  and the preview, and let the owner click it.
 - Never call a write-guarded endpoint, including `free-locked-inventory`
   and `POST /alpaca-overview/equity-handover`.
 - Never ask for or echo the write token.
