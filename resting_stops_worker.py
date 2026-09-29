@@ -196,6 +196,23 @@ async def check_once(session_factory, *, place_orders=True) -> dict:
             log.warning(f"[stops] could not read grid positions ({type(exc).__name__}) "
                         f"- placing without that protection this pass")
 
+        # Which of those branches has NO stop of its own. Reporting only:
+        # it cannot cause a placement, and every asset refused above is
+        # still refused. It exists so a refusal stops claiming the branch
+        # covers a position when the branch has declared it does not - and
+        # so the resulting gap is a figure rather than a reassurance.
+        #
+        # None, not {}, on an unreadable read: UNKNOWN must not render as
+        # "every branch has a stop".
+        unstopped = None
+        try:
+            import crypto_grid_bot as _grid
+            unstopped = await _grid.products_without_a_grid_stop()
+        except Exception as exc:
+            log.warning(f"[stops] could not read grid stop coverage "
+                        f"({type(exc).__name__}) - refusals will say so rather than "
+                        f"claim the branch has it")
+
         for row in (watch.get("rows") or []):
             asset = row.get("asset")
             if not asset:
@@ -224,7 +241,7 @@ async def check_once(session_factory, *, place_orders=True) -> dict:
                 stop_price=row.get("stop_level"), base_increment=bi,
                 quote_increment=qi, base_min_size=bms,
                 share_pct=share, limit_pct=20.0,
-                actively_traded=protected)
+                actively_traded=protected, unstopped=unstopped)
 
             have = existing.get(asset)
             if not plan.get("ok"):

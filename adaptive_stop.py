@@ -53,6 +53,127 @@ DEFAULT_MULTIPLE = 2.5
 DEFAULT_FLOOR = 0.03
 DEFAULT_CAP = 0.25
 
+# ── THE ADOPTED BRANCH'S OWN STOP ────────────────────────────────────────
+#
+# An adopted branch names a stop of 0, and that is the right answer to the
+# question it was asked. The fleet stop sells a slice whose price falls 8%
+# below its ENTRY, and an adopted slice's entry is the price on the day the
+# branch took charge of coin the owner may have held for a year - so an 8%
+# wobble would liquidate a long-term hold against a cost basis nobody paid.
+#
+# But "not an 8% trigger from the adoption date" was implemented as "no
+# trigger at any price, ever", and those are different claims. Measured
+# 2026-09-29: fourteen branches naming a stop of 0, $4,573 of coin, and
+# nothing able to sell any of it. The grid will not - its sell path refuses a
+# losing sale. The resting stops will not - they decline coin a grid branch
+# holds slices on. The concentration trimmer will not - same rule, which it
+# gained after selling $885.43 of ZEC out from under a live branch. ZEC sat
+# 17% below its adoption price with no mechanism able to act.
+#
+# Those three refusals are all correct, and they share one cause: the grid's
+# slice ledger is the book of record for those units, so any OTHER seller
+# desynchronises it and leaves the branch claiming coin the wallet no longer
+# holds. Which settles where a loss exit has to live - in the grid, as a
+# stop, because the stop only CHOOSES a slice and then goes through the same
+# proven sell path that retires the row and records the trade.
+#
+# So: a stop for adopted branches that is FAR from the adoption price rather
+# than absent. Wider multiple, much higher floor - catastrophe insurance on a
+# position that is not meant to be traded, not the working stop of a coin the
+# grid cycles.
+#
+# OFF BY DEFAULT, which is load-bearing and not merely cautious. Arming it
+# sells coin the owner has held for a long time, at a loss. That is the
+# owner's decision, so the default leaves today's behaviour byte-for-byte and
+# the switch has to be thrown on purpose.
+ADOPTED_MODE_ENV = "GRID_ADOPTED_STOP_MODE"        # "off" (default) | "arm"
+ADOPTED_MULTIPLE_ENV = "GRID_ADOPTED_STOP_VOL_MULTIPLE"
+ADOPTED_FLOOR_ENV = "GRID_ADOPTED_STOP_FLOOR_PCT"
+ADOPTED_CAP_ENV = "GRID_ADOPTED_STOP_CAP_PCT"
+
+# 6x daily volatility, against the ordinary 2.5x. On ZEC's measured 6.47%
+# daily that is 38.8%, clamped to the 35% cap - not a wobble on any timeframe
+# the owner cares about.
+ADOPTED_DEFAULT_MULTIPLE = 6.0
+# The floor is the point: never nearer than 20%, whatever volatility says. A
+# quiet coin must not inherit a tight stop here just because 6x its own small
+# number is small.
+ADOPTED_DEFAULT_FLOOR = 0.20
+ADOPTED_DEFAULT_CAP = 0.35
+
+ADOPTED_MODE_ARM = "arm"
+ADOPTED_MODE_OFF = "off"
+
+
+def adopted_mode(value=None):
+    """Only "arm" arms it, ignoring case and surrounding whitespace.
+
+    The same rule as resting_stops.normalise_mode, for the same reason: a
+    trailing space on a Railway variable is an accident rather than a
+    different intention, and a switch that silently fails to arm on an
+    invisible character leaves the owner believing a stop is running when it
+    is not.
+
+    Everything else - "true", "yes", "1", "on", "armed", None - is OFF.
+    Arming this sells coin, so it takes the exact word.
+    """
+    raw = os.getenv(ADOPTED_MODE_ENV) if value is None else value
+    if not isinstance(raw, str):
+        return ADOPTED_MODE_OFF
+    return (ADOPTED_MODE_ARM if raw.strip().lower() == ADOPTED_MODE_ARM
+            else ADOPTED_MODE_OFF)
+
+
+def adopted_stop(product_id, daily_vol_pct=None, mode_override=None):
+    """The stop an ADOPTED branch should use in place of none.
+
+    Returns {"stop_pct", "source", "reason"}. stop_pct 0.0 means the branch
+    keeps no stop, which is exactly today's behaviour.
+
+    Three ways to get 0.0, and the reason says which:
+
+      not armed        the default. Nothing changes until the owner arms it.
+      no volatility    the distance CANNOT BE SIZED, so nothing is sold.
+                       Deliberately the opposite of resolve()'s rule, which
+                       keeps the fixed stop when volatility is unreadable:
+                       there, falling back keeps a stop that already existed;
+                       here it would INVENT one on a long-term hold from a
+                       number nothing measured. A stop that sells real coin
+                       is never derived from a guess.
+      an explicit 0    a per-coin GRID_STOP_OVERRIDES entry of 0 still wins,
+                       because that is the owner naming this coin by hand.
+    """
+    pid = (product_id or "").upper()
+    if adopted_mode(mode_override) != ADOPTED_MODE_ARM:
+        return {"stop_pct": 0.0, "source": "adopted_not_armed",
+                "reason": (f"no stop on this adopted branch: {ADOPTED_MODE_ENV} is not "
+                           f"'arm', so nothing sells {pid or 'this coin'} automatically at "
+                           f"any price")}
+
+    ov = parse_overrides()
+    if pid in ov and ov[pid] == 0:
+        return {"stop_pct": 0.0, "source": "adopted_override_off",
+                "reason": (f"no stop on this adopted branch: {pid} is named with an "
+                           f"explicit 0 in {OVERRIDES_ENV}, which outranks the adopted "
+                           f"stop")}
+
+    _mult = _env_float(ADOPTED_MULTIPLE_ENV, ADOPTED_DEFAULT_MULTIPLE)
+    _floor = _env_float(ADOPTED_FLOOR_ENV, ADOPTED_DEFAULT_FLOOR)
+    scaled = scaled_stop(daily_vol_pct, multiple=_mult, floor=_floor,
+                         cap=_env_float(ADOPTED_CAP_ENV, ADOPTED_DEFAULT_CAP))
+    if scaled is None:
+        return {"stop_pct": 0.0, "source": "adopted_no_volatility",
+                "reason": (f"no stop on this adopted branch: {pid}'s own daily volatility "
+                           f"could not be read, and an adopted stop is never sized from a "
+                           f"guess - that would sell a long-term hold on a number nothing "
+                           f"measured. Retried next cycle.")}
+
+    return {"stop_pct": scaled, "source": "adopted_adaptive",
+            "reason": (f"{scaled * 100:.2f}% stop for {pid} on an ADOPTED branch, {_mult:.2f}x "
+                       f"its own {float(daily_vol_pct):.2f}% daily volatility, floored at "
+                       f"{_floor * 100:.0f}% - catastrophe cover, deliberately far from the "
+                       f"adoption price")}
+
 
 def daily_vol_pct_from_closes(closes, bars_per_day=24):
     """Daily volatility, in percent, from a series of periodic closes.

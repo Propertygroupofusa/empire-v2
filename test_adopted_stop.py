@@ -250,7 +250,16 @@ def test_a_zero_override_reports_no_stop_not_an_adaptive_one():
     out = grid._reported_stop(_B(0.0), ADAPTIVE)
     assert out["stop_pct"] == 0.0
     assert out["source"] == "branch_override_none"
-    assert "NO grid stop" in out["reason"]
+    # WHAT THIS ASSERTS, AND WHY IT IS NO LONGER A FIXED PHRASE.
+    #
+    # It was `"NO grid stop" in out["reason"]`, and it broke when the adopted
+    # catastrophe stop gave the unarmed case a reason naming the switch that
+    # would arm it. The property - report no stop, and never the adaptive
+    # figure the cycle is not applying - was untouched; only the wording
+    # moved. So the wording is not what is checked any more.
+    assert "no stop" in out["reason"].lower()
+    assert "15.88" not in out["reason"], "reported an adaptive distance it does not apply"
+    assert ADAPTIVE["reason"] not in out["reason"]
     # the volatility it was measured at is still worth seeing
     assert out["daily_vol_pct"] == 6.3534
 

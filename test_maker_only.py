@@ -114,10 +114,76 @@ ok("the floor's worst case consults whether the FALLBACK is gone",
    "is_maker_only_active" in worst)
 ok("REGRESSION: it does NOT consult whether maker MODE is on",
    "is_maker_orders_active" not in worst)
-ok("it refuses to price maker without a MEASURED maker rate",
-   "_cached_real_maker_fee_rate is None" in worst)
-ok("it clamps to the taker leg - no arrangement of makers costs more than takers",
-   "min(" in worst)
+
+# --- 3b. the floor's two guards, MEASURED rather than read -----------------
+#
+# These two were greps: "_cached_real_maker_fee_rate is None" in the body,
+# and "min(" in it. Both went stale the moment the function started reading
+# the DURABLE measurement through get_effective_maker_leg_fee_rate() instead
+# of that process-local cache. The guarantee was entirely intact and the
+# check failed anyway - a test that fails on a change which improved the
+# thing it guards is worth less than no test, because the next person's move
+# is to delete it.
+#
+# So the guard is exercised rather than read. Four rows of the truth table,
+# one of them the safety property itself: with nothing measured, the floor
+# prices TAKER no matter what the toggle says.
+try:
+    import asyncio
+
+    import crypto_grid_bot as _grid
+
+    TAKER_ROUND_TRIP = 0.015
+    TAKER_LEG = TAKER_ROUND_TRIP / 2                  # 0.75%
+    MEASURED_MAKER_LEG = 0.0035                       # 0.35%, a real fill
+
+    def _floor(maker_leg, maker_only):
+        """worst_case_leg_fee_rate() with its three inputs pinned."""
+        def aval(v):
+            async def _f(*a, **k):
+                return v
+            return _f
+
+        names = {"get_effective_round_trip_fee_rate": aval(TAKER_ROUND_TRIP),
+                 "get_effective_maker_leg_fee_rate": aval(maker_leg),
+                 "is_maker_only_active": aval(maker_only)}
+        old = {}
+        for n, v in names.items():
+            if not hasattr(_grid, n):
+                raise AssertionError(f"crypto_grid_bot has no {n}")
+            old[n] = getattr(_grid, n)
+            setattr(_grid, n, v)
+        try:
+            return asyncio.run(_grid.worst_case_leg_fee_rate())
+        finally:
+            for n, v in old.items():
+                setattr(_grid, n, v)
+
+    # Each row evaluated inside its own guard. Removing the measured-rate
+    # check makes the function raise rather than return a wrong number, and
+    # one uncaught row would take the other three rows' verdicts with it.
+    def row(label, maker_leg, maker_only, expected):
+        try:
+            got = _floor(maker_leg, maker_only)
+        except BaseException as e:
+            ok(f"{label} (raised {type(e).__name__}: {e})", False)
+            return
+        ok(f"{label} (got {got!r}, wanted {expected!r})", got == expected)
+
+    row("NOTHING MEASURED prices the taker leg, toggle ON",
+        None, True, TAKER_LEG)
+    row("NOTHING MEASURED prices the taker leg, toggle OFF",
+        None, False, TAKER_LEG)
+    row("maker-only OFF prices taker even with a measured maker rate",
+        MEASURED_MAKER_LEG, False, TAKER_LEG)
+    row("maker-only ON with a MEASURED rate is the only case that prices maker",
+        MEASURED_MAKER_LEG, True, MEASURED_MAKER_LEG)
+    row("clamped to taker - no arrangement of makers costs more than takers",
+        0.02, True, TAKER_LEG)
+except BaseException as _e:           # a missing dep, a native panic, anything
+    # Reported as a failure rather than skipped: a guard that cannot be
+    # exercised is not a guard that passed.
+    ok(f"the floor could be exercised for real ({type(_e).__name__}: {_e})", False)
 
 floor = body_src("fee_safe_floor_pct")
 ok("the floor still derives from the worst case, not the estimate",

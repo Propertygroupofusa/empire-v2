@@ -1206,10 +1206,14 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
     record it and be priced honestly later.
 
     `outcome_out`, when given, is filled with why there was no fill -
-    order_outcome.MAKER_EXPIRED for a maker order nobody took inside its
-    window (routine under maker-only), or REJECTED for one the venue
-    actually refused. The caller used to have to guess, and guessed
-    "rejected" for both. Same detail_out pattern as _net_edge_gate_ok."""
+    order_outcome.MAKER_EXPIRED for a maker order that really did rest for
+    its whole window and nobody took (routine under maker-only),
+    NO_ORDER_CREATED when the venue never received an order at all,
+    NO_FILL when whether an order rested is UNKNOWN, or REJECTED for one
+    the venue actually refused. The caller used to have to guess, and
+    guessed "rejected" for all of them; then this function guessed
+    "expired" for all of them, which hid the non-orders in the one cause
+    that counts as routine. Same detail_out pattern as _net_edge_gate_ok."""
     if await is_maker_orders_active():
         fill = await engine.place_maker_buy(session, usd_amount, product_id,
                                             await maker_wait_seconds())
@@ -1224,19 +1228,45 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
             # No fallback, by design. A buy that does not happen costs
             # nothing and the dip will still be there next cycle; a taker
             # buy costs 0.75% and would make the spacing floor a lie.
-            log.info(f"[GRID] {product_id}: maker buy did not fill and maker-ONLY mode is on - "
-                     f"passing this cycle rather than paying the taker leg")
+            #
+            # ONE read of the engine's verdict, used by BOTH the ledger row
+            # and the outcome reported to the caller. Read twice they could
+            # disagree, and "the expiry table says it rested, the event feed
+            # says no order existed" is a contradiction no reader can
+            # resolve. Three states: True rested, False never placed, None
+            # UNKNOWN - and None stays None all the way down.
+            _rested = engine._last_order_rested.get(product_id)
+            _why = engine._last_order_error.get(product_id)
+            if not _why:
+                # The old default asserted a resting order unconditionally.
+                # It is only true when one actually rested; on the UNKNOWN
+                # path _last_order_error was cleared and never set, so that
+                # default was writing a claim the code did not have.
+                _why = ("the order rested at the bid and no seller crossed"
+                        if _rested is True else
+                        "no reason recorded - whether an order was ever placed "
+                        "is UNKNOWN")
+            log.info(
+                f"[GRID] {product_id}: no maker buy completed and maker-ONLY mode is on - "
+                f"passing this cycle rather than paying the taker leg. Reason: {_why}")
             await _record_maker_only_skip(GRID_MAKER_ONLY_SKIP_BUY_KEY)
             await _record_maker_expiry(
-                session, product_id, "buy", bot_name,
-                reason=engine._last_order_error.get(
-                    product_id, "the order rested at the bid and no seller crossed"),
-                order_rested=engine._last_order_rested.get(product_id),
+                session, product_id, "buy", bot_name, reason=_why,
+                order_rested=_rested,
                 block_detail=engine._last_order_block.get(product_id))
             if outcome_out is not None:
                 import order_outcome
-                outcome_out["cause"] = order_outcome.MAKER_EXPIRED
-                outcome_out["wait_seconds"] = await maker_wait_seconds()
+                # NOT hardcoded to MAKER_EXPIRED. Three of place_maker_buy's
+                # returns never place an order (below the minimum size, no
+                # bid, a size that floors to zero) and a fourth cannot say.
+                # Labelling those "maker expired" put them in BENIGN_CAUSES,
+                # where a branch too poor to trade or a book that will not
+                # read is filed as the mode working as designed.
+                outcome_out["cause"] = order_outcome.cause_for_maker_only_no_fill(_rested)
+                if _rested is True:
+                    outcome_out["wait_seconds"] = await maker_wait_seconds()
+                else:
+                    outcome_out["detail"] = _why
             return None
     fill = await engine.place_market_buy(session, usd_amount, product_id,
                                          source="grid_buy_market")
@@ -2456,6 +2486,90 @@ async def fleet_tracked_units_by_product():
         except Exception as exc:
             log.warning(f"[GRID] tracked-unit pricing partial: {exc}")
     return units, prices
+
+
+async def products_without_a_grid_stop() -> dict:
+    """Tickers whose branch has NO grid stop at all. {TICKER: why}.
+
+    WHY THIS EXISTS. resting_stops declines every asset a grid branch holds
+    slices on, and said so with "The branch carries its own adaptive stop;
+    this would be a second one the first cannot see." True for most branches.
+    False for an adopted one, which names its own stop of 0 - see
+    _reported_stop, whose docstring is the rule: a safety figure that
+    disagrees with the code enforcing it is worse than no figure.
+
+    Measured on the live fleet 2026-09-29: eight branches holding $3,712 with
+    stop_pct 0.0, each cited as covered by a layer that was citing it back,
+    and /resting-stops reporting protects_usd 0.
+
+    So the other layer stops assuming and asks. This does not decide anything
+    and cannot cause an order - it only lets a refusal say which case it is,
+    and lets the gap be counted.
+
+    FAILS OPEN, in the direction that changes nothing: an unreadable answer
+    is an EMPTY dict, so a caller falls back to the wording it always used.
+    A caller must therefore treat empty as UNKNOWN and never as "everything
+    has a stop" - the same rule that makes an unreadable balance never $0.00.
+
+    Only the branch override is read, plus the two switches that can turn a
+    stop off wholesale. The override is the one case that is certain:
+    _reported_stop short-circuits on `override is not None` before adaptive
+    or fixed is consulted, so an override of exactly 0 means no stop from
+    that path. The global fixed stop being 0 is its own condition, because
+    that disables the stop for every branch with no override - the whole
+    fleet.
+
+    AN ARMED ADOPTED STOP IS NOT A GAP. When GRID_ADOPTED_STOP_MODE=arm, an
+    override of 0 no longer means no stop: adaptive_stop.adopted_stop gives
+    the branch a wide catastrophe trigger instead. Those branches are left
+    out of this dict rather than reported, because they have a stop POLICY.
+    Whether a given cycle can size it depends on a volatility read this
+    function does not do - and when that read fails, the cycle logs
+    "🚨 NO GRID STOP" and _reported_stop shows 0.0 with the reason, so the
+    per-branch figure still tells the truth even though this summary cannot.
+    """
+    try:
+        async with get_session_factory()() as db:
+            branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
+    except Exception as exc:
+        log.warning(f"[GRID] stop coverage unreadable ({exc}) - reporting UNKNOWN, "
+                    f"not 'covered'")
+        return {}
+
+    # Read once, not per branch. Fails toward REPORTING the gap: if the
+    # policy cannot be read we do not know it is armed, and a coverage report
+    # must not go quiet on a read error.
+    _adopted_armed = False
+    try:
+        import adaptive_stop
+        _adopted_armed = (adaptive_stop.adopted_mode()
+                          == adaptive_stop.ADOPTED_MODE_ARM)
+    except Exception as exc:
+        log.warning(f"[GRID] adopted-stop policy unreadable ({exc}) - treating those "
+                    f"branches as uncovered, which is the direction that reports")
+
+    out = {}
+    for b in branches:
+        if not b.product_id:
+            continue
+        ticker = b.product_id.split("-")[0].upper()
+        override = getattr(b, "stop_loss_pct_override", None)
+        why = None
+        if override is not None:
+            try:
+                if float(override) == 0 and not _adopted_armed:
+                    why = (f"{b.bot_name} names its own stop of 0, so no grid stop can "
+                           f"fire on {b.product_id} at any price")
+            except (TypeError, ValueError):
+                # Unreadable override -> the branch falls back to the fixed
+                # stop, which is a stop. Not a gap; _reported_stop agrees.
+                why = None
+        elif GRID_STOP_LOSS_PCT == 0:
+            why = (f"{b.bot_name} has no override and GRID_STOP_LOSS_PCT is 0, so the "
+                   f"fleet-wide grid stop is switched off")
+        if why:
+            out[ticker] = why
+    return out
 
 
 async def get_grid_undeployed_reserve_total() -> float:
@@ -5717,6 +5831,15 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
     import trading_profile as _tp
     _profile = await get_trading_profile()
     if not _tp.net_edge_gate_enabled(_profile):
+        # RECORDED, for the same reason the DB toggle below is, and it was
+        # missed when that one was fixed: this path also returns True, so the
+        # buy goes in with no economic check. Writing nothing made a whole
+        # profile's worth of real buys invisible to every counter that reads
+        # gate verdicts - including the fill rate, which counts attempts from
+        # the verdicts that allowed them and so could not count these at all.
+        _reason = (f"profile {_profile}: economic gates off - ${slice_usd:,.2f} buy "
+                   f"allowed with NO economic check")
+        await _record_gate_decision(bot_name, product_id, "GATE_DISABLED", _reason)
         return True, f"profile {_profile}: economic gates off"
     if not await is_net_edge_gate_active():
         # RECORDED, not silent. A disabled gate used to return here writing
@@ -6246,8 +6369,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 detail=_outcome.get("detail"),
                 wait_seconds=_outcome.get("wait_seconds"))
             if order_outcome.is_execution_fault(_outcome.get("cause")):
-                log.warning(f"[GRID] {branch.bot_name}: real grid buy into {branch.product_id} "
-                            f"did not fill - will retry next cycle")
+                # _msg, not a generic sentence. It carries WHICH fault this
+                # was; the old wording said "did not fill" for a cycle where
+                # no order was ever created, and threw away the reason the
+                # engine had already recorded.
+                log.warning(f"[GRID] {branch.bot_name}: {branch.product_id}: {_msg} "
+                            f"- will retry next cycle")
             else:
                 log.info(f"[GRID] {branch.bot_name}: {_msg}")
             await _record_gate_decision(branch.bot_name, branch.product_id, _event, _msg)
@@ -6443,15 +6570,47 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             _stop_pct = GRID_STOP_LOSS_PCT
             _override = None
     if _override is not None:
+        _resolved = None
+        if _stop_pct == 0:
+            # A STOP OF 0 IS "not an 8% trigger from the adoption date", NOT
+            # "no trigger at any price". It had become the second: fourteen
+            # branches, $4,573, and nothing able to sell any of it - the grid
+            # refuses a losing sale, the resting stops decline coin a branch
+            # holds slices on, and the trimmer declines it for the same
+            # reason. All three are right, and all three point at the same
+            # conclusion: the only seller that can safely exit grid-held coin
+            # is the grid, because its slice ledger is the book of record.
+            #
+            # So the catastrophe stop is resolved HERE and sells through the
+            # path below, which retires the slice row and records the trade.
+            # OFF unless GRID_ADOPTED_STOP_MODE=arm, so this is a no-op until
+            # the owner arms it - and when unarmed the log says exactly what
+            # it always said.
+            try:
+                import adaptive_stop
+                _adopted = adaptive_stop.adopted_stop(branch.product_id, _stop_vol)
+                _stop_pct = _adopted["stop_pct"]
+                _resolved = _adopted
+            except Exception as exc:
+                # Cannot be the thing that ADDS a stop. An error here leaves
+                # the branch exactly as it was - at 0 - which is the
+                # conservative direction for a trigger that sells coin the
+                # owner has held for a long time.
+                log.warning(f"[GRID] {branch.bot_name}: adopted stop unavailable ({exc}) "
+                            f"- this branch keeps no stop, unchanged")
+                _stop_pct = 0.0
         if _stop_pct == 0 and slices:
             log.warning(
-                f"[GRID] {branch.bot_name}: 🚨 NO GRID STOP - this branch names its own stop "
-                f"of 0. Adopted coin is covered at the portfolio level by the resting stops, "
-                f"not by an 8% trigger measured from the day it was adopted.")
+                f"[GRID] {branch.bot_name}: 🚨 NO GRID STOP - "
+                + ((_resolved or {}).get("reason")
+                   or (f"this branch names its own stop of 0. No portfolio cover is "
+                       f"claimed here - check /resting-stops, where an asset under "
+                       f"`uncovered` has a stop from neither layer.")))
+        elif _resolved is not None:
+            log.warning(f"[GRID] {branch.bot_name}: ADOPTED STOP ARMED - {_resolved['reason']}")
         else:
             log.info(f"[GRID] {branch.bot_name}: stop - branch override "
                      f"{_stop_pct * 100:.1f}%")
-        _resolved = None
     else:
         _stop_pct = GRID_STOP_LOSS_PCT
         try:
@@ -7425,10 +7584,44 @@ def _reported_stop(branch, resolved):
                            f"{GRID_STOP_LOSS_PCT * 100:.0f}% stop stands"),
                 "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
     if pct == 0:
+        # THE ADOPTED CATASTROPHE STOP, resolved the same way and from the
+        # same volatility the cycle uses - this function exists because a
+        # per-product read alone reported a stop the cycle was not applying,
+        # and reporting 0 while the cycle now applies 35% would be that bug
+        # with the sign flipped.
+        try:
+            import adaptive_stop
+            _ad = adaptive_stop.adopted_stop(branch.product_id,
+                                             (resolved or {}).get("daily_vol_pct"))
+            if _ad["stop_pct"]:
+                return {"stop_pct": _ad["stop_pct"], "source": _ad["source"],
+                        "reason": _ad["reason"],
+                        "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
+            _why = _ad["reason"]
+        except Exception as exc:
+            _why = (f"this branch names its own stop of 0, and the adopted-stop policy "
+                    f"could not be read ({type(exc).__name__})")
+        # THE CLAIM THIS USED TO MAKE, AND WHY IT IS GONE.
+        #
+        # It read "Adopted coin is covered at the portfolio level by the
+        # resting stops". Nothing here checked that, and on 2026-09-29 it was
+        # false for every adopted branch. resting_stops refuses any asset a
+        # grid branch holds slices on (ACTIVELY_TRADED), for good reasons of
+        # its own - and its refusal said "the branch carries its own adaptive
+        # stop", which is exactly what THIS branch has just declared it does
+        # not. ZEC went one further: deferred to the concentration trimmer,
+        # which declined it as WITHIN_LIMIT. Three layers each naming the
+        # next, and /resting-stops reporting protects_usd 0.
+        #
+        # This function's own docstring is the rule being applied to it - a
+        # safety figure that disagrees with the code enforcing it is worse
+        # than no figure. So it states only what it knows, and points at where
+        # coverage can be CHECKED instead of asserting that it exists.
         return {"stop_pct": 0.0, "source": "branch_override_none",
-                "reason": ("this branch names its own stop of 0 - there is NO grid stop. "
-                           "Adopted coin is covered at the portfolio level by the resting "
-                           "stops, not by a trigger measured from the day it was adopted."),
+                "reason": (f"{_why}. No portfolio cover is claimed here either, because "
+                           f"nothing in this function can verify one - check "
+                           f"/resting-stops, where an asset listed under `uncovered` has "
+                           f"a stop from neither layer."),
                 "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
     return {"stop_pct": pct, "source": "branch_override",
             "reason": f"this branch names its own {pct * 100:.2f}% stop",

@@ -10578,6 +10578,18 @@ LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR",
 # specific, findable problem that one merged number would hide.
 LIVE_OPS_ORDER_EVENTS = ("ORDER_REJECTED",)
 
+#
+# The OTHER event types the execution counts read - the three further ways an
+# attempted buy ends with no fill, and the post-gate block that means no
+# order was attempted at all - live in crypto_fleet_metrics, beside the
+# arithmetic that consumes them (EXECUTION_OUTCOME_EVENTS, and
+# execution_counts). Not here. They were apart once, the names in this
+# router and the sum inline beside them, and they drifted: `filled =
+# submitted - rejected` stayed put while three more no-fill outcomes were
+# added, so each new one was counted as a FILL. Anything added to that
+# module's NO_FILL_EVENTS is now both queried and subtracted with no second
+# edit in this file.
+
 
 async def _live_ops_config():
     """The settings ACTUALLY in effect in this process, read at call time.
@@ -11003,24 +11015,19 @@ async def get_fleet_metrics(window_days: float = 1.0,
                     for b in branches]
         log.warning(f"[dashboard] fleet metrics: live edge inputs unavailable ({e})")
 
-    # Execution counts. A buy is submitted once the gate passes, so
-    # submitted = passes, and filled is what is left after rejections.
+    # Execution counts. The arithmetic is metrics.execution_counts, which
+    # owns the event-type groups too - see the comment on
+    # LIVE_OPS_ORDER_EVENTS for why the names and the sum are not split
+    # across two files any more. This query asks for exactly what that
+    # function reads.
     async with get_session_factory()() as db:
-        rejected = (await db.execute(
-            select(func.count(CryptoActivityEvent.id))
-            .where(CryptoActivityEvent.event_type.in_(LIVE_OPS_ORDER_EVENTS))
-            .where(CryptoActivityEvent.created_at >= since))).scalar() or 0
-    submitted = tally.get("GATE_PASS", 0)
-    orders = {
-        "submitted": submitted,
-        "rejected": rejected,
-        "filled": max(0, submitted - rejected),
-        "fill_rate_pct": (None if not submitted
-                          else round(max(0, submitted - rejected) / submitted * 100, 1)),
-        "note": ("Submitted is counted as gate passes, since a pass is immediately "
-                 "followed by an order. Rejections are recorded at the point the fill "
-                 "comes back empty."),
-    }
+        outcome_tally = {k: v for k, v in (await db.execute(
+            select(CryptoActivityEvent.event_type, func.count())
+            .where(CryptoActivityEvent.event_type.in_(
+                metrics.EXECUTION_OUTCOME_EVENTS))
+            .where(CryptoActivityEvent.created_at >= since)
+            .group_by(CryptoActivityEvent.event_type))).all()}
+    orders = metrics.execution_counts(tally, outcome_tally)
 
     stats = metrics.round_trip_stats(trades)
     slippage = metrics.slippage_stats(trades)
@@ -11565,6 +11572,17 @@ async def resting_stops_preview():
         _units, _ = await crypto_grid_bot_module.fleet_tracked_units_by_product()
         if _units:
             _protected = {p.split("-")[0].upper() for p in _units}
+    except Exception:
+        pass
+
+    # Which of those branches has no stop of its own, so a refusal here does
+    # not claim cover the branch has declared it does not provide. None, not
+    # {}, when unreadable: UNKNOWN is not "every branch has a stop". Read the
+    # same way the worker reads it, for the same reason the line above is -
+    # a preview that runs a different rule than the loop is worse than none.
+    _unstopped = None
+    try:
+        _unstopped = await crypto_grid_bot_module.products_without_a_grid_stop()
     except Exception:
         pass
 

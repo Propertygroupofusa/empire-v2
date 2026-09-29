@@ -204,15 +204,41 @@ for fname, side in (("grid_sell", "sell"), ("grid_buy", "buy")):
     ok(f"{fname} passes reason", "reason" in kw)
 
     v = kw.get("order_rested")
+
     # A .get with no default yields None for an absent key - UNKNOWN. A
     # default here would invent a verdict for a product the engine said
     # nothing about this cycle.
-    is_bare_get = (isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                   and v.func.attr == "get" and len(v.args) == 1)
+    #
+    # Accepted EITHER inline or through a local name. grid_buy now binds the
+    # lookup once and hands the same value to both the ledger row and the
+    # cause it reports to its caller, deliberately: read twice, the two could
+    # disagree. Demanding the call be written inline would have failed that
+    # improvement, which is the hazard of testing a shape instead of a fact -
+    # so the name is resolved back to what it was assigned.
+    def is_bare_get(node):
+        return (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and len(node.args) == 1
+                and not node.keywords)
+
+    def resolves_to_bare_get(node):
+        if is_bare_get(node):
+            return True
+        if not isinstance(node, ast.Name):
+            return False
+        # Every assignment to that name in this function must be a bare .get;
+        # one that is not means the value reaching the call can be a claim.
+        bound = [a.value for a in ast.walk(f)
+                 if isinstance(a, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == node.id
+                         for t in a.targets)]
+        return bool(bound) and all(is_bare_get(b) for b in bound)
+
     ok(f"{fname} reads order_rested as a defaulted-to-UNKNOWN lookup",
-       is_bare_get,
-       "must be a .get(product_id) with NO second argument, so an absent "
-       "verdict stays None rather than becoming a claim")
+       resolves_to_bare_get(v),
+       "must be a .get(product_id) with NO second argument - inline, or via a "
+       "local assigned nothing else - so an absent verdict stays None rather "
+       "than becoming a claim")
     ok(f"{fname} never hardcodes order_rested to a constant",
        not isinstance(v, ast.Constant))
 
