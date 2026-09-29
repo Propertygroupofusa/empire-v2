@@ -66,10 +66,19 @@ def test_the_stop_still_bypasses_the_profitable_slice_check():
 
 
 def test_a_zero_stop_is_still_logged_loudly():
-    src = cycle_src()
-    i = src.index("_override = getattr(branch")
-    j = src.index("_stop_slice = None", i)
-    assert "NO GRID STOP" in src[i:j]
+    """Was a text match on the cycle body. The decision moved out into
+    crypto_grid_bot.stop_report_line - because branching on the slices before
+    the stop made an unarmed branch log "ADOPTED STOP ARMED" - so this now
+    calls it instead of grepping for the words. Same property, asserted where
+    it can no longer pass on a comment or fail on a rewording."""
+    import crypto_grid_bot
+    unarmed = {"stop_pct": 0.0, "source": "adopted-unarmed",
+               "reason": "GRID_ADOPTED_STOP_MODE is not 'arm'"}
+    level, msg = crypto_grid_bot.stop_report_line("crypto_grid_9", 0.0,
+                                                 unarmed, has_slices=True)
+    assert level == "warning", msg
+    assert "🚨" in msg, msg
+    assert "NO GRID STOP" in msg, msg
 
 
 # ------------------------------------------------ the new behaviour

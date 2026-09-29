@@ -6038,6 +6038,45 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
         return False, reason
 
 
+def stop_report_line(bot_name: str, stop_pct: float, resolved, has_slices: bool):
+    """(level, message) saying what stop an ADOPTED branch actually ended up with.
+
+    Pulled out here and made pure because the version that lived inline asked
+    about the slices before it asked about the stop:
+
+        if stop_pct == 0 and slices:   -> NO GRID STOP
+        elif resolved is not None:     -> ADOPTED STOP ARMED
+
+    A branch at stop 0 with no open slices - JASMY, every cycle - missed the
+    first arm on `slices` and took the second, so the log read "ADOPTED STOP
+    ARMED" directly above a reason stating that GRID_ADOPTED_STOP_MODE is not
+    'arm' and nothing sells it at any price. No trading effect, and exactly the
+    defect class this file keeps being fixed for: a line that states the
+    opposite of the truth.
+
+    So the stop decides WHAT is reported and the slices decide only how loud an
+    absence is. Nothing in here reads bot state - the caller passes the three
+    facts, which is what makes it checkable.
+    """
+    if stop_pct > 0:
+        if resolved is not None:
+            return "warning", (f"[GRID] {bot_name}: ADOPTED STOP ARMED - "
+                               f"{resolved['reason']}")
+        return "info", (f"[GRID] {bot_name}: stop - branch override "
+                        f"{stop_pct * 100:.1f}%")
+    why = ((resolved or {}).get("reason")
+           or ("this branch names its own stop of 0. No portfolio cover is "
+               "claimed here - check /resting-stops, where an asset under "
+               "`uncovered` has a stop from neither layer."))
+    if has_slices:
+        # Open slices with no trigger at any price. This is live exposure.
+        return "warning", f"[GRID] {bot_name}: 🚨 NO GRID STOP - {why}"
+    # No stop, and nothing held to stop out. Said quietly, because it becomes
+    # the line above the moment a slice opens.
+    return "info", (f"[GRID] {bot_name}: no stop, and no open slice to need one "
+                    f"yet - {why}")
+
+
 async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
     """One real cycle for one real grid branch - the live counterpart to
     crypto_selection_backtest.py's _replay_grid_bot(), same real
@@ -6700,18 +6739,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 log.warning(f"[GRID] {branch.bot_name}: adopted stop unavailable ({exc}) "
                             f"- this branch keeps no stop, unchanged")
                 _stop_pct = 0.0
-        if _stop_pct == 0 and slices:
-            log.warning(
-                f"[GRID] {branch.bot_name}: 🚨 NO GRID STOP - "
-                + ((_resolved or {}).get("reason")
-                   or (f"this branch names its own stop of 0. No portfolio cover is "
-                       f"claimed here - check /resting-stops, where an asset under "
-                       f"`uncovered` has a stop from neither layer.")))
-        elif _resolved is not None:
-            log.warning(f"[GRID] {branch.bot_name}: ADOPTED STOP ARMED - {_resolved['reason']}")
-        else:
-            log.info(f"[GRID] {branch.bot_name}: stop - branch override "
-                     f"{_stop_pct * 100:.1f}%")
+        # One pure decision, tested in test_stop_report_line.py, so the log can
+        # never again say ARMED over a reason that says it is not.
+        _level, _msg = stop_report_line(
+            branch.bot_name, _stop_pct, _resolved, bool(slices))
+        (log.warning if _level == "warning" else log.info)(_msg)
     else:
         _stop_pct = GRID_STOP_LOSS_PCT
         try:

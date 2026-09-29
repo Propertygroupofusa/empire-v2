@@ -1362,3 +1362,26 @@ green nor a red from one is worth much on its own.
   rather than by reasoning about it.
 - A switch that sells real coin: default off, exact word to arm, and say what
   arming would do at TODAY's prices before anyone throws it.
+- **Branch on the fact you are reporting, not on a proxy for it.** The adopted
+  stop's log read `if stop_pct == 0 and slices: NO GRID STOP / elif resolved is
+  not None: ADOPTED STOP ARMED`. JASMY — stop 0, mode off, zero open slices —
+  missed the first arm on `and slices` and took the second, whose condition is
+  true whenever the engine answered at ALL, armed or not. So the live log said
+  `ADOPTED STOP ARMED` directly above a reason stating that nothing sells
+  JASMY-USD at any price. No money moved; the stop was still 0 and there was
+  nothing held to stop out. **The `and` that narrows one arm does not narrow
+  the `elif` after it** — every state that falls out of the first condition
+  lands in the second. Fixed by asking about the stop first and letting the
+  slices decide only how LOUD an absence is. Mine, shipped, and exactly the
+  defect class the whole adopted-stop change was made to prevent.
+- **When a decision is wrong, extract it before fixing it.** Those three lines
+  sat in a 9,000-line async cycle nobody can call, and the test guarding them
+  matched a substring of the function body — which broke the moment the strings
+  moved, for the seventh time this session. `stop_report_line(bot_name,
+  stop_pct, resolved, has_slices)` reads no state, so the test states the
+  property once and checks it against every state, and the retargeted
+  `test_adopted_stop` assertion now calls it. **My first statement of that
+  property was wrong and the code was right**: `ARMED iff stop_pct > 0` fails a
+  branch that named its own 8% stop — it has a stop, but is not adopted and must
+  not be described as armed. The property is `resolved is not None and stop_pct
+  > 0`. Too broad fails correct code; pin the exact fact.
