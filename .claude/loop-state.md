@@ -1085,7 +1085,28 @@ reason the constants are.
 1e-9, 1e12 and "1E+3". Dropped from the harness rather than "killed" with
 an assertion about spelling.
 
-### §1 IS NOW WRITTEN — the buy and the partial fill stamp their own state
+### §1 WRITE IS UNVERIFIED ON LIVE DATA — that is UNKNOWN, not working
+
+Read at 10:20Z, right after e1606ef deployed: **all 80 slices have
+`slice_state` NULL. Zero populated rows.**
+
+**This is neither evidence it works nor evidence it is broken.** Every one
+of those 80 slices was created BEFORE the write shipped (~10:17Z), and the
+stamps only happen on a NEW buy or a partial fill. Nothing has bought since.
+So the state of this change is UNKNOWN, and it stays UNKNOWN until a buy
+lands — the same third verdict this whole session has been insisting on,
+applied to my own work.
+
+**VERIFY IT EACH PASS:** pull grid-status and count
+`slice_state is not None` across all slices. The FIRST populated row should
+read `ACCOUNTED`, carry a `cycle_id` shaped `20260929T101700Z`, and a
+`slice_index` between 1 and that branch's num_levels. If a buy lands and
+the count STAYS at zero, the write silently failed and that IS a finding.
+
+Structurally pinned by test_slice_state_writes.py (9 mutants). Structure is
+not behaviour.
+
+### §1 IS WRITTEN — the buy and the partial fill stamp their own state
 
 `run_grid_branch_cycle` takes a `cycle_id` (default None, so any other
 caller still works); `run_grid_branches_cycle` generates ONE per pass via
