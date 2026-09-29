@@ -1085,7 +1085,62 @@ reason the constants are.
 1e-9, 1e12 and "1E+3". Dropped from the harness rather than "killed" with
 an assertion about spelling.
 
-### WHY NOTHING HAS TRADED — measured 10:35Z, and NOT attributable yet
+### WHY NOTHING HAS TRADED — ANSWERED 10:52Z. Nothing is wrong.
+
+**THE BUY SIDE: no coin has dipped.** The trigger is
+`price <= reference_price * (1 - grid_pct)` AND `len(slices) < num_levels`
+(crypto_grid_bot.py ~L6440). It is an `elif` on a plain `if/elif`, so when
+the dip condition is false the block is **never entered** — which is why
+there is no CASH_RESERVE / CONCENTRATION / EXITING / ADOPTED_RUNG event in
+the feed either. Those four all sit INSIDE the block.
+
+Measured across the 10 branches that have room and are not paused or
+breached — **ZERO are at or below their buy trigger:**
+
+    BTC-USD    +1.23%      XLM-USD    +5.51%
+    ETH-USD    +2.04%      ALGO-USD   +7.59%
+    XRP-USD    +2.35%      ONDO-USD   +8.20%
+    FLOKI-USD  +3.78%      QNT-USD   +58.96%
+    APE-USD    +4.06%
+    TON-USD    +4.08%
+
+The nearest is BTC, 1.23% above its trigger. **This is the grid's core
+mechanic, not a fault.** It buys dips; there has been no dip.
+
+And it compounds with the sell side: a sale re-anchors `reference_price`
+to the FILL price, so the five sells between 06:54Z and 08:25Z pushed each
+of those branches' next buy triggers further away. Selling into strength
+and then not buying is the design, not a malfunction.
+
+QNT at +58.96% will effectively never buy — its reference sits far below
+the market. Already known and do-not-touch.
+
+**THE SELL SIDE:** `maker_only_skipped_cycles` = 5,745 sell / 28 buy.
+Maker sells rest and do not fill; there is no taker fallback, by the
+owner's own choice.
+
+**DO NOT "FIX" THIS.** The only levers are tightening grid spacing or
+re-anchoring references downward, and both are forbidden: the owner said
+do NOT tighten spacing, and lowering a threshold to manufacture activity is
+a standing prohibition. A dip that has not happened is an answer.
+
+**What was RULED OUT along the way:** not a stall (heartbeat cycling, lease
+held by web:1); not capital ($311.20 free, above the $150 floor); not
+capacity (10 branches with room); not the net-edge gate (newest GATE_PASS
+06:28:41Z at +1.855%); not "order book unavailable" (all 14 blocks are 8+
+hours stale).
+
+**TWO GATES — DO NOT CONFLATE. I nearly reported the wrong one.**
+`pipeline.per_coin[*].latest.expected_net_edge_pct` is negative for all 18
+scoreable coins, and it is `opportunity_signals`, which grid-status labels
+**observation only**. It is NOT the grid's buy gate and had nothing to do
+with this.
+
+**The edge is real when it trades:** 58 trades since the 26 Sep epoch,
+gross 3.211%, net 2.566% on $2,324.96, mean slice $40.09.
+
+### (superseded) the earlier read at 10:35Z said "not attributable"
+
 
     last BUY   2026-09-29T06:28:50Z  HBAR-USD  (~4h07m ago)
     last SELL  2026-09-29T08:25:52Z  BTC-USD   (~2h10m ago)
