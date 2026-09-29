@@ -11371,7 +11371,10 @@ async def auto_trim_status(fresh: int = 0):
             "min_trim_usd": auto_trim.MIN_TRIM_USD,
             "max_trim_usd": auto_trim.MAX_TRIM_USD,
             "max_daily_usd": auto_trim.MAX_DAILY_TRIM_USD,
-            "max_position_share_pct": auto_trim.MAX_POSITION_SHARE_PCT,
+            # Renamed at the source: this is the cap on ONE TRIM, not the
+            # concentration ceiling. The JSON key keeps its old spelling
+            # so no existing reader of this endpoint breaks.
+            "max_position_share_pct": auto_trim.MAX_TRIM_SHARE_OF_POSITION_PCT,
             "cooldown_hours": auto_trim.COOLDOWN_HOURS,
         },
         "spent_today_usd": auto_trim.spent_today(history, now),

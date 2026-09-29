@@ -273,7 +273,14 @@ def test_worker_checks_the_mode_before_placing():
 def test_defaults_are_bounded():
     assert 0 < at.MIN_TRIM_USD < at.MAX_TRIM_USD <= at.MAX_DAILY_TRIM_USD
     assert 0 < at.BUFFER_PCT < at.LIMIT_PCT
-    assert 0 < at.MAX_POSITION_SHARE_PCT < 100
+    # Renamed from MAX_POSITION_SHARE_PCT, which is what coin_adoption.py and
+    # capital_placement.py call the 20% CEILING - one name, two meanings,
+    # fifteen points apart. The bound below is the same; the extra assertion is
+    # the relationship that makes the two distinguishable at a glance.
+    assert 0 < at.MAX_TRIM_SHARE_OF_POSITION_PCT < 100
+    assert at.MAX_TRIM_SHARE_OF_POSITION_PCT > at.LIMIT_PCT, (
+        "a trim that may sell less than the ceiling allows could never bring an "
+        "overweight position back under it")
     assert at.COOLDOWN_HOURS > 0
 
 

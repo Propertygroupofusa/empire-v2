@@ -65,7 +65,17 @@ BUFFER_PCT = 0.5          # trim to 19.5%, so a small tick does not re-fire
 MIN_TRIM_USD = 25.0       # below this the fee is a meaningful share of it
 MAX_TRIM_USD = 750.0      # no single order larger than this
 MAX_DAILY_TRIM_USD = 1500.0
-MAX_POSITION_SHARE_PCT = 35.0   # never sell more than this much of one holding at once
+# HOW MUCH OF ONE HOLDING A SINGLE TRIM MAY SELL. Not a ceiling on how much
+# of the account a coin may BE - that is concentration_gate.MAX_SINGLE_COIN_SHARE
+# (20%), which this file measures against via limit_pct.
+#
+# Renamed, because the old spelling is what coin_adoption.py and
+# capital_placement.py call the 20% CEILING. One name, two meanings, fifteen
+# points apart, in three files that all decide how much of a coin to hold - and
+# a reader carrying the meaning from one into another would be wrong about a
+# rule the owner lists as a hard limit. This repo has already been bitten by
+# two subsystems enforcing "the same" 20% against different books.
+MAX_TRIM_SHARE_OF_POSITION_PCT = 35.0
 COOLDOWN_HOURS = 24.0     # one trim per asset per day
 
 # --- the tail ---------------------------------------------------------
@@ -301,10 +311,10 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
         cap1 = _num(max_trim_usd)
         if cap1 is not None and amount > cap1:
             amount = cap1; caps.append(f"single-order cap ${cap1:,.0f}")
-        pos_cap = usd * (MAX_POSITION_SHARE_PCT / 100.0)
+        pos_cap = usd * (MAX_TRIM_SHARE_OF_POSITION_PCT / 100.0)
         if amount > pos_cap:
             amount = pos_cap
-            caps.append(f"{MAX_POSITION_SHARE_PCT:.0f}% of the position")
+            caps.append(f"{MAX_TRIM_SHARE_OF_POSITION_PCT:.0f}% of the position")
         if amount > budget_left:
             amount = max(budget_left, 0.0); caps.append(f"${budget_left:,.2f} left in today's budget")
 
