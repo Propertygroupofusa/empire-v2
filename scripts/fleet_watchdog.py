@@ -110,6 +110,7 @@ def main():
     inv = get("/grid-status/invariants")
     alerts = get("/alert-queue")
     stops = get("/resting-stops")
+    census = get("/account-census")
     alpaca = get("/alpaca-overview")
     health = get(BASE + "/health")
 
@@ -396,6 +397,39 @@ def main():
         if unreadable:
             gaps.append(f"product rules unreadable for {', '.join(unreadable)} - "
                         f"a refusal there would be invisible")
+
+    # ---- 4d. Coin the fleet does not manage at all -------------------------
+    #
+    # Every other check here asks whether a branch is working. None of them
+    # asked how much of the wallet has no branch at all - so a quarter of the
+    # account sat outside the fleet, earning nothing and reported by nothing,
+    # for as long as this watchdog has been running.
+    #
+    # Measured when this was written: $2,417.62 of $10,094.55 untracked, and
+    # $1,497.18 of that was BITCOIN - 97% of the BTC holding, sitting beside
+    # a BTC branch that is "full" on its rungs with $35.49 of position. The
+    # branch cannot buy because it is full; full means full of thirty-five
+    # dollars.
+    if census is None or not census.get("available"):
+        gaps.append("account-census unavailable - cannot see coin outside the fleet")
+    else:
+        untr = census.get("untracked_usd")
+        tot = census.get("total_usd")
+        share = census.get("tracked_share_pct")
+        cur["untracked_usd"] = untr
+        prev_untr = prev.get("untracked_usd")
+        if untr is None or not tot:
+            gaps.append("census untracked figure unreadable")
+        elif untr > 0:
+            grew = ("" if prev_untr is None
+                    else f" (was {money(prev_untr)})")
+            # Reported by SHARE, not by dollars: the figure moves on price
+            # every pass, and escalating on that is the mistake NO_EXIT made.
+            level = WARN if (share is not None and share < 90) else INFO
+            flag(level, "UNTRACKED",
+                 f"{money(untr)} of {money(tot)}{grew} is held in the wallet but "
+                 f"managed by no grid branch - {100 - (share or 0):.1f}% of the "
+                 f"account. Nothing buys or sells it; it only moves on price.")
 
     # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
     #

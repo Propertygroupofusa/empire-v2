@@ -71,6 +71,10 @@ def healthy():
         "/api/trading-dashboard/alert-queue": {
             "channel_configured": True, "counts": {"pending": 0, "sent": 5, "failed": 0},
         },
+        "/api/trading-dashboard/account-census": {
+            "available": True, "total_usd": 1000.0, "untracked_usd": 0.0,
+            "tracked_usd": 1000.0, "tracked_share_pct": 100.0, "holdings": [],
+        },
         "/api/trading-dashboard/resting-stops": {
             "uncovered_usd": 0, "uncovered_count": 0, "uncovered": [],
         },
@@ -577,6 +581,33 @@ d3["/api/trading-dashboard/grid-status"]["branches"][0]["slices"] = [
      "unrealized_net_pct": -0.04}]
 ok("and not when the locked branch has no profit to reach",
    "LOCKED_PROFIT" not in run(d3, BASE_SNAP))
+
+# UNTRACKED: every other check asks whether a BRANCH is working. None asked
+# how much of the wallet has no branch at all - so $2,417.62 of $10,094.55
+# sat outside the fleet, $1,497.18 of it Bitcoin, reported by nothing.
+d = healthy()
+d["/api/trading-dashboard/account-census"] = {
+    "available": True, "total_usd": 10094.55, "untracked_usd": 2417.62,
+    "tracked_usd": 7676.93, "tracked_share_pct": 76.05, "holdings": []}
+out = run(d, BASE_SNAP)
+ok("UNTRACKED when a quarter of the wallet has no branch", "UNTRACKED" in out)
+ok("and it gives the share, not just the dollars", "24.0%" in out, out)
+
+# Reported by SHARE, not dollars - the figure moves on price every pass, and
+# escalating on that is exactly the mistake NO_EXIT made this afternoon.
+d2 = healthy()
+d2["/api/trading-dashboard/account-census"] = {
+    "available": True, "total_usd": 10000.0, "untracked_usd": 200.0,
+    "tracked_usd": 9800.0, "tracked_share_pct": 98.0, "holdings": []}
+out = run(d2, BASE_SNAP)
+noisy = [ln for ln in out.splitlines()
+         if "UNTRACKED" in ln and ln.strip().startswith(("WARN", "CRITICAL"))]
+ok("but a small remainder is INFO, not a WARN", not noisy, "; ".join(noisy))
+
+d3 = healthy()
+d3["/api/trading-dashboard/account-census"] = {"available": False}
+ok("an unavailable census is a gap, not a quiet pass",
+   "account-census unavailable" in run(d3, BASE_SNAP))
 
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]
