@@ -2511,12 +2511,22 @@ async def products_without_a_grid_stop() -> dict:
     A caller must therefore treat empty as UNKNOWN and never as "everything
     has a stop" - the same rule that makes an unreadable balance never $0.00.
 
-    Only the branch override is read. That is the one case that is certain:
+    Only the branch override is read, plus the two switches that can turn a
+    stop off wholesale. The override is the one case that is certain:
     _reported_stop short-circuits on `override is not None` before adaptive
-    or fixed is consulted, so an override of exactly 0 means no stop, full
-    stop. The global fixed stop being set to 0 is included as its own
-    condition because it disables the stop for every branch that has no
-    override - and that would be the whole fleet.
+    or fixed is consulted, so an override of exactly 0 means no stop from
+    that path. The global fixed stop being 0 is its own condition, because
+    that disables the stop for every branch with no override - the whole
+    fleet.
+
+    AN ARMED ADOPTED STOP IS NOT A GAP. When GRID_ADOPTED_STOP_MODE=arm, an
+    override of 0 no longer means no stop: adaptive_stop.adopted_stop gives
+    the branch a wide catastrophe trigger instead. Those branches are left
+    out of this dict rather than reported, because they have a stop POLICY.
+    Whether a given cycle can size it depends on a volatility read this
+    function does not do - and when that read fails, the cycle logs
+    "🚨 NO GRID STOP" and _reported_stop shows 0.0 with the reason, so the
+    per-branch figure still tells the truth even though this summary cannot.
     """
     try:
         async with get_session_factory()() as db:
@@ -2525,6 +2535,18 @@ async def products_without_a_grid_stop() -> dict:
         log.warning(f"[GRID] stop coverage unreadable ({exc}) - reporting UNKNOWN, "
                     f"not 'covered'")
         return {}
+
+    # Read once, not per branch. Fails toward REPORTING the gap: if the
+    # policy cannot be read we do not know it is armed, and a coverage report
+    # must not go quiet on a read error.
+    _adopted_armed = False
+    try:
+        import adaptive_stop
+        _adopted_armed = (adaptive_stop.adopted_mode()
+                          == adaptive_stop.ADOPTED_MODE_ARM)
+    except Exception as exc:
+        log.warning(f"[GRID] adopted-stop policy unreadable ({exc}) - treating those "
+                    f"branches as uncovered, which is the direction that reports")
 
     out = {}
     for b in branches:
@@ -2535,7 +2557,7 @@ async def products_without_a_grid_stop() -> dict:
         why = None
         if override is not None:
             try:
-                if float(override) == 0:
+                if float(override) == 0 and not _adopted_armed:
                     why = (f"{b.bot_name} names its own stop of 0, so no grid stop can "
                            f"fire on {b.product_id} at any price")
             except (TypeError, ValueError):
@@ -6548,15 +6570,47 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             _stop_pct = GRID_STOP_LOSS_PCT
             _override = None
     if _override is not None:
+        _resolved = None
+        if _stop_pct == 0:
+            # A STOP OF 0 IS "not an 8% trigger from the adoption date", NOT
+            # "no trigger at any price". It had become the second: fourteen
+            # branches, $4,573, and nothing able to sell any of it - the grid
+            # refuses a losing sale, the resting stops decline coin a branch
+            # holds slices on, and the trimmer declines it for the same
+            # reason. All three are right, and all three point at the same
+            # conclusion: the only seller that can safely exit grid-held coin
+            # is the grid, because its slice ledger is the book of record.
+            #
+            # So the catastrophe stop is resolved HERE and sells through the
+            # path below, which retires the slice row and records the trade.
+            # OFF unless GRID_ADOPTED_STOP_MODE=arm, so this is a no-op until
+            # the owner arms it - and when unarmed the log says exactly what
+            # it always said.
+            try:
+                import adaptive_stop
+                _adopted = adaptive_stop.adopted_stop(branch.product_id, _stop_vol)
+                _stop_pct = _adopted["stop_pct"]
+                _resolved = _adopted
+            except Exception as exc:
+                # Cannot be the thing that ADDS a stop. An error here leaves
+                # the branch exactly as it was - at 0 - which is the
+                # conservative direction for a trigger that sells coin the
+                # owner has held for a long time.
+                log.warning(f"[GRID] {branch.bot_name}: adopted stop unavailable ({exc}) "
+                            f"- this branch keeps no stop, unchanged")
+                _stop_pct = 0.0
         if _stop_pct == 0 and slices:
             log.warning(
-                f"[GRID] {branch.bot_name}: 🚨 NO GRID STOP - this branch names its own stop "
-                f"of 0. Adopted coin is covered at the portfolio level by the resting stops, "
-                f"not by an 8% trigger measured from the day it was adopted.")
+                f"[GRID] {branch.bot_name}: 🚨 NO GRID STOP - "
+                + ((_resolved or {}).get("reason")
+                   or (f"this branch names its own stop of 0. No portfolio cover is "
+                       f"claimed here - check /resting-stops, where an asset under "
+                       f"`uncovered` has a stop from neither layer.")))
+        elif _resolved is not None:
+            log.warning(f"[GRID] {branch.bot_name}: ADOPTED STOP ARMED - {_resolved['reason']}")
         else:
             log.info(f"[GRID] {branch.bot_name}: stop - branch override "
                      f"{_stop_pct * 100:.1f}%")
-        _resolved = None
     else:
         _stop_pct = GRID_STOP_LOSS_PCT
         try:
@@ -7530,6 +7584,23 @@ def _reported_stop(branch, resolved):
                            f"{GRID_STOP_LOSS_PCT * 100:.0f}% stop stands"),
                 "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
     if pct == 0:
+        # THE ADOPTED CATASTROPHE STOP, resolved the same way and from the
+        # same volatility the cycle uses - this function exists because a
+        # per-product read alone reported a stop the cycle was not applying,
+        # and reporting 0 while the cycle now applies 35% would be that bug
+        # with the sign flipped.
+        try:
+            import adaptive_stop
+            _ad = adaptive_stop.adopted_stop(branch.product_id,
+                                             (resolved or {}).get("daily_vol_pct"))
+            if _ad["stop_pct"]:
+                return {"stop_pct": _ad["stop_pct"], "source": _ad["source"],
+                        "reason": _ad["reason"],
+                        "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
+            _why = _ad["reason"]
+        except Exception as exc:
+            _why = (f"this branch names its own stop of 0, and the adopted-stop policy "
+                    f"could not be read ({type(exc).__name__})")
         # THE CLAIM THIS USED TO MAKE, AND WHY IT IS GONE.
         #
         # It read "Adopted coin is covered at the portfolio level by the
@@ -7547,10 +7618,10 @@ def _reported_stop(branch, resolved):
         # than no figure. So it states only what it knows, and points at where
         # coverage can be CHECKED instead of asserting that it exists.
         return {"stop_pct": 0.0, "source": "branch_override_none",
-                "reason": ("this branch names its own stop of 0 - there is NO grid stop, "
-                           "and no portfolio cover is claimed here because nothing in this "
-                           "function can verify one. Check /resting-stops: an asset listed "
-                           "under `uncovered` there has a stop from neither layer."),
+                "reason": (f"{_why}. No portfolio cover is claimed here either, because "
+                           f"nothing in this function can verify one - check "
+                           f"/resting-stops, where an asset listed under `uncovered` has "
+                           f"a stop from neither layer."),
                 "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
     return {"stop_pct": pct, "source": "branch_override",
             "reason": f"this branch names its own {pct * 100:.2f}% stop",
