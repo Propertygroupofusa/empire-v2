@@ -2488,6 +2488,68 @@ async def fleet_tracked_units_by_product():
     return units, prices
 
 
+async def products_without_a_grid_stop() -> dict:
+    """Tickers whose branch has NO grid stop at all. {TICKER: why}.
+
+    WHY THIS EXISTS. resting_stops declines every asset a grid branch holds
+    slices on, and said so with "The branch carries its own adaptive stop;
+    this would be a second one the first cannot see." True for most branches.
+    False for an adopted one, which names its own stop of 0 - see
+    _reported_stop, whose docstring is the rule: a safety figure that
+    disagrees with the code enforcing it is worse than no figure.
+
+    Measured on the live fleet 2026-09-29: eight branches holding $3,712 with
+    stop_pct 0.0, each cited as covered by a layer that was citing it back,
+    and /resting-stops reporting protects_usd 0.
+
+    So the other layer stops assuming and asks. This does not decide anything
+    and cannot cause an order - it only lets a refusal say which case it is,
+    and lets the gap be counted.
+
+    FAILS OPEN, in the direction that changes nothing: an unreadable answer
+    is an EMPTY dict, so a caller falls back to the wording it always used.
+    A caller must therefore treat empty as UNKNOWN and never as "everything
+    has a stop" - the same rule that makes an unreadable balance never $0.00.
+
+    Only the branch override is read. That is the one case that is certain:
+    _reported_stop short-circuits on `override is not None` before adaptive
+    or fixed is consulted, so an override of exactly 0 means no stop, full
+    stop. The global fixed stop being set to 0 is included as its own
+    condition because it disables the stop for every branch that has no
+    override - and that would be the whole fleet.
+    """
+    try:
+        async with get_session_factory()() as db:
+            branches = (await db.execute(select(CryptoGridBranch))).scalars().all()
+    except Exception as exc:
+        log.warning(f"[GRID] stop coverage unreadable ({exc}) - reporting UNKNOWN, "
+                    f"not 'covered'")
+        return {}
+
+    out = {}
+    for b in branches:
+        if not b.product_id:
+            continue
+        ticker = b.product_id.split("-")[0].upper()
+        override = getattr(b, "stop_loss_pct_override", None)
+        why = None
+        if override is not None:
+            try:
+                if float(override) == 0:
+                    why = (f"{b.bot_name} names its own stop of 0, so no grid stop can "
+                           f"fire on {b.product_id} at any price")
+            except (TypeError, ValueError):
+                # Unreadable override -> the branch falls back to the fixed
+                # stop, which is a stop. Not a gap; _reported_stop agrees.
+                why = None
+        elif GRID_STOP_LOSS_PCT == 0:
+            why = (f"{b.bot_name} has no override and GRID_STOP_LOSS_PCT is 0, so the "
+                   f"fleet-wide grid stop is switched off")
+        if why:
+            out[ticker] = why
+    return out
+
+
 async def get_grid_undeployed_reserve_total() -> float:
     """Real USD a grid branch still needs held in RESERVE for the levels
     it hasn't bought yet - its allocation MINUS the real cost basis it
@@ -7468,10 +7530,27 @@ def _reported_stop(branch, resolved):
                            f"{GRID_STOP_LOSS_PCT * 100:.0f}% stop stands"),
                 "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
     if pct == 0:
+        # THE CLAIM THIS USED TO MAKE, AND WHY IT IS GONE.
+        #
+        # It read "Adopted coin is covered at the portfolio level by the
+        # resting stops". Nothing here checked that, and on 2026-09-29 it was
+        # false for every adopted branch. resting_stops refuses any asset a
+        # grid branch holds slices on (ACTIVELY_TRADED), for good reasons of
+        # its own - and its refusal said "the branch carries its own adaptive
+        # stop", which is exactly what THIS branch has just declared it does
+        # not. ZEC went one further: deferred to the concentration trimmer,
+        # which declined it as WITHIN_LIMIT. Three layers each naming the
+        # next, and /resting-stops reporting protects_usd 0.
+        #
+        # This function's own docstring is the rule being applied to it - a
+        # safety figure that disagrees with the code enforcing it is worse
+        # than no figure. So it states only what it knows, and points at where
+        # coverage can be CHECKED instead of asserting that it exists.
         return {"stop_pct": 0.0, "source": "branch_override_none",
-                "reason": ("this branch names its own stop of 0 - there is NO grid stop. "
-                           "Adopted coin is covered at the portfolio level by the resting "
-                           "stops, not by a trigger measured from the day it was adopted."),
+                "reason": ("this branch names its own stop of 0 - there is NO grid stop, "
+                           "and no portfolio cover is claimed here because nothing in this "
+                           "function can verify one. Check /resting-stops: an asset listed "
+                           "under `uncovered` there has a stop from neither layer."),
                 "daily_vol_pct": (resolved or {}).get("daily_vol_pct")}
     return {"stop_pct": pct, "source": "branch_override",
             "reason": f"this branch names its own {pct * 100:.2f}% stop",

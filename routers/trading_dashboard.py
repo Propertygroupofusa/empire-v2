@@ -11575,6 +11575,17 @@ async def resting_stops_preview():
     except Exception:
         pass
 
+    # Which of those branches has no stop of its own, so a refusal here does
+    # not claim cover the branch has declared it does not provide. None, not
+    # {}, when unreadable: UNKNOWN is not "every branch has a stop". Read the
+    # same way the worker reads it, for the same reason the line above is -
+    # a preview that runs a different rule than the loop is worse than none.
+    _unstopped = None
+    try:
+        _unstopped = await crypto_grid_bot_module.products_without_a_grid_stop()
+    except Exception:
+        pass
+
     plans = []
     for row in (watch.get("rows") or []):
         asset = row.get("asset")

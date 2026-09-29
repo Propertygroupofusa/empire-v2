@@ -170,7 +170,7 @@ def plan_stop(asset, *, units_available, price, stop_price,
               base_min_size=None, coverage_pct=COVERAGE_PCT,
               limit_band_pct=LIMIT_BAND_PCT, min_distance_pct=MIN_DISTANCE_PCT,
               min_stop_usd=MIN_STOP_USD, share_pct=None, limit_pct=None,
-              excluded=None, actively_traded=()):
+              excluded=None, actively_traded=(), unstopped=None):
     """One resting stop, or why there will not be one.
 
     `stop_price` is the level holdings_watch already computed. Nothing is
@@ -180,9 +180,54 @@ def plan_stop(asset, *, units_available, price, stop_price,
 
     `actively_traded` is the set of tickers a grid branch currently holds
     open slices on. Nothing rests on those - see the block below.
+
+    `unstopped` is {TICKER: why} for branches with NO grid stop, from
+    crypto_grid_bot.products_without_a_grid_stop(). It changes NO decision
+    here: every refusal below refuses exactly the assets it always did, and
+    this cannot cause a placement. What it changes is whether a refusal may
+    claim the grid is covering the position, and whether the gap is counted.
+
+    THE ASYMMETRY THAT MADE IT NECESSARY. The ACTIVELY_TRADED refusal said
+    "The branch carries its own adaptive stop; this would be a second one the
+    first cannot see." Right for most branches. For an adopted one - which
+    names its own stop of 0 - it was the reassurance that hid the gap, while
+    the branch pointed back here claiming its coin was "covered at the
+    portfolio level by the resting stops". Live on 2026-09-29: eight
+    branches, $3,712, and protects_usd 0.
+
+    None (the default) means UNKNOWN, not "everything has a stop". The
+    wording then falls back to what it always said and nothing is marked
+    either way. An empty dict means the read succeeded and found no gaps.
     """
+    _stops_unknown = unstopped is None
+    _gap_why = (None if _stops_unknown
+                else {str(k).upper(): v for k, v in unstopped.items()}.get(
+                    str(asset).upper()))
+    _no_grid_stop = _gap_why is not None
+
     def no(reason, detail):
-        return {"asset": asset, "ok": False, "reason": reason, "detail": detail}
+        out = {"asset": asset, "ok": False, "reason": reason, "detail": detail}
+        # ANY refusal on a branch with no grid stop is a coverage gap, not
+        # only the ACTIVELY_TRADED one. That generality is load-bearing: ZEC,
+        # the largest of them, is refused as TRIMMERS_COIN and never reaches
+        # that block at all. The reason differs; the position is equally
+        # naked, and a gap that only one refusal path can report is a gap
+        # that hides behind the others.
+        if _no_grid_stop:
+            out["uncovered"] = True
+            out["uncovered_detail"] = (
+                f"NO STOP FROM EITHER LAYER: {_gap_why}, and this layer is not placing "
+                f"one ({reason}). Nothing sells this position automatically at any "
+                f"price.")
+            u, p = _num(units_available), _num(price)
+            out["position_usd"] = (round(u * p, 2)
+                                   if u is not None and p is not None else None)
+        elif _stops_unknown:
+            # Said out loud rather than left absent. A caller that could not
+            # read the grid's stops must not have this read as "the grid has
+            # it" - the same rule that makes an unreadable balance never 0.
+            out["uncovered"] = None
+        return out
 
     mine, why = is_trimmers(asset, share_pct, limit_pct, excluded=excluded)
     if mine:
@@ -213,11 +258,26 @@ def plan_stop(asset, *, units_available, price, stop_price,
     # because a protection that disappears on a read error is worse than
     # one that was never there.
     if str(asset).upper() in {str(a).upper() for a in (actively_traded or ())}:
+        # The three reasons above stand whatever the branch's stop is - they
+        # are about held inventory, phantom units and not realising red, none
+        # of which a stop elsewhere changes. So the REFUSAL is unconditional
+        # and only its last sentence varies: the branch's own stop may be
+        # cited as cover only when the branch actually has one.
+        if _no_grid_stop:
+            _second_stop = (f"AND THE BRANCH HAS NO STOP OF ITS OWN: {_gap_why}. So this "
+                            f"position has no automatic exit from either layer - that is "
+                            f"a gap to decide about, not a reason to rest an order here, "
+                            f"because the three objections above are unchanged.")
+        elif _stops_unknown:
+            _second_stop = ("The branch normally carries its own adaptive stop; whether "
+                            "THIS one does could not be read, so it is not being claimed.")
+        else:
+            _second_stop = ("The branch carries its own adaptive stop; this would be a "
+                            "second one the first cannot see.")
         return no("ACTIVELY_TRADED",
                   f"{asset} has open grid slices on it. A resting sell would hold 75% "
                   f"of the units the grid trades with, and if it fired it would sell "
-                  f"coin the branch still has on its books. The branch carries its own "
-                  f"adaptive stop; this would be a second one the first cannot see.")
+                  f"coin the branch still has on its books. {_second_stop}")
 
     u = _num(units_available)
     p = _num(price)
@@ -322,6 +382,19 @@ def needs_replacement(existing_stop_price, new_stop_price, move_pct=REPLACE_MOVE
 def summarise(plans, mode):
     ok = [p for p in plans if p.get("ok")]
     m = normalise_mode(mode)
+
+    # THE GAP AS A NUMBER, not as a reason buried in a refusal.
+    #
+    # protects_usd was the only coverage figure here, and it answers "how
+    # much is this layer holding a stop under". It read 0 for a week while
+    # every position it declined was being described as covered by a grid
+    # stop that did not exist. A panel that reports what IS protected and
+    # not what is protected by NOTHING lets the second number stay at zero
+    # unnoticed, because zero is also what a healthy fleet reports.
+    uncovered = [p for p in plans if p.get("uncovered") is True]
+    unknown = [p for p in plans if p.get("uncovered") is None
+               and "uncovered" in p]
+    _sized = [p["position_usd"] for p in uncovered if p.get("position_usd") is not None]
     return {
         "mode": m,
         "armed": m == MODE_ARM,
@@ -331,6 +404,27 @@ def summarise(plans, mode):
         "coverage_pct": COVERAGE_PCT,
         "limit_band_pct": LIMIT_BAND_PCT,
         "excluded": sorted(excluded_assets()),
+        # Assets with no stop from this layer AND none from the grid.
+        "uncovered": sorted(p["asset"] for p in uncovered),
+        "uncovered_count": len(uncovered),
+        # None, never 0.0, when no uncovered position could be priced - a
+        # $0.00 gap and an unpriced one are not the same claim.
+        "uncovered_usd": round(sum(_sized), 2) if _sized else None,
+        "uncovered_unpriced": sorted(p["asset"] for p in uncovered
+                                     if p.get("position_usd") is None),
+        # Assets whose grid stop could not be read at all. Not counted as
+        # covered and not counted as a gap - reported as neither.
+        "stop_coverage_unknown": sorted(p["asset"] for p in unknown),
+        "uncovered_note": (
+            "uncovered means NO automatic exit from either layer: the grid branch "
+            "names a stop of 0 and this layer is not resting one either. It is a "
+            "statement about coverage, not a recommendation - the reasons this layer "
+            "declines (it would hold the grid's inventory, it could leave the branch "
+            "tracking units the wallet no longer has, and it would schedule a loss on "
+            "a position the fleet does not sell at a loss) all still apply."
+            if uncovered else
+            "Every position this layer declined has a grid stop of its own, or its "
+            "stop could not be read - see stop_coverage_unknown."),
         "plans": plans,
         "what_it_does_not_do": (
             "A stop-limit is not a guarantee. If price gaps through the limit the "
