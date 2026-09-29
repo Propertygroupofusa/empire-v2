@@ -479,6 +479,73 @@ out = run(d4, BASE_SNAP)
 ok("an unavailable refusal feed is a gap, not a quiet pass",
    "order_refusals unavailable" in out, out)
 
+# The invariant headline is a list of NAMES; the money sits in fields under
+# it. Printing only the names hid $898 of coin claimed but not held and $892
+# reserved by resting orders for a whole afternoon.
+d = healthy()
+d["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 2, "headline": "coin_tracked_is_held; grid_inventory_is_free",
+    "checks": [
+        {"name": "coin_tracked_is_held", "status": "FAIL", "short_usd": 898.96,
+         "short_positions": [{"product_id": "QNT-USD", "short_usd": 178.68},
+                             {"product_id": "PEPE-USD", "short_usd": 137.46}]},
+        {"name": "grid_inventory_is_free", "status": "FAIL", "locked_usd": 892.22,
+         "locked_positions": [{"product_id": "AAA-USD", "locked_pct": 100.0,
+                               "locked_usd": 441.96}],
+         "unreadable": ["ZZZ-USD"]},
+    ]}
+out = run(d, BASE_SNAP)
+ok("INVENTORY_SHORT carries the dollar figure, not just the name",
+   "INVENTORY_SHORT" in out and "898.96" in out, out)
+ok("and names the worst positions", "QNT-USD" in out, out)
+ok("INVENTORY_LOCKED carries its figure too",
+   "INVENTORY_LOCKED" in out and "892.22" in out, out)
+ok("an unreadable lock state is a gap, not silence",
+   "would be invisible" in out, out)
+
+# Profit that is BOTH reachable and locked is the one worth naming alone.
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["slices"] = [{"opened_at": "2026-09-29T10:00:00Z", "qty": 100.0,
+                "entry_price": 1.0, "entry_fee_rate": 0.0035, "adopted": False,
+                "slice_state": "ACCOUNTED", "unrealized_net_pct": 0.0221}]
+out = run(d, BASE_SNAP)
+ok("LOCKED_PROFIT when a slice past the floor sits on reserved coin",
+   "LOCKED_PROFIT" in out, out)
+ok("and it says whose decision freeing it is", "the owner's call" in out, out)
+
+# Not a finding when the coin is free, however profitable the slice is.
+d2 = healthy()
+d2["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "grid_inventory_is_free",
+    "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
+                "locked_usd": 10.0,
+                "locked_positions": [{"product_id": "AAA-USD", "locked_pct": 3.0,
+                                      "locked_usd": 10.0}],
+                "unreadable": []}]}
+d2["/api/trading-dashboard/grid-status"]["branches"][0]["slices"] = [
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 100.0, "entry_price": 1.0,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": 0.0221}]
+ok("but NOT when only a sliver of the coin is reserved",
+   "LOCKED_PROFIT" not in run(d2, BASE_SNAP))
+
+# And not when the locked branch has nothing past the floor - that branch is
+# waiting on price, which is a different problem with a different answer.
+d3 = healthy()
+d3["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "grid_inventory_is_free",
+    "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
+                "locked_usd": 441.96,
+                "locked_positions": [{"product_id": "AAA-USD", "locked_pct": 100.0,
+                                      "locked_usd": 441.96}],
+                "unreadable": []}]}
+d3["/api/trading-dashboard/grid-status"]["branches"][0]["slices"] = [
+    {"opened_at": "2026-09-29T10:00:00Z", "qty": 100.0, "entry_price": 1.0,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": "ACCOUNTED",
+     "unrealized_net_pct": -0.04}]
+ok("and not when the locked branch has no profit to reach",
+   "LOCKED_PROFIT" not in run(d3, BASE_SNAP))
+
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]
 out = run(d, BASE_SNAP)

@@ -382,6 +382,61 @@ def main():
                  + ("" if prev_failed is None else f" (was {prev_failed})")
                  + f": {inv.get('headline')}")
 
+            # The headline is a list of NAMES. The money is in the fields
+            # underneath it, and printing only the names summarised a
+            # first-class diagnostic into uselessness - the same mistake as
+            # not reading order_refusals at all. These two carry dollar
+            # figures that say why sells fail, so they are surfaced with
+            # their numbers rather than left behind a name.
+            for chk in (inv.get("checks") or []):
+                if chk.get("status") != "FAIL":
+                    continue
+                nm = chk.get("name")
+                if nm == "coin_tracked_is_held":
+                    pos = chk.get("short_positions") or []
+                    worst = sorted(pos, key=lambda c: -(c.get("short_usd") or 0))[:4]
+                    flag(level, "INVENTORY_SHORT",
+                         f"{money(chk.get('short_usd'))} of coin is claimed by "
+                         f"{len(pos)} position(s) but not held. A sale of those "
+                         f"slices orders units that do not exist. Worst: "
+                         + ", ".join(f"{c['product_id']} {money(c.get('short_usd'))}"
+                                     for c in worst))
+                elif nm == "grid_inventory_is_free":
+                    pos = chk.get("locked_positions") or []
+                    worst = sorted(pos, key=lambda c: -(c.get("locked_usd") or 0))[:4]
+                    flag(level, "INVENTORY_LOCKED",
+                         f"{money(chk.get('locked_usd'))} of coin is reserved by "
+                         f"resting orders and cannot be sold by the grid. Worst: "
+                         + ", ".join(f"{c['product_id']} {c.get('locked_pct')}% "
+                                     f"({money(c.get('locked_usd'))})" for c in worst))
+                    unread = chk.get("unreadable") or []
+                    if unread:
+                        gaps.append(f"lock state unreadable for {', '.join(unread)} "
+                                    f"- reserved coin there would be invisible")
+
+                    # Money that is BOTH in profit and locked is the one worth
+                    # naming on its own: it is reachable, unlike an underwater
+                    # branch, and the only thing between it and a sale is a
+                    # resting order the owner armed on purpose.
+                    lk = {c.get("product_id"): c for c in pos}
+                    for b2 in branches:
+                        c = lk.get(b2.get("product_id"))
+                        if not c or (c.get("locked_pct") or 0) < 50:
+                            continue
+                        sl2 = b2.get("slices") or []
+                        good = [x for x in sl2
+                                if (x.get("unrealized_net_pct") or 0) >= 0.010]
+                        if not good:
+                            continue
+                        best = max((x.get("unrealized_net_pct") or 0) for x in good)
+                        flag(WARN, "LOCKED_PROFIT",
+                             f"{b2['product_id']} has a slice at +{best * 100:.2f}% "
+                             f"- past the exit floor - but {c.get('locked_pct')}% of "
+                             f"its coin ({money(c.get('locked_usd'))}) is reserved by "
+                             f"a resting order. The profit is reachable; the coin is "
+                             f"not. Cancelling that order frees it and gives up the "
+                             f"protection it was armed for - the owner's call.")
+
     # ---- 7. Is the loop actually running -----------------------------------
     hb = grid.get("heartbeat") or {}
     age = hb.get("age_seconds")
