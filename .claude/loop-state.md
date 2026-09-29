@@ -820,6 +820,25 @@ balance would refuse to sell coin that exists. **Not confirmed as the cause of
 the TIA reading**, and not confirmed to occur at all on this account; worth a
 pass that enumerates the raw account list.
 
+**LEAD CLOSED (measured 01:58Z, three independent reads): no currency is
+duplicated.** `accounts_seen=114`, `currencies_seen=114`,
+`accounts_exceed_currencies=0`, one page. One account per currency, so
+`get_asset_balance`'s first-match and `fetch_balances`'s summing return the
+SAME value — the direct read cannot under-report on this account and the sell
+path is not affected. **`get_asset_balance` was deliberately NOT changed**: the
+two behaviours are identical today, so a change would be churn on a live sell
+path for zero present benefit, and summing could be the WRONG fix later if the
+extra rows ever turn out to be separate portfolios (that would overstate what
+is sellable).
+
+**Latent, not active:** the divergence still exists in the code. It activates
+only if a currency ever gains a second account row —
+`accounts_exceed_currencies` going non-zero is the trigger to revisit, and it
+is now on `/grid-status/asset-balance` where any pass can see it.
+
+**This also rules the multi-account theory OUT as the explanation for TIA
+going 0.0 → 44.57.** That change remains UNEXPLAINED. Do not attach it to this.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those
