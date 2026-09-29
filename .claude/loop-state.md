@@ -640,6 +640,39 @@ of that table labelled QNT "LOCKED" from an inline heuristic
 measured. A convenience rule beat the data that was already in hand. Use the
 direct balance read's `locked_units`, never a guess from ratios.
 
+**RESOLVED: no double-write.** 00:21Z — 28 not-placed rows after the cutover,
+zero expiry `False` rows after it, zero product+second overlaps. The 114ms
+ALGO pair was the deploy straddle. Thread closed.
+
+**The six META orders: the guard existed and was never reached.** 5fb6e6a
+wired it. `can_open_position` has taken `account_positions` and `equity` since
+that incident, both default `None`, and the ONE live call site passed neither —
+so every cycle took the self-only fallback its own docstring calls "the wrong
+denominator… and always was". Now passed, read once per cycle, and **fails
+closed**: `api_call` returns None on failure, `get_account_positions` passes
+that through instead of flattening to `[]`, and an unreadable account refuses
+every entry for the cycle at ERROR. Exits untouched. **No flag changed** — the
+runner stays gated and idle; what changed is that when it runs, its
+concentration limit measures the account, not its own empty book.
+
+**STILL OPEN, worth its own change: `alpaca_swing_bot.get_open_positions`
+fails OPEN.** It returns `{}` on both a non-200 and any exception, and the
+entry guard is `if proxy in open_positions`. An unreadable positions list
+therefore reads as "nothing held" and permits a duplicate buy into a position
+already open. Same fail-open shape as `0af01f1` on the crypto side, against
+this codebase's own rule that anything moving live orders fails closed. Not
+fixed in 5fb6e6a on purpose — different file, different bot, wants its own
+tests.
+
+**A wrong hypothesis, recorded so it is not re-run:** six orders in one second
+was NOT the swing bot's entry loop ordering one proxy repeatedly. META is not
+among its proxies and no proxy is shared between two keys.
+
+**A substring check on a long function proves almost nothing.**
+`"log.error" in seg` passed a mutant that downgraded the exact refusal line to
+`log.debug`, because the cycle contains other `log.error` calls. Find the call
+carrying the message and assert its level.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those
