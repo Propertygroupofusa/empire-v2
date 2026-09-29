@@ -320,6 +320,73 @@ def _callers_pass_none_on_failure():
     return good >= 2
 
 
+def test_every_plan_stop_call_site_passes_the_coverage_map():
+    """THE GUARD THAT WAS MISSING, and it cost a live wrong answer.
+
+    `unstopped` defaults to None, which means UNKNOWN. A call site that forgets
+    it therefore reports every asset as unknown - and that is indistinguishable
+    from a genuine read failure, so nothing looked broken. Live 2026-09-29 the
+    dashboard's call was missing the argument (a read-modify-write clobber in
+    the edit that added it) and `/resting-stops` reported all 49 assets
+    unknown and an empty `uncovered` list, on a fleet where fourteen branches
+    had no stop.
+
+    Every test above this one exercises plan_stop directly and so passed with
+    the wiring broken. Checked on the parsed tree because the property is
+    about the CALL, which no unit test of the function itself can see.
+    """
+    import ast
+    import pathlib
+    found = 0
+    for name in ("routers/trading_dashboard.py", "resting_stops_worker.py"):
+        # .parent / name, not .with_name — with_name rejects a separator, and
+        # one of these two lives in a subdirectory.
+        path = pathlib.Path(__file__).parent / name
+        if not path.exists():
+            ok(f"{name} exists to be checked", False)
+            continue
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "plan_stop"):
+                found += 1
+                kw = {k.arg for k in node.keywords}
+                ok(f"{name}:{node.lineno} passes unstopped", "unstopped" in kw,
+                   "without it plan_stop defaults to None = UNKNOWN, and the "
+                   "coverage gap silently reports as unreadable instead")
+                ok(f"{name}:{node.lineno} passes actively_traded too",
+                   "actively_traded" in kw,
+                   "without it the grid-held guard does not fire at all")
+    ok("both known call sites were found", found >= 2, f"found {found}")
+
+
+def test_every_asset_unknown_does_not_read_like_one_asset_unknown():
+    """The same rule this whole file is about, turned on the field it added.
+    All-unknown is the coverage map not arriving; one-unknown is a gap in the
+    data. If they render the same, the first hides as the second - which is
+    exactly what happened."""
+    all_unknown = rs.summarise(
+        [plan(asset=a, traded=(a,), unstopped=None) for a in ("ETH", "ZEC", "SOL")],
+        "arm")
+    ok("all-unknown is flagged", all_unknown.get("stop_coverage_unreadable") is True,
+       repr(all_unknown.get("stop_coverage_unreadable")))
+    ok("and says what to check",
+       "passes `unstopped`" in (all_unknown.get("stop_coverage_unreadable_note") or ""))
+    some = rs.summarise(
+        [plan(asset="ETH", traded=("ETH",), unstopped=None),
+         plan(asset="SOL", unstopped={})], "arm")
+    ok("a partial unknown is NOT flagged",
+       some.get("stop_coverage_unreadable") is False,
+       repr(some.get("stop_coverage_unreadable")))
+    ok("and carries no alarm note",
+       some.get("stop_coverage_unreadable_note") is None)
+    clean = rs.summarise([plan(asset="SOL", unstopped={})], "arm")
+    ok("a healthy read is not flagged either",
+       clean.get("stop_coverage_unreadable") is False)
+    ok("an empty plan list is not flagged",
+       rs.summarise([], "arm").get("stop_coverage_unreadable") is False)
+
+
 def test_zz_nothing_above_failed():
     assert not _failures, f"{len(_failures)} checks failed: {_failures}"
 
