@@ -41,7 +41,15 @@ import logging
 import os
 import zlib
 from decimal import Decimal as _Decimal, InvalidOperation
-import slice_lifecycle as _sl
+import slice_lifecycle as _sl  # NEVER rebind this name in a function.
+# A `for _sl in slices:` anywhere inside run_grid_branch_cycle makes _sl a
+# LOCAL for that whole function, shadowing this module for every line in it -
+# including the ones ABOVE the loop. That is not a lint nit: on 2026-09-29 at
+# 15:31:03Z a real BTC-USD buy filled, the slice insert raised
+# "UnboundLocalError: cannot access local variable '_sl'", the outer handler
+# swallowed it, and the coin was bought with no slice row written. Two loops
+# did it, and the damage ran in both directions - the insert above them raised,
+# and the PARTIAL write below them would have read a slice object as a module.
 import slice_target
 import random
 import sys
@@ -6748,13 +6756,13 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     if slices and price:
         try:
             async with get_session_factory()() as db:
-                for _sl in slices:
-                    _entry = getattr(_sl, "entry_price", None)
+                for _exc_slice in slices:
+                    _entry = getattr(_exc_slice, "entry_price", None)
                     if not _entry:
                         continue
                     _exc = (price / _entry) - 1.0
                     _row = (await db.execute(select(CryptoGridSlice).where(
-                        CryptoGridSlice.id == _sl.id))).scalar_one_or_none()
+                        CryptoGridSlice.id == _exc_slice.id))).scalar_one_or_none()
                     if _row is None:
                         continue
                     _dirty = False
@@ -6763,8 +6771,8 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                     if _row.mfe_pct is None or _exc > _row.mfe_pct:
                         _row.mfe_pct = _exc; _dirty = True
                     if _dirty:
-                        _sl.mae_pct = _row.mae_pct
-                        _sl.mfe_pct = _row.mfe_pct
+                        _exc_slice.mae_pct = _row.mae_pct
+                        _exc_slice.mfe_pct = _row.mfe_pct
                 await db.commit()
         except Exception as e:
             # Pure instrumentation. It must never be able to stop the thing
@@ -6899,10 +6907,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
 
     _stop_slice = None
     if _stop_pct > 0 and slices:
-        for _sl in slices:
-            _entry = getattr(_sl, "entry_price", None)
+        for _stop_candidate in slices:
+            _entry = getattr(_stop_candidate, "entry_price", None)
             if _entry and price <= _entry * (1 - _stop_pct):
-                _stop_slice = _sl
+                _stop_slice = _stop_candidate
                 break
 
     # A branch as full as its levels cannot buy, so the spacing gate is

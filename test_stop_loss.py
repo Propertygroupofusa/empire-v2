@@ -25,6 +25,10 @@ def ok(label, cond, detail=""):
 
 
 SRC = open("crypto_grid_bot.py").read()
+_TREE = ast.parse(SRC)
+CYCLE_FN = next(n for n in ast.walk(_TREE)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == "run_grid_branch_cycle")
 TREE = ast.parse(SRC)
 
 
@@ -56,9 +60,42 @@ ok("trigger is price <= entry * (1 - stop)",
    "price <= _entry * (1 - _stop_pct)" in CYCLE,
    "a stop that could fire on a rise would dump winners")
 ok("no comparison that would let it fire above entry", "price >= _entry" not in CYCLE)
+# Asserted on the TREE, not on the source text. The previous version matched
+# the literal `_entry = getattr(_sl, "entry_price", None)`, so it broke the
+# moment that loop variable was renamed - and it broke for a rename that FIXED
+# a live bug (the name `_sl` was shadowing the slice_lifecycle module and
+# losing a real BTC-USD buy). A test that fails on a correct rename trains
+# people to weaken it. This asserts the RULE instead: whatever the loop
+# variable is called, the entry used by the stop comes from that slice's own
+# entry_price, and never from the branch's reference_price.
+def _stop_loop_entry_source():
+    """(attribute read, loop variable name) the stop comparison's entry uses."""
+    for loop in [n for n in ast.walk(CYCLE_FN) if isinstance(n, ast.For)]:
+        fires_here = any(
+            isinstance(c, ast.Compare)
+            and ast.unparse(c).replace(" ", "").startswith("price<=_entry*(1-_stop_pct)")
+            for c in ast.walk(loop))
+        if not fires_here:
+            continue
+        target = loop.target.id if isinstance(loop.target, ast.Name) else None
+        for node in ast.walk(loop):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and getattr(node.targets[0], "id", None) == "_entry"
+                    and isinstance(node.value, ast.Call)
+                    and getattr(node.value.func, "id", None) == "getattr"
+                    and len(node.value.args) >= 2
+                    and isinstance(node.value.args[1], ast.Constant)):
+                src = node.value.args[0]
+                return node.value.args[1].value, (src.id if isinstance(src, ast.Name) else None), target
+    return None, None, None
+
+
+_attr, _src_name, _loop_var = _stop_loop_entry_source()
 ok("it reads each slice's OWN entry price, not the branch reference",
-   '_entry = getattr(_sl, "entry_price", None)' in CYCLE,
-   "reference_price moves on every fill; entry is what the slice actually paid")
+   _attr == "entry_price" and _src_name is not None and _src_name == _loop_var,
+   f"the stop's entry came from {_src_name!r}.{_attr!r} while the loop walks "
+   f"{_loop_var!r} - reference_price moves on every fill; entry is what the "
+   f"slice actually paid")
 ok("a slice with no recorded entry is skipped, never sold",
    "if _entry and price <=" in CYCLE)
 
