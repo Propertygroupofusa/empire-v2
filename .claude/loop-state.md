@@ -289,6 +289,33 @@ Also each pass: for every branch compute
 
 ## Reference figures — update in place
 
+**WHY TURNOVER STALLED, measured 02:05Z (book stuck at 132 closes since
+00:40Z).** Distance from each branch's own reference price:
+
+**Only 5 of 23 branches are ABOVE their reference.** And three of those five
+are exactly the ones that cannot reach their coin:
+
+| branch | vs reference | why it cannot sell |
+|---|---:|---|
+| QNT | **+24.03%** | holds dust (0.00097323, floors to 0 at 3 dp) |
+| ALGO | **+7.38%** | 1134.3 of 1134.35 LOCKED |
+| XLM | **+1.70%** | 1980.77 of 1980.77 LOCKED, 0.0 available |
+| TON | +1.37% | parked (3/3); best slice +1.37% gross vs a 1.0% NET floor |
+| BTC | +0.16% | parked (3/3); best slice +0.16% gross — correctly held |
+
+The other 18 are below reference, ZEC worst at −11.94% (−$367.17 unrealised).
+
+**So the stall is not a sell-path fault.** Almost nothing is above water, and
+the branches that ARE are inventory-blocked. This sharpens the
+free-locked-inventory case: not "there is $977 locked somewhere" but **"two of
+the three branches currently positioned to sell cannot reach their coin."**
+QNT is the third and freeing inventory will NOT help it — it is dust.
+
+`GRID_PARKED_MIN_NET_PCT = 0.010` (1.0% net). TON/BTC held correctly; no
+missed sale found. Exact net not computed — the fee rate resolves per slice,
+so only gross percentages are stated above.
+
+
 **PHANTOM INVENTORY, measured 01:10Z — report to the owner, do NOT act.**
 `coin_tracked_is_held` FAILs with 6 positions and $471.01 short, but three
 MORE sat in its `unreadable` footnote because the wallet map could not
