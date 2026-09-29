@@ -1136,6 +1136,7 @@
          endpoints that explain WHY a branch cannot sell were reachable only
          by curl. A check nobody can see protects nothing. -->
     <div id="execution-inventory-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
+    <div id="maker-expiry-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-opportunity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-maker-only-toggle" class="maker-only-card"></div>
     <div class="panel" id="grid-panel">
@@ -2926,6 +2927,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridOpportunityPanel(data);
     renderAccountCensus();
     renderExecutionInventory();
+    renderMakerExpiries();
     renderGridMakerOnlyToggle(data);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -4147,6 +4149,216 @@ async function renderExecutionInventory() {
     el.innerHTML = h;
 }
 
+
+async function renderMakerExpiries() {
+    // THE OTHER HALF OF THE EXECUTION STORY.
+    //
+    // /grid-status/orders-not-placed (the panel above) answers "the order
+    // never reached the venue". THIS one answers the opposite case: an
+    // order DID rest on the book and nobody crossed it. Conflating those
+    // two is the bug that cost four hours - 441 QNT and 429 ALGO rows read
+    // as liquidity failures when no order had ever been sent - so the two
+    // questions get two panels and the buckets are never summed.
+    //
+    // order_rested has THREE states and this panel keeps all three:
+    //   true  -> an order really sat there and went untaken
+    //   false -> legacy rows only; confirmed non-orders are refused at the
+    //            write site now and land in the other table
+    //   null  -> UNKNOWN. Rows written before the column existed, plus the
+    //            one live path that genuinely cannot tell (a POST that
+    //            raised after it may already have reached Coinbase).
+    // UNKNOWN is never folded into either of the other two.
+    const el = document.getElementById('maker-expiry-panel');
+    if (!el) return;
+    const num = (v, d) => (v === null || v === undefined) ? '&mdash;'
+        : Number(v).toLocaleString(undefined, {maximumFractionDigits: d === undefined ? 8 : d});
+
+    let exp = null, expErr = null;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/maker-expiries?hours=24&limit=1000');
+        exp = await r.json();
+        if (!r.ok) { expErr = 'HTTP ' + r.status; exp = null; }
+    } catch (e) { expErr = String(e); }
+
+    let h = '<div class="panel" style="padding:10px 12px;">';
+    h += '<div style="font-weight:600; margin-bottom:6px;">Maker orders the fleet gave up on (24h)</div>';
+
+    if (expErr || !exp || !exp.readable) {
+        // A GAP. Never an empty table, never a green tick.
+        h += '<div style="padding:6px 8px; border-left:3px solid #f59e0b;'
+           + ' background:rgba(245,158,11,.10); color:var(--text-dim);">'
+           + 'The maker-expiry ledger could not be read'
+           + (expErr ? ' (' + expErr + ')' : '') + '. UNKNOWN &mdash; this is a GAP, '
+           + 'not "no orders expired".</div>';
+    } else {
+        const rows = exp.by_product_and_side || [];
+        if (!rows.length) {
+            // Spelled out because an empty table here looks like good news
+            // and is not: a branch below its own sell trigger never places
+            // an order, so it never expires one either.
+            h += '<div style="color:var(--text-dim);">No maker order expired in the last 24h. '
+               + '<span style="font-size:.92em;">That is UNKNOWN, not a pass &mdash; it is equally '
+               + 'consistent with no sell having been attempted at all. Read it beside each '
+               + 'branch\'s distance past its own sell trigger.</span></div>';
+        } else {
+            // Truncation changes what the numbers MEAN, not just how many
+            // rows are drawn: the summary is aggregated over the returned
+            // rows only, so every count below becomes a floor.
+            if (exp.truncated) {
+                h += '<div style="margin-bottom:5px; padding:5px 8px; border-left:3px solid #f59e0b;'
+                   + ' background:rgba(245,158,11,.10); font-size:.92em;">'
+                   + 'Capped at ' + exp.limit + ' rows, so every count below is a FLOOR, not a total.</div>';
+            }
+            h += '<div style="color:var(--text-dim); font-size:.92em; margin-bottom:4px;">'
+               + 'A row is one maker-only cycle the fleet gave up on rather than pay the taker leg. '
+               + 'Rested = an order really sat on the book. Unknown = the row cannot say either way '
+               + 'and is not evidence of anything.</div>';
+            h += '<div class="table-scroll"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">'
+               + '<thead><tr style="text-align:left; color:var(--text-dim);">'
+               + '<th style="padding:3px 8px 3px 0;">Coin</th>'
+               + '<th style="padding:3px 8px;">Side</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Rows</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Rested</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Unknown</th>'
+               + '<th style="padding:3px 0 3px 8px;">Newest</th></tr></thead><tbody>';
+            let anyRested = 0, anyUnknown = 0;
+            for (const r of rows.slice(0, 14)) {
+                anyRested += (r.rested || 0);
+                anyUnknown += (r.unknown_whether_rested || 0);
+                // A legacy false count is still shown, in its own words,
+                // rather than dropped or merged into "unknown".
+                const legacy = (r.no_order_placed || 0);
+                h += '<tr><td style="padding:2px 8px 2px 0;">' + r.product_id + '</td>'
+                   + '<td style="padding:2px 8px; color:var(--text-dim);">' + r.side + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">' + r.count + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">'
+                   + (r.rested ? '<strong>' + r.rested + '</strong>' : '0') + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums; color:'
+                   + ((r.unknown_whether_rested || 0) > 0 ? '#f59e0b' : 'var(--text-dim)') + ';">'
+                   + (r.unknown_whether_rested || 0)
+                   + (legacy ? ' <span style="color:var(--text-dim);">(+' + legacy + ' legacy no-order)</span>' : '')
+                   + '</td>'
+                   + '<td style="padding:2px 0 2px 8px; color:var(--text-dim);">'
+                   + (r.newest ? String(r.newest).replace('T', ' ').slice(0, 19) : '&mdash;') + '</td></tr>';
+            }
+            h += '</tbody></table></div>';
+            if (anyRested === 0 && anyUnknown > 0) {
+                h += '<div style="margin-top:4px; color:#f59e0b; font-size:.92em;">'
+                   + 'Not one row in this window confirms an order actually rested. '
+                   + 'Every count here is UNKNOWN, so none of it supports "the book would not fill us".</div>';
+            }
+        }
+    }
+
+    // ---- ON-DEMAND, ONE CURRENCY, ONE READ ----
+    // Deliberately NOT a table of every coin. get_asset_balance paginates
+    // the venue's whole account list per currency, so a five-coin table is
+    // five full account reads - that exact change was shipped once, got
+    // rate-limited, and left the invariant check UNKNOWN. The cost is
+    // stated so nobody re-adds the loop.
+    h += '<div style="margin-top:10px; padding-top:8px; border-top:1px solid var(--border, rgba(127,127,127,.25));">';
+    h += '<div style="font-weight:600; margin-bottom:3px;">Check one balance at the venue</div>';
+    h += '<div style="color:var(--text-dim); font-size:.92em; margin-bottom:5px;">'
+       + 'The only authoritative answer to "does this account hold X". Unfiltered, no dust threshold, '
+       + 'no rounding &mdash; it can tell an account holding zero from no account at all, which the '
+       + 'census cannot. One currency at a time on purpose: '
+       + 'each lookup reads the whole account list at the venue.</div>';
+    h += '<div style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">'
+       + '<input id="asset-balance-currency" type="text" placeholder="e.g. XLM" '
+       + 'style="width:110px; padding:4px 6px; text-transform:uppercase;" />'
+       + '<button id="asset-balance-go" type="button" style="padding:4px 10px; cursor:pointer;">Check</button>'
+       + '</div>';
+    h += '<div id="asset-balance-result" style="margin-top:6px;"></div>';
+    h += '</div>';
+
+    h += '<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">'
+       + 'Read-only. Nothing on this panel places, cancels or frees an order.</div>';
+    h += '</div>';
+    el.innerHTML = h;
+
+    // WIRING IS BEST-EFFORT AND MUST NOT ABORT THE PANEL.
+    //
+    // The content above is already in the DOM by this point. A throw here
+    // would reject this function's promise AFTER the useful work, which is
+    // the worst shape available: it looks rendered and is not finished.
+    // `truthy` is not enough - getElementById can return an object without
+    // the method (every headless render harness in this repo stubs it that
+    // way, and one of them aborted on exactly this line). The method is
+    // checked, not assumed, for the same reason a balance read is.
+    const btn = document.getElementById('asset-balance-go');
+    const inp = document.getElementById('asset-balance-currency');
+    if (btn && typeof btn.addEventListener === 'function') {
+        btn.addEventListener('click', () => lookupAssetBalance());
+    }
+    if (inp && typeof inp.addEventListener === 'function') {
+        inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') lookupAssetBalance(); });
+    }
+}
+
+async function lookupAssetBalance() {
+    const out = document.getElementById('asset-balance-result');
+    const inp = document.getElementById('asset-balance-currency');
+    if (!out || !inp) return;
+    const cur = (inp.value || '').trim().toUpperCase();
+    if (!cur) { out.innerHTML = '<span style="color:var(--text-dim);">Enter a currency code.</span>'; return; }
+    out.innerHTML = '<span style="color:var(--text-dim);">Reading the venue&hellip;</span>';
+
+    const num = v => (v === null || v === undefined) ? '&mdash;'
+        : Number(v).toLocaleString(undefined, {maximumFractionDigits: 8});
+
+    let d = null, err = null;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/asset-balance?currency='
+                              + encodeURIComponent(cur));
+        d = await r.json();
+        // 500/502 here are the endpoint REFUSING to guess - it raises
+        // rather than return zeros when the account list is unreadable.
+        // Rendering that as "no balance" would undo the whole point of it.
+        if (!r.ok) {
+            err = (d && d.detail) ? String(d.detail) : ('HTTP ' + r.status);
+            d = null;
+        }
+    } catch (e) { err = String(e); }
+
+    if (err || !d || !d.readable) {
+        out.innerHTML = '<div style="padding:6px 8px; border-left:3px solid #f59e0b;'
+            + ' background:rgba(245,158,11,.10); color:var(--text-dim);">'
+            + '<strong>' + cur + ': UNKNOWN.</strong> ' + (err || 'the read did not come back')
+            + ' &mdash; this is a GAP and must not be read as a zero balance.</div>';
+        return;
+    }
+
+    // Colour follows the VERDICT, and UNKNOWN never shares green with held.
+    const gap = (d.venue_lists_no_such_account === null
+                 || d.venue_lists_no_such_account === undefined);
+    const absent = d.venue_lists_no_such_account === true;
+    const colour = gap ? '#f59e0b' : (absent ? '#ef4444' : 'var(--text-dim)');
+
+    let h = '<div style="padding:6px 8px; border-left:3px solid ' + colour + ';">';
+    h += '<div style="margin-bottom:4px;">' + (d.verdict || '') + '</div>';
+    h += '<div style="font-size:.92em; color:var(--text-dim); font-variant-numeric:tabular-nums;">'
+       + 'held ' + num(d.held_units)
+       + ' &middot; available ' + num(d.available_units)
+       + ' &middot; locked ' + num(d.locked_units)
+       + ' &middot; direct read ' + num(d.direct_available_units)
+       + '</div>';
+    if (d.reads_disagree) {
+        h += '<div style="margin-top:4px; color:#f59e0b; font-size:.92em;">'
+           + 'The two reads disagree: ' + d.reads_disagree + '</div>';
+    }
+    // Non-zero means at least one currency spans several accounts, and the
+    // two reads resolve that case differently (one sums, one takes the
+    // first match and stops). Surfaced because it would make the direct
+    // read under-report - and that read gates the sell-refusal path.
+    if (d.accounts_exceed_currencies) {
+        h += '<div style="margin-top:4px; color:#f59e0b; font-size:.92em;">'
+           + d.accounts_seen + ' accounts across ' + d.currencies_seen
+           + ' currencies &mdash; at least one currency spans more than one account, so the '
+           + 'direct read may under-report. Look before trusting the smaller figure.</div>';
+    }
+    h += '</div>';
+    out.innerHTML = h;
+}
 
 async function renderAccountCensus() {
     const el = document.getElementById('account-census-panel');

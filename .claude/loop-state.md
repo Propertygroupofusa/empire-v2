@@ -452,6 +452,48 @@ Two cent-exact confirmations of the idle figure against the owner's own
 Coinbase screen: $2,046.55, then $1,406.77. It is real USD, not a model
 output.
 
+
+**ACH: 11,745.30 UNITS LEFT THE WALLET — exactly the locked amount.**
+At 01:10Z ACH read held 18,872.30 / locked 11,745.30. It now reads held
+7,127.00 / locked 0.0 across three consistent reads. 18,872.30 − 7,127.00 =
+11,745.30, to the unit. There has been no ACH close since 09-27, so the grid
+did not sell it. **Inference, not fact** — venue order history is not readable
+from this container — the shape fits a resting venue stop that filled. The
+shortfall board went $639.28 across 9 products → $708.77 across 10, ACH new on
+it at $61.00. Report if a SECOND branch does this; one is an event, two is a
+pattern and the locked column becomes untrustworthy.
+
+Same sweep, the other direction: ETH's tracked AND held both rose by exactly
+0.0281858 — a normal grid buy, booked correctly on both sides. **The buy path
+works.** Do not read the ACH event as a general accounting failure.
+
+
+**THE SPLIT IS NOW EXERCISED, NOT JUST DEPLOYED — measured 02:58Z** off
+`/grid-status/maker-expiries?hours=24&limit=1000` (1000 rows, truncated, so
+these counts are floors):
+
+| coin | side | rows | rested | unknown | legacy no-order | newest |
+|---|---|---:|---:|---:|---:|---|
+| ALGO | sell | 417 | 0 | 337 | 80 | 00:15:06 |
+| QNT | sell | 413 | 0 | 333 | 80 | 00:14:17 |
+| XLM | sell | 88 | 0 | 49 | 39 | 00:15:05 |
+| TIA | sell | 42 | 0 | 0 | 42 | 00:14:30 |
+| PRIME | sell | 31 | 0 | 3 | 28 | 23:55:41 |
+| **ETH** | **buy** | 1 | **1** | 0 | 0 | **02:25:11** |
+
+Two things, both new:
+1. **No sell-side expiry row anywhere after 00:15:06Z.** Confirmed non-orders
+   are being refused at the write site and routed to `orders-not-placed`
+   instead, which is exactly what the invariant was built to do. The rows
+   stopped arriving; that is the fix working, not the table breaking.
+2. **The first `order_rested = True` row in the fleet's history** — ETH-USD
+   buy, 02:25:11Z. An order genuinely sat on the book and nobody crossed it.
+   Both sides of the three-state flag are now observed on live data.
+
+**Do not read the 337/333 unknowns as liquidity failures.** They are rows
+written before the column existed. Zero rows in this window confirm a sell
+ever rested.
+
 ## Grid config
 
 3 levels × 2.5% spacing · real round-trip fee 1.5% · effective 0.7%
@@ -583,7 +625,11 @@ reminder, not a trading task. Do not absorb it, do not act on it.
 12. Watch market_brain's first live cycle if the flag flips.
 13. Join Coinbase fills to `OrderAttribution`.
 14. `trade-history` caps `recent_trades` at 50 whatever limit you pass.
-15. None of the new endpoints has a dashboard surface.
+15. **PARTLY DONE (e0e80de).** None of the new endpoints had a dashboard
+    surface. `renderExecutionInventory()` in `family_tree_dashboard.html` now
+    reads `/grid-status/invariants` and
+    `/grid-status/orders-not-placed?hours=2&limit=400`. Still unsurfaced:
+    `/grid-status/asset-balance` and `/grid-status/maker-expiries`.
 
 ## Standing lessons
 
@@ -952,3 +998,44 @@ prefix (`/api/trading-dashboard`) turned out to be the whole story. Check
 - Never add two overlapping sets or two different denominators.
 - Protections fail open; anything moving live orders fails closed.
 - Zero is not a safe default for a price.
+
+**A substring check can match a comment — and mine did.** Guarding the new
+dashboard panel, `"UNREADABLE" in seg` passed against a function whose
+UNREADABLE *branch* I had deleted, because the word survived in an
+explanatory comment two lines above. This is the fifth variant of the same
+defect tonight: `"_row.qty"` matched `slice_row.qty`; `"except (TypeError,
+ValueError)"` matched a clause whose body was replaced with `raise`;
+`"log.error"` matched a downgraded line; `"get_open_positions(session)"`
+matched the `async def` line. `test_execution_inventory_panel.py` now runs
+`_strip_js_comments()` before every content assertion. **A substring check
+inside a long function proves almost nothing — strip comments, then anchor
+to the statement, not the word.**
+
+**Written and read by nothing, applied to my own work.** Three endpoints
+built tonight (`/invariants`, `/orders-not-placed`, `/asset-balance`) were
+reachable only by curl. That is exactly the defect I spent the night fixing
+in the engine — a fact recorded and surfaced to no one — committed at the UI
+layer by me. **When you finish a producer, check that a consumer exists
+before calling it shipped.**
+
+**My own harness could not have found this.** The new panel called
+`btn.addEventListener` behind a truthiness guard. Every headless render
+harness in this repo stubs `document.getElementById` with a plain object, and
+`test_branch_coin_label.py` — which execs the WHOLE dashboard script in node —
+aborted on that line, taking the entire script down. My verification harness
+implemented `addEventListener` on its stub, because I wrote the stub to match
+the code I had just written. **A fixture built to match the code under test
+cannot test that code's assumptions.** Same family as "a fixture that
+CONSTRUCTS the input cannot test how that input is made". The suite caught it
+by exit code; nothing I wrote would have. Guard now checks `typeof x.addEventListener
+=== 'function'`, and the wiring is best-effort on purpose — it runs AFTER
+`innerHTML`, so a throw there leaves a panel that looks rendered and is not
+finished, the worst shape available.
+
+**Also: the slice anchor that silently grew.** `test_execution_inventory_panel.py`
+ended its slice at `renderAccountCensus`, the next function in the file on the
+day it was written. This pass inserted two functions before it and the slice
+quietly covered all three, so every content assertion could have been satisfied
+by unrelated code. Both panel tests now slice to the NEXT top-level
+`async function`, not to a named successor. **An end anchor that names a
+sibling is a guess about file order.**

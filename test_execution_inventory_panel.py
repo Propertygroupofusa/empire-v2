@@ -35,8 +35,16 @@ def ok(label, cond, detail=""):
 
 HTML = open("family_tree_dashboard.html", encoding="utf-8").read()
 
+# SLICE TO THE NEXT TOP-LEVEL FUNCTION, NOT TO A NAMED ONE.
+#
+# This used to end the slice at renderAccountCensus, which was the next
+# function in the file ON THE DAY IT WAS WRITTEN. A later pass inserted two
+# functions between them, and the slice silently grew to cover all three -
+# so every content assertion below could have been satisfied by unrelated
+# code. Same defect as anchoring a mutant to a guessed line: the anchor
+# stopped matching what it named and nothing said so.
 i = HTML.find("async function renderExecutionInventory()")
-j = HTML.find("async function renderAccountCensus()")
+j = HTML.find("\nasync function ", i + 1) if i != -1 else -1
 FN_RAW = HTML[i:j] if (i != -1 and j != -1 and j > i) else ""
 
 # COMMENTS ARE STRIPPED BEFORE ANY CONTENT ASSERTION.
