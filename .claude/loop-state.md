@@ -270,6 +270,36 @@ Also each pass: for every branch compute
 
 ## Reference figures — update in place
 
+**FULL BOOK, 132 closes, read at 00:47Z with `limit=1000` (truncated:false).**
+Raising the cap did NOT make the four-way exit_reason readable — still 1 of 132
+rows postdates it (LINK-USD +$4.13, `profit_target`). What it revealed instead:
+
+- **82 of 132 trades have `exit_reason = None`** — every close up to
+  2026-09-09. First populated row is 2026-09-26. Clean boundary, ZERO
+  interleaving after it. Other analysis fields are sparser still: `stop_pct`
+  25/132, `mae_pct`/`mfe_pct` 50/132, `entry_atr_pct`/`entry_spread_pct`/
+  `entry_gate_json` 32/132.
+- **A 17.8-day gap with zero completed trades**, 2026-09-09T03:57 →
+  2026-09-26T22:00. Cause UNKNOWN from this data — do not guess; it is
+  checkable against deploys/config history.
+- **Two eras, and the second is better on both axes of turnover × edge:**
+
+| | closes | per day | realised | per close | median | top trade | losers |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| pre-gap (08-30→09-09) | 82 | 8.74 | +$19.55 | $0.238 | +$0.090 | 30.4% | 19 |
+| post-gap (09-26→09-29) | 50 | 23.68 | +$58.34 | $1.167 | +$0.575 | 9.4% | 0 |
+
+2.7× the close rate AND 4.9× the profit per close, and it is broad rather than
+one trade — median 6.4× higher, top-5 concentration 75.7% → 38.2%.
+
+**CAVEAT, do not report the win rate as skill.** Post-gap 0 losers is
+STRUCTURAL: `_pick_profitable_slice_to_sell` refuses a losing sale, so the only
+way to realise a loss is the stop, and no stop has fired (zero `stop_loss`
+labels). Why pre-gap had 19 losers is UNKNOWABLE from these rows — all 82 carry
+`exit_reason = None`. The two eras also differ in fleet composition, capital and
+config, so this is not a controlled comparison.
+
+
 **LOCKED INVENTORY, full 23-branch sweep at 23:45Z (af869a4 serving).**
 $977.02 locked across seven branches, all seven priced so the total is
 complete (was $923.23 at 09:44Z):
