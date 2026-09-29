@@ -919,7 +919,41 @@ restart can refuse to trade, which is what §22 and §24 ask for and is also
 a way to halt the fleet on a transient read failure — that is an
 owner-visible decision, not one to slip in.
 
-**NOT built at all (§7–§10, §12–§14, §17–§22):** event transport, cycle
+### §7/§8 — THE BLOCKER IS §1's PERSISTENCE, not the transport
+
+Measured 2026-09-29: there is **no WebSocket client anywhere in the repo** —
+no `wss://`, no ws library, in any language. So §8's "where supported by
+the existing implementation" is answered: it is not supported today.
+
+But the dependency is NOT the obstacle. `aiohttp==3.10.5` is already in
+requirements.txt and supports websockets natively (`session.ws_connect`),
+so an order/fill feed needs **no new dependency**. Do not report one as
+needed.
+
+**The real obstacle is that an event loop beside the 30s polling loop is
+two things that can both decide to place the same order**, and they cannot
+agree on what a slice is doing because `CryptoGridSlice` persists no state
+(see §24 above — no state column, no order id). The lease makes one
+PROCESS the trader; it does nothing about two deciders inside it.
+
+So the ordering the spec implies is wrong in one place, and this is worth
+following:
+
+    §1 persistence  ->  unblocks BOTH §7/§8 and §24
+    §23 idempotency ->  already done, and is the other half of making a
+                        second decider safe
+
+**Wiring §23 is the next real step, and it is not free.** Ten call sites
+build `client_order_id` as `str(uuid.uuid4())`. Swapping in the derived id
+is behaviour-preserving in the normal case and protective on a retry — but
+`client_order_id()` returns None when the intent is incomplete, and None
+must NOT fall back to random (that restores exactly the bug) and must not
+be sent. So a call site that cannot supply cycle_id/slice_id has to refuse
+the order, **which is a way to halt the fleet if the fields are not
+threaded through first**. Thread the fields, then swap the id — never the
+other way round, and never with a random fallback "just in case".
+
+**NOT built at all (§9, §10, §12–§14, §17–§22):** event transport, cycle
 rotation, fill accounting, restart reconciliation, the dashboard and the
 speed metrics — and the wiring that would make any of the four modules
 above actually run.
