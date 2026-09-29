@@ -2164,3 +2164,41 @@ green nor a red from one is worth much on its own.
   branch that named its own 8% stop — it has a stop, but is not adopted and must
   not be described as armed. The property is `resolved is not None and stop_pct
   > 0`. Too broad fails correct code; pin the exact fact.
+
+## 12:38Z — the prediction held, and the shortfall reversed direction
+
+**Staked last pass:** SHIB-USD is the only reachable profitable slice, so it
+should sell shortly; *if it does not, the reserved/short classification is
+incomplete and that is a finding in itself.*
+
+**It sold.** `parked_sell` 8 → 9, book 78 → 77, SHIB out of the profitable set.
+The falsifiable half survived: the reserved/short classification correctly
+picked the one slice whose inventory was actually free. That is the first time
+this session a forward claim about WHICH slice moves has been checked and held,
+rather than a description of the book restated.
+
+**Refined — the shortfall is accelerating again, not decelerating.** I had been
+reporting deceleration for several passes. $765.68 → $802.68, **+$37.00**, the
+largest single-interval rise since early morning. Reserved branches went 6 → 5
+(PEPE left), so this is not more capital being locked: the gap between what the
+book wants and what is bankable is widening on its own. A narrative that has
+held for several passes still has to be re-derived from the current number, and
+when it flips it gets named as a reversal, not smoothed into "still flat".
+
+**HBAR +0.47% is the closest approach to a buy trigger all day** (BTC +1.51%,
+NEAR +2.07%, TON +3.06%; none at or below). Check (1) — has a buy landed, and
+did §1 stamp `slice_state`/`cycle_id`/`slice_index`/`order_side`/
+`filled_quantity`/`average_fill_price`/`execution_reason` — has been
+unanswerable all session because nothing has bought. The §1 write path has
+therefore never executed in production. It is tested, not exercised; those are
+different verdicts and it stays UNKNOWN until a real fill stamps a real row.
+
+Stuck slices still exactly two (LINK-USD `0.009999999999998899`, PRIME-USD
+`0.00999999999999801`, both against increment `0.01`). Fixed in code at
+`6b9c207`; the ROWS carry the persisted values and `reconcile-slices` is
+write-guarded and the owner's. Profitable 7 | blocked 7 | REACHABLE 0.
+
+**Next stake:** HBAR closes the remaining 0.47% and buys, exercising §1 for the
+first time — or it re-anchors away and REACHABLE stays 0 while the shortfall
+keeps climbing. Either outcome is informative; a third pass of "gaps unchanged"
+would mean the gap table is not the thing to be watching.
