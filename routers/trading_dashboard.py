@@ -10673,7 +10673,13 @@ async def get_capital_census(json: bool = False):
 LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR",
                         # A buy allowed through with no economic check is the
                         # single most important thing this feed can show.
-                        "GATE_DISABLED")
+                        "GATE_DISABLED",
+                        # A branch cycle that died mid-pass. Not a gate verdict,
+                        # but it belongs in the same feed for the same reason:
+                        # it is the only place a LOST FILL can be seen - the
+                        # coin bought, the slice row never written, and every
+                        # no-fill counter flat because none of them was reached.
+                        "CYCLE_ERROR")
 # Execution outcomes, counted separately from gate decisions: a gate pass
 # says the bot WANTED to buy, these say whether the exchange let it. Kept
 # apart because a healthy pass rate with a rising rejection count is a

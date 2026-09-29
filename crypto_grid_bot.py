@@ -7688,7 +7688,30 @@ async def run_grid_branches_cycle():
             try:
                 await run_grid_branch_cycle(session, branch, cycle_id=_cycle_id)
             except Exception as e:
-                log.error(f"[GRID] {branch.bot_name} cycle error: {e}")
+                # A LOST FILL IS INVISIBLE WITHOUT THIS, and that is not
+                # hypothetical. grid_buy increments the buy fill-mix counter
+                # immediately before returning a fill, so a raise ANYWHERE
+                # after it - the target block, the insert, the commit - leaves
+                # the coin really bought, the slice row never written, and
+                # NEITHER the maker-only skip counter NOR the maker expiry
+                # counter moved, because both live on the no-fill path. Live
+                # on 2026-09-29 that state took an hour to establish by hand
+                # from arithmetic across four dashboard pulls, because the
+                # only trace this handler left was a Railway log line no
+                # dashboard reads.
+                #
+                # Type AND message. `{e}` alone renders an argument-less
+                # exception as the empty string, which is how a swallowed
+                # KeyError becomes "cycle error: " and says nothing at all.
+                _detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                log.error(f"[GRID] {branch.bot_name} cycle error: {_detail}")
+                # Durable, and deliberately NOT allowed to change behaviour:
+                # the except still swallows, the fleet still walks on to the
+                # next branch. This records that the pass died, never decides
+                # anything. _record_gate_decision is contractually unable to
+                # raise, so it cannot turn a swallowed error into a loud one.
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "CYCLE_ERROR", _detail)
             await asyncio.sleep(0.5)
 
         # Fill in any post-expiry horizons that have come due. Inside the

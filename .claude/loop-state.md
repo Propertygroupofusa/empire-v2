@@ -2394,3 +2394,109 @@ slice from the BUY insert - `entry_fee_rate` SET, `adopted` False, and §1's
 fields populated. If a buy fills with NO push anywhere near it and STILL lands
 as an adopted row with a null fee rate, the restart explanation is dead and the
 fault is in the buy path itself.
+
+## 13:30Z — the writer is IDENTIFIED. Three of my own hypotheses died here.
+##            (recorded locally, NOT pushed - see the cadence change above)
+
+**`coin_adoption_worker.topup_once()` wrote the three HBAR rows.** Not the buy
+path, not a restart. Proven by arithmetic that can only come from that
+function's own lines (`coin_adoption_worker.py:337-372`):
+
+                 claimed   deployed_coin   wallet_cash   HBAR alloc
+    12:58        8257.91      7290.39        1671.88        163.80
+    13:24        8426.82      7459.30        1562.31        332.71
+                 +168.91      +168.91        -164.35       +168.91
+
+`row.allocated_usd = round((row.allocated_usd or 0.0) + added_usd, 2)` where
+`added_usd = sum(qty * entry_price)` = 1489.24 x 0.11342 = **$168.91**. Every
+figure moves by that number. topup "puts idle coin under branches that already
+exist" - and a maker buy's fill IS idle coin until the buy path writes its
+slice.
+
+**THE RESTART THEORY IS SUPERSEDED, not refined.** topup needs no restart, no
+coincidence, and runs on its own periodic task (`run_periodically`, :397,
+`asyncio.sleep(max(CHECK_SECONDS, 60))`) independent of the grid loop's thread.
+My "no overlap is possible" was true of BRANCH CYCLES and I nearly let it stand
+as "nothing can race the buy path". It cannot be stretched that far.
+
+**THE 5/3 OVERSHOOT IS KNOWN AND DOCUMENTED - I MISATTRIBUTED IT.** I said it
+was because the trigger counts filled slices and a resting order is invisible
+to it. Wrong. The code says it outright at :356-363: topup sets `row.num_levels
+= len(open_now) + len(t["slices"])`, then `run_grid_branch_cycle` re-applies the
+global spacing override and forces num_levels back to 3, so the branch ends up
+with more open slices than levels - "measured live: ZEC 6/3, XRP 9/3, SHIB 6/3".
+HBAR 5/3 is that same known behaviour. Not a new defect.
+
+**NO DOUBLE COUNT - I CHECKED BEFORE REPORTING ONE.** claimed and deployed_coin
+both rose by exactly $168.91 and `unbacked_usd` stayed NEGATIVE (-709.12 ->
+-599.55), meaning MORE money is really there than branches claim. The books
+balance. Had I reported the accounting defect I was drafting, it would have been
+wrong.
+
+**THE FEE CLAIM, CORRECTED AND MADE PRECISE.** I said the rate paid was "LOST"
+and the slices "cannot be priced honestly". Too loose. `entry_fee_rate` NULL +
+`adopted=True` resolves through `_slice_rate` to the **exit leg only**
+(`test_adopted_entry_fee.py:92`: `rate(Slice(adopted=True), FLAT, MAKER_LEG) ==
+MAKER_LEG`) - correct for coin that was never bought. These three WERE bought
+and DID pay a maker buy leg. So the round trip is understated by one maker leg,
+~0.35%. Consequence, stated exactly: their net P&L reads ~0.35% better than
+reality, so the 1.0% parked-sell floor clears at an effective ~0.65% net. On
+$168.91 that is ~$0.59 of edge, not a loss. Small, real, and NOT "unpriceable".
+
+**STILL GENUINELY OPEN - the one thing none of this explains.** topup says WHO
+wrote the rows. It does NOT say why `grid_buy`'s own insert never ran, nor why
+`maker_only skip buy` (29) and `maker_expiry_drift.buy` (21) BOTH stayed flat
+across 30+ minutes while skip SELL ran +153. Every recorded exit from grid_buy
+ticks one of those. That remains UNKNOWN and is the live question.
+
+**§1 remains UNKNOWN at 0 of 78** - its insert did not run for rows a different
+writer created, so their NULLs prove nothing about it either way.
+
+State otherwise flat at 13:29Z: stuck slices still exactly two; gaps BTC +1.72,
+NEAR +1.81, TON +2.35, ETH +3.01, SHIB +3.09, PEPE +4.05, **0 of 13 at or below
+zero** (HBAR now excluded at 5 >= 3). No buy can be in flight, which makes this
+a safe window to deploy in if code needs shipping.
+
+## 13:40Z — a lost fill is invisible. That is the defect worth shipping.
+
+Chased the open question ("why did grid_buy return a fill three times and no
+row appear?") and killed three more of my own hypotheses on the way:
+
+- **`engine._last_order_id` AttributeError** (my own 00bfec4). DEAD: `engine`
+  IS `crypto_btc_compound_bot` (`:53`) and `_last_order_id = {}` is defined at
+  its `:1705`.
+- **An insert kwarg missing from the model** - which would raise TypeError in
+  exactly the right window. DEAD: all 22 kwargs of the `:6631` insert exist on
+  `CryptoGridSlice` (27 columns), checked by AST against the live model.
+- **The DB missing a §1 column** (the reflection loop adds them nullable, no
+  Alembic). DEAD: the panel SELECTs and serves those columns, so they exist.
+
+**WHAT IS PROVEN.** `GRID_FILL_MIX_BUY_KEY` has exactly TWO writers, both
+inside `grid_buy`, both immediately before `return`ing a fill (`:1226` maker,
+`:1283` taker). So three buy-leg increments PROVE grid_buy returned a fill
+three times and the caller reached the insert. And `run_grid_branches_cycle`
+wraps each branch in `except Exception as e: log.error(...)` (`:7690`) - one
+Railway log line, nothing durable, nothing any dashboard reads.
+
+So a raise anywhere after the fill leaves: **coin really bought, slice row
+never written, and BOTH no-fill counters flat because neither was reached.**
+That is precisely today's state, and establishing it took an hour of arithmetic
+across four dashboard pulls. **A LOST FILL IS INVISIBLE.**
+
+**SHIPPED (pending suite):** the handler now builds `f"{type(e).__name__}: {e}"`
+- type AND message, because `{e}` alone renders an argument-less exception as
+the empty string, which is how a swallowed KeyError becomes "cycle error: " and
+says nothing - and records it durably via `_record_gate_decision(..., "CYCLE_ERROR",
+...)`, which is contractually unable to raise. `CYCLE_ERROR` added to
+`LIVE_OPS_GATE_EVENTS` so it appears at /live-ops.
+
+**Deliberately NOT a behaviour change.** The except still swallows; the fleet
+still walks on to the next branch; no gate, threshold, limit or maker-only
+control is touched. It records that a pass died. It decides nothing.
+
+**Why this is the right P0:** it makes the open question self-answering on the
+very next buy, at zero further cost. Buys are rare - 06:28Z and 13:01Z today -
+so the answer arrives in hours, not minutes.
+
+Deploy window chosen deliberately: 0 of 13 branches at or below trigger, so no
+maker buy can be in flight to orphan.
