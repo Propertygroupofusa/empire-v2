@@ -532,19 +532,48 @@ async def get_account_balance(session):
 
 
 async def get_open_positions(session):
-    """Get all currently open positions"""
+    """Every open position, keyed by real ticker - or None if UNREADABLE.
+
+    NONE AND {} ARE DIFFERENT ANSWERS AND THIS USED TO RETURN {} FOR BOTH.
+    An empty dict means "this account holds nothing", and all three entry
+    caps in this module are computed from it:
+
+        if proxy in open_positions          -> duplicate-entry guard
+        sum(1 for s in open_positions...)   -> concurrent-position count
+        sum(market_value for ... .values()) -> open-notional budget
+
+    So one failed HTTP call did not merely fail to dedup - it reported zero
+    positions held, zero slots used and zero notional committed, which is
+    every cap reading as "nothing used". A single Alpaca hiccup could
+    therefore permit a duplicate buy into a position already open, past a
+    concurrency ceiling already reached, against a budget already spent.
+
+    That is the same fail-open shape as 0af01f1 on the crypto side (where an
+    unreadable balance was shipping sell orders at the tracked quantity), and
+    it is against this codebase's own rule: protections may fail open, but
+    anything that MOVES LIVE ORDERS fails closed. Callers must treat None as
+    "refuse to enter", never as "nothing held".
+    """
     try:
         url = f"{get_base_url()}/v2/positions"
         async with session.get(url, headers=get_headers()) as r:
             if r.status != 200:
-                return {}
+                body = (await r.text())[:200]
+                log.error(f"⛔ POSITIONS UNREADABLE: HTTP {r.status} from "
+                          f"/v2/positions ({body}). This is a GAP, not an "
+                          f"empty account - no entry may be made against it.")
+                return None
             positions = await r.json()
             if not isinstance(positions, list):
-                return {}
+                log.error(f"⛔ POSITIONS UNREADABLE: /v2/positions returned "
+                          f"{type(positions).__name__}, not a list. GAP, not "
+                          f"an empty account.")
+                return None
             return {p["symbol"]: p for p in positions}
     except Exception as e:
-        log.warning(f"Failed to get positions: {e}")
-        return {}
+        log.error(f"⛔ POSITIONS UNREADABLE: {type(e).__name__}: {e}. GAP, "
+                  f"not an empty account - no entry may be made against it.")
+        return None
 
 
 async def place_order(session, symbol, qty, side):
@@ -621,9 +650,22 @@ async def run_intraday_check():
         # stop-loss/profit-target/RSI-overbought exit. Fetched
         # unconditionally now so exit management always runs.
         open_positions = await get_open_positions(session)
+        # UNREADABLE IS NOT EMPTY. Entries are refused for this cycle; the
+        # exit loop below still runs, because an exit is a protection and a
+        # protection that stops working when a read fails is worse than one
+        # that runs on a short list.
+        _positions_unreadable = open_positions is None
+        if _positions_unreadable:
+            log.error(
+                "⛔ INTRADAY ENTRIES REFUSED this cycle - the account's open "
+                "positions could not be read, so the duplicate-entry guard, "
+                "the concurrency count and the notional budget are all "
+                "UNKNOWN. An unknown is not a zero; treating it as one is how "
+                "a cap permits the position it exists to prevent.")
+            open_positions = {}
 
         # Enter positions for intraday trades
-        if intraday_setups:
+        if intraday_setups and not _positions_unreadable:
             intraday_setups.sort(reverse=True)
             # Real positions are keyed by the real ticker (proxy), never
             # the internal SWING_SYMBOLS key - see PROXY_TO_KEY.
@@ -848,9 +890,18 @@ async def run_swing_check():
         # management now always runs regardless of whether any new
         # entry setup exists this cycle.
         open_positions = await get_open_positions(session)
+        # Same rule as the intraday path above: refuse entries, keep exits.
+        _positions_unreadable = open_positions is None
+        if _positions_unreadable:
+            log.error(
+                "⛔ SWING ENTRIES REFUSED this cycle - the account's open "
+                "positions could not be read, so the duplicate-entry guard "
+                "and the concurrency count are UNKNOWN. An unknown is not a "
+                "zero.")
+            open_positions = {}
 
         # Open positions with highest confidence
-        if setups:
+        if setups and not _positions_unreadable:
             setups.sort(reverse=True)  # Sort by confidence (descending)
 
             current_count = len(open_positions)
