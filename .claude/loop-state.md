@@ -289,6 +289,31 @@ Also each pass: for every branch compute
 
 ## Reference figures — update in place
 
+**PHANTOM INVENTORY, measured 01:10Z — report to the owner, do NOT act.**
+`coin_tracked_is_held` FAILs with 6 positions and $471.01 short, but three
+MORE sat in its `unreadable` footnote because the wallet map could not
+express them (fixed 6f68396 — the map now comes from `fetch_balances` plus a
+direct per-currency read):
+
+| product | tracked | held | short |
+|---|---:|---:|---:|
+| QNT-USD | 0.67598215 | 0.00097323 | **$149.54** |
+| TIA-USD | 111.35 | **0.0** | $49.48 |
+| PRIME-USD | 36.64 | **0.0** | $9.34 |
+
+QNT alone exceeds every coin in the headline. **TIA holds 3 open slices for
+111.35 units of a coin the account holds NONE of**, and its −$3.67 unrealised
+is computed off them. Standing constraint still applies: do not reconcile or
+close QNT. TIA and PRIME are not covered by that constraint but are the
+owner's call, not the loop's.
+
+**XLM did NOT move.** An earlier compressed read printed all four fields as
+None; five consecutive full reads give held=1980.766 / direct=0.0, unchanged.
+That was a transient double read-failure — the endpoint correctly reported
+None rather than fabricating zeros. **A single anomalous read is not a
+finding; repeat it before reporting.** I nearly reported $453 of XLM as gone.
+
+
 **FULL BOOK, 132 closes, read at 00:47Z with `limit=1000` (truncated:false).**
 Raising the cap did NOT make the four-way exit_reason readable — still 1 of 132
 rows postdates it (LINK-USD +$4.13, `profit_target`). What it revealed instead:
