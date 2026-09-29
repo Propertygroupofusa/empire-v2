@@ -1128,6 +1128,40 @@ def get_account():
     return api_call("GET", "/v2/account")
 
 
+def get_account_positions():
+    """Every open position in the ALPACA ACCOUNT, across every bot.
+
+    Not this module's own book. That distinction is the whole point: the
+    account is the thing with an exposure limit, and brain_state.json can
+    only ever see the trades this module opened. api_call returns None on
+    failure, and that None is passed through rather than flattened to an
+    empty list - "no positions" and "could not read positions" must not be
+    the same value, because one of them permits a buy.
+    """
+    rows = api_call("GET", "/v2/positions")
+    return rows if isinstance(rows, list) else None
+
+
+def account_exposure_inputs():
+    """(positions, equity) for the account-wide exposure gate, or (None, None).
+
+    Read ONCE per cycle and handed to every candidate, rather than per
+    candidate: the gate is asked N times and the account does not change
+    between two entries in the same pass.
+    """
+    rows = get_account_positions()
+    if rows is None:
+        return None, None
+    acct = get_account() or {}
+    try:
+        eq = float(acct.get("equity"))
+    except (TypeError, ValueError):
+        return None, None
+    if eq != eq or eq <= 0:          # NaN or nonsense
+        return None, None
+    return rows, eq
+
+
 def _client_order_id(source, symbol):
     """Tag an order with the code path that sent it.
 
@@ -1568,7 +1602,37 @@ def run_cycle():
     candidates = scan_parallel(all_symbols, state.positions, pf, hedge_regime)
     log.info(f"  Found {len(candidates)} signals")
 
+    # THE ACCOUNT-WIDE EXPOSURE GATE, ACTUALLY CONNECTED.
+    #
+    # can_open_position has taken account_positions and equity since the six
+    # META orders (73% of equity, in an account this module measured as 0%
+    # exposed because its own book was empty). Both parameters default to
+    # None, and the ONE live call site passed neither - so every real cycle
+    # silently took the self-only fallback, which that function's own
+    # docstring calls "the wrong denominator... and always was". The guard
+    # was written, documented with the incident that motivated it, and never
+    # reached.
+    #
+    # Read once per cycle, not per candidate: the gate is asked N times and
+    # the account does not move between two entries in one pass.
+    _acct_positions, _acct_equity = account_exposure_inputs()
+    _exposure_readable = _acct_positions is not None and _acct_equity is not None
+    if not _exposure_readable:
+        # FAILS CLOSED, and this is the one direction that matters. An
+        # unreadable account is not an empty one; treating it as empty is
+        # exactly how a concentration limit permits the position it exists
+        # to prevent. Exits are untouched - they ran above, and a protection
+        # must still work when a read fails.
+        log.error(
+            "  [CAP] REFUSING every new entry this cycle - the ACCOUNT's own "
+            "positions or equity could not be read, so total exposure is "
+            "UNKNOWN. An unknown exposure is not a zero: the last time this "
+            "gate measured an account it could not see, it permitted 73% of "
+            "equity in one name. Entries resume when the read succeeds.")
+
     for res in candidates:
+        if not _exposure_readable:
+            break
         if not state.can_trade():
             break
 
@@ -1579,8 +1643,12 @@ def run_cycle():
         reason = res["reason"]
         price  = res["price"]
 
-        if not can_open_position(state.positions, alloc):
-            log.info(f"  [CAP] {symbol} — 60% exposure limit")
+        if not can_open_position(state.positions, alloc,
+                                 account_positions=_acct_positions,
+                                 equity=_acct_equity):
+            log.info(f"  [CAP] {symbol} — {CONFIG['max_exposure'] * 100:.0f}% "
+                     f"ACCOUNT exposure limit (measured across every bot in "
+                     f"the account, not just this book)")
             continue
 
         # Diversification check before entry
