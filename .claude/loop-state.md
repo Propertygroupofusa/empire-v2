@@ -973,6 +973,20 @@ entry** — it was observed once, at 08:56Z, and was gone by the next read.
 If it recurs the new codes will name the side; until then it is unexplained,
 not explained.
 
+**COIN SHORTFALL at 09:05Z: $755.17 across 10 branches.**
+Track: $471.01/6 (01:10Z) -> $727.60/10 (05:05Z) -> $755.17/10 (09:05Z).
+Still GROWING, so still a finding — but the RATE has collapsed: +$256.59
+in the first four hours, +$27.57 in the next four, and the branch count
+stopped at 10. Report the deceleration alongside the growth; reporting
+only "still growing" would overstate it.
+Per branch: QNT $170.22, ZEC $122.67, BCH $117.87, XRP $104.82, ETH $85.59,
+ACH $63.78, TIA $40.72, PEPE $35.34, PRIME $9.14, ONDO $5.02.
+
+**CONTEXT FOR THE LINK ENTRY, not an explanation:** `grid_inventory_is_free`
+reports LINK-USD 97% reserved by resting orders ($101.31), so only a sliver
+was free at that moment. That is consistent with what was seen and is NOT
+proof of cause. Do not write it up as the answer.
+
 **THE PRODUCTS ENDPOINT IS NOT FLAKY — measured, not assumed.**
 `product_rules_unreadable_count` is 0 across two reads (08:56Z, 09:03Z).
 That is the post-deploy watch 6a95d4d created, and it is answered: the
