@@ -276,6 +276,47 @@ def main():
         flag(CRITICAL, "STALLED",
              f"last cycle was {age:.0f}s ago - the fleet loop is not running.")
 
+    # ---- 7b. A live loop that has stopped closing anything -----------------
+    #
+    # The sixteen-day dead period (Sep 10-25) was NOT a crash. The loop ran,
+    # the heartbeat was fresh, and check 7 above would have reported the fleet
+    # healthy the entire time - because a branch full on every rung cannot buy
+    # and will not sell below entry. A deadlock looks exactly like a working
+    # system that happens to have nothing to do.
+    #
+    # So measure the thing the heartbeat cannot see: time since the last
+    # close, against the fleet's OWN measured close rate rather than a magic
+    # number, because a slow fleet and a stuck fleet are different failures.
+    edge = ((grid.get("realized_edge") or {}).get("current") or {})
+    if not (grid.get("realized_edge") or {}).get("available"):
+        gaps.append("realized_edge unavailable - cannot tell a dry spell from a quiet one")
+    else:
+        dslc = edge.get("days_since_last_close")
+        cpd = edge.get("closes_per_day")
+        if dslc is None:
+            gaps.append("days_since_last_close unreadable")
+        elif not cpd or cpd <= 0:
+            # A gap is not a zero. Without a rate there is no baseline to
+            # judge the silence against, so say so instead of guessing one.
+            gaps.append("closes_per_day unreadable - no baseline for a dry spell")
+        else:
+            dry_h = dslc * 24.0
+            mean_h = 24.0 / cpd
+            cur["dry_hours"] = round(dry_h, 2)
+            prev_dry = prev.get("dry_hours")
+            # Two conditions, both required: well past this fleet's own typical
+            # gap, AND long enough in absolute terms that a run of quiet luck
+            # does not trip it. A threshold that cries wolf trains its reader
+            # to ignore the alarm - the same reason DEPLOY_LAG is not 15 min.
+            if dry_h > max(3.0, 6.0 * mean_h):
+                level = CRITICAL if dry_h > 12.0 else WARN
+                grew = ("" if prev_dry is None
+                        else f" (was {prev_dry:.1f}h last pass)")
+                flag(level, "DRY_SPELL",
+                     f"{dry_h:.1f}h since the last close{grew}, on a fleet that "
+                     f"averages one every {mean_h:.1f}h ({cpd:.2f}/day). The loop "
+                     f"is alive - this is the shape the 16-day dead period had.")
+
     # ---- 8. A pushed fix that never went live ------------------------------
     #
     # A deploy can fail and leave the previous commit serving, which looks

@@ -54,6 +54,10 @@ def healthy():
             "heartbeat": {"age_seconds": 20},
             "maker_only_skipped_cycles": {"buy": 1},
             "maker_expiry_drift": {"buy": 1},
+            # A fleet closing about once an hour, last close an hour ago.
+            "realized_edge": {"available": True,
+                              "current": {"closes_per_day": 24.0,
+                                          "days_since_last_close": 0.04}},
         },
         "/api/trading-dashboard/live-ops": {
             "gate": {"data": {"events": []}},
@@ -265,6 +269,46 @@ ok("ALPACA_BP when buying power is under its floor", "ALPACA_BP" in run(d, BASE_
 # DEPLOY_LAG: a push that never went live.
 d = healthy(); d["/health"] = {"commit": "0000000", "uptime_human": "1h"}
 ok("DEPLOY_LAG when the served commit is not local HEAD", "DEPLOY_LAG" in run(d, BASE_SNAP))
+
+# DRY_SPELL: the loop is alive but nothing has closed. This is the ONLY check
+# that would have caught the sixteen-day dead period - the heartbeat was fresh
+# throughout it, so check 7 called the fleet healthy for sixteen days.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"]["days_since_last_close"] = 0.35
+ok("DRY_SPELL at 8.4h on a fleet that closes hourly",
+   "DRY_SPELL" in run(d, BASE_SNAP))
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"]["days_since_last_close"] = 0.6
+out = run(d, BASE_SNAP)
+ok("and it escalates to CRITICAL past half a day", "CRITICAL  DRY_SPELL" in out
+   or "CRITICAL DRY_SPELL" in out, out)
+
+# The threshold is the fleet's OWN rate, not a fixed number of hours. A fleet
+# that closes twice a day is not broken because it went 8 hours without one,
+# and an alarm that cannot tell those apart would fire on every slow fleet
+# until its reader stopped reading it.
+d = healthy()
+e = d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"]
+e["closes_per_day"] = 2.0
+e["days_since_last_close"] = 0.35
+ok("but NOT at 8.4h on a fleet that only closes twice a day",
+   "DRY_SPELL" not in run(d, BASE_SNAP))
+
+# No rate means no baseline. A dry spell judged against a rate of zero would
+# fire every pass; a gap is not a zero, so it must decline to judge and say so.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"]["closes_per_day"] = 0
+out = run(d, BASE_SNAP)
+ok("an unreadable close rate refuses to judge a dry spell",
+   "DRY_SPELL" not in out)
+ok("and reports the missing baseline as a gap", "no baseline" in out, out)
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"] = {"available": False}
+out = run(d, BASE_SNAP)
+ok("an unavailable realized_edge is a gap, not a quiet pass",
+   "realized_edge unavailable" in out, out)
 
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]
