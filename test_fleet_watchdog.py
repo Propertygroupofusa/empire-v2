@@ -206,6 +206,38 @@ d["/api/trading-dashboard/resting-stops"] = {
     "uncovered_usd": 500.0, "uncovered_count": 2, "uncovered": ["AAA", "BBB"]}
 ok("NO_EXIT when coin has no automatic exit", "NO_EXIT" in run(d, BASE_SNAP))
 
+# This exposure is unsold inventory marked to market, so its dollar figure
+# moves on price EVERY pass. Escalating on the number alone raised a CRITICAL
+# over a $6.54 drift on a $6,187 book in production - noise wearing the
+# costume of a trend. The structural change is a new asset joining the set.
+SNAP_UNC = dict(BASE_SNAP, uncovered_usd=500.0, uncovered_names=["AAA", "BBB"])
+
+d = healthy()
+d["/api/trading-dashboard/resting-stops"] = {
+    "uncovered_usd": 506.54, "uncovered_count": 2, "uncovered": ["BBB", "AAA"]}
+out = run(d, SNAP_UNC)
+ok("NO_EXIT stays a WARN when only the dollar figure moved",
+   "WARN     NO_EXIT" in out or "WARN NO_EXIT" in out, out)
+ok("and says the change is price only", "price only" in out, out)
+
+d = healthy()
+d["/api/trading-dashboard/resting-stops"] = {
+    "uncovered_usd": 507.0, "uncovered_count": 3, "uncovered": ["AAA", "BBB", "CCC"]}
+out = run(d, SNAP_UNC)
+ok("NO_EXIT goes CRITICAL when a NEW asset joins the uncovered set",
+   "CRITICAL NO_EXIT" in out.replace("CRITICAL  NO_EXIT", "CRITICAL NO_EXIT"), out)
+ok("and names the asset that joined", "CCC JOINED" in out, out)
+
+# Falling exposure with the same assets must not escalate either.
+d = healthy()
+d["/api/trading-dashboard/resting-stops"] = {
+    "uncovered_usd": 400.0, "uncovered_count": 2, "uncovered": ["AAA", "BBB"]}
+out = run(d, SNAP_UNC)
+noexit_lines = [ln for ln in out.splitlines() if "NO_EXIT" in ln]
+ok("and a FALLING figure on the same assets is not a CRITICAL",
+   noexit_lines and not any("CRITICAL" in ln for ln in noexit_lines),
+   "; ".join(noexit_lines) or "NO_EXIT never reported at all")
+
 # IDLE_PROFIT - the one that shipped UNVERIFIED because production had no
 # reachable profitable slice to force it with. Here it does.
 d = healthy()

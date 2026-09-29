@@ -227,16 +227,35 @@ def main():
     # ---- 4. Coin with no automatic exit ------------------------------------
     if stops is not None:
         unc = stops.get("uncovered_usd")
+        names = sorted(stops.get("uncovered") or [])
+        cur["uncovered_usd"] = unc
+        cur["uncovered_names"] = names
         if unc:
             prev_unc = prev.get("uncovered_usd")
-            moved = ("" if prev_unc is None
-                     else f" (was {money(prev_unc)})")
-            level = CRITICAL if (prev_unc is not None and unc > prev_unc) else WARN
-            flag(level, "NO_EXIT",
-                 f"{money(unc)} across {stops.get('uncovered_count')} asset(s) has "
-                 f"no automatic exit from either layer{moved}: "
-                 f"{', '.join((stops.get('uncovered') or [])[:14])}")
-        cur["uncovered_usd"] = unc
+            prev_names = prev.get("uncovered_names")
+            moved = "" if prev_unc is None else f" (was {money(prev_unc)})"
+            # Escalate on a NEW ASSET, never on the dollar figure alone. This
+            # exposure is unsold inventory marked to market, so it moves every
+            # single pass on price: a $6.54 drift across a $6,187 book was
+            # enough to raise a CRITICAL under the old rule, which is the
+            # "a figure that swings on price alone is not a trend" mistake
+            # built into the alarm meant to catch it. An alarm that fires on
+            # noise teaches its reader to stop reading it.
+            joined = ([n for n in names if n not in prev_names]
+                      if prev_names is not None else [])
+            if joined:
+                flag(CRITICAL, "NO_EXIT",
+                     f"{money(unc)} across {stops.get('uncovered_count')} asset(s) "
+                     f"has no automatic exit from either layer{moved} - and "
+                     f"{', '.join(joined)} JOINED that set since the last pass: "
+                     f"{', '.join(names[:14])}")
+            else:
+                same = (" - same assets as last pass, the change is price only"
+                        if prev_names is not None else "")
+                flag(WARN, "NO_EXIT",
+                     f"{money(unc)} across {stops.get('uncovered_count')} asset(s) "
+                     f"has no automatic exit from either layer{moved}{same}: "
+                     f"{', '.join(names[:14])}")
 
     # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
     #
