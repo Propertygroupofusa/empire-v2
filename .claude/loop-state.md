@@ -721,12 +721,24 @@ substring of `slice_row.qty`. Parse the AST.
 
 A scripted edit that cannot find its anchor must exit before writing.
 
-## Test picture — full run at e1221eb
+## Test picture — full run at ad1ff8a (04:10Z 29 Sep)
 
-211 pass (file-level counts, not test counts), 7 fail. The seven are
-credential-dependent and were red before today: `alpaca_connection`,
-`expiry_drift_runtime`, `maker_only`, `newsroom`, `payout_endpoint`,
-`trade_tape`, `video_generation`. No regressions all day.
+**229 pass, 6 fail** (file-level counts, not test counts), over 235 files.
+The six are credential-dependent and have been red all along:
+`alpaca_connection`, `expiry_drift_runtime`, `newsroom`, `payout_endpoint`,
+`trade_tape`, `video_generation`. **`maker_only` is no longer among them** —
+another session fixed it. No regressions.
+
+Earlier baseline, kept for the shape of the day: 211 pass / 7 fail at
+`e1221eb`.
+
+Added by this loop since then: `maker_expiry_rested` (52) ·
+`closed_trade_reason_surfaced` (25) · `order_not_placed_split` (48) ·
+`account_exposure_wired` (18) · `swing_positions_fail_closed` (26) ·
+`trade_history_truncation` (21) · `exit_reason_watch` (24) ·
+`wallet_map_unfiltered` (27) · `unrealized_gap_not_zero` (25) ·
+`execution_inventory_panel` (25) · `maker_expiry_panel` · `fills_by_source` ·
+`resting_stop_attribution`.
 
 New today: `held_position_exit_fallback` (28) · `bars_window` (22) ·
 `parked_capital` (31) · `order_attribution_alpaca` (39) · `closed_trades` (32)
