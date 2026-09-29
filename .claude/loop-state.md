@@ -673,6 +673,29 @@ among its proxies and no proxy is shared between two keys.
 `log.debug`, because the cycle contains other `log.error` calls. Find the call
 carrying the message and assert its level.
 
+**CLOSED (c473adf): the swing bot's fail-open.** `get_open_positions`
+returned `{}` on a non-200 and on any exception. Worse than a missing dedup:
+`intraday_count` comes from `.keys()` and `open_notional` from `.values()`, so
+**one failed read reset three caps to zero** — duplicate guard, concurrency
+ceiling and notional budget all reading "nothing used". Now returns None on
+every failure path, logs at ERROR, and both cycle functions gate their entry
+BLOCK on `open_positions is None`. Exit loops deliberately NOT gated — an exit
+is a protection. `is None`, never truthiness: a genuinely empty account is a
+real zero and must keep trading.
+
+**A mutant that does not apply is not a passing test — this cost three false
+SURVIVED results in one pass.** Anchors silently failed to match (indentation
+guessed wrong; a regex hit a *different* `if r.status != 200: return None`
+earlier in the same file). The reliable method: locate the function via AST,
+slice the source by its own `lineno`/`end_lineno`, mutate inside that slice,
+and assert the replacement count changed. **Always confirm the mutation
+landed before reading the result.**
+
+**A substring can match a `def` line.** The new test found readers with
+`"get_open_positions(session)" in source`, which matched the function's own
+`async def get_open_positions(session):` — three readers instead of two. Match
+the call node, not the text.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those
