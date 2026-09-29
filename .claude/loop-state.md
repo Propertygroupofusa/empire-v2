@@ -696,6 +696,30 @@ landed before reading the result.**
 `async def get_open_positions(session):` — three readers instead of two. Match
 the call node, not the text.
 
+**The 50-row cap was deciding what the data appeared to say (fixed f87fa39).**
+`get_grid_trade_history` served 50 of 132 closed trades with nothing in the
+payload admitting it, and the endpoint called it with no arguments so the cap
+could not be raised. `limit` is now real, bounded by
+`GRID_TRADE_HISTORY_MAX_ROWS`, and the payload carries
+`recent_trades_truncated` / `recent_trades_omitted`. Truncation is computed
+from the TOTAL, not from `len == limit` — a complete 50-trade book served at
+limit=50 is not truncated, and flagging it would make the field noise.
+
+**The four-way exit_reason distribution is NOT yet readable.** At 00:45Z
+exactly 1 of 50 rows postdated the split: LINK-USD, +$4.13, `profit_target`
+(now earned via `_rise_hit`, not a fallthrough). The other 49 are legacy rows
+carrying the old binary label. **Do not report a distribution off that
+window** — re-read with a raised `limit` and filter on `closed_at` once more
+closes accumulate. The interesting question is whether any row is
+`parked_sell`.
+
+**Third substring check to prove less than it looked, same session.** The
+handler guard was `"except (TypeError, ValueError)" in seg`; a mutant kept
+that exact line and replaced its body with `raise`, and passed. Assert the
+handler's BEHAVIOUR (assigns a fallback, contains no `raise`), never that its
+header appears. Each time, the mutation is what caught it — the check never
+looked wrong on its own.
+
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
 called on all three of `place_maker_sell`'s None returns, and two of those
