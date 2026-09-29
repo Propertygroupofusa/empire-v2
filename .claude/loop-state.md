@@ -1182,6 +1182,35 @@ unprofitable slices are being stepped over by design.
 gross 3.211%, net 2.566% on $2,324.96 notional, mean slice $40.09. The
 edge is real; the turnover is what is missing.
 
+### slice_edge AUDITED — §6 IS ALREADY SERVED. DO NOT WIRE IT.
+
+`_net_edge_gate_ok` prices, **against the LIVE BOOK in the instant before
+the order**: the spread actually paid, the depth the slice would trade
+through, one completed step against the real round trip plus adverse
+selection priced off the coin's own volatility, and book pressure — that
+last in OBSERVE mode until its own logs justify enforcing it. It fails
+closed and persists its full reasoning to `entry_gate_json`.
+
+`slice_edge` takes numbers as ARGUMENTS and cannot see a book. Calling it
+from the buy path would put a second, WEAKER net-edge gate beside a working
+one — the specific thing this codebase forbids, and two gates that disagree
+is exactly how the exit_reason bug happened.
+
+**IT IS NOT PENDING WORK.** The note now lives in the module itself, not
+just here, so the next reader who finds it unconsumed does not assume the
+wiring was forgotten. A test pins that `crypto_grid_bot` neither imports
+nor references it.
+
+**The one idea it holds alone is the ADAPTIVE WIDENER, still OFF.** Turning
+it on is an unvalidated claim about the market, and a wider target that
+never fills is a slower engine. If evidence ever justifies it, that is
+where it lives. Until then the module is recorded reasoning, not a
+component — and that is a legitimate thing for it to be.
+
+**THE GENERAL RULE:** an unconsumed module that duplicates working
+machinery is not an asset. Same family as "a guard no mutant can kill is
+not a protection."
+
 ### EVERY PROFITABLE SLICE IS UNSELLABLE — measured 11:30Z
 
 7 of 80 open slices already clear the 1.0% parked-sell floor. **Not one of

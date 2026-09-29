@@ -40,6 +40,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Decisions
+# ─────────────────────────────────────────────────────────────────────────
+# AUDITED 2026-09-29: DO NOT WIRE THIS INTO THE BUY PATH.
+#
+# §6 is ALREADY SERVED, and by something strictly better.
+# crypto_grid_bot._net_edge_gate_ok prices, against the LIVE BOOK in the
+# instant before the order: the spread actually paid, the depth the slice
+# would trade through, one completed step against the real round trip plus
+# adverse selection priced off the coin's own volatility, and book
+# pressure - that last one in OBSERVE mode until its own logs justify
+# enforcing it. It fails closed, and it persists its full reasoning to
+# entry_gate_json.
+#
+# This module takes numbers as ARGUMENTS. It cannot see a book. Calling it
+# from the buy path would be writing a second, weaker net-edge gate beside
+# a working one, which is the specific thing this codebase forbids - and
+# two gates that disagree is how the exit_reason bug happened.
+#
+# IT IS NOT PENDING WORK. It is not waiting to be wired. Anyone who finds
+# it unconsumed and assumes the wiring was forgotten should read this note
+# instead, which is why the note is here rather than only in a commit.
+#
+# WHAT IT IS STILL GOOD FOR: the one idea it holds that nothing else does
+# is the ADAPTIVE WIDENER below - raising the required edge toward what
+# the market is actually offering. That hook is deliberately OFF
+# (allow_adaptive_widening=False) because turning it on is an unvalidated
+# claim about the market, and a wider target that never fills is a slower
+# engine, not a better one. If evidence ever justifies it, this is where
+# it lives. Until then this module is a recorded piece of reasoning, not a
+# component.
+# ─────────────────────────────────────────────────────────────────────────
+
 SET_TARGET = "SET_TARGET"
 DO_NOT_TRADE = "DO_NOT_TRADE"
 REFUSED = "REFUSED"

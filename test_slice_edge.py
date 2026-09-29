@@ -125,6 +125,33 @@ _imports |= {n.name.split(".")[0] for a in ast.walk(tree)
 ok("it imports no market data of its own", not (_imports & {"aiohttp", "requests"}),
    str(_imports))
 
+print("== it is NOT a second net-edge gate, and must not become one ==")
+# Audited 2026-09-29: _net_edge_gate_ok already prices spread, depth, the
+# real round trip and adverse selection against the LIVE BOOK, fails
+# closed, and persists entry_gate_json. This module takes numbers as
+# arguments and cannot see a book. Wiring it into the buy path would put a
+# weaker second gate beside a working one.
+import ast as _ast
+_grid = _ast.parse(open("crypto_grid_bot.py").read())
+_uses = [n for n in _ast.walk(_grid) if isinstance(n, _ast.Name) and n.id == "slice_edge"]
+_uses += [n for n in _ast.walk(_grid) if isinstance(n, _ast.Attribute)
+          and isinstance(n.value, _ast.Name) and n.value.id == "slice_edge"]
+ok("crypto_grid_bot does not call it", not _uses, f"{len(_uses)} reference(s)")
+_imports = {(a.asname or a.name) for n in _ast.walk(_grid)
+            if isinstance(n, _ast.Import) for a in n.names}
+_imports |= {n.module for n in _ast.walk(_grid) if isinstance(n, _ast.ImportFrom) and n.module}
+ok("  and does not import it", "slice_edge" not in _imports, str(sorted(x for x in _imports if x)))
+# The real gate is still there and still the one that decides.
+ok("the real gate still exists",
+   any(isinstance(n, _ast.AsyncFunctionDef) and n.name == "_net_edge_gate_ok"
+       for n in _ast.walk(_grid)))
+# The adaptive widener - the one idea this module holds alone - stays off.
+import inspect as _inspect
+_sig = _inspect.signature(se.plan_edge)
+ok("the adaptive widener is still off by default",
+   _sig.parameters["allow_adaptive_widening"].default is False,
+   str(_sig.parameters["allow_adaptive_widening"].default))
+
 print()
 if failures:
     print("FAILED %d check(s): %s" % (len(failures), ", ".join(failures)))
