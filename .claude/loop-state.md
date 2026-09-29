@@ -1085,6 +1085,48 @@ reason the constants are.
 1e-9, 1e12 and "1E+3". Dropped from the harness rather than "killed" with
 an assertion about spelling.
 
+### WHY NOTHING HAS TRADED — measured 10:35Z, and NOT attributable yet
+
+    last BUY   2026-09-29T06:28:50Z  HBAR-USD  (~4h07m ago)
+    last SELL  2026-09-29T08:25:52Z  BTC-USD   (~2h10m ago)
+
+**It is NOT a stall.** Heartbeat 56s old, stage `cycled`, lease held by
+web:1. 11 of 23 branches have room (JASMY-USD holds 0 of 3).
+`real_free_cash_usd` $311.20, above the $150 floor. Nothing is paused,
+locked or inactive; 2 branches are drawdown-breached, which does not stop
+their sells.
+
+**TWO GATES — DO NOT CONFLATE THEM. I nearly did.**
+`pipeline.per_coin[*].latest.expected_net_edge_pct` is NEGATIVE for all 18
+scoreable coins (best ETH −0.7156%, median 0.94pp short). That is
+`opportunity_signals`, which grid-status itself labels **observation only**.
+It is NOT the grid's buy gate and must not be reported as the reason the
+fleet is not buying.
+
+The grid's own gate writes to the activity feed as GATE_PASS /
+GATE_BLOCK / GATE_OBSERVE. Read at 10:35Z:
+- 19 GATE_PASS, newest **06:28:41Z** — nine seconds before the last buy,
+  with healthy edges (+1.855% on a 3.00% move, +1.933%, +1.040%).
+- 14 GATE_BLOCK, **every one** "order book unavailable - cannot price the
+  spread", across 8 products — but spanning 28 Sep 14:19Z → **29 Sep
+  02:26Z**. The newest is 8+ hours old, so this is **NOT** the current
+  cause. Worth knowing the failure mode exists and fails closed correctly.
+
+**So the drought is NOT attributable from what is readable.** No gate event
+of any kind since 06:28Z. The feed is capped at 120 rows but spans 18
+hours, so the sparsity is real rather than trimming. Do not pick a cause;
+say "buys idle ~4h, cause not established" until there is evidence.
+
+**Sells are a separate story:** `maker_only_skipped_cycles` = 5,745 sell /
+28 buy. Maker sells rest and do not fill and there is no taker fallback —
+the owner's own choice, working as configured. Every recent sell logs
+"sold the oldest PROFITABLE (skipped a stuck older) real slice", so older
+unprofitable slices are being stepped over by design.
+
+**Realized edge when it DOES trade (58 trades since the 26 Sep epoch):**
+gross 3.211%, net 2.566% on $2,324.96 notional, mean slice $40.09. The
+edge is real; the turnover is what is missing.
+
 ### §1 WRITE IS UNVERIFIED ON LIVE DATA — that is UNKNOWN, not working
 
 Read at 10:20Z, right after e1606ef deployed: **all 80 slices have
@@ -1096,6 +1138,11 @@ stamps only happen on a NEW buy or a partial fill. Nothing has bought since.
 So the state of this change is UNKNOWN, and it stays UNKNOWN until a buy
 lands — the same third verdict this whole session has been insisting on,
 applied to my own work.
+
+**Still zero populated at 10:35Z — but the newest slice opened 06:28:50Z,
+so no buy has happened since the write shipped and it has had NO CHANCE to
+fire. Still UNKNOWN. Check the last-buy time before drawing any conclusion
+from a zero count.**
 
 **VERIFY IT EACH PASS:** pull grid-status and count
 `slice_state is not None` across all slices. The FIRST populated row should
