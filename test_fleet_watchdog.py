@@ -54,6 +54,8 @@ def healthy():
             "heartbeat": {"age_seconds": 20},
             "maker_only_skipped_cycles": {"buy": 1},
             "maker_expiry_drift": {"buy": 1},
+            "order_refusals": {"available": True, "by_product": {},
+                               "product_rules_unreadable": []},
             # A fleet closing about once an hour, last close an hour ago.
             "realized_edge": {"available": True,
                               "current": {"closes_per_day": 24.0,
@@ -404,6 +406,51 @@ out = run(d, BASE_SNAP)
 ok("PARKED_RETRY_LOOP when an escape sell will not fill",
    "PARKED_RETRY_LOOP" in out, out)
 ok("and it names the coin", "LINK-USD" in out, out)
+
+# ORDER_REFUSED: /grid-status publishes the venue's own refusal reasons and
+# nothing was reading them. Two live passes were spent inferring from slice
+# shapes what this field states outright - LINK requesting 0.009999999999998899
+# against a 0.01 increment, QNT holding 0.00097323 of a claimed 0.337991.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["order_refusals"] = {
+    "available": True,
+    "by_product": {"LINK-USD": "REQUEST_BELOW_BASE_INCREMENT: 0.0099999 requested"},
+    "product_rules_unreadable": []}
+out = run(d, BASE_SNAP)
+ok("ORDER_REFUSED when a product cannot place an order", "ORDER_REFUSED" in out)
+ok("and the venue's reason is passed through verbatim, not categorised",
+   "REQUEST_BELOW_BASE_INCREMENT: 0.0099999 requested" in out, out)
+
+# A newly refused product is a change; the same one standing is not.
+SNAP_REF = dict(BASE_SNAP, refused_products=["LINK-USD"])
+out = run(d, SNAP_REF)
+ok("a standing refusal stays a WARN", "CRITICAL ORDER_REFUSED" not in
+   out.replace("CRITICAL  ORDER_REFUSED", "CRITICAL ORDER_REFUSED"), out)
+ok("and says the products are unchanged", "same products as last pass" in out, out)
+
+d2 = healthy()
+d2["/api/trading-dashboard/grid-status"]["order_refusals"] = {
+    "available": True,
+    "by_product": {"LINK-USD": "a", "QNT-USD": "b"},
+    "product_rules_unreadable": []}
+out = run(d2, SNAP_REF)
+ok("a NEWLY refused product escalates to CRITICAL",
+   "CRITICAL" in out and "QNT-USD newly refused" in out, out)
+
+# Unreadable product rules hide refusals, so they are a gap, not silence.
+d3 = healthy()
+d3["/api/trading-dashboard/grid-status"]["order_refusals"] = {
+    "available": True, "by_product": {},
+    "product_rules_unreadable": ["FOO-USD"]}
+out = run(d3, BASE_SNAP)
+ok("unreadable product rules are reported as a gap",
+   "would be invisible" in out, out)
+
+d4 = healthy()
+d4["/api/trading-dashboard/grid-status"]["order_refusals"] = {"available": False}
+out = run(d4, BASE_SNAP)
+ok("an unavailable refusal feed is a gap, not a quiet pass",
+   "order_refusals unavailable" in out, out)
 
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]

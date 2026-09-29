@@ -299,6 +299,41 @@ def main():
                  f"against {money(book)} locked in the branch. Selling it "
                  f"releases nothing - this branch has no real way out.")
 
+    # ---- 4c. The venue's own refusal reasons -------------------------------
+    #
+    # /grid-status has published `order_refusals` all along, naming each
+    # blocked product and WHY, and nothing was reading it. Two passes were
+    # spent inferring from slice shapes what this field states outright -
+    # that is the watchdog's failure, not the fleet's, and it is exactly the
+    # kind of gap this file exists to close. A first-class diagnostic the
+    # system already emits is the first thing an overseer should read.
+    #
+    # Reported verbatim. These reasons come from the exchange's own rules and
+    # the fleet's reading of them; paraphrasing them into a category would
+    # throw away the numbers that say what to do about each one.
+    refus = grid.get("order_refusals") or {}
+    if not refus.get("available"):
+        gaps.append("order_refusals unavailable - cannot see venue refusals")
+    else:
+        by_product = refus.get("by_product") or {}
+        cur["refused_products"] = sorted(by_product)
+        prev_refused = prev.get("refused_products")
+        if by_product:
+            joined = ([p2 for p2 in sorted(by_product) if p2 not in prev_refused]
+                      if prev_refused is not None else [])
+            level = CRITICAL if joined else WARN
+            head = (f"{len(by_product)} product(s) cannot place an order"
+                    + (f" - {', '.join(joined)} newly refused" if joined else
+                       " - same products as last pass" if prev_refused is not None
+                       else ""))
+            flag(level, "ORDER_REFUSED", head)
+            for p2 in sorted(by_product):
+                flag(level, "ORDER_REFUSED", f"  {p2}: {by_product[p2]}")
+        unreadable = refus.get("product_rules_unreadable") or []
+        if unreadable:
+            gaps.append(f"product rules unreadable for {', '.join(unreadable)} - "
+                        f"a refusal there would be invisible")
+
     # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
     #
     # The grid marks an adopted slice against a reference price nobody paid,
