@@ -11583,8 +11583,16 @@ async def resting_stops_preview():
     _unstopped = None
     try:
         _unstopped = await crypto_grid_bot_module.products_without_a_grid_stop()
-    except Exception:
-        pass
+    except Exception as _exc:
+        # LOGGED, not passed. A bare `except: pass` here is how a coverage read
+        # that stopped working would go on reporting "unknown" forever with
+        # nothing to say why - and unknown is indistinguishable from a read the
+        # caller never made. None still reaches plan_stop, which is the safe
+        # direction; the difference is that now somebody can find out.
+        log.warning(f"[dashboard] grid stop coverage unreadable "
+                    f"({type(_exc).__name__}: {_exc}) - every asset will report "
+                    f"stop_coverage_unknown, which is NOT a claim that they are "
+                    f"covered")
 
     plans = []
     for row in (watch.get("rows") or []):
@@ -11596,7 +11604,12 @@ async def resting_stops_preview():
             asset, units_available=row.get("units"), price=row.get("price"),
             stop_price=row.get("stop_level"), base_increment=bi,
             quote_increment=qi, base_min_size=bms,
-            actively_traded=_protected))
+            # _unstopped, not omitted. Left off, plan_stop defaults it to None,
+            # which means UNKNOWN - so every asset landed in
+            # stop_coverage_unknown and the gap this endpoint was changed to
+            # show reported as unreadable for all 49. The safety default
+            # swallowed the wiring bug into a plausible-looking answer.
+            actively_traded=_protected, unstopped=_unstopped))
 
     out = resting_stops.summarise(plans, os.getenv(resting_stops.MODE_ENV))
     out["is_a_preview_not_an_order"] = True

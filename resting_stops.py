@@ -415,6 +415,19 @@ def summarise(plans, mode):
         # Assets whose grid stop could not be read at all. Not counted as
         # covered and not counted as a gap - reported as neither.
         "stop_coverage_unknown": sorted(p["asset"] for p in unknown),
+        # EVERY asset unknown is a different statement from one asset unknown,
+        # and it must not read the same. Live 2026-09-29 the dashboard forgot
+        # to pass `unstopped` at all, plan_stop defaulted it to None, and all
+        # 49 assets came back "unknown" - which looked like a legitimate read
+        # failure rather than a call site missing an argument. The safety
+        # default swallowed the wiring bug.
+        "stop_coverage_unreadable": bool(plans) and len(unknown) == len(plans),
+        "stop_coverage_unreadable_note": (
+            "EVERY asset's grid stop read as unknown. One asset unknown is a gap in "
+            "the data; ALL of them is the coverage map not arriving at all - check "
+            "that the caller passes `unstopped` and that "
+            "crypto_grid_bot.products_without_a_grid_stop() is not raising."
+            if plans and len(unknown) == len(plans) else None),
         "uncovered_note": (
             "uncovered means NO automatic exit from either layer: the grid branch "
             "names a stop of 0 and this layer is not resting one either. It is a "
