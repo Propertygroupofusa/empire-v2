@@ -743,6 +743,10 @@ computation I did read.
 
 ## EXECUTION REBUILD — in progress (owner spec, 26 sections)
 
+**The spec's own text is at `.claude/EXECUTION_REBUILD_SPEC.md`** — verbatim, recovered from the transcript after it was compacted out of
+context. Read the section there before building it. Do not reconstruct a
+section from these notes; the notes record what was MEASURED against it.
+
 **Section 3/4 landed. The rest is not built yet.** Do not report the whole
 spec as done.
 
@@ -802,14 +806,45 @@ rejection. Pinned by a test so it is not "fixed" without that reasoning.
 (what the bot uses) publishes both minimums. Absent means the rule is not
 asserted, NEVER that it passed.
 
-**NOT built yet (§1, 2, 5–10, 12–24):** the three-slice state machine with
-per-slice targets, event-driven fill→next-order, cycle rotation,
-idempotency keys, restart reconciliation, the dashboard and the speed
-metrics. `CryptoGridSlice` already carries a per-slice `entry_price`, and
-`_pick_profitable_slice_to_sell` + `_grid_slice_net_pnl` + `_slice_rate`
-already compute per-slice net economics — so §5's per-slice targets are
-closer than the spec assumes. The GRID TRIGGER is the part that uses one
-global `reference_price` for all slices.
+### Pure modules written — NONE OF THEM ARE WIRED YET
+
+Four more modules exist with tests and passed mutation testing. **Nothing
+in the live trading path imports any of them.** Writing a module is not
+shipping a behaviour; do not report these as changing what the bot does.
+
+| module | spec | what it decides |
+|---|---|---|
+| `slice_lifecycle.py` | §1 | the 13 states and every legal move between them; `state_from_inventory` deliberately RAISES — slice state is persisted, never inferred from the wallet |
+| `slice_target.py` | §5 | the exact inverse of `_grid_slice_net_pnl`; rounds a sell target UP (down would give away the edge) |
+| `slice_edge.py` | §6 | the floor that binds; `DO_NOT_TRADE` when the market cannot clear it. **The adaptive widener is deliberately NOT built** — `allow_adaptive_widening=False`, it needs evidence first |
+| `order_idempotency.py` | §23 | the client_order_id IS the hashed intent |
+
+**§5's formula in the spec undershoots.** At a 0.70% round trip and a 1.20%
+required edge it realises 1.19335% — short by 0.00665 points, always the
+same direction. `slice_target` uses the exact inverse instead; a test pins
+the realised edge to the requested one.
+
+**§23, measured:** ten call sites build `client_order_id` as
+`str(uuid.uuid4())`. That is the VENUE'S duplicate key, so the system has
+no duplicate protection at any layer — a retry or a twice-delivered event
+opens a real second position. `COID_PREFIX = "rstop-"` is load-bearing:
+`free_locked_inventory` filters on it to cancel only this system's stops,
+so the prefix survives unhashed and an over-long one refuses rather than
+being truncated.
+
+**Four times now the spec has assumed less exists than does.**
+`_net_edge_gate_ok` already prices spread, depth, real round trip and
+adverse selection and fails closed; `resting_stops.round_down` IS
+`floor_to_increment`; `CryptoGridSlice` already persists `entry_price` AND
+`entry_fee_rate`; `_pick_profitable_slice_to_sell` + `_grid_slice_net_pnl`
++ `_slice_rate` already compute per-slice net economics. **Read before
+building.** The GRID TRIGGER is the one place still using a single global
+`reference_price` for all slices.
+
+**NOT built at all (§7–§10, §12–§22, §24):** event transport, cycle
+rotation, fill accounting, restart reconciliation, the dashboard and the
+speed metrics — and the wiring that would make any of the four modules
+above actually run.
 
 ## Grid config
 
