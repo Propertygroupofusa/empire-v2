@@ -1146,6 +1146,103 @@ class CryptoGridSlice(Base):
     # a later reader would compute lifetime returns that never happened.
     adopted = Column(Boolean, nullable=True, default=False)
 
+    # ---- §1: SLICE STATE, PERSISTED AND NEVER INFERRED -------------------
+    #
+    # The spec's first requirement is that each slice have its own
+    # persistent state, and its first prohibition is "do NOT infer slice
+    # state from wallet balance alone". Until these columns existed a
+    # slice's EXISTENCE was its state - there was nothing else - so the
+    # only way to answer "what is this slice doing?" was to look at the
+    # wallet, which is exactly what the spec forbids and what
+    # slice_lifecycle.state_from_inventory() refuses to do by raising.
+    #
+    # EVERY ONE OF THESE IS NULLABLE, AND NULL MEANS UNKNOWN.
+    # main.py's reflection loop adds missing columns ALWAYS nullable
+    # regardless of what is declared here, and there is no Alembic - so a
+    # NOT NULL default would be a lie the database never enforced. NULL is
+    # also the honest value for every row that already exists: their state
+    # genuinely is unknown, and a default like CREATED would be a claim
+    # about history nobody observed.
+    #
+    # THE FLEET DOES NOT RUN THREE SLICES. The spec models each position as
+    # exactly SLICE 1/3, 2/3, 3/3. A live branch runs up to its own
+    # num_levels rungs (default 10), and _pick_profitable_slice_to_sell
+    # takes a list of whatever exists. So slice_index records WHICH RUNG
+    # this slice is, and no three-ness is imposed - forcing three would
+    # change how the grid itself trades, which is not what a persistence
+    # change is for.
+    #
+    # INDEXES DECLARED HERE ARE NOT CREATED ON AN EXISTING TABLE. The
+    # reflection loop issues ALTER TABLE ... ADD COLUMN and nothing else, so
+    # index=True below describes the model, not the live table. Nothing
+    # queries these columns yet, so there is no cost today - but whatever
+    # first does must create the index itself rather than assume this line
+    # produced one.
+    #
+    # The cycle this slice was opened in. The discriminator that lets two
+    # deciders inside one cycle agree they mean the same order, which is
+    # what makes an event loop safe beside the 30s polling loop.
+    cycle_id = Column(String, nullable=True, index=True)
+    # One of slice_lifecycle's 13 states. NULL = UNKNOWN, which is a third
+    # verdict and never a pass.
+    slice_state = Column(String, nullable=True)
+    # Which rung, not "which third". See above.
+    slice_index = Column(Integer, nullable=True)
+    # The sell price this slice is working toward, from slice_target - the
+    # exact inverse of _grid_slice_net_pnl for THIS slice's own entry.
+    target_price = Column(Float, nullable=True)
+    # WHY that target, so a number on the page can be argued with.
+    target_reason = Column(String, nullable=True)
+
+    # ---- the venue's side of the same slice ----
+    #
+    # THIS IS THE COLUMN §24 STEP 7 WAS MISSING. "Reconcile order states"
+    # had nothing to reconcile against: an open order at the exchange could
+    # not be matched to the slice that placed it, because no slice recorded
+    # an order id. Coinbase's fills feed carries order_id and NOT
+    # client_order_id (checked against a real fill), so order_id is the
+    # join key that actually works.
+    order_id = Column(String, nullable=True, index=True)
+    order_side = Column(String, nullable=True)
+    order_price = Column(Float, nullable=True)
+    # WHY the order went out as it did - or why it did not.
+    execution_reason = Column(String, nullable=True)
+
+    # ---- what actually filled, which is never assumed to be what was asked
+    #
+    # §15: "Never assume the requested order quantity equals the filled
+    # quantity." qty above is what this slice HOLDS; these record what the
+    # venue reported on the order working against it, which is what makes
+    # the PARTIAL state expressible at all.
+    filled_quantity = Column(Float, nullable=True)
+    average_fill_price = Column(Float, nullable=True)
+    filled_at = Column(DateTime, nullable=True)
+    # When the STATE last moved - not when the row was last touched. A
+    # generic updated_at would be stamped by an excursion update every
+    # cycle and could never answer "how long has this slice been stuck in
+    # SUBMITTING?", which is the question it exists for.
+    state_updated_at = Column(DateTime, nullable=True)
+
+    # DELIBERATELY NOT PERSISTED, each for its own reason:
+    #
+    # base_increment / base_min_size / quote_increment / quote_min_size -
+    #   the spec lists these per slice. They are PRODUCT metadata, read
+    #   live by get_product_rules(), and a persisted copy can go stale.
+    #   Sizing an order against a rule the venue no longer has is the exact
+    #   class of bug §3 is about; a stale copy would reintroduce it while
+    #   looking like extra rigour.
+    # executable_quantity -
+    #   computed live by execution_quantity from the CURRENT rules and the
+    #   CURRENT balance. Stored, it is a sizing decision preserved past the
+    #   moment it was true.
+    # remaining_quantity -
+    #   qty minus filled_quantity. A stored copy is a second source of
+    #   truth that can disagree with the two numbers it came from.
+    # realized_pnl -
+    #   an OPEN slice has none. Realized P&L is booked to
+    #   CryptoGridTradeHistory.pnl when the round trip closes, and that is
+    #   the only place it is real.
+
 
 class ShortTermSignal(Base):
     """One short-horizon opportunity score, and what the market did next.

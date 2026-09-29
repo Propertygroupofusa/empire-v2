@@ -1043,6 +1043,48 @@ Three independent measurements now point at the same missing thing:
 §24 recovery, §7/§8 event transport, and §23's wiring are ALL blocked on
 §1's persisted slice state. **§1 IS THE NEXT BUILD.**
 
+### §1 PERSISTENCE — the 13 columns landed. NOTHING WRITES THEM YET.
+
+`CryptoGridSlice` gained: `cycle_id`, `slice_state`, `slice_index`,
+`target_price`, `target_reason`, `order_id`, `order_side`, `order_price`,
+`execution_reason`, `filled_quantity`, `average_fill_price`, `filled_at`,
+`state_updated_at`. **`order_id` is the column §24 step 7 was missing** —
+Coinbase's fills feed carries `order_id` and NOT `client_order_id`, so it
+is the join key that actually works.
+
+**All nullable, no defaults.** NULL = UNKNOWN. A `CREATED` default would
+claim every existing row started there and was observed doing so.
+
+**THE FLEET DOES NOT RUN THREE SLICES.** The spec models every position as
+1/3, 2/3, 3/3. A branch runs up to its own `num_levels` rungs (default
+**10**), and `_pick_profitable_slice_to_sell` takes whatever list exists.
+`slice_index` records WHICH RUNG; no three-ness is imposed. Forcing three
+would change how the grid trades, which a persistence change must not do.
+
+**DELIBERATELY NOT PERSISTED, each for a reason** — do not "complete" the
+spec's field list by adding them:
+- `base_increment`/`base_min_size`/`quote_increment`/`quote_min_size` —
+  PRODUCT metadata, read live by `get_product_rules()`. A stale copy would
+  size an order against a rule the venue no longer has: the exact bug §3
+  exists to remove, wearing the costume of extra rigour.
+- `executable_quantity` — a sizing decision preserved past the moment it
+  was true.
+- `remaining_quantity` — `qty - filled_quantity`; a stored copy is a second
+  source of truth that can disagree with the two numbers it came from.
+- `realized_pnl` — an OPEN slice has none. It is booked to
+  `CryptoGridTradeHistory.pnl` when the round trip closes.
+
+**INDEXES DECLARED ARE NOT INDEXES CREATED.** main.py's reflection loop
+issues `ALTER TABLE ... ADD COLUMN` and nothing else, so `index=True` on
+`cycle_id`/`order_id` describes the MODEL, not the live table. Nothing
+queries them yet so there is no cost today — but whatever first does must
+create the index itself.
+
+**NEXT: write them.** The columns are inert until `run_grid_branch_cycle`
+stamps state transitions and records `order_id` on placement. That is the
+step that makes §24 and §7/§8 buildable, and it is a real behaviour change
+(writes on the live order path), so it wants care.
+
 ### §7/§8 — THE BLOCKER IS §1's PERSISTENCE, not the transport
 
 Measured 2026-09-29: there is **no WebSocket client anywhere in the repo** —
