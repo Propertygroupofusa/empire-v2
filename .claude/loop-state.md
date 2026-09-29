@@ -965,11 +965,19 @@ now name BOTH numbers. When both are under one unit the WALLET wins, since
 changing the request cannot help. Nothing branches on these codes — they
 are reported, not dispatched on — so splitting them was free.
 
-**STILL OPEN: why does something request a sub-increment LINK quantity?**
-The live payload will now say so directly. If a SLICE carries less than one
-increment, that slice can never close — the QNT situation at slice level
-rather than wallet level. Read `order_refusals.by_product` after the deploy
-and find out; do not guess.
+**LINK CLEARED BEFORE THE FIX DEPLOYED, so its cause was never captured.**
+At 09:03Z the list is ALGO and QNT only, both correctly wallet-bound with
+the request now shown (ALGO: 279.4 requested vs 0.046389 held; QNT: 0.338
+requested vs 0.00097323 held). **Do not invent a reason for the LINK
+entry** — it was observed once, at 08:56Z, and was gone by the next read.
+If it recurs the new codes will name the side; until then it is unexplained,
+not explained.
+
+**THE PRODUCTS ENDPOINT IS NOT FLAKY — measured, not assumed.**
+`product_rules_unreadable_count` is 0 across two reads (08:56Z, 09:03Z).
+That is the post-deploy watch 6a95d4d created, and it is answered: the
+fail-closed refusal has not fired once. Keep reading it each pass; only a
+NON-ZERO count is a finding for the owner.
 
 **THE LESSON: the first read of grid-status showed no refusals and that
 proved nothing, because grid-status did not expose them yet.** The finding
