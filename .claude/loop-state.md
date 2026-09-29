@@ -1182,6 +1182,46 @@ unprofitable slices are being stepped over by design.
 gross 3.211%, net 2.566% on $2,324.96 notional, mean slice $40.09. The
 edge is real; the turnover is what is missing.
 
+### EVERY PROFITABLE SLICE IS UNSELLABLE — measured 11:30Z
+
+7 of 80 open slices already clear the 1.0% parked-sell floor. **Not one of
+them can be sold**, and the blockers are two things already tracked
+SEPARATELY that nobody had connected to "why nothing sells":
+
+    slice                net      value    blocker
+    QNT-USD  x2       +56.86%   $30.94 ea  SHORTFALL: claims 0.675982,
+                                           holds 0.000973 ($170.97 short).
+                                           Also do-not-touch.
+    ALGO-USD          +13.84%   $ 4.48     100% RESERVED ($150.66)
+    LINK-USD (stuck)   +6.34%   $ 0.01     below one increment
+    XLM-USD            +6.09%   $ 7.28     100% RESERVED ($458.49)
+    LINK-USD           +4.10%   $ 1.86     97% RESERVED ($101.70)
+    TIA-USD            +3.81%   $ 0.02     SHORTFALL: claims 89.78,
+                                           holds 0.000000 ($41.26 short)
+
+**BE PRECISE ABOUT THE DOLLARS — do not headline $75.53.**
+Genuinely bankable if the resting orders were released: **$13.62**
+(ALGO $4.48 + XLM $7.28 + LINK $1.86). The QNT $61.88 is against an
+ADOPTED basis, the coin is not held, and QNT is do-not-touch — it is not
+bankable at all. TIA $0.02 and the stuck LINK $0.01 are rounding.
+
+**THE STRUCTURAL POINT IS BIGGER THAN THE DOLLARS.** The parked sell exists
+precisely to create turnover when the grid trigger will not fire. Right now
+it is fully blocked: every slice it could act on is either reserved at the
+venue or is coin the books claim and the wallet does not hold. So BOTH
+halves of turnover are stopped, for two unrelated reasons:
+  BUY  — no dip (correct, nothing to fix)
+  SELL — the only profitable slices are unreachable
+
+**73 of 80 slices are underwater.** Distribution: min −14.95%, p25 −4.84%,
+median −2.71%, p75 −0.95%, max +56.86%; only 8 above water at all. So even
+unblocked, there is little else to sell. That is the market, not a fault.
+
+**THE REMEDY IS THE OWNER'S, NOT MINE.** Releasing reserved units means
+`free-locked-inventory`, which is WRITE-GUARDED and cancel-only, and its own
+text says cancelling a resting sell "gives up the protection it was armed
+for, so it is a decision to take deliberately." **Report it; never call it.**
+
 ### §5 IS WIRED — every new slice carries its OWN take-profit target
 
 `slice_target.target_price()` is now called at the buy, and
