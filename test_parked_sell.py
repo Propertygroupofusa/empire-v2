@@ -92,18 +92,91 @@ ok("this is not a second path around it",
 # line is here rather than the weaker one.
 ok("the gate compares against the floor, not against zero",
    "GRID_PARKED_MIN_NET_PCT" in CYCLE)
+# The floor comparison moved out of the cycle body and into
+# _pick_parked_slice_to_sell, which now picks the BEST qualifying slice
+# rather than the first positive one. Every property below is unchanged and
+# still required - they are asserted where the decision now lives, plus a
+# guard that the cycle really calls it, so none of them can be satisfied by
+# code the cycle never reaches. Re-pointing a guard at moved logic is the
+# job; weakening it because the string moved is how a real protection dies.
+PARKED_PICK = fn("_pick_parked_slice_to_sell")
+PARKED_LOGIC = CYCLE + "\n" + PARKED_PICK
+ok("the cycle actually calls the parked picker, so it is not dead code",
+   "_pick_parked_slice_to_sell(" in CYCLE)
 ok("and it is a >= against that constant, not a > against 0",
-   ">= GRID_PARKED_MIN_NET_PCT" in CYCLE)
+   ">= floor_pct" in PARKED_PICK
+   and "GRID_PARKED_MIN_NET_PCT)" in CYCLE)
 ok("the constant exists at module level", "GRID_PARKED_MIN_NET_PCT" in SRC)
 ok("it is 1.0% by default", abs(grid.GRID_PARKED_MIN_NET_PCT - 0.010) < 1e-9)
 ok("comfortably above the repo's own fee floor",
    grid.GRID_PARKED_MIN_NET_PCT > 0.009)
 ok("it is measured NET of fees, not gross",
-   "_grid_slice_net_pnl(_cand.qty" in CYCLE)
+   "_grid_slice_net_pnl(s.qty, s.entry_price, price," in PARKED_LOGIC)
 ok("and as a share of the slice's own basis, not dollars",
-   "_net / _basis" in CYCLE)
-ok("a zero basis cannot divide", "_basis > 0" in CYCLE)
+   "net / basis" in PARKED_LOGIC)
+ok("a zero basis cannot divide", "basis <= 0" in PARKED_LOGIC)
 ok("it is settable", "GRID_PARKED_MIN_NET_PCT" in SRC and "os.getenv" in SRC)
+
+# --- the defect the picker change exists to remove -------------------------
+#
+# The old gate asked _pick_profitable_slice_to_sell for a candidate. That
+# function returns the FIRST slice netting anything at all, oldest-first.
+# On a parked branch with a floor under it, an oldest slice at +0.1% masks a
+# newer one at +3.0%: the gate refuses, no sale happens, and a branch that
+# could have got out stays locked. Measured on the live fleet the moment this
+# was written, 0 of 12 full branches were in that state - so this is a latent
+# defect, not today's cause, and it gets worse as slice counts grow (SHIB was
+# already carrying 10 slices, LTC and ZEC 7 each).
+class _S:
+    def __init__(self, qty, entry):
+        self.qty, self.entry_price = qty, entry
+        self.adopted = False
+        self.entry_fee_rate = 0.0
+        self.order_side = "BUY"
+
+
+# Zero fees, so net% is just the price move: entry 100 at price 101 is +1%.
+_marginal = _S(1.0, 100.90)   # +0.099% at 101 - positive, under the floor
+_good = _S(1.0, 98.00)        # +3.06%   at 101 - clears the floor
+_book = [_marginal, _good]    # oldest first, exactly the blocking order
+
+_first = grid._pick_profitable_slice_to_sell(_book, 101.0, 0.0, 0.0)
+ok("the FIFO picker really does return the marginal slice first",
+   _first is _marginal,
+   "if this fails the scenario below proves nothing about the defect")
+
+_pick, _pct = grid._pick_parked_slice_to_sell(_book, 101.0, 0.0, 0.0,
+                                              grid.GRID_PARKED_MIN_NET_PCT)
+ok("the parked picker looks past it and finds the qualifying slice",
+   _pick is _good, f"got {_pick!r} at {_pct!r}")
+ok("and reports that slice's own net percentage",
+   _pct is not None and abs(_pct - 0.0306122) < 1e-4, f"{_pct!r}")
+
+# Nothing is loosened: the floor is unchanged and still binding.
+_under = [_S(1.0, 100.90), _S(1.0, 100.50)]   # +0.099% and +0.497%
+_pick, _pct = grid._pick_parked_slice_to_sell(_under, 101.0, 0.0, 0.0,
+                                              grid.GRID_PARKED_MIN_NET_PCT)
+ok("a book where NOTHING clears the floor still sells nothing",
+   _pick is None, f"got {_pick!r} at {_pct!r}")
+
+_losing = [_S(1.0, 120.0), _S(1.0, 130.0)]
+_pick, _ = grid._pick_parked_slice_to_sell(_losing, 101.0, 0.0, 0.0,
+                                           grid.GRID_PARKED_MIN_NET_PCT)
+ok("and a book that is entirely underwater can never be sold here",
+   _pick is None, f"got {_pick!r}")
+
+_best = [_S(1.0, 98.0), _S(1.0, 90.0), _S(1.0, 99.0)]
+_pick, _ = grid._pick_parked_slice_to_sell(_best, 101.0, 0.0, 0.0,
+                                           grid.GRID_PARKED_MIN_NET_PCT)
+ok("among several qualifying slices it takes the best one",
+   _pick is _best[1], f"got entry {getattr(_pick, 'entry_price', None)!r}")
+
+# The sale must hand over the slice the gate certified, not re-pick with the
+# FIFO function - otherwise the gate passes on +3.0% and the sale sells +0.1%.
+ok("the parked route sells the slice its own gate chose",
+   "oldest = _parked_slice" in CYCLE)
+ok("and only when the parked route is what fired",
+   "_parked_sell and not _rise_hit" in CYCLE)
 
 
 def would_sell(net_pct, parked, floor=None):

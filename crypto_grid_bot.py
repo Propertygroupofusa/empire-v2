@@ -5570,6 +5570,48 @@ def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_ra
     return None
 
 
+def _pick_parked_slice_to_sell(slices: list, price: float, round_trip_fee_rate: float = None,
+                               exit_leg_rate: float = None, floor_pct: float = 0.0):
+    """The BEST slice that clears the parked floor, not the first one in the
+    book that happens to be positive.
+
+    _pick_profitable_slice_to_sell above walks oldest-first and returns the
+    first slice netting anything at all. For the grid's own rise trigger that
+    is right: FIFO is the deliberate tie-break, and any profit clears a gate
+    with no floor under it.
+
+    The parked route asks a different question. It has a floor
+    (GRID_PARKED_MIN_NET_PCT), and it is the ONLY way out of a branch that is
+    full on its rungs - such a branch cannot buy, and will not sell below
+    entry, which is the state that produced sixteen days of zero closes from
+    2026-09-10. Handing that floor the first marginally-positive slice means
+    an oldest slice at +0.1% masks a newer one at +3.0%: the gate refuses,
+    no sale happens, and the branch stays locked with a qualifying slice
+    sitting in it. The floor is not the thing that failed - it never got
+    shown the slice that satisfied it.
+
+    So here: consider every slice, keep only those that clear the floor on
+    their own basis, and return the best of them. Nothing is loosened. A
+    candidate must still net a real profit AND still clear the same floor;
+    this only stops the branch from being judged by a slice that was never
+    the one being offered. FIFO remains the tie-break between equals.
+
+    Returns (slice, net_pct) or (None, None) when nothing qualifies.
+    """
+    best = None
+    best_pct = None
+    for s in slices:
+        basis = (s.qty or 0) * (s.entry_price or 0)
+        if basis <= 0:
+            continue
+        net = _grid_slice_net_pnl(s.qty, s.entry_price, price,
+                                  _slice_rate(s, round_trip_fee_rate, exit_leg_rate))
+        pct = net / basis
+        if pct >= floor_pct and (best_pct is None or pct > best_pct):
+            best, best_pct = s, pct
+    return best, best_pct
+
+
 def _grid_branch_real_equity(branch: CryptoGridBranch, slices: list, price: float) -> float:
     """Real live equity for one grid branch right now - allocated_usd is
     a cost-basis figure (see the model's own docstring: it only ever
@@ -6928,20 +6970,18 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     _parked = bool(slices) and (len(slices) >= (branch.num_levels or 0)
                                 or branch_is_adopted_only(slices))
     _parked_sell = False
+    _parked_slice = None
     if _parked and _stop_slice is None:
-        _cand = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
-        if _cand is not None:
-            _basis = (_cand.qty or 0) * (_cand.entry_price or 0)
-            _net = _grid_slice_net_pnl(_cand.qty, _cand.entry_price, price,
-                                       _slice_rate(_cand, real_fee_rate, exit_leg_rate))
-            if _basis > 0 and (_net / _basis) >= GRID_PARKED_MIN_NET_PCT:
-                _parked_sell = True
-                log.info(
-                    f"[GRID] {branch.bot_name}: parked ({len(slices)} slices / "
-                    f"{branch.num_levels} levels - cannot buy), and a slice is "
-                    f"+{_net / _basis * 100:.2f}% net of fees. Selling on its own "
-                    f"merit rather than waiting for a {grid_pct * 100:.2f}% rise "
-                    f"off a reference it will never rebuy from.")
+        _parked_slice, _pct = _pick_parked_slice_to_sell(
+            slices, price, real_fee_rate, exit_leg_rate, GRID_PARKED_MIN_NET_PCT)
+        if _parked_slice is not None:
+            _parked_sell = True
+            log.info(
+                f"[GRID] {branch.bot_name}: parked ({len(slices)} slices / "
+                f"{branch.num_levels} levels - cannot buy), and a slice is "
+                f"+{_pct * 100:.2f}% net of fees. Selling on its own "
+                f"merit rather than waiting for a {grid_pct * 100:.2f}% rise "
+                f"off a reference it will never rebuy from.")
 
     # Hoisted so the exit can be NAMED, not just taken. All three entries to
     # this block used to collapse into "stop_loss" or "profit_target", which
@@ -6961,6 +7001,13 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 f"purpose: a slice this far down waits a very long time for +{grid_pct * 100:.2f}%, "
                 f"and that wait is the risk this stop exists to cut."
             )
+        elif _parked_sell and not _rise_hit:
+            # The parked route is the one that fired, so sell the slice that
+            # actually cleared its floor. Recomputing with the FIFO picker
+            # here would sell a DIFFERENT slice from the one the gate just
+            # certified - the gate would pass on a +3.0% slice and the sale
+            # would hand over a +0.1% one.
+            oldest = _parked_slice
         else:
             oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
             if oldest is None:
