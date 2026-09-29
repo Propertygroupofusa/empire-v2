@@ -28,6 +28,11 @@ refreshes baselines first.
   threshold.
 - Never sell a red position. ZEC-USD is the ONE authorised exception and
   even that order is the owner's to place.
+- **Never arm `GRID_ADOPTED_STOP_MODE`.** It exists as of 3ab8dec, off by
+  default. Armed, it sells red adopted positions automatically — the limit
+  above by proxy. The switch is the owner's alone, in Railway. Reporting that
+  it is off, and what arming would do at today's prices, is this loop's job.
+  Throwing it is not.
 - Never call a write-guarded endpoint, including `free-locked-inventory`
   and `POST /alpaca-overview/equity-handover`.
 - Never ask for or echo the write token.
@@ -184,6 +189,101 @@ reason; `grid_sell` reports it.
 `/maker-expiries` cannot split the counts. The log distinguishes them; the row
 does not.
 
+## Shipped 29 Sep on `claude/maker-only-cause-split` — NOT MERGED
+
+Five commits, pushed, no PR (creation is 403 for this repo from the session).
+Nothing here is live until the owner merges and redeploys.
+
+| Commit | What |
+|---|---|
+| adc9a54 | a cycle that never placed an order is no longer a maker expiry |
+| 44a815f | the fill count no longer reports every maker expiry as a fill |
+| 8f1de52 | the fee floor's guards are exercised, not grepped for |
+| bbe415e | no layer claims a stop another layer is claiming back |
+| 3ab8dec | a catastrophe stop for adopted branches, **off by default** |
+
+### The three-way stop-coverage circle — the real finding of 29 Sep
+
+Chasing the slice overflow turned this up. **Fourteen branches, $4,573
+allocated (56% of the fleet), holding 96% of the −$575.19 unrealized, with no
+automatic exit in either direction.** Each layer cited the next; the last
+cited the first.
+
+| layer | what it said | true? |
+|---|---|---|
+| grid branch | `stop_pct 0.0` — "Adopted coin is covered at the portfolio level by the resting stops" | no |
+| resting stops | refuses it `ACTIVELY_TRADED` — "The branch carries its own adaptive stop" | no, it names 0 |
+| ZEC, one further | refused `TRIMMERS_COIN`, deferred to the trimmer | trimmer says `WITHIN_LIMIT` |
+
+`/resting-stops` reported `protects_usd 0` throughout — which is also what a
+healthy fleet reports, so the one number that could have shown it could not.
+That is the shape to watch for: **a coverage figure whose healthy value and
+whose broken value are the same number.**
+
+Why a branch cannot exit: full (`len(slices) >= num_levels`) so no buy; every
+slice underwater so `_pick_profitable_slice_to_sell` returns None and neither
+the rise trigger nor the parked-sell path (+1.0% net) can fire — checked at
+both the taker 1.5% and maker 0.70% round trip, conclusion identical; and
+`stop_pct 0.0` so no stop. `drawdown_breached` false as well.
+
+**The perverse feedback, worth remembering.** The trimmer fires on SHARE of
+account, not on loss. ZEC was over 20% at its $2,272 entry basis; the decline
+itself took its market value to $1,829 = 18.41% and out of the trimmer's
+reach. The worse it gets, the further it moves from the only mechanism
+nominally responsible for it.
+
+### Two fixes proposed and withdrawn — read before proposing a third
+
+1. **Relax `resting_stops`' `ACTIVELY_TRADED` guard.** Wrong. That guard was
+   written after a real incident and names three objections a stop elsewhere
+   does not touch: a resting sell holds 75% of the units the grid trades with;
+   if it fires the branch goes on tracking units the wallet no longer has
+   (*"that is how ETH came to be short 0.0316 units"*); and it schedules a
+   loss on a position the fleet does not sell at a loss. It would also have
+   recreated the reserved-inventory case that produces "nothing sellable:
+   available X floors to 0".
+2. **A loss trigger on the concentration trimmer.** Cannot fire. `plan_trims`
+   refuses `ACTIVELY_TRADED` before any other reason can let a trim through,
+   and all fourteen have open grid slices — **measured 0 of 14 sellable**, so
+   it would be dead code. Forcing it past that rule recreates the incident
+   that rule was written after: $885.43 of ZEC and $244.78 of XRP sold out
+   from under live branches.
+
+**THE RULE THOSE THREE REFUSALS SHARE, and the answer they force:** the grid's
+slice ledger is the book of record for those units, so any OTHER seller
+desynchronises it and leaves the branch claiming coin the wallet no longer
+holds. The only seller that can safely exit grid-held coin is the grid, via
+the stop — which only CHOOSES a slice and then uses the proven sell path that
+retires the row and records the trade.
+
+So 3ab8dec puts it there: `adaptive_stop.adopted_stop()`, 6x daily volatility
+against the ordinary 2.5x, floored at 20%, capped at 35%. **Off by default —
+see the hard limit.** Three ways it still declines, each naming which: not
+armed; a per-coin `GRID_STOP_OVERRIDES` entry of 0; and volatility it cannot
+read. That last is deliberately the opposite of `resolve()`, which keeps the
+fixed stop when volatility is unreadable — there falling back keeps a trigger
+that already existed, here it would INVENT one on a long-term hold from a
+number nothing measured.
+
+**What arming would do at 02:48Z 29 Sep: nothing.** All fourteen inside their
+own armed stop; ZEC the worst at −17.26% against 35%, 17.7 points of room.
+Insurance, not a liquidation. Re-check this before ever reporting on arming —
+it is a live-price statement with a date on it, not a property.
+
+### After the merge, these change
+
+- `/resting-stops` gains `uncovered`, `uncovered_count`, `uncovered_usd`
+  (None, never 0.00, when nothing could be priced), `uncovered_unpriced` and
+  `stop_coverage_unknown`. Unarmed, expect `uncovered` to list ACH ALGO BCH
+  ETH HBAR LINK LTC PEPE QNT SHIB SOL XLM XRP ZEC. That list is the gap being
+  visible, NOT a regression — armed, it empties.
+- The Live Ops fill rate DROPS and that is the fix landing. It read 82.6%
+  (`submitted 46, rejected 8, filled 38`) on the old arithmetic, which counted
+  every maker expiry, non-order, unknown-fate cycle and post-gate block as a
+  FILL, and left `GATE_OBSERVE` and `GATE_DISABLED` out of the attempt count
+  although both return True and let the buy through.
+- `ORDER_NOT_PLACED` and `ORDER_NO_FILL` appear as new activity event types.
+
 ## Retractions — carry forward until stale
 
 **"The blocker is inventory locked by resting orders" is right for ALGO and
@@ -221,8 +321,17 @@ next rows onward; every row written before then is NULL = UNKNOWN, not zero.
 
 - **META's stop**: −$26.12, last `no_scan_data` refusal 13s before the fill.
 - **"Lowest in months"**: FALSE. Equity was lower on 53 of 96 days in window.
-- **Six branches over their level count**: not a bug. An adopted-only branch
-  gets exactly one extra rung. `slices_over_levels_unexplained = 0`.
+- **Branches over their level count** (six then, seven at 02:48Z 29 Sep): not
+  a bug, and there are TWO mechanisms, not one. (a) adopted headroom — an
+  adopted-only branch gets `len(slices) + 1`, takes that one rung, goes mixed,
+  and the cap snaps back to 3, so it reads 4/3. (b) `coin_topup` writes N more
+  adopted rows and sets `num_levels` to the new full count, which the cycle
+  re-caps to the override's 3 every pass — twice-topped branches read 7/3.
+  Verified against the live slice list: every overflow branch has adopted rows
+  in groups of three at one timestamp, plus exactly one real buy. The
+  invariant holds — `7 < 3` is false, so nothing buys past its cap, and
+  `slices_over_levels_unexplained` stays 0. **Do not reopen the overflow. DO
+  read the stop-coverage finding below, which is what chasing it turned up.**
 - **QNT's drawdown** as the sell blocker: ruled out.
 - **The picker refusing adopted slices**: ruled out — `_slice_rate` handles
   them explicitly, exit leg only.
@@ -542,7 +651,14 @@ maker-only · fee-safe floor 0.9% · `CYCLE_SECONDS` 30.
 back to `python3 "$f"` and uses ITS rc. Always file-by-file. `python3 f.py |
 tail` then `echo $?` reports TAIL's code — redirect to a file.
 
-fastapi is NOT installed here: to test router code, exec the function's source
+**`pip install pytest` WORKS (29 Sep, pytest 9.1.1).** That changes the
+picture: 54 files import pytest and had been unrunnable, counted only at file
+level. Installed, they run as **1,505 individual tests**. Do this first on a
+fresh container. Split the run — pytest for the files that `import pytest`,
+`python3 f.py` for the rest — because the script-style files call `sys.exit()`
+at import, which aborts a whole-suite pytest run with an INTERNALERROR.
+
+fastapi is still NOT installed: to test router code, exec the function's source
 segment out of the file with AST, deriving what else to exec from the
 function's own AST rather than hand-listing it.
 
@@ -1085,3 +1201,33 @@ quietly covered all three, so every content assertion could have been satisfied
 by unrelated code. Both panel tests now slice to the NEXT top-level
 `async function`, not to a named successor. **An end anchor that names a
 sibling is a guess about file order.**
+
+**Both sides of this file found the same defect on 29 Sep from opposite
+directions.** The entry above is a substring check matching a COMMENT and so
+passing wrongly; the lessons below are substring checks matching PROSE that
+moved and so failing wrongly. Same cause - asserting on text instead of on
+the property - and it can fail in either direction, which is why neither a
+green nor a red from one is worth much on its own.
+
+- **A coverage figure whose healthy value and whose broken value are the same
+  number cannot detect the break.** `protects_usd 0` meant both "nothing needs
+  protecting" and "fourteen positions are naked". Report what is covered by
+  NOTHING alongside what is covered.
+- When each layer defers to the next, follow it to the last one and check it
+  closes. Three correct deferrals made a circle with nothing inside it.
+- A guard that blocks your fix may encode an incident, not an oversight. Read
+  why it exists before relaxing it — twice on 29 Sep the obvious fix was one
+  the guard had been written to prevent, and the comment named the dollar
+  amount and the units left phantom.
+- **A test asserting a prose phrase fails changes that improve what it
+  guards.** Four on 29 Sep: `"_cached_real_maker_fee_rate is None" in body`,
+  `"min(" in body`, an inline-`.get()` shape, `"NO grid stop" in reason`. Each
+  time the property held and only the wording moved. Assert the property.
+- A test that RAISES hides every test after it. One deliberate break threw a
+  KeyError and a 13-failure regression reported as one. Catch per test and
+  record a raise as a failure.
+- Before building a trigger, count how many rows it could fire on today. A
+  loss trigger on the trimmer was 0 of 14 — dead code, found by counting
+  rather than by reasoning about it.
+- A switch that sells real coin: default off, exact word to arm, and say what
+  arming would do at TODAY's prices before anyone throws it.
