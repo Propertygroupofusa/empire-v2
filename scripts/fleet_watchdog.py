@@ -387,6 +387,50 @@ def main():
              f"fee rate - their round trips are understated by about "
              f"{money(book * 0.0035)} in total.")
 
+    # ---- 11c. THE DEADLOCK THAT KILLED SIXTEEN DAYS ------------------------
+    #
+    # Between 2026-09-10 and 2026-09-25 the fleet closed ZERO trades. Not a
+    # crash - a deadlock. A branch that fills every rung on the way down can
+    # no longer buy (it is full) and will not sell (the grid never sells below
+    # entry), so it simply sits. The old configuration fell in on Sep 9 and
+    # stayed there until the fleet was rebuilt on Sep 26.
+    #
+    # It is measured off the STABLE figure the invariant names itself -
+    # branches full on their rungs - NOT the underwater dollar amount beside
+    # it, which that same text warns moved $3,156 -> $588 -> $717 inside 36
+    # minutes with nothing traded. A number that swings that far on price is
+    # not a trend and must never be reported as one.
+    #
+    # Watched because the escape is narrow: the parked-sell floor retires a
+    # slice on its OWN basis at +1.0% net, which only clears at all because
+    # maker-only cut the round trip to 0.70%. If full branches keep growing,
+    # the fleet is walking back into the state that produced sixteen days of
+    # nothing.
+    if inv is not None:
+        import re as _re2
+        _dead = ""
+        for c in (inv.get("checks") or []):
+            if c.get("name") == "no_dead_capital":
+                _dead = c.get("detail") or ""
+        m = _re2.search(r"\$([\d,]+\.\d{2}) across (\d+) branch\(es\) full on their rungs", _dead)
+        if m:
+            full_usd = float(m.group(1).replace(",", ""))
+            full_n = int(m.group(2))
+            cur["full_usd"], cur["full_n"] = full_usd, full_n
+            prev_usd = prev.get("full_usd")
+            if prev_usd is not None and full_usd > prev_usd + 0.01:
+                flag(CRITICAL, "PARKED_GREW",
+                     f"capital in branches FULL on their rungs grew "
+                     f"{money(prev_usd)} -> {money(full_usd)} ({full_n} branches). "
+                     f"A full branch cannot buy and will not sell below entry - "
+                     f"this is the state that produced 16 days of zero closes "
+                     f"from 2026-09-10.")
+            else:
+                flag(INFO, "PARKED",
+                     f"{money(full_usd)} across {full_n} branch(es) is full on its "
+                     f"rungs and can only move when a slice clears the parked-sell "
+                     f"floor.")
+
     # ---- 12. ALPACA - the half of the account nobody was watching ----------
     #
     # Every check above is the crypto grid. The stock side has its own

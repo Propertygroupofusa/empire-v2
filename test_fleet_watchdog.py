@@ -135,7 +135,8 @@ def run(routes, prev_snapshot=None):
 BASE_SNAP = {"at": "2026-09-29T10:00:00Z", "buy_legs": 10, "sell_legs": 5,
              "slice_count": 1, "realized": 100.0, "stuck": 0, "inv_failed": 0,
              "uncovered_usd": 0, "cycle_errors": [], "reachable": [],
-             "alpaca_equity": 2000.0, "populated": 1, "adopted_nofee_usd": 0.0}
+             "alpaca_equity": 2000.0, "populated": 1, "adopted_nofee_usd": 0.0,
+             "full_usd": 0.0}
 
 print("\n-- the control: a healthy fleet must raise NOTHING --")
 # THE CONTROL MUST PASS FOR THE RIGHT REASON. The healthy fixture serves the
@@ -237,6 +238,19 @@ d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
      "unrealized_net_pct": 0.0})
 ok("ADOPTED_GREW when fee-less adopted book grows",
    "ADOPTED_GREW" in run(d, dict(BASE_SNAP, adopted_nofee_usd=0.0)))
+
+# PARKED_GREW - the deadlock that produced sixteen days of zero closes.
+# Parsed off the invariant's own STABLE phrase, never the underwater figure
+# beside it, which that text warns swings hundreds of dollars on price alone.
+d = healthy()
+d["/api/trading-dashboard/grid-status/invariants"]["checks"] = [
+    {"name": "no_dead_capital", "status": "FAIL",
+     "detail": "$5,000.00 across 12 branch(es) full on their rungs, which "
+               "cannot buy at any price until a slice sells."}]
+ok("PARKED_GREW when capital full on its rungs grows",
+   "PARKED_GREW" in run(d, dict(BASE_SNAP, full_usd=1000.0)))
+ok("and it does NOT fire when that capital is flat or falling",
+   "PARKED_GREW" not in run(d, dict(BASE_SNAP, full_usd=9000.0)))
 
 # ALPACA_FLOOR / HALT / BP - the half of the account nothing watched.
 d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["equity"] = 800.0
