@@ -297,9 +297,19 @@ direct per-currency read):
 
 | product | tracked | held | short |
 |---|---:|---:|---:|
-| QNT-USD | 0.67598215 | 0.00097323 | **$149.54** |
-| TIA-USD | 111.35 | **0.0** | $49.48 |
-| PRIME-USD | 36.64 | **0.0** | $9.34 |
+| QNT-USD | 0.67598215 | 0.00097323 | **$141.68** |
+| TIA-USD | 111.35 | 44.57 | $28.86 |
+| PRIME-USD | 36.64 | **0.0** | $9.26 |
+
+**CORRECTED at 01:36Z — the TIA figure above was withdrawn and restated.** It
+was reported as `held 0.0` / `$49.48` / "three open slices for coin the account
+holds NONE of". Three consecutive reads now give **44.57 held, all available,
+nothing locked**, so the shortfall is 66.78 units ($28.86), not 111.35. The
+slices are unchanged (3, same quantities, same open times) and there has been no
+new close, so the grid neither bought nor sold — **I cannot explain the change
+from here and will not guess.** The 0.0 came from the same 01:07 sweep that
+produced the bad XLM read; I applied "repeat an anomalous read" to XLM and then
+failed to apply it to TIA in the same breath.
 
 QNT alone exceeds every coin in the headline. **TIA holds 3 open slices for
 111.35 units of a coin the account holds NONE of**, and its −$3.67 unrealised
@@ -793,6 +803,22 @@ that exact line and replaced its body with `raise`, and passed. Assert the
 handler's BEHAVIOUR (assigns a fallback, contains no `raise`), never that its
 header appears. Each time, the mutation is what caught it — the check never
 looked wrong on its own.
+
+**I applied a lesson to one coin and not the one beside it.** The XLM
+all-None read at 01:07 was correctly treated as suspect and repeated five
+times. TIA's `0.0` came from the SAME sweep, was not repeated, and was
+reported to the owner as fact — then moved. **A rule learned mid-task has to
+be applied to every reading in that task, not just the one that prompted it.**
+
+**LEAD, unverified: `get_asset_balance` returns the FIRST matching account,
+`fetch_balances` SUMS across them.** `if account.get("currency") == currency:
+return float(...)` versus `held[cur] = held.get(cur, 0.0) + total`. If a
+currency ever spans two Coinbase accounts, the direct read under-reports and
+the map does not. That matters because the direct read is the input to the
+sell-refusal path (0af01f1) and to "nothing sellable" — an under-reported
+balance would refuse to sell coin that exists. **Not confirmed as the cause of
+the TIA reading**, and not confirmed to occur at all on this account; worth a
+pass that enumerates the raw account list.
 
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
