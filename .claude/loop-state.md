@@ -2202,3 +2202,64 @@ write-guarded and the owner's. Profitable 7 | blocked 7 | REACHABLE 0.
 first time — or it re-anchors away and REACHABLE stays 0 while the shortfall
 keeps climbing. Either outcome is informative; a third pass of "gaps unchanged"
 would mean the gap table is not the thing to be watching.
+
+## 12:58Z — the drought broke: HBAR is below its trigger and a buy is resting
+
+The watcher exited 0, "quiet". It was not quiet. **parked_sell 9 → 12, book
+143 → 146, slices 77 → 75** — three more sells inside twenty minutes. The
+watcher reports NEW LABEL TYPES only; three sells under an existing label are
+invisible to it. Counted by hand, as always.
+
+**Last pass's stake held, and then went further than staked.** I predicted HBAR
+would close its remaining 0.47%. It closed it and went through: the gap is now
+**−1.45%** (price 0.11424 against a trigger of 0.115925 = 0.11951 × 0.97). One
+of thirteen branches with room is at or below zero; it is the first all day.
+
+**The buy block is entered, and the gate is deciding live.** `buys_paused`
+False, `drawdown_breached` False, so `_sell_only` is False and the preceding
+`if` does not swallow the `elif`; 2 open slices against `num_levels` 3 leaves a
+free rung. Live-ops confirms it from the other side — HBAR gate verdicts in the
+last fifteen minutes:
+
+    12:57:20  GATE_PASS   net edge +1.849% on a 3.00% step, spread 0.035%
+    12:56:27  GATE_BLOCK  order book unavailable - cannot price the spread
+    12:55:22  GATE_BLOCK  order book unavailable - cannot price the spread
+    12:53:22  GATE_BLOCK  order book unavailable - cannot price the spread
+    12:51:00  GATE_BLOCK  order book unavailable - cannot price the spread
+    12:45:34  GATE_PASS   net edge +1.843% on a 3.00% step, spread 0.044%
+    12:42:56  GATE_BLOCK  order book unavailable - cannot price the spread
+
+**REFINED — "order book unavailable" was recorded as RULED OUT and stale. It is
+neither.** It is firing on roughly every other HBAR cycle right now. The old
+reading was correct about the OLD data and wrong as a standing fact: nothing
+was below its trigger, so the gate was never reached, so of course its blocks
+looked historical. **A gate that is never reached produces no evidence, and no
+evidence is not evidence of absence.** The moment a branch crossed, the gate
+started answering — and half its answers are that it cannot read the book.
+
+**A buy is almost certainly resting on the book right now.** Between the 12:55Z
+and 12:58Z pulls, available cash went **$1,726.66 → $1,671.88, −$54.78**, with
+no new slice and no closed trade to explain it. HBAR's rung is
+`allocated_usd / num_levels` = 163.80 / 3 = **$54.60**. Three independent
+numbers agree: a GATE_PASS at 12:57:20, a $54.78 hold, and a $54.60 rung.
+**I cannot see the order directly — no read-only endpoint exposes resting
+orders — so this is an inference, not an observation.** It is falsifiable in
+four minutes: `maker_order_wait_seconds` is 240.
+
+**Check (1) is STILL UNKNOWN. Say exactly that.** Newest slice remains
+2026-09-29T04:08:59Z (LINK-USD); `slice_state` populated **0 of 75**. §1's
+write path has never executed in production. Tested is not exercised.
+
+**Next stake, resolving ~13:01:20Z — two branches, both checkable:**
+- **FILL:** a new HBAR slice appears with `slice_state=ACCOUNTED`, `cycle_id`
+  `20260929T1257xxZ`, `slice_index` 3, `order_id` a venue uuid, and
+  `target_price` ABOVE `entry_price`. §1 is exercised for the first time.
+  Any of those NULL on a slice that new is a SILENT FAILURE and a finding.
+- **EXPIRY:** no slice, cash returns to ~$446 unallocated, and
+  `maker_expiry_drift.buy` goes **21 → 22**. That counter is the tell; check it.
+
+Checks (2) and (4) unchanged in shape: stuck slices still exactly two (LINK-USD
+`0.009999999999998899`, PRIME-USD `0.00999999999999801`). Profitable **15**,
+**blocked 15, REACHABLE 0** — reserved ALGO/LINK/NEAR/SOL/XLM, short
+ACH/BCH/ETH/ONDO/PEPE/PRIME/QNT/TIA/XRP/ZEC. The profitable set keeps growing
+inside products the system cannot reach; that pattern is unchanged.
