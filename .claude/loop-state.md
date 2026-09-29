@@ -1237,7 +1237,38 @@ behind reserved resting orders and the coin shortfall. Do not say "the sell
 side is broken" — say "these seven are unreachable, and everything else
 sells when it qualifies."
 
-### THE SEVEN THAT REMAIN UNREACHABLE — measured 11:30Z, unchanged at 12:02Z
+### 12:22Z — THE PROFITABLE SET GREW TO 12, AND 11 OF 12 ARE BLOCKED
+
+Prices rose, so five more slices crossed the 1.0% floor. Classified against
+a FRESHLY re-read invariants (not the hour-old list):
+
+    QNT x2   +57.80%  $31.45 ea  SHORT
+    ALGO     +13.28%  $ 4.30     RESERVED
+    XLM      + 6.98%  $ 8.35     RESERVED
+    LINK     + 6.61%  $ 0.01     RESERVED (the stuck sub-increment slice)
+    TIA      + 5.08%  $ 0.03     SHORT
+    LINK     + 4.36%  $ 1.98     RESERVED
+    PEPE x4  +1.06..1.18%  $0.27-0.46  SHORT **and now RESERVED too**
+    SHIB     + 1.03%  $ 0.37     **REACHABLE — the only one**
+
+**RESERVED grew 5 -> 6 branches: PEPE joined** (ALGO, LINK, NEAR, PEPE,
+SOL, XLM). Shortfall $765.68/10 — up $6.51 from the 11:30Z reading of
+$759.17, so the first drop did not hold. Still roughly flat, not the
+$256/4h of the early morning.
+
+**A FALSIFIABLE PREDICTION, check it next pass:** SHIB-USD is the ONLY
+reachable profitable slice. The mechanism fired within a cycle or two for
+NEAR and HBAR at 11:49/11:50, so **SHIB should sell shortly. If it does
+not, the reserved/short classification is incomplete and that is a finding
+in itself** — something else is blocking, and I would want to know what.
+
+**The pattern that is emerging:** as the market rises, the profitable set
+grows, but it grows almost entirely inside products that are reserved or
+short. The turnover constraint is not the floor and not the mechanism — it
+is that the inventory which becomes worth selling is disproportionately the
+inventory the system cannot reach.
+
+### THE SEVEN THAT WERE UNREACHABLE — measured 11:30Z (superseded by the 12 above)
 
 7 of 80 open slices already clear the 1.0% parked-sell floor. **Not one of
 them can be sold**, and the blockers are two things already tracked
