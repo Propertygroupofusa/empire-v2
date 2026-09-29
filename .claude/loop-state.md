@@ -875,7 +875,51 @@ quantity and price, `grid_sell_residual()` handles requested != filled, and
 buy leg really paid. That is the fifth time the spec has assumed less
 exists than does.
 
-**NOT built at all (§7–§10, §12–§14, §17–§22, §24):** event transport, cycle
+### §24 — recovery CANNOT be finished before §1's persistence lands
+
+`CryptoGridSlice` persists entry_price, qty, product_id, fees and the entry
+gate's diagnostic — but **NO state column and NO order id** (measured, the
+whole column list). A slice's existence IS its state. So §24's step 7,
+"reconcile order states", has nothing in the schema to reconcile against:
+an open exchange order cannot be matched to the slice that placed it. That
+is §1/§2's job. The spec does not state this ordering; it is real.
+
+Today there is a LEASE and a heartbeat but **no reconciliation on restart
+at all** — `run_grid_branches_cycle` goes straight to trading. The only
+reconciliation that exists is the manual, write-guarded
+`POST /grid-status/reconcile-slices`, **which is the owner's to run, never
+mine.**
+
+`restart_recovery.py` (pure) decides whether a restarted process may
+resume. Three outcomes, not two:
+`RESUME` (read and agrees) / `HOLD` (read and disagrees) /
+`REFUSED` (could not be read). REFUSED is not a worse HOLD — HOLD knows
+something is wrong, REFUSED does not know whether anything is wrong.
+`may_trade` is `decision == RESUME`, written as an identity so a decision
+added later is refused by default rather than permitted by a negative test.
+
+**SHORT and EXCESS are deliberately asymmetric.** Tracked above held blocks
+(the ledger claims coin the wallet lacks). Held above tracked does NOT —
+that is the fleet's ordinary adopted state, and a symmetric check would
+halt it over nothing. The live coin shortfall is the SHORT case.
+
+**A missing key in the balances dict is UNKNOWN, never zero.** `None` for a
+whole input means UNREAD; an empty list/dict means READ AND EMPTY, which is
+an ordinary answer. Collapsing those is the same bug as reporting an unread
+balance as 0.
+
+**A guard I wrote and then deleted:** `isinstance(v, bool)` beside
+`Decimal(str(v))` was unkillable by mutation — `Decimal("True")` already
+raises. A guard no test can break is not a protection. The comment now
+explains why `str()` comes first (`Decimal(True)` IS `Decimal(1)`, since
+bool is an int).
+
+**It is NOT wired.** Nothing gates a cycle on it. Wiring it would mean a
+restart can refuse to trade, which is what §22 and §24 ask for and is also
+a way to halt the fleet on a transient read failure — that is an
+owner-visible decision, not one to slip in.
+
+**NOT built at all (§7–§10, §12–§14, §17–§22):** event transport, cycle
 rotation, fill accounting, restart reconciliation, the dashboard and the
 speed metrics — and the wiring that would make any of the four modules
 above actually run.
