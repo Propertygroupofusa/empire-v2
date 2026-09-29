@@ -570,8 +570,17 @@ when the branch is FULL and cannot buy, on a slice clearing
 waiting for a rise off a reference it will never rebuy from", i.e. the
 target is precisely what was NOT reached. **When one value dominates a
 distribution, check whether it is the fallthrough before reading anything
-into it.** Fixed in b9e1523: four values, `profit_target` now gated on
+into it.** Fixed in 4dd6867: four values, `profit_target` now gated on
 `_rise_hit`.
+
+**A commit cannot cite its own hash.** Twice now loop-state has carried a
+hash that resolves to nothing. First a placeholder written from memory
+(af869a4 fixed it). Then, more subtly: the hash was read with
+`git rev-parse HEAD`, substituted into the file, and the commit **amended**
+— which rewrote the very hash just recorded, leaving a reference to an
+orphaned object. **Write the hash in a follow-up commit, never in the
+commit it names.** Verify with `git cat-file -t <hash>` before trusting any
+hash in this file.
 
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
