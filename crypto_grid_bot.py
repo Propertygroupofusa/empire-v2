@@ -41,6 +41,7 @@ import logging
 import os
 import zlib
 from decimal import Decimal as _Decimal, InvalidOperation
+import slice_lifecycle as _sl
 import random
 import sys
 import time
@@ -6105,7 +6106,23 @@ def stop_report_line(bot_name: str, stop_pct: float, resolved, has_slices: bool)
                     f"yet - {why}")
 
 
-async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
+def current_cycle_id() -> str:
+    """An identifier for THIS pass of the fleet loop, to the second.
+
+    §1 asks every slice to record the cycle it belongs to. Cycles are 30
+    seconds apart, so a UTC timestamp to the second cannot collide with the
+    next one, and unlike a random token it can be read by a person and
+    lined up against a log.
+
+    NOT an idempotency key. order_idempotency's key needs an `attempt` the
+    CALLER controls, because a next-cycle retry of the same intent gets a
+    different cycle id and would not be deduplicated - see the duplicate
+    path finding. This answers "which pass opened this slice", nothing more.
+    """
+    return datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+
+async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str = None):
     """One real cycle for one real grid branch - the live counterpart to
     crypto_selection_backtest.py's _replay_grid_bot(), same real
     mechanics exactly: buy a real slice when price closes grid_pct below
@@ -6591,7 +6608,34 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                                    # it actually paid so the gap is measurable
                                    # later; it cannot be recovered from the
                                    # fill alone.
-                                   entry_expected_price=price))
+                                   entry_expected_price=price,
+                                   # ---- §1 state, recorded rather than inferred ----
+                                   #
+                                   # ACCOUNTED, not OPEN: the buy leg FILLED
+                                   # (filled_qty/filled_price came back from the
+                                   # venue) and THIS transaction is its
+                                   # accounting. That is exactly what the state
+                                   # means, and slice_lifecycle makes it
+                                   # terminal for the same reason - the buy's
+                                   # lifecycle is over the moment it is booked.
+                                   # Nothing is claimed here about the sell leg,
+                                   # which has not been attempted.
+                                   slice_state=_sl.ACCOUNTED,
+                                   state_updated_at=datetime.utcnow(),
+                                   cycle_id=cycle_id,
+                                   # WHICH RUNG, 1-based - the same number the
+                                   # log line below reports. Not "which third":
+                                   # this branch has num_levels rungs.
+                                   slice_index=len(slices) + 1,
+                                   order_side="BUY",
+                                   # What it expected to pay vs what it paid.
+                                   # Both, because the gap is the fact worth
+                                   # keeping and neither implies the other.
+                                   order_price=price,
+                                   average_fill_price=filled_price,
+                                   filled_quantity=filled_qty,
+                                   filled_at=datetime.utcnow(),
+                                   execution_reason="grid_buy_filled"))
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             fresh = result.scalar_one_or_none()
             if fresh:
@@ -6865,6 +6909,27 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                                   await slice_round_trip_fee_rate(oldest, sell_leg_fee))
         new_balance = branch.allocated_usd + pnl
 
+        # WHY THIS SLICE CLOSED - computed ONCE, above every reader.
+        #
+        # This three-way lived in two places: inside the shadow block and
+        # again in the _log_grid_trade call below. The comment there already
+        # warned that the two sites disagreeing is what produced the
+        # P&L-sign version of exit_reason in the first place - so a third
+        # reader was not going to be the one that made duplication safe.
+        #
+        # It also could not be read from the shadow block at all: that block
+        # is guarded by SHADOW_MODE_ENABLED, which is FALSE in production
+        # (it imports from a path Railway does not have), so a name assigned
+        # inside it is simply undefined everywhere the fleet actually runs.
+        #
+        # _rise_hit wins over a parked sell when both are true: the target
+        # genuinely was reached, so saying so is the more truthful of the two.
+        # _stop_slice is set only when the stop actually chose this slice,
+        # which is why it is the real source rather than the sign of the P&L.
+        exit_reason = ("stop_loss" if _stop_slice is not None
+                         else "profit_target" if _rise_hit
+                         else "parked_sell")
+
         # ── SHADOW MODE: Log position closed (fire-and-forget, non-blocking) ────
         if SHADOW_MODE_ENABLED and shadow_manager:
             try:
@@ -6917,9 +6982,6 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 # Same three-way as the persisted ledger below. The two
                 # sites disagreeing is what produced the P&L-sign version
                 # in the first place, so they are kept identical.
-                exit_reason = ('stop_loss' if _stop_slice is not None
-                               else 'profit_target' if _rise_hit
-                               else 'parked_sell')
 
                 shadow_manager.on_position_closed(
                     client_order_id=order_id,
@@ -6960,6 +7022,24 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                             # slice_round_trip_fee_rate() still prices the
                             # remainder against what its buy leg really paid.
                             slice_row.qty = _residual
+                            # ---- §1/§15 state, on the write that already
+                            # happens. No new write path, no new way for a
+                            # ledger update to fail, and it inherits this
+                            # block's three retries.
+                            #
+                            # PARTIAL is the honest state: the venue filled
+                            # some of what was asked and this much is still
+                            # held. It is NOT FILLED (the order did not
+                            # complete) and NOT an error - §2 is explicit
+                            # that a remainder is neither.
+                            slice_row.slice_state = _sl.PARTIAL
+                            slice_row.state_updated_at = datetime.utcnow()
+                            # What ACTUALLY filled, never what was asked for.
+                            slice_row.filled_quantity = filled_qty
+                            slice_row.average_fill_price = filled_price
+                            slice_row.filled_at = datetime.utcnow()
+                            slice_row.order_side = "SELL"
+                            slice_row.execution_reason = exit_reason
                     branch_result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
                     fresh = branch_result.scalar_one_or_none()
                     if fresh:
@@ -7019,9 +7099,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                               # _rise_hit wins over _parked_sell when both are
                               # true: the target genuinely was reached, so saying
                               # so is the more truthful of the two.
-                              exit_reason=("stop_loss" if _stop_slice is not None
-                                           else "profit_target" if _rise_hit
-                                           else "parked_sell"),
+                              exit_reason=exit_reason,
                               mae_pct=getattr(oldest, "mae_pct", None),
                               mfe_pct=getattr(oldest, "mfe_pct", None),
                               entry_atr_pct=getattr(oldest, "entry_atr_pct", None),
@@ -7536,9 +7614,15 @@ async def run_grid_branches_cycle():
         except Exception as e:
             log.warning(f"[GRID] real fee-rate refresh failed (non-fatal): {type(e).__name__}: {e}")
 
+        # ONE id for this whole pass, so every slice opened in it agrees on
+        # which pass that was. Read once rather than per branch: branches are
+        # walked in sequence with a sleep between them, so per-branch stamps
+        # would land in different seconds and claim to be different cycles.
+        _cycle_id = current_cycle_id()
+
         for branch in branches:
             try:
-                await run_grid_branch_cycle(session, branch)
+                await run_grid_branch_cycle(session, branch, cycle_id=_cycle_id)
             except Exception as e:
                 log.error(f"[GRID] {branch.bot_name} cycle error: {e}")
             await asyncio.sleep(0.5)

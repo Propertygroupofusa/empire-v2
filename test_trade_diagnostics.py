@@ -112,7 +112,12 @@ ok("excursion is measured against the slice's own entry",
 print("\nexit_reason is taken from what actually happened")
 ok("_log_grid_trade accepts exit_reason", "exit_reason=None" in LOGFN)
 ok("the reason comes from _stop_slice, not the sign of P&L",
-   'exit_reason=("stop_loss" if _stop_slice is not None' in CYCLE,
+   # Now a single hoisted assignment rather than an inline copy at each
+   # write site - it had to move out of the shadow-mode guard, which is
+   # disabled in production, so a name assigned inside it was undefined
+   # everywhere the fleet runs. The property is unchanged: the reason is
+   # derived from _stop_slice, never from the sign of the P&L.
+   'exit_reason = ("stop_loss" if _stop_slice is not None' in CYCLE,
    "pnl < 0 cannot tell a stop from an ordinary sale that happened to lose")
 ok("both outcomes are named", '"stop_loss"' in CYCLE and '"profit_target"' in CYCLE)
 

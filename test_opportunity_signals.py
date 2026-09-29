@@ -61,7 +61,9 @@ ok("the per-branch trading cycle never mentions the scorer",
    "a score that reaches the branch cycle can influence a trade")
 fleet = GRID.split("async def run_grid_branches_cycle")[1].split("\nasync def ")[0]
 ok("scoring runs AFTER every branch has decided",
-   fleet.index("_score_short_term_opportunities") > fleet.index("run_grid_branch_cycle(session, branch)"))
+   # No closing paren - the call takes a cycle_id now, and this is an
+   # ordering check, not an argument-list check.
+   fleet.index("_score_short_term_opportunities") > fleet.index("run_grid_branch_cycle(session, branch"))
 # Asserted via AST, not a character window. The previous version looked for
 # "except Exception" within 400 characters of the call, and adding one comment
 # and one more resolver line pushed the handler past that boundary - a test

@@ -316,7 +316,9 @@ ok("resolution can never break trading", "log.debug" in RES and "except Exceptio
 ok("resolution is capped per cycle", "_EXPIRY_RESOLVE_MAX_PER_CYCLE" in BOT and ".limit(" in RES)
 ok("it runs AFTER the branch loop, so it cannot delay a trade",
    BOT.index("await _resolve_maker_expiries(session)")
-   > BOT.index("await run_grid_branch_cycle(session, branch)"))
+   # No closing paren: the call takes a cycle_id now, and this check is
+   # about ORDERING, not about the argument list.
+   > BOT.index("await run_grid_branch_cycle(session, branch"))
 ok("each horizon resolves once and only once",
    'getattr(row, f"price_{tag}") is None' in RES)
 

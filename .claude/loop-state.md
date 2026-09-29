@@ -1085,7 +1085,50 @@ reason the constants are.
 1e-9, 1e12 and "1E+3". Dropped from the harness rather than "killed" with
 an assertion about spelling.
 
-### §1 PERSISTENCE — the 13 columns landed. NOTHING WRITES THEM YET.
+### §1 IS NOW WRITTEN — the buy and the partial fill stamp their own state
+
+`run_grid_branch_cycle` takes a `cycle_id` (default None, so any other
+caller still works); `run_grid_branches_cycle` generates ONE per pass via
+`current_cycle_id()` — a UTC timestamp to the second, read once rather than
+per branch, since branches are walked with a sleep between them and
+per-branch stamps would claim to be different cycles. **It is NOT an
+idempotency key** (a next-cycle retry gets a different id); it answers
+"which pass opened this slice".
+
+**The BUY insert stamps `slice_state=ACCOUNTED`** — not OPEN. The fill came
+back from the venue and that very transaction books it, which is exactly
+what ACCOUNTED means and why slice_lifecycle makes it terminal. Nothing is
+claimed about the sell leg, which has not been attempted. Also
+`cycle_id`, `slice_index` (= `len(slices) + 1`, the rung, matching the log
+line), `order_side`, `order_price` (expected) AND `average_fill_price`
+(paid) as separate facts, `filled_quantity`, `filled_at`.
+
+**The PARTIAL fill stamps `slice_state=PARTIAL`** on the row that is kept —
+on the UPDATE that already happens, inside the existing 3-retry ledger
+catch-up. No new session, no new way for a write to fail, and PARTIAL is
+neither FILLED nor a fault (`is_fault` excludes it, per §2).
+
+**A BUG CAUGHT BEFORE SHIPPING:** `exit_reason` was assigned ONLY inside
+the `SHADOW_MODE_ENABLED` guard — which is FALSE in production — while a
+second copy of the same three-way sat inline in the `_log_grid_trade` call.
+Reading it from anywhere else is a **NameError everywhere the fleet
+actually runs.** Hoisted to one assignment above the guard, three readers.
+Found by an AST sweep for unbound Load names, not by eye.
+
+**KEEP THE NAME `exit_reason`.** Four existing tests
+(`test_closed_trade_reason_surfaced`, `test_trade_diagnostics`,
+`test_governs_panel_live`, `test_opportunity_signals`) police that
+expression BY NAME and BY SOURCE TEXT. Renaming it to `_close_reason` broke
+all four. They are right to police it — two write sites disagreeing is what
+produced the P&L-sign version originally.
+
+**THREE BRITTLE ASSERTIONS UPDATED, none weakened:** the two ordering
+checks now match `"run_grid_branch_cycle(session, branch"` without the
+closing paren (they are ORDERING checks, not argument-list checks, and are
+now robust to any added kwarg); `test_trade_diagnostics` follows the
+hoisted assignment instead of the inline keyword. Ratchet still 563.
+
+### §1 PERSISTENCE — the 13 columns landed (c45171a).
 
 `CryptoGridSlice` gained: `cycle_id`, `slice_state`, `slice_index`,
 `target_price`, `target_reason`, `order_id`, `order_side`, `order_price`,
