@@ -448,21 +448,53 @@ ok("ORDER_REFUSED when a product cannot place an order", "ORDER_REFUSED" in out)
 ok("and the venue's reason is passed through verbatim, not categorised",
    "REQUEST_BELOW_BASE_INCREMENT: 0.0099999 requested" in out, out)
 
-# A newly refused product is a change; the same one standing is not.
-SNAP_REF = dict(BASE_SNAP, refused_products=["LINK-USD"])
+# A TRANSITION MUST SURVIVE A DUPLICATE RUN.
+#
+# The old rule escalated only when a product was missing from the PREVIOUS
+# snapshot, so running the watchdog twice let the second run overwrite the
+# first's evidence and report "same products as last pass". The first run
+# then owned the only announcement a new refusal would ever get. TIA-USD
+# went refused this afternoon and it could not afterwards be shown that its
+# escalation had ever fired - and with ALARM_DEAD standing, "announced once"
+# means announced to nobody.
+import datetime as _dt
+_now = _dt.datetime.utcnow()
+_fmt = "%Y-%m-%dT%H:%M:%SZ"
+_recent = (_now - _dt.timedelta(minutes=5)).strftime(_fmt)
+_old = (_now - _dt.timedelta(hours=6)).strftime(_fmt)
+
+SNAP_REF = dict(BASE_SNAP, refused_products=["LINK-USD"],
+                refused_since={"LINK-USD": _recent})
 out = run(d, SNAP_REF)
-ok("a standing refusal stays a WARN", "CRITICAL ORDER_REFUSED" not in
-   out.replace("CRITICAL  ORDER_REFUSED", "CRITICAL ORDER_REFUSED"), out)
-ok("and says the products are unchanged", "same products as last pass" in out, out)
+ok("a refusal already in the snapshot is STILL critical while it is fresh",
+   "CRITICAL" in out and "refused within the last hour" in out,
+   "this is the regression: a duplicate run must not consume the transition")
+ok("and it shows how long it has been refused", "refused 5m ago" in out, out)
+
+SNAP_OLD = dict(BASE_SNAP, refused_products=["LINK-USD"],
+                refused_since={"LINK-USD": _old})
+out = run(d, SNAP_OLD)
+noisy = [ln for ln in out.splitlines()
+         if "ORDER_REFUSED" in ln and ln.strip().startswith("CRITICAL")]
+ok("but a refusal standing over an hour settles to a WARN", not noisy, "; ".join(noisy))
+ok("and says so", "all standing over an hour" in out, out)
+ok("with its age in hours", "refused 6.0h" in out, out)
 
 d2 = healthy()
 d2["/api/trading-dashboard/grid-status"]["order_refusals"] = {
     "available": True,
     "by_product": {"LINK-USD": "a", "QNT-USD": "b"},
     "product_rules_unreadable": []}
-out = run(d2, SNAP_REF)
-ok("a NEWLY refused product escalates to CRITICAL",
-   "CRITICAL" in out and "QNT-USD newly refused" in out, out)
+out = run(d2, SNAP_OLD)
+ok("a NEWLY refused product escalates even beside an old one",
+   "CRITICAL" in out and "QNT-USD refused within the last hour" in out, out)
+ok("and the old one is not relabelled new", "LINK-USD, QNT-USD refused" not in out, out)
+
+# An unreadable stamp is UNKNOWN, and UNKNOWN on a refusal fails loud.
+SNAP_BAD = dict(BASE_SNAP, refused_products=["LINK-USD"],
+                refused_since={"LINK-USD": "not-a-timestamp"})
+ok("an unreadable refusal stamp is treated as fresh, not as settled",
+   "CRITICAL" in run(d, SNAP_BAD))
 
 # Unreadable product rules hide refusals, so they are a gap, not silence.
 d3 = healthy()

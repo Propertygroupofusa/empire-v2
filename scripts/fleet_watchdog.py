@@ -77,6 +77,20 @@ def get(path, timeout=45):
         return None
 
 
+def _age_seconds(stamp, now):
+    """Seconds between two "%Y-%m-%dT%H:%M:%SZ" stamps, or None if either is
+    unreadable. None is a real answer meaning UNKNOWN - a gap is not a zero,
+    and an unreadable stamp read as "0 seconds old" would mark every standing
+    refusal brand new for ever."""
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    try:
+        a = datetime.datetime.strptime(stamp, fmt)
+        b = datetime.datetime.strptime(now, fmt)
+    except (TypeError, ValueError):
+        return None
+    return (b - a).total_seconds()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", action="store_true")
@@ -336,18 +350,48 @@ def main():
     else:
         by_product = refus.get("by_product") or {}
         cur["refused_products"] = sorted(by_product)
-        prev_refused = prev.get("refused_products")
+
+        # A TRANSITION MUST NOT BE CONSUMABLE BY A DUPLICATE RUN.
+        #
+        # The old rule escalated only when a product was absent from the
+        # PREVIOUS snapshot. Run the watchdog twice in a row and the second
+        # run overwrites that snapshot, so the first run owns the only
+        # announcement a new refusal will ever get - and if nobody read that
+        # one line, the finding is gone for good. TIA-USD went refused this
+        # afternoon and its escalation cannot now be proven to have fired,
+        # which is exactly the failure mode. With ALARM_DEAD standing, no
+        # alert is delivered anywhere either, so "reported once" really does
+        # mean "reported to nobody".
+        #
+        # Fixed by remembering WHEN each product was first seen refused
+        # rather than only whether it was in the last snapshot. A refusal
+        # keeps announcing itself as new until it has been standing an hour,
+        # however many times the watchdog runs in between.
+        refused_since = dict(prev.get("refused_since") or {})
+        for p2 in list(refused_since):
+            if p2 not in by_product:
+                del refused_since[p2]               # it can trade again
+        for p2 in by_product:
+            refused_since.setdefault(p2, now)
+        cur["refused_since"] = refused_since
+
         if by_product:
-            joined = ([p2 for p2 in sorted(by_product) if p2 not in prev_refused]
-                      if prev_refused is not None else [])
-            level = CRITICAL if joined else WARN
+            fresh = []
+            for p2 in sorted(by_product):
+                age = _age_seconds(refused_since.get(p2), now)
+                if age is None or age < 3600:
+                    fresh.append(p2)
+            level = CRITICAL if fresh else WARN
             head = (f"{len(by_product)} product(s) cannot place an order"
-                    + (f" - {', '.join(joined)} newly refused" if joined else
-                       " - same products as last pass" if prev_refused is not None
-                       else ""))
+                    + (f" - {', '.join(fresh)} refused within the last hour"
+                       if fresh else " - all standing over an hour"))
             flag(level, "ORDER_REFUSED", head)
             for p2 in sorted(by_product):
-                flag(level, "ORDER_REFUSED", f"  {p2}: {by_product[p2]}")
+                age = _age_seconds(refused_since.get(p2), now)
+                stamp = ("" if age is None
+                         else f" [refused {age / 3600:.1f}h]" if age >= 3600
+                         else f" [refused {age / 60:.0f}m ago]")
+                flag(level, "ORDER_REFUSED", f"  {p2}{stamp}: {by_product[p2]}")
         unreadable = refus.get("product_rules_unreadable") or []
         if unreadable:
             gaps.append(f"product rules unreadable for {', '.join(unreadable)} - "
