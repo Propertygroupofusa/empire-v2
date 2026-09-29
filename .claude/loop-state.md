@@ -246,6 +246,25 @@ band; `slices_over_levels_unexplained` still 0.
 
 ## Sweep each pass
 
+**EVERY PASS, run the exit-reason watcher. One command, no re-derivation:**
+
+```
+cd /home/user/empire-v2 && python3 scripts/exit_reason_watch.py
+```
+
+Exit 0 = quiet, say nothing. Exit 2 = REPORTABLE, tell the owner what it
+printed. Exit 1 = UNREADABLE, which is a GAP and never "no change".
+
+It raises the limit to 1000, splits on the four-way cutover, and refuses to
+report a distribution until at least 20 post-cutover rows exist — because the
+naive count said "100% profit_target" when 131 of 132 rows were legacy. It
+keeps `.claude/exit-reason-watch.json` so a repeat pass stays quiet instead of
+re-reporting the same state. **Do not hand-roll this analysis again;** the
+three traps it encodes (the cap deciding what the data says, legacy rows
+drowning new ones, an unreadable fetch read as an empty book) were each walked
+into once on live data.
+
+
 All under `https://empire-v2-production.up.railway.app/api/trading-dashboard`
 except `/health`, at the root. A 404 is a wrong URL or a route not yet
 deployed. A 500 or empty body is a GAP.
