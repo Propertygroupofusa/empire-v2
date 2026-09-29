@@ -284,9 +284,15 @@ def main():
                     % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).read().strip()
     served = (health or {}).get("commit")
     if head and served and not served.startswith(head) and not head.startswith(served):
+        # NOT "~15 minutes". Measured build times on this project ranged from
+        # ~1.5 to ~26 minutes in a single afternoon, and calling a deploy
+        # failed at 15 was wrong twice in a row - the second time after the
+        # lesson had already been written down. A threshold that produces
+        # false alarms trains its reader to ignore the alarm.
         flag(WARN, "DEPLOY_LAG",
              f"serving {served} but local HEAD is {head} - a push has not gone "
-             f"live. If this persists past ~15 minutes the build may have failed.")
+             f"live yet. Builds here have taken up to ~26 minutes; do not call "
+             f"it failed before 30.")
 
     # ---- 9. Stuck slices ----------------------------------------------------
     stuck = [(p, s["qty"]) for p, s in slices
