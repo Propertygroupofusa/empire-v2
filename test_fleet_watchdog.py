@@ -1,0 +1,253 @@
+"""Force every watchdog alarm against a mock fleet, and prove it fires.
+
+WHY A MOCK AND NOT THE LIVE FEED. Several of these checks cannot be forced
+against production without faking money: LOST_FILL needs coin bought with no
+slice written, IDLE_PROFIT needs a reachable profitable slice when there are
+currently zero, ALPACA_HALT needs a halted account. When the watchdog shipped,
+IDLE_PROFIT went out honestly labelled UNVERIFIED for exactly that reason -
+and an unverified alarm is a decoration until something makes it fire.
+
+So this serves a fleet whose numbers are chosen to trip one alarm at a time,
+and asserts each one really does. The control case matters just as much: a
+healthy fleet must produce NO alarms, or every green result below is
+meaningless.
+
+The lesson underneath is one that already cost five hours: a protection whose
+firing cannot be observed is indistinguishable from one that never fires. That
+applies to the watchdog itself.
+
+No network, no credentials - it binds a throwaway HTTP server on localhost.
+"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+failures = []
+
+
+def ok(label, cond, detail=""):
+    if cond:
+        print(f"  PASS  {label}")
+    else:
+        print(f"  FAIL  {label}{(' - ' + detail) if detail else ''}")
+        failures.append(label)
+
+
+def healthy():
+    """A fleet with nothing wrong. Every scenario below mutates a copy."""
+    return {
+        "/api/trading-dashboard/grid-status": {
+            "branches": [{
+                "product_id": "AAA-USD", "num_levels": 3, "active": True,
+                "reference_price": 100.0, "current_price": 100.0, "grid_pct": 0.03,
+                "total_unrealized_net_usd": 1.0, "allocated_usd": 300.0,
+                "slices": [{"opened_at": "2026-09-29T10:00:00Z", "qty": 1.0,
+                            "entry_price": 100.0, "entry_fee_rate": 0.0035,
+                            "adopted": False, "slice_state": "ACCOUNTED",
+                            "unrealized_net_pct": 0.001}],
+            }],
+            "fill_mix": {"buy": {"legs": 10}, "sell": {"legs": 5}},
+            "heartbeat": {"age_seconds": 20},
+            "maker_only_skipped_cycles": {"buy": 1},
+            "maker_expiry_drift": {"buy": 1},
+        },
+        "/api/trading-dashboard/live-ops": {
+            "gate": {"data": {"events": []}},
+            "headline": {"data": {"realized_usd": 100.0}},
+        },
+        "/api/trading-dashboard/grid-status/invariants": {
+            "failed": 0, "headline": "all clear", "checks": [],
+        },
+        "/api/trading-dashboard/alert-queue": {
+            "channel_configured": True, "counts": {"pending": 0, "sent": 5, "failed": 0},
+        },
+        "/api/trading-dashboard/resting-stops": {
+            "uncovered_usd": 0, "uncovered_count": 0, "uncovered": [],
+        },
+        "/api/trading-dashboard/alpaca-overview": {
+            "equity": 2000.0, "equity_floor": 900.0, "buying_power": 800.0,
+            "buying_power_floor": 150.0, "buying_power_halted": False,
+            "account_blocked": False, "trading_blocked": False,
+            "trade_suspended_by_user": False,
+        },
+        # The real local HEAD, so the control case does not trip DEPLOY_LAG.
+        # Hardcoding a commit here made the healthy fixture fail against its
+        # own repo - the check was right and the fixture was wrong, which is
+        # worth a comment because the instinct is to weaken the check.
+        "/health": {"commit": HEAD, "uptime_human": "1h"},
+    }
+
+
+HEAD = (os.popen("git -C %s rev-parse --short HEAD 2>/dev/null"
+                 % os.path.dirname(os.path.abspath(__file__))).read().strip()
+        or "0000000")
+
+ROUTES = {}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = ROUTES.get(self.path)
+        if body is None:
+            self.send_response(404); self.end_headers(); return
+        raw = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *a):
+        pass
+
+
+srv = HTTPServer(("127.0.0.1", 0), Handler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+BASE = f"http://127.0.0.1:{srv.server_address[1]}"
+SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "scripts", "fleet_watchdog.py")
+
+
+def run(routes, prev_snapshot=None):
+    """Serve `routes`, run the watchdog once, return its stdout."""
+    ROUTES.clear()
+    ROUTES.update(routes)
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        state = f.name
+        if prev_snapshot is not None:
+            json.dump(prev_snapshot, f)
+    try:
+        env = dict(os.environ, EMPIRE_BASE=BASE)
+        r = subprocess.run([sys.executable, "-B", SCRIPT, "--state", state],
+                           capture_output=True, text=True, env=env, timeout=120)
+        return r.stdout + r.stderr
+    finally:
+        os.unlink(state)
+
+
+# A baseline snapshot that matches `healthy()`, so delta checks are ARMED.
+# Without this every delta check skips and the scenarios below would pass
+# vacuously - which is the exact failure mode the first watchdog run had.
+BASE_SNAP = {"at": "2026-09-29T10:00:00Z", "buy_legs": 10, "sell_legs": 5,
+             "slice_count": 1, "realized": 100.0, "stuck": 0, "inv_failed": 0,
+             "uncovered_usd": 0, "cycle_errors": [], "reachable": [],
+             "alpaca_equity": 2000.0, "populated": 1}
+
+print("\n-- the control: a healthy fleet must raise NOTHING --")
+out = run(healthy(), BASE_SNAP)
+noisy = [ln for ln in out.splitlines()
+         if ln.strip().startswith(("CRITICAL", "WARN"))]
+ok("a healthy fleet produces no CRITICAL or WARN", not noisy, "; ".join(noisy))
+ok("and says so", "quiet" in out, out)
+
+print("\n-- each alarm, forced one at a time --")
+
+# LOST_FILL: buy legs moved, book did not grow.
+d = healthy(); d["/api/trading-dashboard/grid-status"]["fill_mix"]["buy"]["legs"] = 13
+ok("LOST_FILL when 3 buys fill and no slice appears", "LOST_FILL" in run(d, BASE_SNAP))
+
+# SELL_NOT_RETIRED: sells filled, book did not shrink.
+d = healthy(); d["/api/trading-dashboard/grid-status"]["fill_mix"]["sell"]["legs"] = 8
+ok("SELL_NOT_RETIRED when 3 sells fill and the book stays", "SELL_NOT_RETIRED" in run(d, BASE_SNAP))
+
+# REALIZED_FELL: a forced close booked a loss.
+d = healthy(); d["/api/trading-dashboard/live-ops"]["headline"]["data"]["realized_usd"] = 92.0
+ok("REALIZED_FELL when realized drops", "REALIZED_FELL" in run(d, BASE_SNAP))
+
+# CYCLE_ERROR: any at all.
+d = healthy()
+d["/api/trading-dashboard/live-ops"]["gate"]["data"]["events"] = [
+    {"event_type": "CYCLE_ERROR", "created_at": "2026-09-29T11:00:00",
+     "product_id": "AAA-USD", "message": "BoomError: x"}]
+ok("CYCLE_ERROR on any cycle error", "CYCLE_ERROR" in run(d, BASE_SNAP))
+
+# ALARM_DEAD: alerts held with nowhere to go.
+d = healthy()
+d["/api/trading-dashboard/alert-queue"] = {
+    "channel_configured": False, "counts": {"pending": 9, "sent": 0, "failed": 0},
+    "channel_diagnosis": {"expected_variable": "ALERT_WEBHOOK_URL"}}
+ok("ALARM_DEAD when no channel is configured", "ALARM_DEAD" in run(d, BASE_SNAP))
+
+# STALLED: the loop stopped cycling.
+d = healthy(); d["/api/trading-dashboard/grid-status"]["heartbeat"]["age_seconds"] = 999
+ok("STALLED when the loop stops cycling", "STALLED" in run(d, BASE_SNAP))
+
+# STUCK_ROSE: more inventory below one tradeable unit.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    {"opened_at": "2026-09-29T09:00:00Z", "qty": 0.009999999999998899,
+     "entry_price": 1.0, "adopted": False, "unrealized_net_pct": 0.0})
+ok("STUCK_ROSE when a stuck slice appears", "STUCK_ROSE" in run(d, BASE_SNAP))
+
+# NO_EXIT: coin with no stop from either layer.
+d = healthy()
+d["/api/trading-dashboard/resting-stops"] = {
+    "uncovered_usd": 500.0, "uncovered_count": 2, "uncovered": ["AAA", "BBB"]}
+ok("NO_EXIT when coin has no automatic exit", "NO_EXIT" in run(d, BASE_SNAP))
+
+# IDLE_PROFIT - the one that shipped UNVERIFIED because production had no
+# reachable profitable slice to force it with. Here it does.
+d = healthy()
+sl = d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0]
+sl["unrealized_net_pct"] = 0.05           # well clear of the +1.0% floor
+snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
+ok("IDLE_PROFIT when reachable profit sits across two passes",
+   "IDLE_PROFIT" in run(d, snap))
+
+# ADOPTED_BASIS: a "loss" measured against a price nobody paid.
+d = healthy()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["total_unrealized_net_usd"] = -100.0
+b["slices"][0]["adopted"] = True
+ok("ADOPTED_BASIS when an all-adopted branch shows a loss",
+   "ADOPTED_BASIS" in run(d, BASE_SNAP))
+
+# SECTION1_SILENT: a newly BOUGHT row with no state written.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    {"opened_at": "2026-09-29T12:00:00Z", "qty": 1.0, "entry_price": 100.0,
+     "entry_fee_rate": 0.0035, "adopted": False, "slice_state": None,
+     "unrealized_net_pct": 0.0})
+ok("SECTION1_SILENT when a bought slice carries no state",
+   "SECTION1_SILENT" in run(d, BASE_SNAP))
+
+# ALPACA_FLOOR / HALT / BP - the half of the account nothing watched.
+d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["equity"] = 800.0
+ok("ALPACA_FLOOR when equity is under its floor", "ALPACA_FLOOR" in run(d, BASE_SNAP))
+
+d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["trading_blocked"] = True
+ok("ALPACA_HALT when trading is blocked", "ALPACA_HALT" in run(d, BASE_SNAP))
+
+d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["buying_power"] = 50.0
+ok("ALPACA_BP when buying power is under its floor", "ALPACA_BP" in run(d, BASE_SNAP))
+
+# DEPLOY_LAG: a push that never went live.
+d = healthy(); d["/health"] = {"commit": "0000000", "uptime_human": "1h"}
+ok("DEPLOY_LAG when the served commit is not local HEAD", "DEPLOY_LAG" in run(d, BASE_SNAP))
+
+print("\n-- a gap is a finding, never a pass --")
+d = healthy(); del d["/api/trading-dashboard/alert-queue"]
+out = run(d, BASE_SNAP)
+ok("an unreadable feed is reported as a GAP", "GAP" in out, out)
+
+d = {"/health": {"commit": "x"}}   # grid-status itself unreadable
+out = run(d, BASE_SNAP)
+ok("an unreadable grid-status refuses to judge anything",
+   "UNREADABLE" in out, out)
+
+print("\n-- an absent baseline skips delta checks rather than inventing them --")
+d = healthy(); d["/api/trading-dashboard/grid-status"]["fill_mix"]["buy"]["legs"] = 99
+out = run(d, prev_snapshot=None)
+ok("no snapshot means no LOST_FILL claim", "LOST_FILL" not in out)
+ok("and it says why", "no previous snapshot" in out, out)
+
+srv.shutdown()
+print()
+if failures:
+    print(f"FAILED: {len(failures)}")
+    sys.exit(1)
+print("Every watchdog alarm fires when forced, and a healthy fleet raises none.")

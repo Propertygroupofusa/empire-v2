@@ -96,6 +96,7 @@ def main():
     inv = get("/grid-status/invariants")
     alerts = get("/alert-queue")
     stops = get("/resting-stops")
+    alpaca = get("/alpaca-overview")
     health = get(BASE + "/health")
 
     if grid is None:
@@ -347,6 +348,52 @@ def main():
             flag(INFO, "REACHABLE",
                  f"{len(reachable)} profitable slice(s) reachable this pass - "
                  f"expect them to retire shortly.")
+
+    # ---- 12. ALPACA - the half of the account nobody was watching ----------
+    #
+    # Every check above is the crypto grid. The stock side has its own
+    # capital, its own bots and its own halt conditions, and nothing in this
+    # session had ever looked at it. A floor that halts trading is worth
+    # watching BEFORE it is crossed, not after: by the time equity is under
+    # it the bots have already stopped and the first anyone knows is silence,
+    # which reads exactly like a quiet market.
+    if alpaca is not None:
+        eq = alpaca.get("equity")
+        floor = alpaca.get("equity_floor")
+        cur["alpaca_equity"] = eq
+        if eq is not None and floor:
+            cushion = eq - floor
+            pct = (cushion / floor * 100) if floor else None
+            if cushion <= 0:
+                flag(CRITICAL, "ALPACA_FLOOR",
+                     f"equity {money(eq)} is AT OR BELOW its {money(floor)} floor - "
+                     f"the stock bots are halted.")
+            elif pct is not None and pct < 10:
+                flag(WARN, "ALPACA_FLOOR_NEAR",
+                     f"equity {money(eq)} is {money(cushion)} ({pct:.1f}%) above its "
+                     f"{money(floor)} floor - a {pct:.1f}% fall halts the stock bots.")
+        # A halt or a block is never inferred from quietness - these say it.
+        for key, label in (("buying_power_halted", "buying power halted"),
+                           ("account_blocked", "account BLOCKED"),
+                           ("trading_blocked", "trading BLOCKED"),
+                           ("trade_suspended_by_user", "trading suspended by user")):
+            if alpaca.get(key):
+                reason = alpaca.get("buying_power_reason") or alpaca.get("orders_blocked_reason")
+                flag(CRITICAL, "ALPACA_HALT",
+                     f"{label}" + (f" - {reason}" if reason else ""))
+        bp, bpf = alpaca.get("buying_power"), alpaca.get("buying_power_floor")
+        if bp is not None and bpf and bp < bpf:
+            flag(WARN, "ALPACA_BP",
+                 f"buying power {money(bp)} is under its {money(bpf)} floor - "
+                 f"no new stock entries will be taken.")
+        # Equity falling between passes, reported with BOTH sides so a normal
+        # intraday swing is not dressed up as an alarm.
+        if prev.get("alpaca_equity") is not None and eq is not None:
+            move = eq - prev["alpaca_equity"]
+            if move < -20:
+                flag(WARN, "ALPACA_DROP",
+                     f"equity fell {money(move)} since last pass "
+                     f"({money(prev['alpaca_equity'])} -> {money(eq)}).")
 
     # ---- report -------------------------------------------------------------
     try:
