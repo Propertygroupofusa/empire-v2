@@ -841,7 +841,41 @@ adverse selection and fails closed; `resting_stops.round_down` IS
 building.** The GRID TRIGGER is the one place still using a single global
 `reference_price` for all slices.
 
-**NOT built at all (§7–§10, §12–§22, §24):** event transport, cycle
+### §15/§16 — the fee told to the learning layer was ~100x too small
+
+`crypto_grid_bot.py`'s shadow close block computed
+`total_fees = slice_round_trip_fee_rate(...) * qty * entry / 100`. That
+function returns a FRACTION (0.0070 for a 0.70% round trip), so the `/100`
+understated the fee by about a hundred, and the consumer does
+`net_pnl = realized_pnl - fees` — every trade looked nearly fee-free to the
+one reader whose job is judging whether the edge is real. On a
+LINK-shaped slice it turned a $0.23 trade into a $0.88 one.
+
+Fixed by DERIVING it: `_grid_slice_net_pnl` returns `gross - fee`, so
+`gross_pnl - pnl` IS the fee it charged, for whatever rate that slice was
+priced at. A derived figure cannot drift from the real formula the way a
+second hand-written copy can.
+
+**It was DEAD IN PRODUCTION** — the shadow block imports from
+`/home/user/Delfina`, which Railway does not have, so `SHADOW_MODE_ENABLED`
+is False there. A latent defect, not a live money bug. **Do not report it
+to the owner as one.**
+
+**A second "bug" here is NOT a bug — do not "fix" it.**
+`realized_pnl=gross_pnl` looks wrong against
+`bot_integration_points.on_position_closed`, whose docstring calls that
+parameter "Net P&L after fees". But the IMPORTED consumer is
+`shadow_mode_init`, which does `gross_pnl = realized_pnl` and
+`net_pnl = realized_pnl - fees`. Gross is what it wants. The two files
+disagree with each other; the imported one wins.
+
+**The rest of §15 already held.** `grid_sell()` returns the ACTUAL filled
+quantity and price, `grid_sell_residual()` handles requested != filled, and
+`_grid_slice_net_pnl` prices the round trip at the rate this slice's own
+buy leg really paid. That is the fifth time the spec has assumed less
+exists than does.
+
+**NOT built at all (§7–§10, §12–§14, §17–§22, §24):** event transport, cycle
 rotation, fill accounting, restart reconciliation, the dashboard and the
 speed metrics — and the wiring that would make any of the four modules
 above actually run.

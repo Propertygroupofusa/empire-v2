@@ -6843,6 +6843,32 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                 order_id = f"{branch.bot_name}_{oldest.id}_{int(time.time()*1000)}"
                 hold_time_minutes = int((time.time() - oldest.opened_at.timestamp()) / 60) if oldest.opened_at else 0
                 gross_pnl = filled_qty * (filled_price - oldest.entry_price)
+                # THE FEE IS DERIVED, NOT RE-DERIVED.
+                #
+                # This read:
+                #   total_fees = (await slice_round_trip_fee_rate(...))
+                #                * filled_qty * oldest.entry_price / 100
+                # which is a second, hand-written copy of the fee formula -
+                # and it was wrong in two ways. slice_round_trip_fee_rate()
+                # returns a FRACTION (0.0070 for a 0.70% round trip), so the
+                # /100 made the fee about 100x too small; and it charged the
+                # rate against the ENTRY notional alone where the real
+                # formula charges it against both legs, qty*(entry+exit)/2.
+                #
+                # It mattered because the consumer does
+                # `net_pnl = realized_pnl - fees` - a fee 100x too small
+                # makes every trade look nearly fee-free to the learning
+                # layer, which is the one reader whose whole job is judging
+                # whether the edge is real.
+                #
+                # _grid_slice_net_pnl() returns gross - fee, so gross - net
+                # IS the fee it charged, exactly, for whatever rate this
+                # slice was priced at. Deriving it cannot drift from the
+                # real formula the way a second copy can - the same reason
+                # that formula was extracted into one function to begin
+                # with. `pnl` above is the figure actually booked into
+                # allocated_usd, so this is the fee actually paid.
+                fees_paid = gross_pnl - pnl
                 # THE SIGN OF THE P&L IS NOT A REASON.
                 #
                 # This read `'profit_target' if pnl >= 0 else 'stop_loss'`,
@@ -6874,7 +6900,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
                     exit_price=filled_price,
                     quantity=filled_qty,
                     realized_pnl=gross_pnl,
-                    total_fees=(await slice_round_trip_fee_rate(oldest, sell_leg_fee)) * filled_qty * oldest.entry_price / 100,
+                    total_fees=fees_paid,
                     hold_time_minutes=hold_time_minutes,
                     exit_reason=exit_reason,
                     risk_amount=branch.allocated_usd / branch.num_levels
