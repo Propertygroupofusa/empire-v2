@@ -998,6 +998,51 @@ proved nothing, because grid-status did not expose them yet.** The finding
 came from making the thing observable and then LOOKING. A deployed fix is
 not an exercised fix.
 
+### THE ONE REAL DUPLICATE-ORDER PATH, AND ITS MEASURED RATE: ZERO SO FAR
+
+`_place_and_confirm` **never retries the POST** — one attempt, and on an
+exception it records the error and returns None. So there is exactly one
+way this system can place a duplicate order:
+
+**The POST raises AFTER the venue accepted it** (a 15s timeout, say). No
+`order_id` comes back, so the fill-history reconciliation below — which is
+keyed on `order_id` and was written precisely so "callers never submit a
+duplicate order" — cannot run. The caller sees None, and its next cycle can
+place the same order again.
+
+The codebase already names this case: `GridOrderNotPlaced`'s docstring
+refuses to write it as a confirmed non-order, because "no order was
+created" is a claim the evidence cannot support. It lands in
+`GridMakerExpiry` with `order_rested` NULL instead.
+
+**MEASURED 09:10Z from /grid-status/maker-expiries?limit=500:**
+
+    order_rested NULL   228 rows, ALL between 20:53Z and 23:03:58Z 28 Sep
+    order_rested False  269 rows, 23:03:44Z -> 00:15:06Z
+    order_rested True     3 rows, 02:25:11Z -> 06:27:50Z
+
+Every NULL row PREDATES the moment the column shipped (~23:04Z 28 Sep), and
+they are 112 ALGO + 111 QNT — the two permanent-dust products, i.e. legacy
+non-orders, not timeouts. **Since the path became observable there have
+been ZERO unknown-order rows in ~7.5 hours.** The 3 rows since are all
+genuine rests.
+
+**Do NOT read "228 NULL" as 228 timeouts** — the endpoint's own text warns
+NULL covers both legacy rows and the live path, and the timestamps separate
+them completely.
+
+**WHAT THIS CHANGES.** The duplicate exposure is real and correctly
+identified, but its observed rate is zero, so it does not justify surgery
+on live order paths now. And the key would not even fix it: a cycle_id
+discriminator makes a NEXT-CYCLE retry a DIFFERENT id, so it deduplicates
+the two-deciders-in-one-cycle case (the event loop) and NOT the
+post-timeout case. The post-timeout case needs the caller to remember it
+already attempted this intent — **which is persistence again.**
+
+Three independent measurements now point at the same missing thing:
+§24 recovery, §7/§8 event transport, and §23's wiring are ALL blocked on
+§1's persisted slice state. **§1 IS THE NEXT BUILD.**
+
 ### §7/§8 — THE BLOCKER IS §1's PERSISTENCE, not the transport
 
 Measured 2026-09-29: there is **no WebSocket client anywhere in the repo** —
