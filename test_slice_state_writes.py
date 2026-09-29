@@ -202,6 +202,39 @@ if _holders:
        any(isinstance(n, ast.Name) and n.id == "CryptoGridSlice"
            for n in ast.walk(_holders[0])), "")
 
+print("== and the written state is READABLE ==")
+# A write nobody can read is the same trap as a protection nobody can
+# observe. Both real bugs found today came from shipping observability and
+# then looking, so the state the cycle stamps is served by grid-status.
+_status = next((n for n in ast.walk(TREE)
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_grid_status"), None)
+ok("get_grid_status exists", _status is not None)
+_appends = [n for n in ast.walk(_status) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+            and n.args and isinstance(n.args[0], ast.Dict)] if _status else []
+ok("the slice serialiser is a dict literal", bool(_appends), str(len(_appends)))
+_keys = set()
+for a in _appends:
+    _keys |= {k.value for k in a.args[0].keys
+              if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+for field in ("slice_state", "cycle_id", "slice_index",
+              "filled_quantity", "average_fill_price", "execution_reason"):
+    ok(f"  grid-status serves {field}", field in _keys, str(sorted(_keys)))
+# getattr with a None default, because a pre-existing row has no state and
+# NULL is UNKNOWN - not a value to invent.
+_vals = {}
+for a in _appends:
+    d = a.args[0]
+    for k, v in zip(d.keys, d.values):
+        if isinstance(k, ast.Constant) and k.value in ("slice_state", "cycle_id"):
+            _vals[k.value] = v
+ok("state is read defensively, so an old row reads UNKNOWN not a default",
+   all(isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "getattr"
+       and len(v.args) == 3 and isinstance(v.args[2], ast.Constant)
+       and v.args[2].value is None
+       for v in _vals.values()) and len(_vals) == 2,
+   str(sorted(_vals)))
+
 print()
 if failures:
     print("FAILED %d check(s): %s" % (len(failures), ", ".join(failures)))

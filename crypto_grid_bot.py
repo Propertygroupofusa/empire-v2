@@ -8072,6 +8072,23 @@ async def get_grid_status() -> dict:
                 # adopted matters just as much: an adopted slice paid no entry
                 # commission, and charging one would invent a hole the size of
                 # the fleet's whole adopted inventory.
+                # ---- §1 state, so the WRITE can be verified, not assumed ----
+                #
+                # 5b9d62d started stamping these. A write nobody can read is
+                # the same trap as a protection nobody can observe - and both
+                # real bugs found today came from shipping observability and
+                # then LOOKING. So they are served, and getattr with a None
+                # default because a row written before the columns existed
+                # genuinely has no state: NULL is UNKNOWN, never a default.
+                "slice_state": getattr(s, "slice_state", None),
+                "cycle_id": getattr(s, "cycle_id", None),
+                "slice_index": getattr(s, "slice_index", None),
+                # What ACTUALLY filled on the order working against this
+                # slice, never what was asked for - §15's whole point, and
+                # what makes a PARTIAL distinguishable from a whole one here.
+                "filled_quantity": getattr(s, "filled_quantity", None),
+                "average_fill_price": getattr(s, "average_fill_price", None),
+                "execution_reason": getattr(s, "execution_reason", None),
                 "entry_fee_rate": getattr(s, "entry_fee_rate", None),
                 "adopted": bool(getattr(s, "adopted", False)),
             })
