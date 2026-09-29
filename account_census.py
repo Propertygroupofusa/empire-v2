@@ -141,6 +141,57 @@ async def fetch_balances(session) -> dict:
             "pages": pages, "accounts_seen": len(accounts)}
 
 
+def wallet_units_for(balances, assets, direct=None):
+    """A units map for exactly the assets asked about, with ZERO and UNKNOWN
+    kept apart. Pure - the caller does the I/O.
+
+    WHY THIS EXISTS. coin_tracked_is_held was being handed census()'s
+    `holdings` list, and this module's own asset-balance endpoint already
+    documents why that is the wrong input: census drops assets it cannot
+    price and rolls anything under the dust threshold into an unnamed count.
+    Its job is "what is this account worth"; it cannot answer "does this
+    account hold X at all".
+
+    The consequence was not theoretical. A coin absent from that list is
+    classified UNREADABLE rather than short - correct defence given the
+    input - so the three positions with the LARGEST shortfalls in the fleet
+    were reported as unknown in a footnote while the headline named only the
+    six smaller ones. QNT-USD alone was $149.54 short, more than any coin in
+    the headline.
+
+    Two filters were doing it, and neither is a fault of the filter:
+      - the dust threshold, which hid QNT (0.00097323 units, worth $0.22)
+      - `total > 0` in fetch_balances, which cannot represent a real zero
+        and so hid TIA and PRIME after they went to exactly nothing
+
+    `balances` is fetch_balances()'s result (unfiltered by price or dust).
+    `direct` is {asset: (units, reason)} from a per-currency read, used only
+    for assets the map cannot speak for. A direct read of 0.0 is a CONFIRMED
+    ZERO and lands as 0.0; a failed one stays absent, because an unreadable
+    balance is still not an empty one and that rule is the whole point.
+    """
+    if not balances or not balances.get("available"):
+        return None
+    held = balances.get("held") or {}
+    direct = direct or {}
+    out = {}
+    for asset in assets or ():
+        key = str(asset).upper()
+        if key in held:
+            out[key] = held[key]
+            continue
+        units, _reason = direct.get(key, (None, None))
+        if units is not None:
+            # The venue was asked about this one currency and answered. 0.0
+            # here means the account exists and holds nothing - the maximum
+            # possible shortfall, and precisely the case the filtered map
+            # could not express.
+            out[key] = units
+        # else: left ABSENT, so the check reports it unreadable rather than
+        # inventing a zero for a balance nobody could read.
+    return out
+
+
 async def _price_one(session, asset: str):
     """Advanced Trade first, public feed second. Returns (price, source)."""
     if asset in STABLE:
