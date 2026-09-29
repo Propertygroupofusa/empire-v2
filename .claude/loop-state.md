@@ -2263,3 +2263,67 @@ Checks (2) and (4) unchanged in shape: stuck slices still exactly two (LINK-USD
 **blocked 15, REACHABLE 0** — reserved ALGO/LINK/NEAR/SOL/XLM, short
 ACH/BCH/ETH/ONDO/PEPE/PRIME/QNT/TIA/XRP/ZEC. The profitable set keeps growing
 inside products the system cannot reach; that pattern is unchanged.
+
+## 13:03Z — buys FILLED, but the adoption path swallowed them, not §1
+
+The stake resolved in neither branch I named. I framed it fill-or-expire. It
+was neither: **no maker expiry, no grid-buy slice, and the coin arrived anyway.**
+
+    fill_mix.buy.legs   70 -> 71 -> 73        (three buy legs really filled)
+    wallet cash      $1,726.66 -> $1,562.31   (-$164.35)
+    maker_only skip buy        29 -> 29       (unchanged)
+    maker_expiry_drift.buy     21 -> 21       (unchanged)
+    slices                     75 -> 78
+    HBAR open_slices            2 -> 5        against num_levels 3
+
+**§1 IS STILL UNKNOWN. It is NOT a silent failure — I was one step from
+reporting it as one.** The three new rows carry `entry_fee_rate = None` and
+`adopted = True`. BOTH `CryptoGridSlice` insert sites set `entry_fee_rate`
+(`:6631` the buy path with `buy_leg_fee`, `:4620` the forced-buy path with
+`leg_rate`), and NEITHER sets `adopted` — it is a column defaulting False
+(`models.py:1147`). So these rows came from a THIRD writer, the adoption /
+`reconcile_positions_with_broker` path. §1 stamps the buy insert only, so its
+fields SHOULD be NULL here. **The buy insert still has not run in production.
+Tested, not exercised. UNKNOWN.**
+
+**THE REAL FINDING — a race between the maker wait and the reconciler.**
+`grid_buy` calls `engine.place_maker_buy(..., await maker_wait_seconds())`,
+which is 240s under maker-only. The gate passed at 12:45:34, 12:57:20 and
+12:59:49 — each followed by a $54.78 cash hold ($54.60 = `allocated_usd /
+num_levels` = 163.80/3). Those orders filled. But `grid_buy` never returned:
+the skip counter and the expiry counter BOTH stayed flat, and they tick on
+every maker-only no-fill. So while it was still awaiting, the reconciler saw
+the coin land in the wallet and adopted it:
+
+    13:01:32.779812  entry 0.11342  qty 496.4145  fee_rate None  adopted True
+    13:01:32.779876  entry 0.11342  qty 496.4145  fee_rate None  adopted True
+    13:01:32.779891  entry 0.11342  qty 496.4145  fee_rate None  adopted True
+
+One averaged price, three equal rungs, three microseconds apart — one writer in
+one transaction, not three fills 150 seconds apart at three different prices.
+1489.24 HBAR x 0.11342 = $168.91 against $164.35 of cash spent.
+
+Two consequences, both real:
+1. **The fee rate actually paid on those three legs is LOST.** `entry_fee_rate`
+   NULL means `_grid_slice_net_pnl` cannot price these round trips honestly.
+   The adopted rows also carry no `entry_gate_json`, no `entry_spread_pct`, no
+   `entry_expected_price` — every fact the buy insert exists to record.
+2. **HBAR overshot its own rung cap: 5 slices against `num_levels` 3.** The
+   trigger is `len(slices) < branch.num_levels`, which counts FILLED slices.
+   A maker order resting for 240s is invisible to it while the cycle runs every
+   ~60-90s, so three orders rested concurrently for one free rung. It is
+   self-limiting only AFTER the overshoot, because 5 < 3 is now false.
+
+**This is an inference from counters and row shape, not an observed sequence.**
+No read-only endpoint exposes resting orders or the reconciler's log. Labelled
+as such deliberately.
+
+**Next stake — sharp, and it discriminates:** `grid_buy` is still awaiting
+those maker orders. Either
+- **it returns and inserts its own slices** -> HBAR jumps to 6, 7 or 8 slices,
+  the SAME coin recorded twice (once adopted, once bought), §1 fields populated
+  on the new rows only. That is double-counted inventory and a worse finding.
+- **or it returns empty** -> `maker_only skip buy` 29 -> 30+ and/or
+  `maker_expiry_drift.buy` 21 -> 22+, and HBAR stays at 5 slices. The fill was
+  real but the buy path believes it never happened.
+Check BOTH counters explicitly; the slice count alone cannot tell them apart.
