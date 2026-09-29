@@ -579,8 +579,11 @@ hash that resolves to nothing. First a placeholder written from memory
 `git rev-parse HEAD`, substituted into the file, and the commit **amended**
 — which rewrote the very hash just recorded, leaving a reference to an
 orphaned object. **Write the hash in a follow-up commit, never in the
-commit it names.** Verify with `git cat-file -t <hash>` before trusting any
-hash in this file.
+commit it names.** And verify with
+`git merge-base --is-ancestor <hash> HEAD`, NOT `git cat-file -t`: the
+orphaned hash still answered "commit" to cat-file, because the object
+survives in the local store long after nothing points at it. cat-file
+proves the object exists; only ancestry proves the history contains it.
 
 **A row is not an order.** `GridMakerExpiry`'s own docstring said each row was
 "one post-only order that rested its whole window". `_record_maker_expiry` was
