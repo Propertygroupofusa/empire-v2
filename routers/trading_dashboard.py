@@ -1127,6 +1127,122 @@ def _resolved_crypto_mode() -> str:
     return os.getenv("CRYPTO_STRATEGY_MODE", "") or "(unset)"
 
 
+@router.get("/fills-by-source")
+async def fills_by_source(hours: int = 24, max_pages: int = 20,
+                          db: AsyncSession = Depends(get_db)):
+    """Which subsystem placed the orders the exchange actually filled.
+
+    Read-only. Places no order and writes nothing.
+
+    WHY THIS EXISTS. `OrderAttribution` has been written since 2026-09-28
+    and read by NOTHING - no endpoint, no report, no join - which is the
+    same defect as a column persisted and never surfaced, one layer up.
+    The table exists so a taker commission can be traced to the caller that
+    caused it; this is the trace.
+
+    THE JOIN KEY IS order_id, NOT client_order_id. Coinbase's fills feed
+    does not return client_order_id, which was checked against a real fill
+    before the table was built - a tag written there never comes back.
+
+    UNATTRIBUTED IS NOT A SOURCE. It is UNKNOWN, and mostly EXPECTED: a
+    post-only maker order never passes through the market-order path that
+    writes attribution, and nothing can carry a row from before tagging
+    began. The cutover is READ FROM THE TABLE rather than hardcoded,
+    because a wrong constant would silently reclassify every order on one
+    side of it - and when the table is empty nothing at all is called
+    untagged.
+    """
+    if crypto_btc_compound_bot_module is None:
+        raise HTTPException(status_code=500,
+                            detail="crypto_btc_compound_bot not importable - no Coinbase auth available")
+    try:
+        hours = max(1, min(int(hours), 720))
+    except (TypeError, ValueError):
+        hours = 24
+    try:
+        max_pages = max(1, min(int(max_pages), 40))
+    except (TypeError, ValueError):
+        max_pages = 20
+
+    mod = crypto_btc_compound_bot_module
+    _end = datetime.now(timezone.utc)
+    _start = _end - timedelta(hours=hours)
+    start_iso = _start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = _end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            raw = await mod.fetch_fills_between(session, start_iso, end_iso,
+                                                max_pages=max_pages)
+    except Exception as e:
+        raise HTTPException(status_code=502,
+                            detail=(f"fills fetch failed: {type(e).__name__}: {e}. "
+                                    f"This is a GAP - it does NOT mean no orders filled."))
+    if not raw.get("available"):
+        # An unreadable exchange is UNKNOWN. Returning empty buckets here
+        # would render as "nobody traded", which is the single most
+        # misleading thing this endpoint could say.
+        return {"readable": False,
+                "window": {"start": start_iso, "end": end_iso},
+                "error": raw.get("error"), "detail": raw.get("detail"),
+                "what_this_means": ("The exchange's fill record could not be read. "
+                                    "UNKNOWN, not zero - do not read this as 'no "
+                                    "orders were filled in the window'."),
+                "as_of": datetime.now(timezone.utc).isoformat()}
+
+    fills = raw.get("fills") or []
+    order_ids = sorted({f.get("order_id") for f in fills if f.get("order_id")})
+
+    # OUR OWN TABLE IS THE HALF THAT MAY FAIL WITHOUT TAKING THE EXCHANGE
+    # HALF DOWN. Same shape as /coinbase-statement: the exchange record is
+    # the point, so a database error degrades the join rather than the
+    # whole answer - but it is NAMED, never swallowed, because an empty
+    # attribution map and an unreadable one produce the same buckets and
+    # mean opposite things.
+    from models import OrderAttribution
+    attribution, started_at, attr_error = {}, None, None
+    try:
+        # Chunked: a single IN() over a whole window's order ids can exceed
+        # the driver's bound-parameter limit, and that failure would look
+        # like "nothing was attributed".
+        for i in range(0, len(order_ids), 400):
+            chunk = order_ids[i:i + 400]
+            rows = (await db.execute(
+                select(OrderAttribution.order_id, OrderAttribution.source)
+                .where(OrderAttribution.order_id.in_(chunk)))).all()
+            for oid, src in rows:
+                attribution[oid] = src
+        _oldest = (await db.execute(select(func.min(OrderAttribution.placed_at)))).scalar()
+        if _oldest is not None:
+            started_at = _oldest.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception as e:
+        attr_error = f"{type(e).__name__}: {e}"
+        attribution, started_at = {}, None
+
+    import fills_attribution as _fa
+    out = _fa.classify(fills, attribution,
+                       attribution_started_at=started_at,
+                       truncated=bool(raw.get("truncated")))
+    out.update({
+        "readable": True,
+        "window": raw.get("window") or {"start": start_iso, "end": end_iso},
+        "pages_read": raw.get("pages_read"),
+        "source": "Coinbase /orders/historical/fills joined to order_attribution",
+        # An unreadable attribution table means every order lands in the
+        # unattributed bucket for a reason that has nothing to do with the
+        # orders. Said out loud so that bucket is not read as a finding.
+        "attribution_table_error": attr_error,
+        "attribution_is_unreadable": attr_error is not None,
+        "as_of": datetime.now(timezone.utc).isoformat(),
+    })
+    if attr_error is not None:
+        out["what_unattributed_means"] = (
+            "UNKNOWN for a reason that is not about these orders: the "
+            "attribution table itself could not be read, so EVERY order fell "
+            "into this bucket. Nothing here is evidence about any caller.")
+    return out
+
+
 @router.get("/family-tree-status")
 async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     """Real DB state of every crypto_family_tree_bot.py branch. Unlike

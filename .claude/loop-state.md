@@ -623,7 +623,17 @@ reminder, not a trading task. Do not absorb it, do not act on it.
 10. The Alpaca side earns nothing. The question is on v4; do not decide it.
 11. Why six identical orders at 13:15:02.
 12. Watch market_brain's first live cycle if the flag flips.
-13. Join Coinbase fills to `OrderAttribution`.
+13. ~~Join Coinbase fills to `OrderAttribution`.~~ **DONE** —
+    `fills_attribution.py` (pure) + `GET /fills-by-source`. The table had
+    been written since 2026-09-28 and read by NOTHING. The join is on
+    `order_id`, because the fills feed does not return `client_order_id`.
+    **Unattributed is a bucket, not a source**, and three different absences
+    mean opposite things: a post-only MAKER order never reaches the path
+    that writes attribution; an order predating the first row could not have
+    been tagged; only a TAKER order after the cutover with no row names a
+    caller nobody can identify. **The cutover is read from the table's own
+    oldest `placed_at`, never hardcoded.** Not yet read live — it needs a
+    deploy first.
 14. `trade-history` caps `recent_trades` at 50 whatever limit you pass.
 15. **PARTLY DONE (e0e80de).** None of the new endpoints had a dashboard
     surface. `renderExecutionInventory()` in `family_tree_dashboard.html` now
