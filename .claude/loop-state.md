@@ -2327,3 +2327,70 @@ those maker orders. Either
   `maker_expiry_drift.buy` 21 -> 22+, and HBAR stays at 5 slices. The fill was
   real but the buy path believes it never happened.
 Check BOTH counters explicitly; the slice count alone cannot tell them apart.
+
+## 13:26Z — the discriminator resolved, and it points at my own pushes
+
+Neither branch of the stake happened, 23 minutes after a 240-second window:
+
+    slices 78 (unchanged)      HBAR 5 slices against num_levels 3
+    maker_only skip buy  29 -> 29      expiry.buy 21 -> 21
+      ...while skip SELL ran 6427 -> 6580 (+153), so the counter IS live
+    cash 1562.31 unchanged - the $164.35 never came back
+
+`grid_buy` neither returned-and-inserted nor returned-empty. Its no-fill paths
+both tick counters, and neither ticked, while the sell-side equivalent ticked
+153 times. So `grid_buy` did not complete through any recorded path.
+
+**HYPOTHESIS I RAISED AND THEN KILLED: concurrent branch cycles.** Wrong. The
+driver is `loop.run_until_complete(run_grid_branches_cycle())` inside a
+`while True` with a blocking `time.sleep` (`:9259`), and branches are walked
+sequentially with `await` (`:7687`). No overlap is possible in-process. Killed
+before it reached a report.
+
+**OVER-READ I CAUGHT IN MYSELF.** I started to treat `entry_fee_rate IS NULL`
++ `adopted=True` as the signature of an orphaned buy, and ran the correlation
+across the book. **48 of 78 slices have exactly that shape, and 45 of them
+predate today** (earliest 2026-09-27). It is simply what an adopted row looks
+like. It proves the three HBAR rows came from the adoption writer and NOTHING
+more. Had I not run the whole-book check I would have reported a pattern that
+does not exist.
+
+**CONFIRMED, and it is mine: every push to main redeploys the live trading
+process.** /health `commit` tracks my pushes and `uptime_seconds` resets with
+them:
+
+    26529e1 pushed 12:41:53Z  ->  process start ~12:41:35Z
+    17c53af pushed 13:04:46Z  ->  process start ~13:06:09Z  (uptime 1217s at 13:26:26Z)
+
+I have been pushing a loop-state commit every fifteen minutes all session -
+31 commits today. Each one restarts the process that holds in-flight maker
+orders open for 240 seconds.
+
+**LEADING EXPLANATION, EXPLICITLY NOT ESTABLISHED:** a restart during an
+in-flight `place_maker_buy` orphans it - the venue still fills, `grid_buy`
+never returns, no slice row is written, neither counter ticks, and the
+reconciler later adopts the coin with no fee rate. It accounts for every
+measurement above. What it does NOT have is a second instance: today's three
+fills are the only buys since 06:28Z, so there has been exactly one opportunity
+for this to happen, and it coincided with two pushes inside five minutes. One
+coincidence is not a mechanism. Do not promote this to a finding without a
+second case.
+
+**SEPARATE AND UNCONDITIONAL: HBAR holds 5 slices against `num_levels` 3.**
+The trigger counts FILLED slices (`len(slices) < branch.num_levels`), so orders
+resting for 240s are invisible to it while the cycle runs every ~60-90s. That
+is a real overshoot whatever caused the missing rows, and it is self-limiting
+only AFTER the fact, because 5 < 3 is now false.
+
+**WHAT I AM CHANGING - MY OWN BEHAVIOUR, NOT THE TRADING SYSTEM.** A
+fifteen-minute documentation commit is not worth a restart of a live trading
+process. From here: batch loop-state notes locally and push at most hourly, or
+when shipping code that actually needs to deploy. No risk limit, threshold,
+circuit breaker or maker-only control is touched by this - it is purely a
+change to how often I redeploy.
+
+**Next stake:** with pushes throttled, the next buy that fills should produce a
+slice from the BUY insert - `entry_fee_rate` SET, `adopted` False, and §1's
+fields populated. If a buy fills with NO push anywhere near it and STILL lands
+as an adopted row with a null fee rate, the restart explanation is dead and the
+fault is in the buy path itself.
