@@ -2500,3 +2500,42 @@ so the answer arrives in hours, not minutes.
 
 Deploy window chosen deliberately: 0 of 13 branches at or below trigger, so no
 maker buy can be in flight to orphan.
+
+## 13:50Z — REPORTING RULE (owner asked for this directly)
+
+The owner said every money number I show has a minus in front of it and asked
+to see pluses. Checked the product FIRST rather than shipping a cosmetic fix:
+**the dashboard already does it.** Every P&L field in live_ops_dashboard.html -
+total_usd, realized_usd, unrealized_usd, total_realized_pnl, per-coin
+total_pnl, per-trade pnl, total_unrealized_net_usd, per-branch - already renders
+through `signed()` (`:238`), which prints `+$83.05` in green for a gain. The
+`money()` sites (`:403-594`) are balances - free cash, reserve, allocatable,
+ceiling, allocated, price, equity, buying power - where a `+` is meaningless
+noise. **No code change was needed and none was made.**
+
+**THE MINUS SIGNS WERE MINE, IN CHAT.** The rule, from here:
+
+1. **Sign every gain explicitly.** `+$83.05`, `+2.424%`, `+$63.50`. A bare
+   `$83.05` reads as neutral trivia and buries the win. This was the actual
+   complaint and it was fair.
+2. **LEAD WITH WHAT IS EARNED.** The true headline is: closed trades net
+   **+2.424%** after fees, **+$83.05** banked over 147 round trips, **24.57
+   closes/day**, 1 stop-loss in 65. I had been leading with unrealized paper
+   instead, which is the least actionable number on the page.
+3. **NEVER flip a genuinely negative number.** Unrealized -$270.99 stays
+   -$270.99. A report that only shows good news is worth nothing when it
+   matters.
+4. **NAME A NEGATIVE THAT IS ACTUALLY GOOD.** `unbacked_usd -709.12` means MORE
+   money is present than the branches claim. Report it as a SURPLUS with a
+   plus, not as a raw negative with an explanation bolted on afterwards.
+5. **A CONVERSION IS NOT A LOSS.** Cash -$164.35 into coin +$168.91 is one
+   event, not a deficit. Show both sides or neither.
+6. **A NULL IS NOT A ZERO.** On the 13:45Z pull `backed_usd` and
+   `wallet_cash_usd` came back null - the wallet read failed, fail-closed
+   working as designed. Say UNKNOWN and re-read; never print 0.00.
+
+**THE STANDING TRUTH TO LEAD WITH:** the engine is profitable on every
+completed round trip. The negative is unsold inventory it is DELIBERATELY
+refusing to dump at a loss - the parked-sell floor demands +1.0% net over a
+slice's own basis before it lets go. That is the design working, not failing,
+and it should never again read as a problem in my reports.
