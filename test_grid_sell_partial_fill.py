@@ -57,6 +57,17 @@ def _load_helper():
     names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
     segments = []
     for node in TREE.body:
+        # IMPORTS TOO, not only constants. The helper used to name nothing
+        # but module-level numbers, so carrying assignments alone was
+        # enough - an unstated assumption that broke silently the moment it
+        # started using Decimal, with a NameError from inside the exec
+        # rather than a failing check. Bound names come from the AST for
+        # the same reason the constants do: a hand-written list goes stale
+        # without saying so.
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound = {(a.asname or a.name).split(".")[0] for a in node.names}
+            if bound & names:
+                segments.append(ast.get_source_segment(SOURCE, node))
         if isinstance(node, ast.Assign):
             targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
             if targets & names:
@@ -199,6 +210,42 @@ if sell_fn is not None:
           any("_retire" in {x.id for x in ast.walk(t.test) if isinstance(x, ast.Name)}
               for t in len_tests),
           "a kept residual means the branch is not flat")
+
+print("the residual is exact, because it is a quantity that must be sellable")
+# FOUND IN THE LIVE PAYLOAD 2026-09-29, not in the code. Two slices were
+# sitting at 0.009999999999998899 (LINK-USD) and 0.00999999999999801
+# (PRIME-USD) against a base_increment of 0.01 - each ONE ULP BELOW one
+# tradeable unit. The venue cannot express a size like that, so neither
+# could ever be sold, and a residual never grows. Permanently stuck
+# slices, created by a float subtraction in this function.
+for a, b in ((4.1, 4.09), (10.51, 10.5), (0.23, 0.22), (2.35, 2.34),
+             (1.0, 0.99), (100.01, 100.0)):
+    r, retire = call(a, b)
+    check(f"{a} - {b} lands exactly on one 0.01 unit",
+          r == 0.01 and retire is False, f"{r!r},{retire!r}")
+    check(f"  and plain float arithmetic would not have for {a} - {b}",
+          (a - b) != 0.01, f"float gave {a - b!r}")
+
+r, retire = call(4.1, 2.0)
+check("an ordinary half fill is unchanged", r == 2.1 and retire is False, f"{r!r}")
+r, retire = call("4.1", "4.09")
+check("string inputs land on the same exact answer",
+      r == 0.01 and retire is False, f"{r!r}")
+
+print("exact arithmetic, not a wider float")
+_fn = next((n for n in TREE.body
+            if isinstance(n, ast.FunctionDef) and n.name == "grid_sell_residual"), None)
+_names = ({n.id for n in ast.walk(_fn) if isinstance(n, ast.Name)}
+          if _fn else set())
+check("the residual is computed through Decimal",
+      "_Decimal" in _names, str(sorted(n for n in _names if "ecimal" in n)))
+_calls = [n for n in ast.walk(_fn) if isinstance(n, ast.Call)
+          and isinstance(n.func, ast.Name) and n.func.id == "_Decimal"] if _fn else []
+check("and every Decimal is built from TEXT, never from the float itself",
+      bool(_calls) and all(c.args and isinstance(c.args[0], ast.Call)
+                           and isinstance(c.args[0].func, ast.Name)
+                           and c.args[0].func.id == "str" for c in _calls),
+      f"{len(_calls)} Decimal call(s)")
 
 print()
 if failures:

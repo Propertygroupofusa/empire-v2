@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import zlib
+from decimal import Decimal as _Decimal, InvalidOperation
 import random
 import sys
 import time
@@ -1335,7 +1336,34 @@ def grid_sell_residual(slice_qty, filled_qty, rel_epsilon: float = None):
         # None when nothing filled), but deleting on a zero fill would be
         # the original bug in its worst form.
         return slice_qty, False
-    residual = slice_qty - filled_qty
+    # EXACT DECIMAL, NOT FLOAT SUBTRACTION.
+    #
+    # Found 2026-09-29 in the live payload: two slices were sitting at
+    # 0.009999999999998899 (LINK-USD) and 0.00999999999999801 (PRIME-USD)
+    # against a base_increment of 0.01. Each should be EXACTLY one
+    # tradeable unit, and each was one ULP below it - so the venue's rules
+    # could not express them, they could never be sold, and they will never
+    # grow. A permanently stuck slice, created by this line.
+    #
+    # float: 4.1 - 4.09 == 0.009999999999999787
+    # Decimal("4.1") - Decimal("4.09") == 0.01, exactly.
+    #
+    # str() first, deliberately: it takes each float at the decimal
+    # spelling it was written with, which is the number a person and the
+    # venue both mean. Decimal(float) would instead preserve the binary
+    # error this exists to remove.
+    #
+    # This is the same discipline execution_quantity applies to sizing. The
+    # residual written back to the row IS a quantity the next cycle will
+    # try to sell, so it has to survive the venue's rules just as an order
+    # size does.
+    try:
+        residual = float(_Decimal(str(slice_qty)) - _Decimal(str(filled_qty)))
+    except (InvalidOperation, ValueError, OverflowError):
+        # Unparseable inputs are not a reason to guess. Fall back to the
+        # plain subtraction rather than returning a number from nowhere;
+        # the guards above have already rejected the cases that matter.
+        residual = slice_qty - filled_qty
     if residual <= slice_qty * rel_epsilon:
         return 0.0, True
     return residual, False

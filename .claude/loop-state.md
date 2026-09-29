@@ -1043,6 +1043,48 @@ Three independent measurements now point at the same missing thing:
 §24 recovery, §7/§8 event transport, and §23's wiring are ALL blocked on
 §1's persisted slice state. **§1 IS THE NEXT BUILD.**
 
+### TWO SLICES ARE PERMANENTLY STUCK — found the hour the telemetry shipped
+
+Measured 09:45Z across all 80 open slices, each against its own venue
+`base_increment`:
+
+    LINK-USD    qty 0.009999999999998899   increment 0.01   opened 28 Sep 14:34Z
+    PRIME-USD   qty 0.00999999999999801    increment 0.01   opened 28 Sep 17:08Z
+
+Each should be EXACTLY 0.01 — one whole tradeable unit, sellable. Each is
+one ULP below it. The venue cannot express a size like that, a residual
+never grows, so **neither slice can ever be sold.** They have sat there ~19
+and ~16.5 hours.
+
+**CAUSE, in `grid_sell_residual`:** `residual = slice_qty - filled_qty`, a
+FLOAT subtraction, written back to the row. `4.1 - 4.09` is
+`0.009999999999999787` in float and `0.01` exactly in Decimal. Its retire
+guard is RELATIVE to the slice (`rel_epsilon` 1e-6), so it has no idea what
+the venue's smallest unit is and keeps the remainder.
+
+**FIXED** — the residual is now `float(Decimal(str(a)) - Decimal(str(b)))`.
+`str()` first, deliberately: `Decimal(float)` would preserve the binary
+error this removes. Same discipline `execution_quantity` applies to sizing,
+and for the same reason — the residual IS a quantity the next cycle tries
+to sell, so it must survive the venue's rules like any order size.
+
+**THE TWO EXISTING ROWS ARE NOT FIXED BY THIS.** They are persisted values.
+Correcting them is a DB write on the live ledger, and `reconcile-slices` is
+write-guarded and **the owner's to run, never mine.** Report; do not touch.
+
+**A LOADER ASSUMPTION THIS BROKE:** `test_grid_sell_partial_fill.py` lifts
+the helper out with AST and execs only it, collecting module-level
+ASSIGNMENTS whose names the function uses — but not IMPORTS. That was fine
+while the helper named only numbers; the moment it named `Decimal` it blew
+up with a NameError from inside the exec rather than a failing check. The
+loader now carries imports too, bound names read from the AST for the same
+reason the constants are.
+
+**AN EQUIVALENT MUTANT IS NOT A TEST GAP.** `Decimal(str(float(x)))` vs
+`Decimal(str(x))` survived; verified identical over 20,009 cases including
+1e-9, 1e12 and "1E+3". Dropped from the harness rather than "killed" with
+an assertion about spelling.
+
 ### §1 PERSISTENCE — the 13 columns landed. NOTHING WRITES THEM YET.
 
 `CryptoGridSlice` gained: `cycle_id`, `slice_state`, `slice_index`,
