@@ -1130,6 +1130,12 @@
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
+    <!-- EXECUTION & INVENTORY. Added because none of it was on this page:
+         /grid-status/invariants was reporting FAIL with $639.28 short across
+         nine positions and the dashboard did not mention it, and the three
+         endpoints that explain WHY a branch cannot sell were reachable only
+         by curl. A check nobody can see protects nothing. -->
+    <div id="execution-inventory-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-opportunity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-maker-only-toggle" class="maker-only-card"></div>
     <div class="panel" id="grid-panel">
@@ -2919,6 +2925,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridMakerOrdersToggle(data);
     renderGridOpportunityPanel(data);
     renderAccountCensus();
+    renderExecutionInventory();
     renderGridMakerOnlyToggle(data);
 
     document.getElementById('grid-total-allocated').textContent =
@@ -3990,6 +3997,157 @@ async function toggleGridMakerOrders(enable) {
 // no other element here can show. It fetches on its own rather than riding
 // the status payload: the census prices dozens of assets and must never sit
 // in the path of the page that shows whether trading is alive.
+async function renderExecutionInventory() {
+    // TWO QUESTIONS THE OWNER ASKS AND THIS PAGE COULD NOT ANSWER:
+    //   "is the fleet claiming coin it does not have?"  -> /grid-status/invariants
+    //   "why can that branch not sell?"                 -> /grid-status/orders-not-placed
+    //
+    // An UNREADABLE fetch must never render as all-clear. Each half below
+    // says GAP in its own words rather than falling back to an empty panel,
+    // because a blank space next to a green page reads as "nothing wrong" -
+    // which is the exact confusion this whole line of work came from.
+    const el = document.getElementById('execution-inventory-panel');
+    if (!el) return;
+    const usd = v => (v === null || v === undefined) ? '&mdash;'
+        : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const num = (v, d) => (v === null || v === undefined) ? '&mdash;'
+        : Number(v).toLocaleString(undefined, {maximumFractionDigits: d === undefined ? 8 : d});
+
+    let inv = null, invErr = null;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/invariants');
+        inv = await r.json();
+        if (!r.ok) { invErr = 'HTTP ' + r.status; inv = null; }
+    } catch (e) { invErr = String(e); }
+
+    let blocked = null, blkErr = null;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/orders-not-placed?hours=2&limit=400');
+        blocked = await r.json();
+        if (!r.ok) { blkErr = 'HTTP ' + r.status; blocked = null; }
+    } catch (e) { blkErr = String(e); }
+
+    if (invErr && blkErr) {
+        el.innerHTML = '<div class="panel" style="padding:10px 12px; border-left:3px solid #f59e0b;">'
+            + '<strong>Execution &amp; inventory: UNREADABLE.</strong> '
+            + '<span style="color:var(--text-dim);">Neither the invariant check nor the blocked-order '
+            + 'ledger could be read, so nothing here is confirmed. This is a GAP, not an all-clear.</span></div>';
+        return;
+    }
+
+    let h = '<div class="panel" style="padding:10px 12px;">';
+    h += '<div style="font-weight:600; margin-bottom:6px;">Execution &amp; inventory</div>';
+
+    // ---- Does the fleet hold the coin it claims? ----
+    const check = inv && (inv.checks || []).find(c => c.name === 'coin_tracked_is_held');
+    if (invErr || !check) {
+        h += '<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #f59e0b;'
+           + ' background:rgba(245,158,11,.10); color:var(--text-dim);">'
+           + 'The tracked-vs-held check could not be read'
+           + (invErr ? ' (' + invErr + ')' : '') + '. UNKNOWN, not clear.</div>';
+    } else if (check.status === 'OK') {
+        h += '<div style="margin-bottom:7px;">Every tracked position is fully held at the venue.</div>';
+    } else if (check.status !== 'FAIL') {
+        // UNKNOWN is its own verdict and gets its own colour, never green.
+        h += '<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #f59e0b;'
+           + ' background:rgba(245,158,11,.10);"><strong>Tracked vs held: '
+           + check.status + '.</strong> <span style="color:var(--text-dim);">'
+           + (check.detail || '') + '</span></div>';
+    } else {
+        const pos = (check.short_positions || []).slice().sort(
+            (a, b) => (b.short_usd || 0) - (a.short_usd || 0));
+        h += '<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #ef4444;'
+           + ' background:rgba(239,68,68,.08);">'
+           + '<strong>' + usd(check.short_usd) + '</strong> of coin is claimed by a branch and not held '
+           + '<span style="color:var(--text-dim);">&mdash; across ' + pos.length
+           + ' position' + (pos.length === 1 ? '' : 's') + '. A sale of those slices would be an order '
+           + 'for units that do not exist.</span></div>';
+        if (pos.length) {
+            h += '<div class="table-scroll"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">'
+               + '<thead><tr style="text-align:left; color:var(--text-dim);">'
+               + '<th style="padding:3px 8px 3px 0;">Coin</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Tracked</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Held</th>'
+               + '<th style="text-align:right; padding:3px 0;">Short</th></tr></thead><tbody>';
+            for (const r of pos) {
+                h += '<tr><td style="padding:2px 8px 2px 0;">' + r.product_id + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">' + num(r.tracked) + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">' + num(r.held) + '</td>'
+                   + '<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;"><strong>'
+                   + usd(r.short_usd) + '</strong></td></tr>';
+            }
+            h += '</tbody></table></div>';
+        }
+        // The footnote is never dropped: a coin nobody could read is not a
+        // coin that is fine.
+        if (check.unreadable && check.unreadable.length) {
+            h += '<div style="margin-top:4px; color:#f59e0b; font-size:.92em;">'
+               + check.unreadable.length + ' tracked coin(s) could not be confirmed either way: '
+               + check.unreadable.join(', ') + '. UNKNOWN, not zero.</div>';
+        }
+    }
+
+    // ---- Why could a branch not even place an order? ----
+    if (blkErr || !blocked || !blocked.readable) {
+        h += '<div style="margin-top:8px; padding:6px 8px; border-left:3px solid #f59e0b;'
+           + ' background:rgba(245,158,11,.10); color:var(--text-dim);">'
+           + 'The blocked-order ledger could not be read'
+           + (blkErr ? ' (' + blkErr + ')' : '') + '. An empty result and an unreadable one '
+           + 'are different things; this is the second.</div>';
+    } else {
+        const rows = blocked.by_product_and_side || [];
+        if (!rows.length) {
+            h += '<div style="margin-top:8px; color:var(--text-dim);">'
+               + 'No order was blocked in the last 2h. '
+               + '<span style="font-size:.92em;">That is not the same as "every branch sold" &mdash; '
+               + 'a branch below its own sell trigger never attempts, so it never appears here.</span></div>';
+        } else {
+            h += '<div style="margin-top:8px; font-weight:600;">Could not place an order (last 2h)</div>';
+            h += '<div style="color:var(--text-dim); font-size:.92em; margin-bottom:4px;">'
+               + 'These cycles never reached the venue. LOCKED means the coin sits behind a resting '
+               + 'order and freeing inventory helps; DUST means there is nothing to free.</div>';
+            h += '<div class="table-scroll"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">'
+               + '<thead><tr style="text-align:left; color:var(--text-dim);">'
+               + '<th style="padding:3px 8px 3px 0;">Coin</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Cycles</th>'
+               + '<th style="text-align:right; padding:3px 8px;">Available</th>'
+               + '<th style="padding:3px 0 3px 8px;">Reading</th></tr></thead><tbody>';
+            for (const r of rows.slice(0, 12)) {
+                const av = r.min_available_units;
+                // A null available is UNKNOWN. It must not be drawn as dust,
+                // and it must not be drawn as locked either.
+                let verdict, colour;
+                if (av === null || av === undefined) {
+                    verdict = 'UNKNOWN &mdash; the balance could not be read';
+                    colour = '#f59e0b';
+                } else if (av === 0) {
+                    verdict = 'LOCKED &mdash; nothing free at all';
+                    colour = '#ef4444';
+                } else {
+                    verdict = 'available is ' + num(av) + ' &mdash; see the branch\'s holdings '
+                            + 'to tell LOCKED from DUST';
+                    colour = 'var(--text-dim)';
+                }
+                h += '<tr><td style="padding:2px 8px 2px 0;">' + r.product_id + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">' + r.count + '</td>'
+                   + '<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">' + num(av) + '</td>'
+                   + '<td style="padding:2px 0 2px 8px; color:' + colour + ';">' + verdict + '</td></tr>';
+            }
+            h += '</tbody></table></div>';
+            if (blocked.truncated) {
+                h += '<div style="margin-top:4px; color:#f59e0b; font-size:.92em;">'
+                   + 'The list is capped at ' + blocked.limit + ' rows, so this is a partial view.</div>';
+            }
+        }
+    }
+
+    h += '<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">'
+       + 'Read-only. Freeing locked inventory is a deliberate call and is not on this page.</div>';
+    h += '</div>';
+    el.innerHTML = h;
+}
+
+
 async function renderAccountCensus() {
     const el = document.getElementById('account-census-panel');
     if (!el) return;
