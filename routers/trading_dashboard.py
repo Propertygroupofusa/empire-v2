@@ -8070,6 +8070,108 @@ class SetGridMakerOnlyRequest(BaseModel):
     enabled: bool
 
 
+class SetAdoptedStopRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/adopted-stop")
+async def set_adopted_stop_endpoint(payload: SetAdoptedStopRequest):
+    """Arm or disarm the catastrophe stop on ADOPTED branches.
+
+    THE GAP THIS CLOSES. An adopted branch names a stop of 0, which is the
+    right answer to the question it was asked: the fleet stop sells a slice 8%
+    below its ENTRY, and an adopted entry is the price on the day the branch
+    took charge of coin the owner may have held a year, so an 8% wobble would
+    liquidate a long-term hold against a cost basis nobody paid.
+
+    It was implemented as no trigger at ANY price, and those are different
+    claims. Measured 2026-09-29: fourteen branches, $6,271 of coin, and
+    nothing able to sell it. The grid refuses a losing sale; the resting stops
+    decline coin a grid branch holds slices on; the concentration trimmer
+    declines it under the same rule. All three are correct and all three share
+    one cause - the grid's slice ledger is the book of record for those units,
+    so any OTHER seller desynchronises it. The only safe seller is the grid,
+    through its stop.
+
+    Armed, every adopted branch gets a stop 20-35% below its adoption price,
+    sized at 6x the coin's own daily volatility with a 20% floor - catastrophe
+    cover, not a working stop. It sells through the grid's existing path, so
+    the slice row retires and the trade is recorded; nothing here is a second
+    seller.
+
+    WHAT IT WILL NOT DO: size itself from a guess. A branch whose volatility
+    cannot be read keeps no stop that cycle and says so, rather than inventing
+    a distance on a long-term hold. And a per-coin GRID_STOP_OVERRIDES entry
+    of 0 still outranks this.
+
+    The response reports what the change means at CURRENT prices - which
+    branches are now stopped and how far each is from firing - because
+    "armed" on its own does not tell the owner whether anything is about to be
+    sold. Takes effect on the bot's next cycle; no restart.
+
+    GRID_ADOPTED_STOP_MODE in the environment WINS over this. If it is set,
+    the response says so and the effective mode does not change.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_adopted_stop_active(payload.enabled)
+
+    mode = await crypto_grid_bot_module.adopted_stop_mode()
+    out = {
+        "requested": "arm" if payload.enabled else "off",
+        "effective_mode": mode,
+        "source": await crypto_grid_bot_module.adopted_stop_mode_source(),
+        "takes_effect": "the bot's next grid cycle - no restart",
+    }
+    if out["requested"] != mode:
+        out["overridden"] = (
+            "the environment variable is set and wins over this toggle, so the "
+            "effective mode did not change - clear it in Railway to let this decide")
+
+    # What it means right now, per branch. An armed switch with no idea what it
+    # would sell is the thing this whole endpoint exists to avoid.
+    try:
+        import adaptive_stop
+        status = await crypto_grid_bot_module.get_grid_status()
+        rows, would_sell = [], []
+        for b in (status.get("branches") or []):
+            if b.get("stop_loss_pct_override") != 0.0:
+                continue
+            px, sl = b.get("current_price"), (b.get("slices") or [])
+            if not sl or not px:
+                continue
+            stop = adaptive_stop.adopted_stop(
+                b["product_id"], b.get("stop_daily_vol_pct"),
+                mode_override=mode)["stop_pct"]
+            worst = min((px - s["entry_price"]) / s["entry_price"]
+                        for s in sl if s.get("entry_price"))
+            hit = bool(stop) and worst <= -stop
+            rows.append({
+                "product_id": b["product_id"],
+                "stop_pct": round(stop, 6) if stop else 0.0,
+                "worst_slice_pct": round(worst * 100, 2),
+                # None, not 0, when there is no stop to measure against.
+                "points_of_room": (round((stop - abs(min(worst, 0.0))) * 100, 1)
+                                   if stop else None),
+                "would_sell_now": hit,
+                "unsized": not stop,
+            })
+            if hit:
+                would_sell.append(b["product_id"])
+        rows.sort(key=lambda r: (r["points_of_room"] is None, r["points_of_room"]))
+        out["branches"] = rows
+        out["would_sell_now"] = would_sell
+        out["would_sell_now_count"] = len(would_sell)
+        out["thinnest_cushion"] = next((r for r in rows
+                                        if r["points_of_room"] is not None), None)
+    except Exception as exc:
+        # The switch was still written. Never claim a preview that failed.
+        out["preview_error"] = (
+            f"the switch was set, but what it would sell could not be computed "
+            f"({type(exc).__name__}: {exc}) - read /grid-status before relying on it")
+    return out
+
+
 @router.post("/grid-status/maker-only")
 async def set_grid_maker_only_endpoint(payload: SetGridMakerOnlyRequest):
     """Remove the market fallback entirely - maker fills or no fill.

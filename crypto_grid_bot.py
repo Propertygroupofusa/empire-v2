@@ -2488,6 +2488,101 @@ async def fleet_tracked_units_by_product():
     return units, prices
 
 
+#: Where the adopted catastrophe stop's DB switch lives, in the same
+#: TradingBotState table and the same 1.0/0.0 shape MAKER_ONLY_MODE_KEY uses.
+ADOPTED_STOP_MODE_KEY = "grid_adopted_stop_mode"
+
+
+async def adopted_stop_mode() -> str:
+    """"arm" or "off" for the adopted catastrophe stop, env first then the DB.
+
+    WHY A DB SWITCH AT ALL, when adaptive_stop already reads an env var. The
+    env var was the only way in, and this fleet's owner runs everything else
+    from the dashboard - maker-only, the spacing override, the net-edge gate
+    are all DB-backed with a button, precisely so a real-money setting can be
+    changed and SEEN without a Railway visit and a restart. An env-only switch
+    on the one control that decides whether $6,271 of adopted coin has a stop
+    was the odd one out.
+
+    Precedence is the same as is_maker_only_active's, deliberately: the
+    environment WINS when it says anything, so a variable set in Railway can
+    always override whatever is in the database - including forcing it OFF
+    when the DB says arm. get_grid_status reports which one decided.
+
+    FAILS CLOSED to "off". Every consumer treats "arm" as permission to SELL,
+    so an unreadable toggle must never answer "arm" - the same rule
+    is_maker_only_active follows for the same reason, one direction being
+    safe and the other not.
+    """
+    import adaptive_stop
+    raw = os.getenv(adaptive_stop.ADOPTED_MODE_ENV)
+    if raw is not None and str(raw).strip():
+        # Anything the environment says is final, armed or not. Quotes
+        # stripped for the same reason maker_only_env_override strips them: a
+        # pasted Railway value has broken this deployment once already.
+        return adaptive_stop.adopted_mode(str(raw).strip().strip('"').strip("'"))
+    try:
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(TradingBotState).where(
+                TradingBotState.bot_name == ADOPTED_STOP_MODE_KEY))).scalar_one_or_none()
+            if row is not None and row.base_capital and row.base_capital >= 1.0:
+                return adaptive_stop.ADOPTED_MODE_ARM
+    except Exception as e:
+        log.warning(f"[GRID] adopted-stop toggle unreadable ({e}) - staying OFF, so no "
+                    f"adopted branch gains a stop from a read that failed")
+    return adaptive_stop.ADOPTED_MODE_OFF
+
+
+async def adopted_stop_mode_source() -> str:
+    """Which switch is deciding, for the dashboard to show.
+
+    A setting whose value is visible but whose SOURCE is not is how an
+    operator comes to click a button that cannot win - the maker-only card
+    disables its own button when the environment is in charge, and this
+    exists so the same can be done here.
+    """
+    import adaptive_stop
+    raw = os.getenv(adaptive_stop.ADOPTED_MODE_ENV)
+    if raw is not None and str(raw).strip():
+        return f"environment {adaptive_stop.ADOPTED_MODE_ENV} (wins over the database)"
+    return "database"
+
+
+async def set_adopted_stop_active(enabled: bool):
+    """Arm (True) or disarm (False) the adopted catastrophe stop.
+
+    THIS SELLS REAL COIN WHEN ARMED. Not immediately and not on its own
+    schedule - it gives every adopted branch a stop 20-35% below its adoption
+    price, and a branch that falls that far will be sold by the grid's own
+    sell path. Off by default, and the caller is expected to have established
+    what it would sell at today's prices first.
+
+    Logged at WARNING either way, with the count of branches it changes the
+    answer for, because "a switch was thrown" is the single most useful line
+    in a log after something sells.
+    """
+    import adaptive_stop
+    async with get_session_factory()() as db:
+        row = (await db.execute(select(TradingBotState).where(
+            TradingBotState.bot_name == ADOPTED_STOP_MODE_KEY))).scalar_one_or_none()
+        if row is None:
+            db.add(TradingBotState(bot_name=ADOPTED_STOP_MODE_KEY,
+                                   base_capital=1.0 if enabled else 0.0))
+        else:
+            row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
+
+    env = os.getenv(adaptive_stop.ADOPTED_MODE_ENV)
+    _overridden = bool(env is not None and str(env).strip())
+    log.warning(
+        f"[GRID] adopted catastrophe stop set to {'ARM' if enabled else 'OFF'} in the "
+        f"database"
+        + (f" - BUT {adaptive_stop.ADOPTED_MODE_ENV}={env!r} is set and WINS, so the "
+           f"effective mode is unchanged" if _overridden else
+           f" - adopted branches now have a stop 20-35% below their adoption price"
+           if enabled else " - adopted branches have NO stop again"))
+
+
 async def products_without_a_grid_stop() -> dict:
     """Tickers whose branch has NO grid stop at all. {TICKER: why}.
 
@@ -2542,8 +2637,10 @@ async def products_without_a_grid_stop() -> dict:
     _adopted_armed = False
     try:
         import adaptive_stop
-        _adopted_armed = (adaptive_stop.adopted_mode()
-                          == adaptive_stop.ADOPTED_MODE_ARM)
+        # adopted_stop_mode(), not adopted_mode() - the switch now lives in the
+        # database as well as the environment, and reading only the env would
+        # report a branch as uncovered while the cycle is stopping it.
+        _adopted_armed = (await adopted_stop_mode()) == adaptive_stop.ADOPTED_MODE_ARM
     except Exception as exc:
         log.warning(f"[GRID] adopted-stop policy unreadable ({exc}) - treating those "
                     f"branches as uncovered, which is the direction that reports")
@@ -6588,7 +6685,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch):
             # it always said.
             try:
                 import adaptive_stop
-                _adopted = adaptive_stop.adopted_stop(branch.product_id, _stop_vol)
+                _adopted = adaptive_stop.adopted_stop(
+                    branch.product_id, _stop_vol,
+                    # Resolved env-then-DB, so the dashboard button decides
+                    # this as well as the Railway variable.
+                    mode_override=await adopted_stop_mode())
                 _stop_pct = _adopted["stop_pct"]
                 _resolved = _adopted
             except Exception as exc:
@@ -7557,7 +7658,7 @@ async def _resolve_branch_stop(session, product_id):
                 "daily_vol_pct": None}
 
 
-def _reported_stop(branch, resolved):
+def _reported_stop(branch, resolved, adopted_mode=None):
     """The stop THIS branch really trades under, for reporting.
 
     _resolve_branch_stop is keyed by product, but the override that
@@ -7591,8 +7692,13 @@ def _reported_stop(branch, resolved):
         # with the sign flipped.
         try:
             import adaptive_stop
+            # adopted_mode passed IN, for the same reason `resolved` is: this
+            # function is sync and the switch now has a database half that
+            # only an async read can see. None falls back to the environment
+            # alone, which is what every existing caller got.
             _ad = adaptive_stop.adopted_stop(branch.product_id,
-                                             (resolved or {}).get("daily_vol_pct"))
+                                             (resolved or {}).get("daily_vol_pct"),
+                                             mode_override=adopted_mode)
             if _ad["stop_pct"]:
                 return {"stop_pct": _ad["stop_pct"], "source": _ad["source"],
                         "reason": _ad["reason"],
@@ -7728,6 +7834,11 @@ async def get_grid_status() -> dict:
         stop_by_product = {}
         for product_id in distinct_products:
             stop_by_product[product_id] = await _resolve_branch_stop(session, product_id)
+        # ONCE for the whole status read, not per branch: it is one DB row and
+        # every branch resolves against the same answer. Fails to "off" inside
+        # adopted_stop_mode, so a read failure here cannot report a stop that
+        # the cycle is not applying.
+        _adopted_mode = await adopted_stop_mode()
 
     out = []
     total_allocated = 0.0
@@ -7798,7 +7909,8 @@ async def get_grid_status() -> dict:
 
         # Resolved per BRANCH, not per product: the override lives on the
         # branch and is what the trading loop actually obeys.
-        _branch_stop = _reported_stop(b, stop_by_product.get(b.product_id))
+        _branch_stop = _reported_stop(b, stop_by_product.get(b.product_id),
+                                      adopted_mode=_adopted_mode)
 
         out.append({
             "bot_name": b.bot_name, "product_id": b.product_id, "allocated_usd": round(b.allocated_usd, 2),
@@ -7933,6 +8045,12 @@ async def get_grid_status() -> dict:
         "maker_only_source": ("environment " + MAKER_ONLY_ENV_VAR
                               if maker_only_env_override() is not None else "database toggle"),
         "maker_only_skipped_cycles": await get_maker_only_skips(),
+        # The adopted catastrophe stop, and which switch decided it. Reported
+        # for the same reason maker_only_source is: this one can SELL, and a
+        # setting whose source the page cannot name is one nobody can turn off
+        # again. _adopted_mode was resolved once, above.
+        "adopted_stop_mode": _adopted_mode,
+        "adopted_stop_source": await adopted_stop_mode_source(),
         # The theoretical figure above is step - (fees + adverse selection).
         # This is the same question answered from real fills, so the page can
         # stop presenting an estimate in the voice of a measurement.

@@ -338,6 +338,123 @@ def test_the_stop_did_not_get_its_own_copy_of_the_sell_path():
         ok(f"the comparison could run ({type(exc).__name__}: {exc})", False)
 
 
+def test_the_db_switch_never_beats_the_environment_and_fails_closed():
+    """The switch gained a database half so the owner can throw it from the
+    dashboard rather than from Railway - the env var was the only way in, and
+    it is the one control deciding whether $6,271 of adopted coin has a stop.
+
+    Two properties matter more than the convenience: the environment WINS when
+    it says anything, so a Railway variable can always force it off whatever
+    the database holds; and an unreadable database answers OFF, because every
+    consumer reads "arm" as permission to sell.
+    """
+    import asyncio
+    import contextlib
+    import os
+
+    import crypto_grid_bot as grid
+
+    class _Row:
+        def __init__(self, v): self.base_capital = v
+
+    def _factory(db_value, explode=False):
+        class _Res:
+            def __init__(self, r): self._r = r
+            def scalar_one_or_none(self): return self._r
+        class _DB:
+            async def execute(self, *a_, **k):
+                if explode:
+                    raise RuntimeError("database is gone")
+                return _Res(None if db_value is None else _Row(db_value))
+        @contextlib.asynccontextmanager
+        async def _sess(): yield _DB()
+        return lambda: _sess
+
+    def mode(*, env=None, db=None, explode=False):
+        old_f, old_e = grid.get_session_factory, os.environ.get(a.ADOPTED_MODE_ENV)
+        grid.get_session_factory = _factory(db, explode)
+        if env is None:
+            os.environ.pop(a.ADOPTED_MODE_ENV, None)
+        else:
+            os.environ[a.ADOPTED_MODE_ENV] = env
+        try:
+            return asyncio.run(grid.adopted_stop_mode())
+        finally:
+            grid.get_session_factory = old_f
+            if old_e is None:
+                os.environ.pop(a.ADOPTED_MODE_ENV, None)
+            else:
+                os.environ[a.ADOPTED_MODE_ENV] = old_e
+
+    ok("no env, no DB row -> off", mode() == "off")
+    ok("no env, DB row 0.0 -> off", mode(db=0.0) == "off")
+    ok("no env, DB row 1.0 -> arm (the dashboard button works)",
+       mode(db=1.0) == "arm")
+    ok("env=arm beats a DB 0.0", mode(env="arm", db=0.0) == "arm")
+    ok("env=off BEATS a DB 1.0 - Railway can always force it off",
+       mode(env="off", db=1.0) == "off")
+    ok("env='true' does not arm, even over a DB 0.0",
+       mode(env="true", db=0.0) == "off")
+    ok("a quoted Railway value still arms", mode(env='"arm"', db=0.0) == "arm")
+    ok("whitespace is forgiven", mode(env=" Arm ", db=0.0) == "arm")
+    ok("an empty env falls through to the DB rather than forcing off",
+       mode(env="   ", db=1.0) == "arm")
+    ok("AN UNREADABLE DATABASE ANSWERS OFF, never arm",
+       mode(db=1.0, explode=True) == "off")
+    ok("and the environment still wins over an unreadable database",
+       mode(env="arm", db=None, explode=True) == "arm")
+
+
+def test_the_status_report_and_the_cycle_cannot_disagree_about_the_mode():
+    """_reported_stop is sync and the switch now has a database half only an
+    async read can see. If the mode is not passed in, the page reports the
+    environment's answer while the cycle applies the database's - which is
+    exactly the defect _reported_stop was created to end.
+    """
+    import ast
+    import pathlib
+    src = pathlib.Path(__file__).with_name("crypto_grid_bot.py").read_text()
+    tree = ast.parse(src)
+
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "_reported_stop"), None)
+    ok("_reported_stop exists", fn is not None)
+    if fn is not None:
+        args = [a_.arg for a_ in fn.args.args] + [a_.arg for a_ in fn.args.kwonlyargs]
+        ok("_reported_stop takes adopted_mode", "adopted_mode" in args, str(args))
+        calls = [n for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "adopted_stop"]
+        ok("it resolves the adopted stop exactly once", len(calls) == 1, str(len(calls)))
+        for c in calls:
+            ok("and passes the mode through rather than reading the env",
+               any(k.arg == "mode_override" for k in c.keywords))
+
+    # Every caller must supply it, or the default silently reverts to env-only.
+    callers = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "_reported_stop"]
+    ok("a caller was found", callers, str(len(callers)))
+    for c in callers:
+        ok(f"caller at line {c.lineno} passes adopted_mode",
+           any(k.arg == "adopted_mode" for k in c.keywords),
+           "without it the page reports the env while the cycle obeys the DB")
+
+    # And the two async consumers must read the resolved mode, not adopted_mode().
+    for name in ("products_without_a_grid_stop", "run_grid_branch_cycle"):
+        f = next((n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == name), None)
+        ok(f"{name} exists", f is not None)
+        if f is None:
+            continue
+        seg = ast.get_source_segment(src, f) or ""
+        ok(f"{name} resolves via adopted_stop_mode()", "adopted_stop_mode()" in seg)
+        ok(f"{name} does NOT read adaptive_stop.adopted_mode() directly",
+           "adaptive_stop.adopted_mode()" not in seg,
+           "that reads the environment only and ignores the dashboard switch")
+
+
 def test_zz_nothing_above_failed():
     assert not _failures, f"{len(_failures)} checks failed: {_failures}"
 

@@ -315,5 +315,23 @@ def test_grid_status_serializes_buys_paused():
               and n.name == "get_grid_status")
     body = "\n".join(src.splitlines()[fn.lineno - 1:fn.end_lineno])
     assert '"buys_paused"' in body
-    # and the per-branch stop, not the per-product one
-    assert "_reported_stop(b, stop_by_product.get(b.product_id))" in body
+    # AND THE PER-BRANCH STOP, NOT THE PER-PRODUCT ONE.
+    #
+    # This was `"_reported_stop(b, stop_by_product.get(b.product_id))" in body`
+    # and it broke when the call gained an adopted_mode keyword - the property
+    # was untouched, only the call's text moved. Asserted on the tree now: the
+    # call must exist, take the BRANCH as its first argument, and be handed the
+    # per-product resolution rather than that resolution being used directly.
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "_reported_stop"]
+    assert len(calls) == 1, f"expected one _reported_stop call, found {len(calls)}"
+    call = calls[0]
+    assert call.args, "_reported_stop called with no positional arguments"
+    assert isinstance(call.args[0], ast.Name) and call.args[0].id == "b", (
+        "the first argument must be the BRANCH - that is what carries the "
+        "override the whole function exists to honour")
+    passed = ast.unparse(call)
+    assert "stop_by_product" in passed, (
+        "the per-product resolution must be handed IN, so the branch override "
+        "can beat it rather than being bypassed")
