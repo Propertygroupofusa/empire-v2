@@ -138,6 +138,18 @@ BASE_SNAP = {"at": "2026-09-29T10:00:00Z", "buy_legs": 10, "sell_legs": 5,
              "alpaca_equity": 2000.0, "populated": 1}
 
 print("\n-- the control: a healthy fleet must raise NOTHING --")
+# THE CONTROL MUST PASS FOR THE RIGHT REASON. The healthy fixture serves the
+# real local HEAD so DEPLOY_LAG stays quiet - but if git is unavailable the
+# fixture falls back to "0000000" AND the watchdog's own lookup returns "",
+# which makes it skip that check entirely. The control would then pass
+# because the check never ran, not because it was satisfied. That is a
+# vacuous pass, and it is the same defect class this whole file exists to
+# catch, so it is asserted rather than assumed.
+ok("git resolved, so the control really exercises DEPLOY_LAG",
+   HEAD != "0000000",
+   "git is unavailable - the DEPLOY_LAG check is SKIPPED, not satisfied, and "
+   "the control below proves nothing about it")
+
 out = run(healthy(), BASE_SNAP)
 noisy = [ln for ln in out.splitlines()
          if ln.strip().startswith(("CRITICAL", "WARN"))]
