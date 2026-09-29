@@ -805,7 +805,25 @@ reminder, not a trading task. Do not absorb it, do not act on it.
    no-order rows. Follow-up still open: `grid_buy` sets
    `outcome_out["cause"] = order_outcome.MAKER_EXPIRED` for every None
    reason, including the ones where no order was placed — a third consumer
-   of the same conflation, left alone because other code branches on it.
+   of the same conflation. **CLOSED by another session in `be076b7`**, which
+   built ON the three-state `_last_order_rested` flag rather than around it:
+   `order_outcome` gained `NO_ORDER_CREATED`, `NO_FILL` got its meaning, and
+   neither joined `BENIGN_CAUSES`, so UNKNOWN stays its own cause instead of
+   collapsing into `MAKER_EXPIRED`. It also retargeted one check in
+   `test_maker_expiry_rested.py` that had demanded the `order_rested` lookup be
+   written inline — a fair fix, since a single read handed to both the ledger
+   row and the reported cause is what stops the two disagreeing. **Do not
+   re-do this.**
+
+   **ANOTHER SESSION IS WORKING THIS SAME REPO AND MAIN.** Two of its six
+   commits (`be076b7`, `12704ca`) touch the maker-expiry path and two
+   (`3b919f5`, `1a1de02`) touch stops — the same files this loop edits. Merge,
+   never rebase. **After every merge, re-verify semantically rather than
+   trusting a clean textual merge:** check that the functions BOTH sides
+   touched still do both things. `resting_stops_worker.place()` was the live
+   case — their edit landed in `check_once` and mine in `place()`, so the merge
+   was genuinely clean, but that was established by reading the merged function,
+   not assumed from git's exit code.
 3. Check every other `unreadable` entry by direct balance read.
 4. Watch free cash. A second unexplained outflow is report-loudly.
 5. Read the unrealized formula — confirm a phantom rung inflates it.
