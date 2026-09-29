@@ -213,12 +213,31 @@ def main():
         # having done nothing. From outside that looks exactly like a healthy
         # quiet branch, which is why it is read off the feed rather than
         # inferred from the branch looking unchanged.
+        # CANNOT and HAS NOT YET are different failures, and calling both
+        # critical is how an alarm stops being read. Under maker-only there is
+        # no market fallback, so a sell that nobody crossed within the wait
+        # window simply does not fill - that is the mode working as configured,
+        # not a fault. SHIB-USD proved it on this very pass: three no-fills,
+        # then it filled twice and left the full set with +$1.65 realized.
+        # A product the venue REFUSES to accept an order from is the real
+        # trap - it can never fill, at any price, however long it waits.
+        _refused_now = set((( grid.get("order_refusals") or {}
+                             ).get("by_product") or {}))
         nofill = [e for e in events if e.get("event_type") == "PARKED_SELL_NOFILL"]
         if nofill:
             coins = sorted({e.get("product_id") for e in nofill if e.get("product_id")})
-            flag(CRITICAL, "PARKED_RETRY_LOOP",
-                 f"{len(nofill)} escape sell(s) did not fill on {', '.join(coins)} "
-                 f"- the gate keeps passing and the branch keeps not leaving.")
+            blocked = [c for c in coins if c in _refused_now]
+            waiting = [c for c in coins if c not in _refused_now]
+            if blocked:
+                flag(CRITICAL, "PARKED_RETRY_LOOP",
+                     f"{', '.join(blocked)} cannot place the escape sell at all "
+                     f"(see ORDER_REFUSED) - the gate passes every cycle and the "
+                     f"order can never fill. This one does not resolve by waiting.")
+            if waiting:
+                flag(INFO, "PARKED_SELL_WAITING",
+                     f"{', '.join(waiting)}: escape sell posted and not taken yet. "
+                     f"Maker-only has no market fallback, so this is the mode "
+                     f"working - it clears when a taker crosses it.")
 
     # ---- 3. The alarm can actually reach a human ---------------------------
     #

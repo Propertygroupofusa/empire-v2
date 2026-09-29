@@ -402,10 +402,37 @@ d["/api/trading-dashboard/live-ops"]["gate"]["data"]["events"] = [
     {"event_type": "PARKED_SELL_NOFILL", "product_id": "LINK-USD",
      "created_at": "2026-09-29T18:01:00", "message": "did not fill"},
 ]
+# CANNOT and HAS NOT YET are different failures. A maker-only sell that
+# nobody crossed is the mode working - SHIB-USD proved it live: three
+# no-fills, then it filled twice, left the full set and realized +$1.65.
+# Only a product the venue refuses outright can never fill.
+d["/api/trading-dashboard/grid-status"]["order_refusals"] = {
+    "available": True,
+    "by_product": {"LINK-USD": "REQUEST_BELOW_BASE_INCREMENT: 0.0099 requested"},
+    "product_rules_unreadable": []}
 out = run(d, BASE_SNAP)
-ok("PARKED_RETRY_LOOP when an escape sell will not fill",
+ok("PARKED_RETRY_LOOP when the venue refuses the escape sell outright",
    "PARKED_RETRY_LOOP" in out, out)
 ok("and it names the coin", "LINK-USD" in out, out)
+ok("and says waiting will not fix it", "does not resolve by waiting" in out, out)
+
+# The same no-fills with NO refusal are an unfilled maker order, not a trap.
+d2 = healthy()
+d2["/api/trading-dashboard/live-ops"]["gate"]["data"]["events"] = [
+    {"event_type": "PARKED_SELL_NOFILL", "product_id": "SHIB-USD",
+     "created_at": "2026-09-29T18:00:00", "message": "did not fill"},
+    {"event_type": "PARKED_SELL_NOFILL", "product_id": "SHIB-USD",
+     "created_at": "2026-09-29T18:01:00", "message": "did not fill"},
+]
+out = run(d2, BASE_SNAP)
+ok("but an unrefused product is NOT a critical retry loop",
+   "PARKED_RETRY_LOOP" not in out, out)
+ok("it is reported as a maker sell still waiting for a taker",
+   "PARKED_SELL_WAITING" in out, out)
+ok("and that is not a WARN or a CRITICAL",
+   not [ln for ln in out.splitlines()
+        if "PARKED_SELL_WAITING" in ln and ln.strip().startswith(("WARN", "CRITICAL"))],
+   out)
 
 # ORDER_REFUSED: /grid-status publishes the venue's own refusal reasons and
 # nothing was reading them. Two live passes were spent inferring from slice
