@@ -1182,6 +1182,26 @@ unprofitable slices are being stepped over by design.
 gross 3.211%, net 2.566% on $2,324.96 notional, mean slice $40.09. The
 edge is real; the turnover is what is missing.
 
+### §24's JOIN KEY IS WIRED — `order_id` now reaches the slice
+
+`_last_order_id` (crypto_btc_compound_bot) records the venue's own order id
+per product, set at the ONE instant it is certainly known — beside
+`_record_order_source`, the moment Coinbase mints it — and cleared at every
+order-attempt entry so a previous cycle's id can never be read as this
+order's. The buy insert reads it with `.get`, so a product the engine
+recorded nothing for lands as None: **UNKNOWN, not a claim.**
+
+**Why a dict and not a return value:** `_place_and_confirm` returns
+`(filled_size, avg_price)` and that shape is consumed by four sizers and
+every one of their callers. Widening it to carry an id would put a
+signature change on a live order path in the way of a diagnostic. The three
+sibling dicts already carry per-product facts back out; this is the fourth.
+
+**IT IS LAST-WRITE-WINS, and that is a stated limit.** One product belongs
+to one branch and branches are walked in sequence with a sleep, so there is
+no second writer today. **An event loop beside the polling loop WOULD be
+one — revisit this before §7/§8 lands.**
+
 ### §1 WRITE IS UNVERIFIED ON LIVE DATA — that is UNKNOWN, not working
 
 Read at 10:20Z, right after e1606ef deployed: **all 80 slices have

@@ -6635,7 +6635,20 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                    average_fill_price=filled_price,
                                    filled_quantity=filled_qty,
                                    filled_at=datetime.utcnow(),
-                                   execution_reason="grid_buy_filled"))
+                                   execution_reason="grid_buy_filled",
+                                   # THE JOIN §24 STEP 7 NEEDED. Coinbase's
+                                   # fills feed carries order_id and NOT
+                                   # client_order_id, so this is the key that
+                                   # actually matches an open order at the
+                                   # venue to the slice that placed it.
+                                   #
+                                   # .get, so a product the engine recorded
+                                   # nothing for lands as None - UNKNOWN, not
+                                   # a claim. The engine clears the entry at
+                                   # every order-attempt entry point, so a
+                                   # previous cycle's id can never be read
+                                   # here as this order's.
+                                   order_id=engine._last_order_id.get(branch.product_id)))
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
             fresh = result.scalar_one_or_none()
             if fresh:

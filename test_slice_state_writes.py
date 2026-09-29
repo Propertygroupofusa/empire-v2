@@ -235,6 +235,45 @@ ok("state is read defensively, so an old row reads UNKNOWN not a default",
        for v in _vals.values()) and len(_vals) == 2,
    str(sorted(_vals)))
 
+print("== the venue's order id reaches the slice ==")
+# §24 step 7 had nothing to reconcile against: an open order could not be
+# matched to the slice that placed it. Coinbase's fills feed carries
+# order_id and NOT client_order_id, so this is the join that works.
+_oid = _kw.get("order_id")
+ok("the buy records an order_id", _oid is not None, str(sorted(_kw)))
+# .get, never [] - a product the engine recorded nothing for must land as
+# UNKNOWN, not raise and not claim.
+ok("  read with .get, so a missing one is UNKNOWN",
+   isinstance(_oid, ast.Call) and isinstance(_oid.func, ast.Attribute)
+   and _oid.func.attr == "get",
+   ast.dump(_oid)[:80] if _oid is not None else "absent")
+ok("  from the engine's own per-product map",
+   isinstance(_oid, ast.Call) and isinstance(_oid.func.value, ast.Attribute)
+   and _oid.func.value.attr == "_last_order_id",
+   ast.dump(_oid)[:120] if _oid is not None else "absent")
+
+import crypto_btc_compound_bot as _eng
+ok("the engine exposes the map", isinstance(getattr(_eng, "_last_order_id", None), dict))
+_esrc = ast.parse(open("crypto_btc_compound_bot.py").read())
+# Set exactly where the venue mints the id, and nowhere else.
+_sets = [n for n in ast.walk(_esrc) if isinstance(n, ast.Assign)
+         and any(isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                 and t.value.id == "_last_order_id" for t in n.targets)]
+ok("it is written in exactly one place", len(_sets) == 1, str(len(_sets)))
+ok("  and what it stores is the venue's order_id",
+   _sets and isinstance(_sets[0].value, ast.Name) and _sets[0].value.id == "order_id",
+   ast.dump(_sets[0].value)[:60] if _sets else "-")
+# Cleared at every order-attempt entry, so a stale id is never a false join.
+_pops = [n for n in ast.walk(_esrc) if isinstance(n, ast.Call)
+         and isinstance(n.func, ast.Attribute) and n.func.attr == "pop"
+         and isinstance(n.func.value, ast.Name) and n.func.value.id == "_last_order_id"]
+ok("it is cleared at every order-attempt entry", len(_pops) >= 3, str(len(_pops)))
+_rested = [n for n in ast.walk(_esrc) if isinstance(n, ast.Call)
+           and isinstance(n.func, ast.Attribute) and n.func.attr == "pop"
+           and isinstance(n.func.value, ast.Name) and n.func.value.id == "_last_order_rested"]
+ok("  as often as its sibling _last_order_rested",
+   len(_pops) >= len(_rested), f"{len(_pops)} vs {len(_rested)}")
+
 print()
 if failures:
     print("FAILED %d check(s): %s" % (len(failures), ", ".join(failures)))

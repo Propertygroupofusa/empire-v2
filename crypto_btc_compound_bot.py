@@ -1375,6 +1375,9 @@ async def _place_maker_order(session, order: dict, wait_seconds: int):
         # this order's answer, so absent (UNKNOWN) is the correct state until
         # one of the returns below sets it.
         _last_order_rested.pop(product_id, None)
+        # Same lifecycle for the venue's order id: absent is UNKNOWN, and a
+        # previous cycle's id read as this order's would be a false join.
+        _last_order_id.pop(product_id, None)
     try:
         async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path),
                                 json=order, timeout=15) as r:
@@ -1444,6 +1447,7 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
     _last_order_rested.pop(product_id, None)
     _last_order_error.pop(product_id, None)
     _last_order_block.pop(product_id, None)
+    _last_order_id.pop(product_id, None)
     _asked_usd = usd_amount
     real_usd, _ = await get_usd_balance(session)
     if real_usd is not None and real_usd < usd_amount:
@@ -1526,6 +1530,7 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     # verdict for this one's; every return below sets its own.
     _last_order_rested.pop(product_id, None)
     _last_order_block.pop(product_id, None)
+    _last_order_id.pop(product_id, None)
     # The size the CALLER asked for, captured before any clamping. `qty` is
     # rebound below - clamped to the available balance, then floored to the
     # product's base_increment - so by the time the not-executable branch is
@@ -1664,6 +1669,31 @@ _last_order_rested = {}
 # keys are UNKNOWN, never zero.
 _last_order_block = {}
 
+# THE VENUE'S OWN ORDER ID FOR THE LAST ORDER ON THIS PRODUCT.
+#
+# §24 step 7 is "reconcile order states", and it had nothing to reconcile
+# against: an open order at the exchange could not be matched to the slice
+# that placed it, because no slice recorded an id. Coinbase's fills feed
+# carries order_id and NOT client_order_id - checked against a real fill,
+# and the reason fills_attribution keys on it - so this is the join that
+# actually works.
+#
+# Recorded here rather than by changing what _place_and_confirm RETURNS,
+# because that return shape is consumed by four sizers and every one of
+# their callers, and widening it to carry an id would put a live order
+# path's signature change in the way of a diagnostic. Same shape as the
+# three dicts above, which already carry per-product facts back out.
+#
+# IT IS LAST-WRITE-WINS, and that is a real limit, not a hidden one: if two
+# orders for one product were ever in flight at once, the second would
+# overwrite the first. Today one product belongs to one branch and branches
+# are walked in sequence with a sleep between them, so there is no second
+# writer - but an event loop beside the polling loop WOULD be one, and this
+# must be revisited before §7/§8 lands.
+#
+# A missing key is UNKNOWN, never "no order".
+_last_order_id = {}
+
 
 def _describe_order_rejection(resp: dict) -> str:
     """Pulls the real reason out of a Coinbase order-rejection response.
@@ -1752,6 +1782,11 @@ async def _place_and_confirm(session, path: str, order: dict, source: str = None
             order_id = resp["success_response"]["order_id"]
             if product_id:
                 _last_order_error.pop(product_id, None)
+                # Recorded at the same instant as _record_order_source below
+                # and for the same reason: this is the only moment the id is
+                # certainly known, and a slow or failed fill poll must not be
+                # able to lose it.
+                _last_order_id[product_id] = order_id
             # Recorded the moment Coinbase mints the id, before the fill
             # poll below, so a slow or failed poll cannot lose the only
             # link between this order and whoever asked for it.
