@@ -8123,6 +8123,11 @@ async def get_grid_status() -> dict:
         # The end-to-end funnel, so "zero trades" names its own bottleneck
         # instead of leaving it to be inferred from six scattered numbers.
         "pipeline": await _never_fails(get_pipeline_funnel, "pipeline"),
+        # Which products are refusing to place an order right now, and why.
+        # Without this the fail-closed sizing refusal shipped in 6a95d4d
+        # was invisible: nothing read-only exposed engine._last_order_error
+        # for the grid fleet at all.
+        "order_refusals": await _never_fails(get_order_refusals, "order_refusals"),
         # WHAT CHANGED, rather than what is true. Everything else here reads
         # the present; this says the moment a coin crossed into or out of
         # being worth trading, and whether past crossings paid.
@@ -8379,6 +8384,93 @@ async def _score_short_term_opportunities(session, branches, deadline=None):
             log.debug(f"[SIGNAL] {pid or '?'} not scored: "
                       f"{type(e).__name__}: {e}")
 
+
+
+# THE REFUSAL THAT NOBODY COULD SEE.
+#
+# 6a95d4d made an unreadable product REFUSE to size an order instead of
+# falling back to 8 decimals - the right direction, and what §22 asks for.
+# But the signal it writes, engine._last_order_error, was exposed by no
+# read-only endpoint at all: line 1364 of the dashboard router covers
+# family-tree branches only, and the other reader is inside a
+# write-guarded POST. So the fleet could have been refusing every order on
+# every product and the page would have shown nothing missing.
+#
+# A protection whose firing cannot be observed is indistinguishable from a
+# protection that never fires. That is the whole reason this exists.
+#
+# UNKNOWN IS NOT ZERO. If the engine's dicts cannot be read, this reports
+# available=False, never "no refusals". An empty dict that WAS read is the
+# real and ordinary answer "nothing is being refused right now", and the
+# two must not look alike - the same distinction restart_recovery draws
+# between an unread balance and a balance of zero.
+_RULES_REFUSAL = "product rules unreadable"
+
+
+async def get_order_refusals() -> dict:
+    """Which products are currently refusing to place an order, and why.
+
+    Read-only telemetry over the engine's own per-product last-error map.
+    Nothing here decides anything; it exists so that a fail-closed refusal
+    is visible while it is happening rather than inferred afterwards from
+    an absence of trades.
+    """
+    errors = getattr(engine, "_last_order_error", None)
+    if not isinstance(errors, dict):
+        # The map itself is the thing that could not be read. Saying
+        # "available: False" is the honest answer; reporting zero refusals
+        # would be a measurement nobody took.
+        return {"available": False,
+                "error": "engine._last_order_error is not readable"}
+
+    tracked = set()
+    try:
+        for b in await get_grid_branches():
+            if getattr(b, "active", False) and getattr(b, "product_id", None):
+                tracked.add(b.product_id)
+    except Exception as e:
+        # The branch list is a DB read and may fail on its own. The error
+        # map is still worth reporting, so this degrades to "every product
+        # the map knows about" and SAYS that it did, rather than silently
+        # reporting a narrower set as if it were the fleet.
+        log.warning(f"[GRID] order-refusal scope unreadable: {type(e).__name__}: {e}")
+        tracked = None
+
+    by_product, reasons = {}, {}
+    rules_refusals = []
+    for product_id, why in list(errors.items()):
+        if tracked is not None and product_id not in tracked:
+            continue
+        if not why:
+            continue
+        text = str(why)
+        by_product[product_id] = text
+        # The code before the first colon, which is how the engine writes
+        # these ("NOTHING_TO_SELL: ...", "INSUFFICIENT_FUND: ..."). A
+        # message with no colon is its own whole reason rather than being
+        # dropped into an "other" bucket that hides it.
+        code = text.split(":", 1)[0].strip() or text
+        reasons[code] = reasons.get(code, 0) + 1
+        if _RULES_REFUSAL in text:
+            rules_refusals.append(product_id)
+
+    return {
+        "available": True,
+        # True only because the map was read and held nothing for the
+        # fleet - not because nothing was looked at.
+        "scope": ("active grid branches" if tracked is not None
+                  else "every product in the engine's error map (branch list unreadable)"),
+        "products_refusing": len(by_product),
+        "by_reason": reasons,
+        "by_product": by_product,
+        # Called out separately because it is the one this fleet was told
+        # to watch: it means the venue's products endpoint could not be
+        # read, so sizing refused rather than guessing an increment. A few
+        # are ordinary transient failures; many, or persistent ones, mean
+        # the endpoint is flaky and the owner should hear about it.
+        "product_rules_unreadable": sorted(rules_refusals),
+        "product_rules_unreadable_count": len(rules_refusals),
+    }
 
 
 async def _never_fails(fn, label: str) -> dict:

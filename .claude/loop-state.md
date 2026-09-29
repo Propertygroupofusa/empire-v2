@@ -919,6 +919,29 @@ restart can refuse to trade, which is what §22 and §24 ask for and is also
 a way to halt the fleet on a transient read failure — that is an
 owner-visible decision, not one to slip in.
 
+### THE REFUSAL NOBODY COULD SEE — fixed, and it was my own gap
+
+6a95d4d made an unreadable product REFUSE rather than size at 8 decimals,
+and I told the owner to watch `product rules unreadable` in
+`_last_order_error`. **That signal was exposed by no read-only endpoint for
+the grid fleet at all** — dashboard router line 1364 covers family-tree
+branches only, and the other reader sits inside a write-guarded POST. The
+fleet could have been refusing every order on every product and the page
+would have shown nothing missing.
+
+`get_order_refusals()` now reports it under `grid-status.order_refusals`:
+count, reasons grouped by the code before the colon, per-product messages,
+and `product_rules_unreadable` called out separately because that is the
+one this fleet was told to watch. Registered through `_never_fails`, so a
+diagnostic can never take the payload down.
+
+**`available: False` when the map cannot be read, NEVER zero refusals.**
+Same distinction as restart_recovery's unread-vs-zero.
+
+**A first read of grid-status found no refusals — but grid-status did not
+expose them then, so that was a NON-READ, not a clean result.** Do not
+record that first look as evidence of anything.
+
 ### §7/§8 — THE BLOCKER IS §1's PERSISTENCE, not the transport
 
 Measured 2026-09-29: there is **no WebSocket client anywhere in the repo** —
