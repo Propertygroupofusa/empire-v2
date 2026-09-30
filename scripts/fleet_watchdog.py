@@ -695,17 +695,49 @@ def main():
     # maker-only cut the round trip to 0.70%. If full branches keep growing,
     # the fleet is walking back into the state that produced sixteen days of
     # nothing.
-    if inv is not None:
+    # COMPUTED FROM THE BRANCHES, NOT SCRAPED OUT OF A SENTENCE.
+    #
+    # This used to regex a dollar figure out of the no_dead_capital
+    # invariant's English prose. Two things were wrong with that. A wording
+    # change would silently stop the match, and with no match the whole block
+    # - PARKED_GREW included - was skipped without reporting anything: the
+    # single most valuable alarm here, the one that catches the state behind
+    # sixteen days of zero closes, could go quiet and say nothing about it.
+    #
+    # And it disagreed with the data. The prose read $3,492.09 while the
+    # branches themselves summed to $3,647.40 over the same ten branches -
+    # a $155 gap that was reported as fact all night.
+    #
+    # Basis (qty x entry), deliberately, not market value: a parked branch's
+    # cost does not move with price, so a figure that changes is a branch
+    # joining or leaving, which is the thing worth an alarm.
+    full_usd = 0.0
+    full_n = 0
+    for b in branches:
+        sl = b.get("slices") or []
+        if not sl or len(sl) < (b.get("num_levels") or 0):
+            continue
+        full_n += 1
+        full_usd += sum((x.get("qty") or 0) * (x.get("entry_price") or 0) for x in sl)
+    full_usd = round(full_usd, 2)
+
+    if branches:
+        cur["full_usd"], cur["full_n"] = full_usd, full_n
+        # The endpoint's own prose is kept ONLY as a second opinion. Two
+        # sources that disagree is an UNKNOWN worth saying out loud, not a
+        # number to quietly prefer one of.
         import re as _re2
         _dead = ""
-        for c in (inv.get("checks") or []):
+        for c in (inv.get("checks") or []) if inv else []:
             if c.get("name") == "no_dead_capital":
                 _dead = c.get("detail") or ""
         m = _re2.search(r"\$([\d,]+\.\d{2}) across (\d+) branch\(es\) full on their rungs", _dead)
         if m:
-            full_usd = float(m.group(1).replace(",", ""))
-            full_n = int(m.group(2))
-            cur["full_usd"], cur["full_n"] = full_usd, full_n
+            _said = float(m.group(1).replace(",", ""))
+            if full_usd and abs(_said - full_usd) > max(1.0, full_usd * 0.01):
+                gaps.append(f"parked capital disagrees: branches sum to "
+                            f"{money(full_usd)}, the invariant says {money(_said)}")
+        if True:
             prev_usd = prev.get("full_usd")
             if prev_usd is not None and full_usd > prev_usd + 0.01:
                 flag(CRITICAL, "PARKED_GREW",
