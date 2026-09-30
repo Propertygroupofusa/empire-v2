@@ -5933,6 +5933,40 @@ if MICROSTRUCTURE_VETO_MODE not in _VETO_MODES:
     MICROSTRUCTURE_VETO_MODE = "observe"
 
 
+# How recently a repeating condition was written to the shared feed, keyed by
+# (verdict, product). The feed is a fixed-size window, so an event that
+# repeats every cycle does not just add noise - it EVICTS. Measured twice
+# tonight: PARKED_NO_EXIT held 32 of 40 rows, and once that was removed
+# PARKED_SELL/PARKED_SELL_NOFILL from two venue-refused products took all 40
+# between them. Either way GATE_PASS, GATE_BLOCK and CYCLE_ERROR were gone,
+# and CYCLE_ERROR is the only place a LOST FILL can be seen.
+#
+# So a condition that is still true keeps its first row and stops writing
+# for a while. The first occurrence is the news; the hundredth is the thing
+# that hides everything else.
+_FEED_LAST_WRITE = {}
+FEED_REPEAT_SECONDS = 900.0
+
+
+def _feed_should_write(verdict: str, product_id: str, now: float = None) -> bool:
+    """True when this (verdict, product) has not been written recently.
+
+    Never raises: this guards instrumentation, and instrumentation must not
+    be able to stop a trade. An unreadable clock falls through to writing,
+    because losing a row is worse than writing one too many.
+    """
+    try:
+        now = time.time() if now is None else now
+        key = (verdict, product_id)
+        last = _FEED_LAST_WRITE.get(key)
+        if last is not None and (now - last) < FEED_REPEAT_SECONDS:
+            return False
+        _FEED_LAST_WRITE[key] = now
+        return True
+    except Exception:
+        return True
+
+
 async def _record_gate_decision(bot_name: str, product_id: str, verdict: str, reason: str):
     """Write one gate verdict to the shared activity feed the dashboard reads.
 
@@ -6990,10 +7024,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             # recorded with it: a branch whose only qualifying slice is dust
             # reports itself escapable while staying locked, and that is
             # invisible unless the size is written down next to the verdict.
-            await _record_gate_decision(
-                branch.bot_name, branch.product_id, "PARKED_SELL",
-                f"+{_pct * 100:.2f}% net on ${_notional:,.2f} of basis "
-                f"({len(slices)}/{branch.num_levels} rungs full)")
+            if _feed_should_write("PARKED_SELL", branch.product_id):
+                await _record_gate_decision(
+                    branch.bot_name, branch.product_id, "PARKED_SELL",
+                    f"+{_pct * 100:.2f}% net on ${_notional:,.2f} of basis "
+                    f"({len(slices)}/{branch.num_levels} rungs full)")
         # PARKED_NO_EXIT is deliberately NOT written here any more.
         #
         # It is a steady STATE, not an event, and writing it every cycle for
@@ -7051,7 +7086,8 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             # fill, and the cycle returns here having done nothing. That is
             # the same outward shape as a healthy quiet branch, so it is
             # written down rather than left to a log line nobody reads.
-            if _parked_sell:
+            if _parked_sell and _feed_should_write("PARKED_SELL_NOFILL",
+                                                  branch.product_id):
                 await _record_gate_decision(
                     branch.bot_name, branch.product_id, "PARKED_SELL_NOFILL",
                     f"escape sell of {oldest.qty:g} did not fill - branch "
