@@ -11597,6 +11597,9 @@ async def gate_verdict(days: int = 30):
             "paid_pct": live_pay[0] if live_pay else None,
             "resolved": live_pay[1] if live_pay else 0,
             "basis": "expected_move = half a 15-minute return, vs a full round-trip cost",
+            "paid_pct_measures": (
+                "did the 30-minute MFE reach THIS ROW'S OWN predicted move "
+                "(materialized). It is NOT the round-trip test below."),
         },
         "six_hour_gate": {
             "would_take": len(hz_yes),
@@ -11605,7 +11608,20 @@ async def gate_verdict(days: int = 30):
             "resolved": hz_pay[1] if hz_pay else 0,
             "mean_net_pct": mean_net,
             "basis": "the identical arithmetic over six hours; same cost, same haircut",
+            "paid_pct_measures": (
+                "did the SIX-HOUR MFE clear the round-trip cost "
+                "(horizon_gate_paid). Different column and a 12x longer "
+                "window than the live gate's rate above."),
         },
+        "do_not_compare_the_two_paid_rates": (
+            "live_gate.paid_pct and six_hour_gate.paid_pct are DIFFERENT "
+            "MEASUREMENTS and their difference means nothing. One asks "
+            "whether a 30-minute move hit its own forecast; the other asks "
+            "whether a six-hour move cleared the round trip. A longer window "
+            "clears a bar more often for no better reason than having more "
+            "time. The only like-for-like comparison on this page is "
+            "six_hour_gate.paid_pct against the_control - same column, same "
+            "window, and that is what the verdict uses."),
         "the_control": {
             "setups_the_six_hour_gate_REFUSED": len(hz_no),
             "of_those_that_paid_anyway_pct": hz_skip_pay[0] if hz_skip_pay else None,

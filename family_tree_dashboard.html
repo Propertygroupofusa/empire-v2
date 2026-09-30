@@ -6335,6 +6335,16 @@ async function loadTape() {
         // these figures said the opposite in money-coloured type, and the
         // type won. So the amounts are neutral now, explicitly labelled
         // market volume, and the label says whose trades they are.
+        //
+        // AND THE ROWS TOO. The summary was neutralised and the rows under it
+        // were not, so every print still rendered BUY in green and SELL in
+        // red - money colours, on somebody else's volume. The owner read that
+        // tape as his own fills and asked which of them were wins. None of
+        // them are his, so none of them can be either. BUY/SELL here is the
+        // DIRECTION of a stranger's print, never the outcome of one of his
+        // trades, and it is no longer painted in the colours this dashboard
+        // uses for profit and loss. His own closed round trips, which do have
+        // a P&L and are coloured by it, are in the trade history above.
         document.getElementById('tape-summary').innerHTML =
             `<span style="color:var(--text-dim);">Market volume on your coins `
             + `&mdash; <strong>none of this is your money</strong>:</span> `
@@ -6351,8 +6361,7 @@ async function loadTape() {
                 <div class="tape-row">
                     <div style="color:var(--text-dim);">${escText(String(x.time || '').slice(11, 19))}</div>
                     <div style="font-weight:700;">${escText(x.asset)}</div>
-                    <div style="color:${x.side === 'buy' ? 'var(--green)'
-                                        : x.side === 'sell' ? 'var(--red)' : 'var(--text-dim)'};">
+                    <div style="color:var(--text-dim);">
                         ${x.side ? escText(x.side.toUpperCase()) : 'UNKNOWN'}</div>
                     <div style="text-align:right; font-weight:700;">${_wUSD(x.usd)}</div>
                 </div>`).join('')
