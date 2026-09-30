@@ -12833,29 +12833,6 @@ async def alpaca_growth(days: int = 60, fresh: int = 0):
     return out
 
 
-@router.get("/grid-status/profit-ratchet")
-async def get_profit_ratchet():
-    """The locked floor, current Coinbase net worth, next tier, and whether
-    new buys are paused. Read-only."""
-    import crypto_grid_bot as g
-    return await g.profit_ratchet_status()
-
-
-@router.post("/grid-status/profit-ratchet")
-async def set_profit_ratchet(body: dict):
-    """{"active": bool} switches the ratchet; {"rebase": true} resets the
-    floor to today's net worth (use after a withdrawal)."""
-    import crypto_grid_bot as g
-    if "active" in body:
-        await g.set_profit_ratchet_active(bool(body["active"]))
-    if body.get("rebase"):
-        try:
-            await g.rebase_profit_ratchet()
-        except ValueError as e:
-            raise HTTPException(status_code=503, detail=str(e))
-    return await g.profit_ratchet_status()
-
-
 @router.get("/growth-curve")
 async def growth_curve(hours: float = 24.0, limit: int = 500):
     """Where the numbers have BEEN, which is the only way to say if they moved.

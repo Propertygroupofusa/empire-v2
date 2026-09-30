@@ -5200,9 +5200,6 @@ async def _auto_deploy_idle_free_cash():
     shortfall just means fewer (or zero) branches created this sweep,
     picked up again next time."""
     created = 0
-    if _profit_ratchet.get("active") and _profit_ratchet.get("blocked"):
-        log.info(f"[GRID] auto-deploy skipped - {_profit_ratchet.get('reason')}")
-        return
     while created < GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP:
         real_free_cash = await get_real_free_cash_usd()
         # None means the real balance could not be read. Unknown cash is
@@ -6524,10 +6521,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             f"never buy more. Set at adoption because the position was over the 20% rule, "
             f"so every sale banks profit AND reduces the concentration."
         )
-    _ratchet_blocked = bool(_profit_ratchet.get("active") and _profit_ratchet.get("blocked"))
-    if _ratchet_blocked and not (drawdown_breached or _sell_only):
-        log.info(f"[GRID] {branch.bot_name}: 🔒 {_profit_ratchet.get('reason')}")
-    if drawdown_breached or _sell_only or _ratchet_blocked:
+    if drawdown_breached or _sell_only:
         # Only the breaker gets the drawdown message. A sell-only branch
         # at a fresh peak reading "equity is down 0% from its peak" would
         # be an alarm about nothing.
@@ -7415,153 +7409,7 @@ _HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0,
 # Set once this process has swept orphaned maker orders (see
 # engine.sweep_orphan_maker_orders). Per process on purpose: a restart is
 # exactly when orphans exist, so every new process must sweep once.
-
-# ── PROFIT RATCHET (see profit_ratchet.py) ──────────────────────────────
-# Floor on the whole Coinbase account, stepped up in PROFIT_RATCHET_STEP_PCT
-# tiers and never down. Below it: no new buys, sells keep running.
-PROFIT_RATCHET_ACTIVE_KEY = "crypto_profit_ratchet_active"
-PROFIT_RATCHET_FLOOR_KEY = "crypto_profit_ratchet_floor"
-PROFIT_RATCHET_STEP_PCT = float(os.getenv("PROFIT_RATCHET_STEP_PCT", "0.05") or 0.05)
-PROFIT_RATCHET_REFRESH_SECONDS = 60
-# How long a last good net-worth reading may stand in for an unreadable one
-# before buys pause. The reads were shown today to fail intermittently; one
-# blip must not freeze the fleet, but an hour of blindness must.
-PROFIT_RATCHET_STALE_SECONDS = 600
-_profit_ratchet = {"checked_at": 0.0, "read_at": 0.0, "net_worth": None,
-                   "floor": None, "active": True, "blocked": False, "reason": None}
-
 _orphan_sweep_done = False
-
-
-
-async def _ratchet_state_value(key):
-    async with get_session_factory()() as db:
-        row = (await db.execute(select(TradingBotState)
-                                .where(TradingBotState.bot_name == key))).scalar_one_or_none()
-        return None if row is None else row.base_capital
-
-
-async def _ratchet_state_set(key, value):
-    async with get_session_factory()() as db:
-        row = (await db.execute(select(TradingBotState)
-                                .where(TradingBotState.bot_name == key))).scalar_one_or_none()
-        if row is None:
-            row = TradingBotState(bot_name=key, base_capital=value)
-            db.add(row)
-        else:
-            row.base_capital = value
-        await db.commit()
-
-
-async def is_profit_ratchet_active() -> bool:
-    """ON unless explicitly switched off - the account owner asked for it."""
-    v = await _ratchet_state_value(PROFIT_RATCHET_ACTIVE_KEY)
-    return True if v is None else v >= 1.0
-
-
-async def set_profit_ratchet_active(enabled: bool):
-    await _ratchet_state_set(PROFIT_RATCHET_ACTIVE_KEY, 1.0 if enabled else 0.0)
-    _profit_ratchet["checked_at"] = 0.0
-
-
-async def read_crypto_net_worth(session):
-    """Real USD wallet + live market value of every coin the grid holds.
-    None - never a partial number - if either piece cannot be read."""
-    bal, _err = await engine.get_usd_balance(session)
-    if bal is None:
-        return None
-    held, complete = await get_grid_holdings_market_value()
-    if not complete:
-        return None
-    return round(bal + held, 2)
-
-
-async def refresh_profit_ratchet(session, force: bool = False):
-    """Re-read net worth, step the floor up if a tier was reached, and decide
-    whether new buys are blocked. Throttled; returns the current state."""
-    import time as _t
-    import profit_ratchet as pr
-    st = _profit_ratchet
-    now = _t.time()
-    if not force and now - st["checked_at"] < PROFIT_RATCHET_REFRESH_SECONDS:
-        return st
-    st["checked_at"] = now
-    st["active"] = await is_profit_ratchet_active()
-    floor = await _ratchet_state_value(PROFIT_RATCHET_FLOOR_KEY)
-    try:
-        nw = await read_crypto_net_worth(session)
-    except Exception as e:
-        log.warning(f"[RATCHET] net worth read failed: {type(e).__name__}: {e}")
-        nw = None
-    if nw is not None:
-        st["net_worth"], st["read_at"] = nw, now
-        new_floor, crossed = pr.advance(floor, nw, PROFIT_RATCHET_STEP_PCT)
-        if new_floor != floor:
-            await _ratchet_state_set(PROFIT_RATCHET_FLOOR_KEY, new_floor)
-            msg = (f"Locked ${new_floor:,.2f} as the new floor "
-                   + (f"({crossed} tier(s) up from ${floor:,.2f}); " if floor else "(starting baseline); ")
-                   + f"net worth ${nw:,.2f}. Next tier "
-                   f"${pr.next_tier(new_floor, PROFIT_RATCHET_STEP_PCT):,.2f}.")
-            log.info(f"[RATCHET] {msg}")
-            await _log_activity_safe("grid_fleet", None, "TIER_LOCK", msg)
-            floor = new_floor
-    st["floor"] = floor
-    was_blocked = st["blocked"]
-    if not st["active"]:
-        st["blocked"], st["reason"] = False, None
-    elif st["net_worth"] is None or now - st["read_at"] > PROFIT_RATCHET_STALE_SECONDS:
-        st["blocked"] = True
-        st["reason"] = ("account net worth could not be read recently, so the locked floor "
-                        "cannot be checked - new buys paused until it can")
-    elif pr.blocks_buys(floor, st["net_worth"]):
-        st["blocked"] = True
-        st["reason"] = (f"account ${st['net_worth']:,.2f} is below the locked floor "
-                        f"${floor:,.2f} - new buys paused, sells continue")
-    else:
-        st["blocked"], st["reason"] = False, None
-    if st["blocked"] and not was_blocked:
-        log.warning(f"[RATCHET] {st['reason']}")
-        await _log_activity_safe("grid_fleet", None, "RATCHET_PAUSE", st["reason"])
-    elif was_blocked and not st["blocked"]:
-        await _log_activity_safe("grid_fleet", None, "RATCHET_RESUME",
-                                 "Back at or above the locked floor - buying resumed.")
-    return st
-
-
-async def rebase_profit_ratchet():
-    """Set the floor to the current net worth. For a WITHDRAWAL (which would
-    otherwise leave the account permanently under its floor) - never needed
-    for a deposit, which the ratchet simply locks as a tier."""
-    async with engine.aiohttp.ClientSession() as session:
-        nw = await read_crypto_net_worth(session)
-    if nw is None:
-        raise ValueError("net worth could not be read - floor left unchanged")
-    await _ratchet_state_set(PROFIT_RATCHET_FLOOR_KEY, nw)
-    _profit_ratchet["checked_at"] = 0.0
-    await _log_activity_safe("grid_fleet", None, "TIER_LOCK",
-                             f"Floor manually reset to current net worth ${nw:,.2f}.")
-    return nw
-
-
-async def profit_ratchet_status(read_net_worth: bool = True):
-    """Status for the dashboard. Reads the STORED floor, not this process's
-    memory: the dashboard runs in the web service, the ratchet in the
-    crypto-trading service, and only the database is shared."""
-    import profit_ratchet as pr
-    active = await is_profit_ratchet_active()
-    floor = await _ratchet_state_value(PROFIT_RATCHET_FLOOR_KEY)
-    nw = None
-    if read_net_worth:
-        try:
-            async with engine.aiohttp.ClientSession() as session:
-                nw = await read_crypto_net_worth(session)
-        except Exception as e:
-            log.warning(f"[RATCHET] status net worth read failed: {e}")
-    blocked = None if nw is None else (active and pr.blocks_buys(floor, nw))
-    return {"active": active, "floor_usd": floor, "net_worth_usd": nw,
-            "next_tier_usd": pr.next_tier(floor, PROFIT_RATCHET_STEP_PCT),
-            "step_pct": PROFIT_RATCHET_STEP_PCT, "buys_blocked": blocked,
-            "cushion_usd": (round(nw - floor, 2) if nw is not None and floor else None)}
 
 
 async def _sweep_orphans_once() -> bool:
@@ -8011,11 +7859,6 @@ async def run_grid_branches_cycle():
         # walked in sequence with a sleep between them, so per-branch stamps
         # would land in different seconds and claim to be different cycles.
         _cycle_id = current_cycle_id()
-
-        try:
-            await refresh_profit_ratchet(session)
-        except Exception as e:
-            log.warning(f"[RATCHET] refresh failed: {type(e).__name__}: {e}")
 
         for branch in branches:
             try:
@@ -8603,7 +8446,6 @@ async def get_grid_status() -> dict:
         "reanchor_interval_minutes": GRID_REANCHOR_INTERVAL_SECONDS // 60,
         "adaptive_fleet": await get_adaptive_fleet_status(),
         "drawdown_breaker_pct": GRID_DRAWDOWN_BREAKER_PCT,
-        "profit_ratchet": await profit_ratchet_status(read_net_worth=False),
         "branch_count": len(branches),
         "branches_with_open_slices": len(branches_with_slices),
         "total_allocated_usd": round(total_allocated, 2),
