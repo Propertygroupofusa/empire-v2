@@ -133,6 +133,38 @@ async def main():
     src = inspect.getsource(g.run_grid_branch_cycle)
     check("buy gate obeys the pause", "_ratchet_buys_paused" in src)
     check("buy sizing reserves the lock", "_dep_reserve + _ratchet_locked_usd" in src)
+    # ---------- deadlock: paused with nothing open can never clear itself ----------
+    st = await g._ratchet_read_all()
+    check("paused + no open slices -> the clock starts", st[g.RATCHET_FLAT_PAUSED_SINCE_KEY] > 0)
+    await g.update_profit_ratchet()
+    check("inside the grace period -> still paused", g._ratchet_buys_paused)
+    from models import CryptoGridSlice
+    async with get_session_factory()() as db:
+        db.add(CryptoGridSlice(bot_name="crypto_grid_t", product_id="X-USD", entry_price=1.0, qty=1.0))
+        await db.commit()
+    await g.update_profit_ratchet()
+    st = await g._ratchet_read_all()
+    check("an open slice can still realize -> no release, clock cleared",
+          g._ratchet_buys_paused and st[g.RATCHET_FLAT_PAUSED_SINCE_KEY] == 0)
+    async with get_session_factory()() as db:
+        for r in (await db.execute(g.select(CryptoGridSlice))).scalars().all():
+            await db.delete(r)
+        await db.commit()
+    await g.update_profit_ratchet()
+    await g._ratchet_write({g.RATCHET_FLAT_PAUSED_SINCE_KEY: datetime.utcnow().timestamp() - 25 * 3600})
+    await g.update_profit_ratchet()
+    s = await g.get_profit_ratchet_status()
+    check("24h paused with nothing open -> floor re-anchors, buying resumes",
+          not g._ratchet_buys_paused and not s["buys_paused"])
+    check("release never unlocks profit", s["locked_usd"] == peak)
+    check("release sets floor = current trading capital", abs(s["floor"] - s["trading_capital"]) < 0.01)
+    await bank(-5.0)
+    await g.update_profit_ratchet()
+    check("a fresh loss below the new floor pauses again", g._ratchet_buys_paused)
+    check("pure step: not paused -> no clock", pr.deadlock_step(False, 0, 123.0, 999.0) == (0.0, False))
+    check("pure step: open slice -> no clock", pr.deadlock_step(True, 2, 123.0, 999.0) == (0.0, False))
+    check("pure step: release exactly at the limit",
+          pr.deadlock_step(True, 0, 1000.0, 1000.0 + 24 * 3600) == (1000.0, True))
     for fn in (g.update_profit_ratchet, g.set_profit_ratchet_armed, g.get_profit_ratchet_status,
                g.reconcile_grid_with_exchange.__wrapped__ if hasattr(g.reconcile_grid_with_exchange, "__wrapped__") else fake_reconcile):
         body = inspect.getsource(fn)

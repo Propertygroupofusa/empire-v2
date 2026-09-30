@@ -13754,7 +13754,15 @@ Final design, merged from two passes and confirmed by the owner:
   response says whether the seed was credited and why not.
 - It cannot make a negative impossible: open coin can sit below cost and is
   never sold to defend a floor.
-- Tests: `test_profit_ratchet.py` (45).
+- **Deadlock release.** Only a sell moves realized profit, so "buys paused"
+  with no open slice anywhere (stops liquidated the book below the floor)
+  could never clear. After `GRID_RATCHET_DEADLOCK_RELEASE_HOURS` (24) in
+  exactly that state the floor re-anchors to current trading capital.
+  Locked profit does not move. Found by an external review that simulated a
+  market-value floor; that design's other findings (pause 64-99% of hours
+  on dips, deposits ratcheting) do not apply here because nothing reads
+  market value or deposits.
+- Tests: `test_profit_ratchet.py` (56).
 
 ---
 

@@ -24,6 +24,8 @@ Pure functions only - no database, no network.
 
 TIER_STEP_PCT = 0.01
 LOCK_FRACTION = 0.5
+# How long buys may stay paused with NOTHING open before the floor re-anchors.
+DEADLOCK_RELEASE_HOURS = 24.0
 
 
 def advance(principal, tier, consumed, locked, realized_total,
@@ -93,3 +95,21 @@ def reconcile(tracked_by_product, held_by_currency, increments_by_product):
             findings.append(f"{pid} {verdict}: grid tracks {qty:g}, venue holds "
                             f"{held_by_currency.get(cur, 0.0):g}")
     return (not findings), findings
+
+
+def deadlock_step(buys_paused, open_slices, flat_paused_since, now_ts,
+                  release_hours=DEADLOCK_RELEASE_HOURS):
+    """The one state the floor cannot leave on its own.
+
+    Only a SELL moves realized profit, and a sell needs an open slice. So
+    paused-with-nothing-open is permanent: no buy is allowed, no sell is
+    possible. (Reached by stops liquidating the book below the floor.)
+
+    Returns (new_flat_paused_since, release). release=True means re-anchor
+    the floor to current trading capital. Locked profit is untouched - only
+    the floor moves down, and only after release_hours of that exact state.
+    """
+    if not buys_paused or open_slices > 0:
+        return 0.0, False
+    since = flat_paused_since or now_ts
+    return since, (now_ts - since) >= release_hours * 3600.0

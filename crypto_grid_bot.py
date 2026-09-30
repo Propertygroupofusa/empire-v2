@@ -2900,8 +2900,12 @@ RATCHET_TIER_KEY = "grid_ratchet_tier"
 RATCHET_CONSUMED_KEY = "grid_ratchet_consumed"
 RATCHET_LOCKED_KEY = "grid_ratchet_locked"
 RATCHET_SEEDED_KEY = "grid_ratchet_seed_credited"   # 1.0 / 0.0
+# Epoch seconds since buys became paused with no open slice anywhere; 0 = not.
+RATCHET_FLAT_PAUSED_SINCE_KEY = "grid_ratchet_flat_paused_since"
 _RATCHET_KEYS = (RATCHET_ARMED_AT_KEY, RATCHET_PRINCIPAL_KEY, RATCHET_TIER_KEY,
-                 RATCHET_CONSUMED_KEY, RATCHET_LOCKED_KEY, RATCHET_SEEDED_KEY)
+                 RATCHET_CONSUMED_KEY, RATCHET_LOCKED_KEY, RATCHET_SEEDED_KEY,
+                 RATCHET_FLAT_PAUSED_SINCE_KEY)
+RATCHET_DEADLOCK_RELEASE_HOURS = float(os.getenv("GRID_RATCHET_DEADLOCK_RELEASE_HOURS", "24"))
 
 # In-process mirror for the trading loop, so a buy never waits on a query.
 _ratchet_buys_paused = False
@@ -3072,6 +3076,27 @@ async def update_profit_ratchet(session=None):
             view, _ = profit_ratchet.advance(*args, cross=False)
             log.warning(f"[GRID] 🪜 tier due but NOT locked - reconciliation not clean: "
                         f"{'; '.join(findings)}")
+    # DEADLOCK RELEASE. Paused with nothing open can never clear itself:
+    # only a sell moves realized profit. After the grace period the floor
+    # re-anchors to current trading capital (consumed := realized). Locked
+    # profit does not move; only the pause is lifted.
+    async with get_session_factory()() as db:
+        open_slices = int((await db.execute(select(func.count(CryptoGridSlice.id)))).scalar() or 0)
+    now_ts = datetime.utcnow().timestamp()
+    since, release = profit_ratchet.deadlock_step(
+        view["buys_paused"], open_slices, st[RATCHET_FLAT_PAUSED_SINCE_KEY], now_ts,
+        RATCHET_DEADLOCK_RELEASE_HOURS)
+    if release:
+        await _ratchet_write({RATCHET_CONSUMED_KEY: realized, RATCHET_FLAT_PAUSED_SINCE_KEY: 0.0})
+        view, _ = profit_ratchet.advance(st[RATCHET_PRINCIPAL_KEY], view["tier"], realized,
+                                         view["locked_usd"], realized, cross=False)
+        await _log_activity_safe("grid_profit_ratchet", "", "LOCK",
+                                 f"🪜 buys were paused with no open slices for "
+                                 f"{RATCHET_DEADLOCK_RELEASE_HOURS:g}h - floor re-anchored to "
+                                 f"${view['floor']:,.2f}. Locked ${view['locked_usd']:,.2f} unchanged.")
+    elif since != st[RATCHET_FLAT_PAUSED_SINCE_KEY]:
+        await _ratchet_write({RATCHET_FLAT_PAUSED_SINCE_KEY: since})
+    view["flat_paused_since"] = (datetime.utcfromtimestamp(since).isoformat() + "Z") if since and not release else None
     _ratchet_buys_paused = view["buys_paused"]
     _ratchet_locked_usd = view["locked_usd"]
     if _ratchet_buys_paused:
