@@ -1035,12 +1035,43 @@ def main():
                         blockers.append("ADOPTED basis - the gain is measured "
                                         "against a price nobody paid")
                     ready.append((pid2, best2, thr2, why2, blockers))
-                free = [r for r in ready if not r[4]]
+                # AN ACCUSATION NEEDS TWO READINGS.
+                #
+                # "nothing is blocking it, so the sell path itself is the
+                # suspect" points the owner at a code bug. On 2026-09-30 it
+                # said exactly that about ALGO-USD while ALGO was locked -
+                # 1134.300 of 1134.346 units reserved, confirmed by a direct
+                # read seconds later. The tell was in the same output:
+                # "4 invariant(s) BROKEN (was 2)". The invariants feed briefly
+                # reported two failures instead of four, grid_inventory_is_free
+                # among the missing, so the blocker lookup came back empty and
+                # absence read as "nothing locked".
+                #
+                # Absence really does mean "nothing locked" when the invariant
+                # ran and passed - that is why the gap for a missing check was
+                # removed earlier. What it cannot do is carry an accusation on
+                # its own. So the sell-path verdict requires the branch to have
+                # looked unblocked on the PREVIOUS pass too.
+                #
+                # THREE STATES, NOT TWO, and the first draft of this fix
+                # collapsed them into two: it filtered the unblocked list down
+                # to the confirmed ones, which sent an unconfirmed branch into
+                # the "every one is blocked" arm and printed it with an empty
+                # blocker list - asserting a blocker it could not name. Worse
+                # than the bug being fixed. The unfiltered set decides whether
+                # anything is unblocked; the filtered one decides whether that
+                # is sayable yet.
+                free_now = [r for r in ready if not r[4]]
+                prev_free = prev.get("free_ready")
+                cur["free_ready"] = sorted(r[0] for r in free_now)
+                free_confirmed = ([r for r in free_now
+                                   if r[0] in set(prev_free)]
+                                  if prev_free is not None else [])
                 if not ready:
                     diag = (f" NOTHING to sell: no slice of {len(slices)} stands at "
                             f"the threshold that governs it, so the fleet is "
                             f"waiting on price, not stuck.")
-                elif not free:
+                elif not free_now:
                     diag = (f" {len(ready)} slice-holding branch(es) of "
                             f"{len(branches)} ARE past their own threshold and "
                             f"every one is blocked: "
@@ -1049,12 +1080,24 @@ def main():
                                         for p3, n3, t3, w3, bl in
                                         sorted(ready, key=lambda r: -r[1]))
                             + ". The close rate is not waiting on price.")
-                else:
-                    diag = (f" {len(free)} branch(es) are past their own threshold "
-                            f"with NOTHING blocking them - "
+                elif free_confirmed:
+                    diag = (f" {len(free_confirmed)} branch(es) are past their "
+                            f"own threshold with NOTHING blocking them on this "
+                            f"pass AND the last - "
                             + ", ".join(f"{p3} at {n3*100:+.2f}%"
-                                        for p3, n3, _, _, _ in free)
+                                        for p3, n3, _, _, _ in free_confirmed)
                             + " - so the sell path itself is the suspect.")
+                else:
+                    diag = (f" {len(free_now)} branch(es) are past their own "
+                            f"threshold and look unblocked on THIS reading only"
+                            + (" (no baseline to compare against)"
+                               if prev_free is None else "")
+                            + " - "
+                            + ", ".join(f"{p3} at {n3*100:+.2f}%"
+                                        for p3, n3, _, _, _ in free_now)
+                            + ". That is not enough to accuse the sell path: "
+                              "the blocker feed can drop a check for one poll. "
+                              "Confirm on the next pass.")
                 flag(level, "DRY_SPELL",
                      f"{dry_h:.1f}h since the last close{grew}, on a fleet that "
                      f"averages one every {mean_h:.1f}h ({cpd:.2f}/day). The loop "

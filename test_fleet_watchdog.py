@@ -668,14 +668,33 @@ out = run(d, BASE_SNAP)
 ok("an all-adopted ready slice is flagged as measured against a price nobody paid",
    "price nobody paid" in out, out)
 
-# Ready with NOTHING blocking it - then the sell path itself is the suspect,
-# and saying "blocked" there would send the reader the wrong way entirely.
+# Ready with NOTHING blocking it - then the sell path itself is the suspect.
+# But that verdict ACCUSES THE CODE, so it needs two readings.
+#
+# On 2026-09-30 this fired on ALGO-USD while ALGO was locked - 1134.300 of
+# 1134.346 units reserved, confirmed seconds later by a direct read. The
+# invariants feed had briefly reported "4 invariant(s) BROKEN (was 2)" with
+# grid_inventory_is_free among the missing, so the blocker lookup came back
+# empty and absence read as "nothing locked".
 d = _dry()
 d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0][
     "unrealized_net_pct"] = 0.0719
-out = run(d, BASE_SNAP)
-ok("a ready slice with no blocker points at the sell path",
+out = run(d, dict(BASE_SNAP, free_ready=["AAA-USD"]))
+ok("a ready slice unblocked on TWO passes points at the sell path",
    "the sell path itself is the suspect" in out, out)
+
+out = run(d, BASE_SNAP)          # no free_ready in the baseline
+ok("but one reading alone does NOT accuse the sell path",
+   "the sell path itself is the suspect" not in out, out)
+ok("and it says a single reading is not enough",
+   "not enough to accuse the sell path" in out, out)
+ok("and tells the reader to confirm next pass",
+   "Confirm on the next pass" in out, out)
+
+# A branch unblocked now but blocked last pass is also only one reading.
+ok("a branch newly unblocked is not yet an accusation",
+   "the sell path itself is the suspect" not in
+   run(d, dict(BASE_SNAP, free_ready=["ZZZ-USD"])))
 
 # Unreadable lock state must not read as "nothing is locked".
 d = _dry()
