@@ -10685,7 +10685,10 @@ LIVE_OPS_GATE_EVENTS = ("GATE_PASS", "GATE_BLOCK", "GATE_OBSERVE", "GATE_ERROR",
                         # route, so whether it fired - and whether the order
                         # actually filled - is the difference between a branch
                         # that is quietly fine and one locked in a retry loop.
-                        "PARKED_SELL", "PARKED_NO_EXIT", "PARKED_SELL_NOFILL")
+                        # PARKED_NO_EXIT is NOT in this list: it is a state
+                        # that repeats every cycle per parked branch, and it
+                        # crowded CYCLE_ERROR out of the feed's own window.
+                        "PARKED_SELL", "PARKED_SELL_NOFILL")
 # Execution outcomes, counted separately from gate decisions: a gate pass
 # says the bot WANTED to buy, these say whether the exchange let it. Kept
 # apart because a healthy pass rate with a rising rejection count is a

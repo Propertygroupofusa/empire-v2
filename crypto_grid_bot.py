@@ -6994,11 +6994,20 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 branch.bot_name, branch.product_id, "PARKED_SELL",
                 f"+{_pct * 100:.2f}% net on ${_notional:,.2f} of basis "
                 f"({len(slices)}/{branch.num_levels} rungs full)")
-        elif _parked:
-            await _record_gate_decision(
-                branch.bot_name, branch.product_id, "PARKED_NO_EXIT",
-                f"{len(slices)}/{branch.num_levels} rungs full and not one "
-                f"slice clears the {GRID_PARKED_MIN_NET_PCT * 100:.2f}% floor")
+        # PARKED_NO_EXIT is deliberately NOT written here any more.
+        #
+        # It is a steady STATE, not an event, and writing it every cycle for
+        # every parked branch flooded the Live Ops feed: measured at 32 of the
+        # last 40 rows, which pushed every GATE_PASS, GATE_BLOCK and - the
+        # dangerous one - every CYCLE_ERROR out of the window entirely. An
+        # alarm whose evidence has been crowded out of the feed cannot fire,
+        # which is the exact failure this instrumentation existed to prevent,
+        # caused by the instrumentation itself.
+        #
+        # Nothing is lost: the watchdog derives the same fact from
+        # /grid-status directly (PARKED, PARKED_DUST), where it costs no feed
+        # rows. Only the two genuine EVENTS stay durable - an escape sell
+        # attempted, and an escape sell refused.
 
     # Hoisted so the exit can be NAMED, not just taken. All three entries to
     # this block used to collapse into "stop_loss" or "profit_target", which
