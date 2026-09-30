@@ -8608,7 +8608,43 @@ function fmtCombinedMomentum(history) {
     const cls = deltaUsd >= 0 ? 'up' : 'down';
     const arrow = deltaUsd >= 0 ? '▲' : '▼';
     const sign = deltaUsd >= 0 ? '+' : '-';
+    // WHAT AROSE vs WHAT WAS EARNED. Rendered green with an up arrow, this
+    // line reads as a month's profit, and it was read that way: +$7,613.50
+    // (+370.71%) prompted a plan to project $800k from it. It is not profit.
+    // $5,175.35 of it landed in ONE poll interval on 2026-09-27 when coin the
+    // owner already held was adopted into the fleet, with $1,796.06 more an
+    // hour later. His net worth did not move; the scope of this measure did.
+    // Realised trading over the same window was $82.72 - 1.1% of the headline.
+    //
+    // So any single-poll step of $400+ is named right here. The fleet's best
+    // FULL DAY of closed trades is $41.62, so a step that size is money
+    // ARRIVING in the measure, never money earned.
+    let stepNote = '';
+    let stepSum = 0, stepCount = 0, biggest = null;
+    for (let i = 1; i < history.length; i++) {
+        const a = history[i - 1].combined_equity, b = history[i].combined_equity;
+        if (a == null || b == null) continue;
+        if (Math.abs(b - a) >= 400) {
+            stepSum += (b - a); stepCount++;
+            if (!biggest || Math.abs(b - a) > Math.abs(biggest.d)) {
+                biggest = {d: b - a, at: history[i].created_at};
+            }
+        }
+    }
+    if (stepCount > 0 && deltaUsd > 0) {
+        const pct = deltaUsd ? (stepSum / deltaUsd) * 100 : 0;
+        stepNote = `<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.5;
+                       border-left:3px solid var(--amber, #f0b429); padding-left:10px;">
+             <strong>This is not a profit figure.</strong> ${stepCount} single-poll step(s) totalling
+             ${fmtUsd(stepSum)} &mdash; ${pct.toFixed(0)}% of it &mdash; arrived in this window,
+             the largest ${fmtUsd(biggest.d)} on ${String(biggest.at).slice(0, 10)}.
+             A step that size is coin adopted into the fleet or cash moved in, not money earned:
+             the best FULL DAY of closed trades this fleet has ever had is $41.62.
+             What trading actually earned is the realised figure in the Grid Trade History below.
+             <strong>Do not project from this line.</strong></div>`;
+    }
     return `<span class="${cls}">${arrow} ${sign}${fmtUsd(Math.abs(deltaUsd))} (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)</span> over the last ${spanStr} of real tracking`
+        + stepNote
         + (deltaUsd < 0
             ? `<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.5;">
                  This window still contains the retired family tree, which closed <strong>-$508.44</strong> across

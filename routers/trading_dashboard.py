@@ -1773,6 +1773,67 @@ def _project_years_to_goal(history_rows, combined_equity: float, goal: float):
     return round(years, 1), round(span_days, 2)
 
 
+def _decompose_combined_delta(history_rows):
+    """Split the headline delta into what was EARNED and what merely ARRIVED.
+
+    THE CARD SAID +$7,613.50 (+370.71%) IN GREEN WITH AN UP ARROW, and the
+    owner read it as a month's profit and asked to project $800k from it.
+    It is not profit. Over that window the combined figure went $2,053.78 ->
+    $9,667.28, and $5,175.35 of it landed in ONE snapshot interval at
+    2026-09-27T13:11:11, with a further $1,796.06 at 14:21:15 - the moment
+    coin the owner already held in his Coinbase wallet was adopted into the
+    fleet and therefore into this measure. His net worth did not move. The
+    scope of the measurement did.
+
+    Realised trading profit over the same window was $82.72: 1.1% of the
+    headline. _project_years_to_goal's own docstring says the delta
+    "reflects everything that happened in that window, real trading gains
+    AND any new cash added - the caller is expected to caveat it that way",
+    and the caller did not. This returns the figures that caveat is made of.
+
+    A single-interval step is flagged at $400 because that is far above any
+    move this fleet's trading has ever produced in one poll (its best FULL
+    DAY of closes is $41.62), so a step that size is arrival, not earnings.
+    """
+    if not history_rows or len(history_rows) < 2:
+        return None
+    steps = []
+    prev = None
+    for r in history_rows:
+        c = r.combined_equity
+        if c is None:
+            continue
+        if prev is not None and abs(c - prev[1]) >= 400.0:
+            steps.append({
+                "at": prev[0].isoformat() if hasattr(prev[0], "isoformat") else str(prev[0]),
+                "to_at": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") else str(r.created_at),
+                "from_usd": round(prev[1], 2),
+                "to_usd": round(c, 2),
+                "step_usd": round(c - prev[1], 2),
+            })
+        prev = (r.created_at, c)
+    jump_total = round(sum(s["step_usd"] for s in steps), 2)
+    delta = round((history_rows[-1].combined_equity or 0)
+                  - (history_rows[0].combined_equity or 0), 2)
+    return {
+        "delta_usd": delta,
+        "single_interval_steps": steps,
+        "sum_of_steps_usd": jump_total,
+        "step_share_of_delta_pct": (round(100.0 * jump_total / delta, 1)
+                                    if delta else None),
+        "what_a_step_is": (
+            "a move of $400+ between two consecutive polls. This fleet's best "
+            "FULL DAY of closed trades is $41.62, so a step that size is money "
+            "ARRIVING in the measure - coin adopted into the fleet, or cash "
+            "moved in - not money earned."),
+        "read_this_before_projecting": (
+            "Do NOT extrapolate the headline delta. It includes every dollar "
+            "that entered the measurement, not just what trading earned. The "
+            "earned figure is realised P&L from the closed book and is the "
+            "only one of the two a projection may use."),
+    }
+
+
 def _build_progress_observations(alpaca_data, crypto_data):
     """Real, concrete observations about what's currently helping or
     hurting progress toward the combined goal - per the account owner's
@@ -2035,6 +2096,11 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         "excluded_legacy_snapshots": excluded_legacy_snapshots,
         "projected_years_to_goal": projected_years_to_goal,
         "projection_basis_days": projection_basis_days,
+        "delta_decomposition": _decompose_combined_delta(history),
+        "projected_years_to_goal_is_not_a_trading_figure": (
+            "It extrapolates the total change in combined equity, which "
+            "includes coin adopted into the fleet and any cash added. See "
+            "delta_decomposition before quoting it."),
         "observations": observations,
     }
 
@@ -7848,6 +7914,107 @@ async def get_profit_locks():
 
 @router.get("/adaptive-capital-fleet-status")
 @router.get("/capital-fleet-status")
+@router.get("/goal-pace")
+async def goal_pace(goal_usd: float = 800000.0, days: int = 30):
+    """Day by day: where the fleet actually is, against a goal path. Read-only.
+
+    ASKED FOR DIRECTLY - "put something like that in this area and compare to
+    the days that's going now so I can see the difference ... one day, two day,
+    three day, and how we get closer to that 30-day 800k goal."
+
+    So both paths are here, day by day, and the gap between them is the point.
+    The required path is what the goal DEMANDS, not what anything predicts, and
+    it is reported even when it is absurd - especially then, because a goal
+    nobody names the required rate for is how a number like $800k survives.
+
+    THE MEASURED RATE IS THE TRADING RATE, deliberately. It does NOT come from
+    the change in combined equity, which includes coin adopted into the fleet
+    and cash moved in - $5,175.35 of that arrived in a single poll on
+    2026-09-27 and is 68% of a headline that was read as a month's profit.
+    Projecting from it would compound an accounting event.
+
+    Nothing here is a forecast. It is arithmetic on a rate already measured,
+    and the measured rate is an average over a window in which this fleet
+    closed nothing at all on 17 of 30 days.
+    """
+    import math
+    try:
+        gm = await get_growth_model()
+        if hasattr(gm, "body"):
+            gm = json_module.loads(gm.body)
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"growth model unreadable: {type(exc).__name__}: {exc}")
+
+    rate = (gm or {}).get("rate") or {}
+    cap = (gm or {}).get("capital") or {}
+    monthly_pct = rate.get("monthly_pct")
+    base = cap.get("total_capital_usd")
+    if not monthly_pct or not base:
+        return {"readable": False,
+                "detail": ("the measured rate or the capital base could not be "
+                           "read, so neither path can be drawn. UNKNOWN, not zero.")}
+
+    days = max(1, min(int(days), 365))
+    monthly = float(monthly_pct) / 100.0
+    daily = (1.0 + monthly) ** (1.0 / 30.0) - 1.0
+    required_daily = (float(goal_usd) / float(base)) ** (1.0 / days) - 1.0
+
+    marks = sorted({1, 2, 3, 5, 7, 10, 14, 20, 25, days})
+    path = [{
+        "day": d,
+        "at_measured_pace_usd": round(base * (1 + daily) ** d, 2),
+        "goal_path_requires_usd": round(base * (1 + required_daily) ** d, 2),
+        "gap_usd": round(base * (1 + required_daily) ** d
+                         - base * (1 + daily) ** d, 2),
+    } for d in marks if d <= days]
+
+    months_to_goal = (math.log(float(goal_usd) / float(base)) / math.log(1 + monthly)
+                      if goal_usd > base and monthly > 0 else None)
+
+    return {
+        "readable": True,
+        "as_of": datetime.utcnow().isoformat() + "Z",
+        "starting_from_usd": round(float(base), 2),
+        "goal_usd": float(goal_usd),
+        "days": days,
+        "measured": {
+            "monthly_pct": round(monthly * 100, 4),
+            "daily_pct": round(daily * 100, 5),
+            "basis_days": rate.get("span_days"),
+            "realised_usd": rate.get("realised_usd"),
+            "this_is_the_trading_rate": (
+                "realised profit over capital, from the closed book. It is NOT "
+                "the change in combined equity, which includes adopted coin and "
+                "cash moved in."),
+            "the_window_has_dead_days": (
+                "this fleet closed nothing at all on 17 of the last 30 days, so "
+                "the average spans a dormant fortnight and four busy days. It is "
+                "the honest 30-day figure and it is not a forecast of either state."),
+        },
+        "to_hit_the_goal_in_time": {
+            "multiple_required": round(float(goal_usd) / float(base), 1),
+            "daily_pct_required": round(required_daily * 100, 3),
+            "times_the_measured_rate": (round(required_daily / daily, 0)
+                                        if daily > 0 else None),
+            "this_is_a_requirement_not_a_prediction": (
+                "it is what the goal demands of the account, derived from the "
+                "goal and the deadline alone. Nothing here says it will happen."),
+        },
+        "at_the_measured_pace": {
+            "months_to_goal": round(months_to_goal, 1) if months_to_goal else None,
+            "years_to_goal": round(months_to_goal / 12.0, 1) if months_to_goal else None,
+        },
+        "path": path,
+        "is_arithmetic_not_a_forecast": (
+            "Both columns compound a fixed rate. The left one compounds a rate "
+            "this fleet actually produced and assumes it repeats, which nothing "
+            "guarantees. The right one compounds whatever rate the goal needs. "
+            "Neither is a prediction, and realised profit is banked while "
+            "unrealised is not in either number."),
+    }
+
+
 @router.get("/capital-mobility")
 async def capital_mobility():
     """Why is capital not cycling? Read-only. Places nothing, moves nothing.
