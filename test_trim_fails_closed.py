@@ -77,13 +77,39 @@ def test_an_unreadable_grid_returns_before_any_sell():
         "a sell path is reachable before the unreadable-grid return"
 
 
+def test_it_retries_before_refusing():
+    """Failing closed must not mean giving up on the first miss.
+
+    A guard that skips on one transient rate limit leaves the ceiling
+    unenforced for as long as the venue is busy - which on this account
+    is often. Three attempts with a widening pause, then the refusal
+    stands.
+    """
+    assert "for _attempt in range(3):" in CODE, "no retry loop"
+    assert "await asyncio.sleep(2 ** _attempt)" in CODE, "no widening pause"
+    assert "if _units is not None:" in CODE and "break" in CODE, \
+        "a successful read must stop retrying"
+    # the sleep must be skipped after the LAST attempt
+    assert "if _attempt < 2:" in CODE, "it would sleep after the final try"
+
+
+def test_retrying_never_weakens_the_refusal():
+    # The whole point is that the refusal still stands when all three
+    # attempts fail - retry is a way to avoid the skip, not to skip it.
+    i = CODE.index("for _attempt in range(3):")
+    j = CODE.index("if _units is None:")
+    assert i < j, "the retry loop must sit BEFORE the unreadable check"
+    assert "_place_market_sell" not in CODE[i:j], \
+        "an order path is reachable from inside the retry loop"
+
+
 def test_a_raised_exception_also_lands_on_the_skip():
     # Both failure shapes - a raise and a None return - must reach the
     # same refusal. Previously only the raise was even logged.
-    i = BODY.index("except Exception as exc:")
-    j = BODY.index("if _units is None:")
+    i = CODE.index("except Exception as exc:")
+    j = CODE.index("if _units is None:")
     assert i < j, "the except must fall through to the None check"
-    assert "_units = None" in BODY[i:j], \
+    assert "_units = None" in CODE[i:j], \
         "an exception must set _units to None so it reaches the same refusal"
 
 

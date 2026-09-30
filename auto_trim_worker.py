@@ -255,18 +255,37 @@ async def check_once(session_factory, *, place=True) -> dict:
         # a phantom slice row, and a manual reconcile. Every other
         # unreadable input in this function already returns rather than
         # guessing; this one was the outlier.
+        # RETRY BEFORE REFUSING. Failing closed is correct, but a guard
+        # that gives up on the first miss turns every transient rate
+        # limit into a skipped pass, and the ceiling then goes
+        # unenforced for as long as the venue is busy. The read is
+        # cheap and the failure it guards against is expensive, so it
+        # gets three attempts with a widening pause before the refusal
+        # stands. Measured on this account, the venue's 429s clear in
+        # seconds; it is the ten-second timeouts that cluster.
         protected = ()
-        try:
-            import crypto_grid_bot as _grid
-            _units, _ = await _grid.fleet_tracked_units_by_product()
-        except Exception as exc:
-            _units = None
-            log.warning(f"[auto_trim] grid positions raised ({type(exc).__name__}: {exc})")
+        _units = None
+        for _attempt in range(3):
+            try:
+                import crypto_grid_bot as _grid
+                _units, _ = await _grid.fleet_tracked_units_by_product()
+            except Exception as exc:
+                _units = None
+                log.warning(f"[auto_trim] grid positions raised on attempt "
+                            f"{_attempt + 1}/3 ({type(exc).__name__}: {exc})")
+            if _units is not None:
+                if _attempt:
+                    log.info(f"[auto_trim] grid positions readable on attempt "
+                             f"{_attempt + 1} - protection restored without a skip")
+                break
+            if _attempt < 2:
+                await asyncio.sleep(2 ** _attempt)
         if _units is None:
             log.warning("[auto_trim] grid positions UNREADABLE - skipping this pass "
                         "rather than trimming coin the grid may be holding")
             return {"mode": mode, "armed": True, "acted": 0,
-                    "detail": ("grid positions could not be read, so which coins are "
+                    "detail": ("grid positions could not be read in 3 attempts, so which "
+                               "coins are "
                                "actively traded is UNKNOWN; nothing placed. Trimming "
                                "without that list sells coin the grid still has on its "
                                "books and leaves a slice claiming units the wallet no "
