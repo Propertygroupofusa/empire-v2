@@ -8979,15 +8979,20 @@ class _ProfitRatchetToggle(BaseModel):
 
 @router.post("/grid-status/profit-ratchet")
 async def set_grid_profit_ratchet(payload: _ProfitRatchetToggle):
-    """Arm or disarm the profit ratchet (tiers every 5% of fleet value, lock
-    half of each tier's gain, pause new buys if the fleet falls back to the
-    locked tier). Arming starts fresh at the current fleet value. It never
-    sells anything."""
+    """Arm or disarm the profit ratchet. Tiers are 1% of trading capital and
+    move on VERIFIED realized profit only; half of each tier is locked; new
+    buys pause if trading capital falls below the floor. Profit banked before
+    arming is credited only if the grid ledger reconciles with the exchange
+    right now. It never sells anything."""
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
-    await crypto_grid_bot_module.set_profit_ratchet_armed(payload.enabled)
-    log.warning(f"[dashboard] 🪜 profit ratchet {'ARMED' if payload.enabled else 'disarmed'}")
-    return await crypto_grid_bot_module.get_profit_ratchet_status()
+    armed = await crypto_grid_bot_module.set_profit_ratchet_armed(payload.enabled)
+    log.warning(f"[dashboard] 🪜 profit ratchet {'ARMED' if payload.enabled else 'disarmed'}"
+                + (f" - seed {'credited' if armed.get('seed_credited') else 'REFUSED'}"
+                   if payload.enabled else ""))
+    status = await crypto_grid_bot_module.get_profit_ratchet_status()
+    status["arming"] = armed
+    return status
 
 
 @router.get("/grid-status/fee-reality")

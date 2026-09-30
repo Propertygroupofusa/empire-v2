@@ -1,23 +1,23 @@
-"""Profit ratchet: lock banked profit in tiers; pause new buys if the fleet
-falls back to the locked floor. Never sells.
+"""Profit ratchet: lock verified banked profit in tiers; pause new buys if
+trading capital falls back to the floor. Never sells.
 
-Owner's choices, 2026-09-30:
-  * tiers move on BANKED (realized) profit only - never on price or paper
-    gains, so a phantom unrealized gain can never raise the floor;
-  * each tier is 1% of trading capital, recomputed after every tier, so
-    tiers grow as the account does;
-  * half of each tier's profit is locked; half keeps compounding;
-  * profit already banked before arming counts toward the first tier;
-  * at the floor, new buys pause. Nothing is sold.
+Owner's final design, 2026-09-30:
+  * the ONLY input that can advance a tier is realized profit, and only after
+    the grid ledger reconciles with the exchange. Fleet value and unrealized
+    P&L are never read here, so phantom inventory (QNT showed +$86.84 on coin
+    the venue may not hold) can never move the ratchet;
+  * each tier is 1% of current trading capital, recomputed after every tier;
+  * half of each tier is locked in a dedicated bucket, half keeps compounding;
+  * profit banked before arming is credited only if reconciliation is clean
+    at arming - otherwise the seed is zero;
+  * reconciliation that is unreadable or SHORT fails CLOSED: no tier advances
+    until it is clean again;
+  * the floor is trading capital as it stood when the last tier locked. New
+    buys pause while current trading capital is below it. Nothing is sold;
+    open positions keep their normal exits.
 
-Locked only ever goes UP. A realized loss moves the counter back (the next
-tier needs the loss earned back first) but never unlocks anything; only the
-owner disarming releases it.
-
-What this cannot promise: open P&L is just price. Coin already held can sit
-below any floor, and this code never sells to defend one. The guarantees are
-that banked profit, once locked, is never respent, and that the fleet stops
-buying into a fall.
+Trading capital = principal + realized - locked. Principal is grid capital
+at arming minus the profit it already carried. Locked only ever rises.
 
 Pure functions only - no database, no network.
 """
@@ -27,54 +27,69 @@ LOCK_FRACTION = 0.5
 
 
 def advance(principal, tier, consumed, locked, realized_total,
-            step=TIER_STEP_PCT, lock_fraction=LOCK_FRACTION):
-    """Cross every tier that realized profit now covers.
+            step=TIER_STEP_PCT, lock_fraction=LOCK_FRACTION, cross=True):
+    """Cross every tier realized profit now covers.
 
-    principal       trading capital at arming, net of profit already banked
-    consumed        realized profit already used up by crossed tiers
-    realized_total  all realized grid profit counted (incl. pre-arm profit)
-
+    consumed is the realized profit already used by crossed tiers (plus, if
+    the seed was refused, the pre-arm profit that must not count).
+    cross=False reports the state as persisted without crossing anything -
+    what the ratchet shows while a due tier waits on reconciliation.
     Returns (state, events); events are (tier, tier_size, locked_add).
     """
     tier = int(tier or 0)
     consumed = float(consumed or 0.0)
     locked = float(locked or 0.0)
+    principal = float(principal or 0.0)
     realized_total = float(realized_total or 0.0)
     events = []
-    principal = float(principal or 0.0)
-    for _ in range(10000):  # hard stop; a real account crosses a handful
-        trading_capital = principal + consumed - locked
-        size = step * trading_capital
-        if size <= 0 or realized_total - consumed < size:
+    for _ in range(10000 if cross else 0):  # hard stop; a real account crosses a handful
+        size = step * (principal + consumed - locked)
+        if not size > 0 or realized_total - consumed < size:
             break
         consumed += size
         add = lock_fraction * size
         locked += add
         tier += 1
         events.append((tier, round(size, 2), round(add, 2)))
-    trading_capital = principal + consumed - locked
-    next_size = step * trading_capital if trading_capital > 0 else None
+    floor = principal + consumed - locked
+    current = principal + realized_total - locked
+    next_size = step * floor if floor > 0 else None
     return {
         "tier": tier,
         "consumed": round(consumed, 6),
         "locked_usd": round(locked, 2),
-        "trading_capital": round(trading_capital, 2),
+        "trading_capital": round(current, 2),
+        "floor": round(floor, 2),
         "progress_usd": round(realized_total - consumed, 2),
         "next_tier_size": round(next_size, 2) if next_size else None,
+        # Below the floor only when realized losses have given back more than
+        # was banked since the last tier. Exactly at it is not a breach.
+        "buys_paused": current < floor - 1e-9,
     }, events
 
 
-def floor_value(anchor_equity, locked, locked_at_arm):
-    """The fleet value new buys must stay above: where the fleet stood when
-    armed, plus everything locked SINCE. Profit locked from pre-arm earnings
-    is already inside the anchor, so it does not raise the floor twice."""
-    if not anchor_equity:
-        return None
-    return round(anchor_equity + max(0.0, locked - (locked_at_arm or 0.0)), 2)
+def reconcile(tracked_by_product, held_by_currency, increments_by_product):
+    """Does every product the grid claims to hold actually exist on the venue?
 
+    tracked_by_product     {product_id: qty in open grid slices}
+    held_by_currency       {currency: available + hold}, or None if unread
+    increments_by_product  {product_id: base_increment}
 
-def buys_paused(fleet_equity, floor):
-    """Paused only once the fleet is genuinely BELOW the floor - at the floor
-    exactly (the moment it is anchored, for one) is not a breach. An unknown
-    fleet value never pauses anything."""
-    return floor is not None and fleet_equity is not None and fleet_equity < floor
+    Returns (ok, findings). ok is True only when every product is MATCHED or
+    EXCESS (the account may hold more than the grid tracks - manual coin is
+    not a phantom). SHORT or UNKNOWN anywhere fails closed.
+    """
+    from restart_recovery import reconcile_inventory, MATCHED, EXCESS
+    if held_by_currency is None:
+        return False, ["balances unreadable"]
+    findings = []
+    for pid, qty in sorted((tracked_by_product or {}).items()):
+        if not qty:
+            continue
+        cur = pid.split("-")[0]
+        verdict = reconcile_inventory(qty, held_by_currency.get(cur, 0.0),
+                                      (increments_by_product or {}).get(pid))
+        if verdict not in (MATCHED, EXCESS):
+            findings.append(f"{pid} {verdict}: grid tracks {qty:g}, venue holds "
+                            f"{held_by_currency.get(cur, 0.0):g}")
+    return (not findings), findings

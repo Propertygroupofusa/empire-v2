@@ -13714,35 +13714,39 @@ endpoint sends; the snapshot writer only sets columns the table has.
 
 ## Lock-in tiers (profit ratchet) for Grid Bot, 2026-09-30
 
-Owner's choices (revised same day after a second design pass):
-- **Tiers move on BANKED profit only**, never on price or paper gains, so a
-  phantom unrealized gain (QNT showed +$86.84 on coin the venue did not
-  report) can never raise the floor.
-- **Tier = 1% of trading capital**, recomputed after every tier.
-- **Half of each tier is locked**; half keeps compounding.
-- **Profit already banked counts** toward the first tiers at arming.
-- **At the floor, new buys pause. Nothing is ever sold.**
+Final design, merged from two passes and confirmed by the owner:
 
-How it works:
-- `profit_ratchet.py`, pure arithmetic. `principal` = grid allocated at
-  arming minus profit it already carries. Locked only ever rises; a realized
-  loss moves the counter back instead of unlocking anything.
-- Floor = fleet value at arming + profit locked SINCE arming. It is not
-  starting capital: open losses at arming (-$491 on 2026-09-30) would
-  otherwise pause buying the moment it is switched on. Pause is strict `<`.
-- Fleet value = sum of a COMPLETE pass of branch equities. An unreadable
-  branch means no value that pass; an unknown never pauses or anchors.
-- Locked cash joins the buy's deployment reserve and leaves free cash. It has
-  its own bucket, deliberately NOT the family tree's `locked_usd`.
-- **Off by default.** Dashboard switch in the Grid Bot section, or
-  `POST /api/trading-dashboard/grid-status/profit-ratchet {enabled}`.
-  Disarming releases the lock.
-- **Reconcile QNT before arming.** The pause compares fleet value, which
-  includes unrealized P&L; a phantom gain that later vanishes can drop the
-  fleet below its anchor and pause buying.
-- It cannot make a negative impossible: open coin can sit below any floor.
-  Show locked, banked and open as separate numbers; only locked is monotone.
-- Tests: `test_profit_ratchet.py`.
+| Rule | Value |
+|---|---|
+| What moves a tier | VERIFIED realized profit only |
+| Tier size | 1% of current trading capital, recomputed each tier |
+| Lock | 50% of each tier, in a dedicated bucket |
+| Unlocked half | Stays in trading capital and compounds |
+| Floor | Trading capital as it stood when the last tier locked |
+| At the floor | New buys pause. Nothing is ever sold |
+| Locked | Never decreases from a loss; only disarming releases it |
+| Reconciliation | Unreadable or SHORT fails CLOSED - no tier advances |
+| Pre-arm profit | Credited only if reconciliation is clean at arming |
+
+- **`fleet_value` and unrealized P&L are never read.** Phantom inventory
+  (QNT showed +$86.84 on coin the venue may not hold) cannot move a tier or
+  the floor. Trading capital = principal + realized - locked, where principal
+  is grid allocation at arming minus the profit it already carried.
+- **Reconciliation** (`reconcile_grid_with_exchange`) sums open grid slices
+  per product and compares them with `account_census.fetch_balances`
+  (available + hold) through `restart_recovery.reconcile_inventory`. EXCESS is
+  fine (manual coin); SHORT or UNKNOWN blocks. It runs only when a tier is
+  actually due, so an ordinary pass adds no venue call.
+- A due tier held by a dirty ledger shows as `tiers_pending_reconciliation`;
+  it locks on the first clean pass.
+- Dashboard shows LOCKED, REALIZED and trading capital vs floor as separate
+  numbers. Only LOCKED is monotone.
+- **Off by default.** Arm from the Grid Bot section, or
+  `POST /api/trading-dashboard/grid-status/profit-ratchet {enabled}`; the
+  response says whether the seed was credited and why not.
+- It cannot make a negative impossible: open coin can sit below cost and is
+  never sold to defend a floor.
+- Tests: `test_profit_ratchet.py` (45).
 
 ---
 

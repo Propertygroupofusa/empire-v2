@@ -3949,10 +3949,11 @@ function renderGridMakerOrdersToggle(data) {
         `${on ? 'Switch back to market orders' : 'Switch to limit orders'}</a>`;
 }
 
-// Profit ratchet: tiers move on BANKED profit only (1% of trading capital
-// each), half of each tier locked, new buys paused if the fleet falls back
-// to the floor. Three numbers, never summed: locked (can only go up),
-// banked, and the floor. Prints what the server computed; never sells.
+// Profit ratchet: tiers move on VERIFIED realized profit only (1% of trading
+// capital each), half locked, new buys paused while trading capital is below
+// the floor. LOCKED / REALIZED / trading capital are separate numbers and are
+// never summed - only LOCKED is guaranteed to never go down. Open P&L is not
+// shown here on purpose: it never moves the ratchet. Never sells.
 function renderGridProfitRatchet(data) {
     const el = document.getElementById('grid-profit-ratchet');
     if (!el || data == null) return;
@@ -3960,27 +3961,38 @@ function renderGridProfitRatchet(data) {
     const link = (on) => `<a href="#" onclick="toggleGridProfitRatchet(${on});return false;" ` +
         `style="color:var(--accent)">${on ? 'Turn on lock-in tiers' : 'Turn off'}</a>`;
     if (!r.armed) {
-        el.innerHTML = `🪜 Lock-in tiers: <strong>OFF</strong>. When on, every time banked profit ` +
-            `reaches 1% of trading capital, half of it is locked as cash the bot never spends, and ` +
-            `new buys pause if the fleet falls back to the locked floor. ${link(true)}`;
+        el.innerHTML = `🪜 Lock-in tiers: <strong>OFF</strong>. When on, every time verified banked ` +
+            `profit reaches 1% of trading capital, half of it is locked as cash the bot never spends. ` +
+            `Paper gains never count. ${link(true)}`;
         return;
     }
-    const floor = r.floor != null
-        ? `Floor <strong>${fmtUsd(r.floor)}</strong>.`
-        : `Floor set on the next full pass.`;
-    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>, tier <strong>${r.tier}</strong>. ` +
-        `🔒 Locked <strong>${fmtUsd(r.locked_usd)}</strong> (only ever goes up). ` +
-        `Banked toward next tier <strong>${fmtUsd(r.progress_usd)}</strong> of ` +
-        `${r.next_tier_size != null ? fmtUsd(r.next_tier_size) : '—'}. ${floor} ` +
-        (r.buys_paused ? `<strong style="color:var(--red, #c0392b)">New buys paused</strong> — fleet is at the floor. ` : '') +
+    const rec = r.last_reconcile;
+    const recLine = rec == null ? '' : (rec.ok
+        ? ' Ledger matches the exchange.'
+        : ` <strong style="color:var(--red, #c0392b)">Ledger does not match the exchange</strong> — ` +
+          `tiers are held until it does (${(rec.findings || []).join('; ')}).`);
+    const pending = r.tiers_pending_reconciliation > 0
+        ? ` <strong>${r.tiers_pending_reconciliation}</strong> tier(s) earned, waiting on reconciliation.` : '';
+    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>, tier <strong>${r.tier}</strong>.<br>` +
+        `🔒 LOCKED <strong>${fmtUsd(r.locked_usd)}</strong> (never goes down) · ` +
+        `💵 REALIZED <strong>${fmtUsd(r.realized_total)}</strong> · ` +
+        `Trading capital <strong>${fmtUsd(r.trading_capital)}</strong> vs floor ` +
+        `<strong>${fmtUsd(r.floor)}</strong>.<br>` +
+        `Next tier: <strong>${fmtUsd(r.progress_usd)}</strong> of ` +
+        `${r.next_tier_size != null ? fmtUsd(r.next_tier_size) : '—'} banked.` +
+        (r.seed_credited ? '' : ' Past profit was not credited (ledger was not clean when switched on).') +
+        pending + recLine + ' ' +
+        (r.buys_paused ? `<strong style="color:var(--red, #c0392b)">New buys paused</strong> — realized ` +
+            `losses took trading capital below the floor. ` : '') +
         link(false);
 }
 
 async function toggleGridProfitRatchet(enable) {
     const msg = enable
-        ? 'Turn on lock-in tiers?\n\nEvery time banked profit reaches 1% of trading capital, half of it is ' +
-          'locked as cash the bot will not spend. Profit already banked counts right away. If the fleet ' +
-          'falls back to the floor, new buys pause.\n\nNothing is ever sold, so open coins can still dip below it.'
+        ? 'Turn on lock-in tiers?\n\nEvery time verified banked profit reaches 1% of trading capital, half ' +
+          'of it is locked as cash the bot will not spend. Profit already banked counts only if the ledger ' +
+          'matches the exchange right now. If realized losses take trading capital below the floor, new ' +
+          'buys pause.\n\nNothing is ever sold, so open coins can still dip below cost.'
         : 'Turn off lock-in tiers?\n\nLocked cash becomes spendable again and the pause is lifted.';
     if (!confirm(msg)) return;
     try {
