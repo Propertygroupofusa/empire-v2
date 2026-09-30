@@ -137,22 +137,52 @@ def _exit_threshold(branch):
     # and a slice is +77.56% net of fees. Selling on its own merit rather than
     # waiting for a 3.00% rise off a reference it will never rebuy from."
     # Two of three rungs, and still on the parked route.
-    adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
-    if len(sl) >= lv or adopted_only:
-        best = max((x.get("unrealized_net_pct") or 0) for x in sl)
-        why = ("parked-sell floor (adopted-only branch)" if adopted_only
-               and len(sl) < lv else "parked-sell floor")
-        return (best >= PARKED_FLOOR_PCT, why,
-                None if best >= PARKED_FLOOR_PCT
-                else (PARKED_FLOOR_PCT - best) * 100.0)
+    # THE TWO RULES ARE OR-ED, NOT EXCLUSIVE. crypto_grid_bot.py:7051:
+    #
+    #     if _stop_slice is not None or _parked_sell or _rise_hit:
+    #
+    # This treated them as a branch: parked took the parked floor and
+    # RETURNED, so a parked branch whose price had cleared the rise trigger
+    # was reported "cannot sell - needs X% more" when the executor would
+    # have sold it. Found by test_trigger_consistency.py on its first run,
+    # 248 disagreements in 4000 generated branches. It is the third instance
+    # of one bug class - after d7f0bb7 (slice gain used as the branch rule)
+    # and 284228b (parked floor applied to an unparked branch) - and the
+    # first to err PESSIMISTICALLY, which is why no advice went out on it.
+    # It still fed DRY_SPELL and READINESS, so "nothing is ready" could be
+    # wrong in the direction that looks calm.
+    #
+    # Rise is checked FIRST and unconditionally, exactly as _rise_hit is
+    # computed before the branch in the executor.
     gp = branch.get("grid_pct")
     ref = branch.get("reference_price")
     px = branch.get("current_price")
-    if not gp or not ref or not px:
+    adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
+    parked = len(sl) >= lv or adopted_only
+    readable = bool(gp and ref and px)
+    if readable and px >= ref * (1 + gp):
+        return True, "grid rise trigger", None
+
+    if parked:
+        best = max((x.get("unrealized_net_pct") or 0) for x in sl)
+        why = ("parked-sell floor (adopted-only branch)" if adopted_only
+               and len(sl) < lv else "parked-sell floor")
+        if best >= PARKED_FLOOR_PCT:
+            return True, why, None
+        if not readable:
+            # Parked floor missed AND the rise leg cannot be read: the
+            # executor could still sell on rise, so this is UNKNOWN.
+            return None, "parked floor missed, rise trigger unreadable", None
+        # Both legs readable and both missed - report the nearer distance.
+        floor_gap = (PARKED_FLOOR_PCT - best) * 100.0
+        rise_gap = (ref * (1 + gp) / px - 1) * 100.0
+        return ((False, why, floor_gap) if floor_gap <= rise_gap
+                else (False, "grid rise trigger", rise_gap))
+
+    if not readable:
         return None, "rise trigger unreadable", None
     trigger = ref * (1 + gp)
-    return (px >= trigger, "grid rise trigger",
-            None if px >= trigger else (trigger / px - 1) * 100.0)
+    return False, "grid rise trigger", (trigger / px - 1) * 100.0
 
 
 def _phantom_short_positions(inv):
