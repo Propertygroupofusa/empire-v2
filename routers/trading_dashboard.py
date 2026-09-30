@@ -12752,6 +12752,81 @@ async def capital_kpis(fresh: int = 0, limit: int = 2000):
     return out
 
 
+_ALPACA_GROWTH_CACHE = {"at": 0.0, "key": None, "payload": None}
+_ALPACA_GROWTH_TTL_SECONDS = 180
+
+
+@router.get("/alpaca-growth")
+async def alpaca_growth(days: int = 60, fresh: int = 0):
+    """Why Alpaca is not growing, and whether raising the risk cap would help.
+
+    The crypto side's /capital-kpis answers "is it the edge or the
+    capital?" Alpaca had no equivalent, although every Alpaca round trip
+    is already in ClosedTrade (prop_apex and alpaca_swing). This reads
+    those rows, the live account, and the live positions, and hands them
+    to alpaca_growth.diagnose() - which judges them with the SAME
+    capital_kpis rules the crypto side uses.
+
+    The answer that matters is `lever`: RAISE_RISK_CAP only appears on a
+    measured positive edge with enough trades behind it. Anything else
+    means more capital would scale noise or a loss.
+
+    Read-only. It places nothing and changes no setting.
+    """
+    import time as _time
+    key = int(days)
+    c = _ALPACA_GROWTH_CACHE
+    if not fresh and c["payload"] is not None and c["key"] == key \
+            and _time.time() - c["at"] < _ALPACA_GROWTH_TTL_SECONDS:
+        out = dict(c["payload"])
+        out["served_from_cache"] = True
+        out["cache_age_seconds"] = round(_time.time() - c["at"], 1)
+        return out
+
+    import alpaca_growth as ag
+    from models import ClosedTrade
+
+    since = datetime.utcnow() - timedelta(days=max(1, key))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(ClosedTrade)
+            .where(ClosedTrade.bot.in_(["prop_apex", "alpaca_swing"]),
+                   ClosedTrade.closed_at >= since)
+            .order_by(ClosedTrade.closed_at))).scalars().all()
+    trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+               "exit_price": r.exit_price, "opened_at": r.opened_at,
+               "closed_at": r.closed_at, "symbol": r.symbol, "bot": r.bot}
+              for r in rows]
+
+    # A live-read failure must surface as unavailable, never as $0 equity:
+    # a zero here would read as "cap binding at zero" and be wrong.
+    async with aiohttp.ClientSession() as session:
+        account = await _fetch_alpaca_account(session)
+        positions = await _fetch_alpaca_positions(session)
+    equity = _safe_float(account.get("equity"))
+    cash = _safe_float(account.get("cash"))
+    deployed = sum(abs(_safe_float(p.get("market_value")) or 0.0) for p in positions)
+
+    max_risk = (getattr(prop_bot_module, "MAX_RISK_PERCENT", None)
+                if prop_bot_module is not None else None)
+    min_pos = (getattr(prop_bot_module, "MIN_POSITION_NOTIONAL", None)
+               if prop_bot_module is not None else None) or ag.DEFAULT_MIN_POSITION_USD
+
+    out = ag.diagnose(trades, equity=equity, cash=cash, deployed=deployed,
+                      max_risk_pct=max_risk, min_position_usd=min_pos)
+    out["window_days"] = key
+    out["trades_by_bot"] = {b: sum(1 for t in trades if t["bot"] == b)
+                            for b in ("prop_apex", "alpaca_swing")}
+    out["open_positions"] = len(positions)
+    out["note"] = ("ClosedTrade carries no strategy tag. If the live strategy family "
+                   "changed inside this window, the sample mixes configurations - narrow "
+                   "`days` to the period since the last switch before acting on it.")
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0
+    c.update(at=_time.time(), key=key, payload=out)
+    return out
+
+
 @router.get("/growth-curve")
 async def growth_curve(hours: float = 24.0, limit: int = 500):
     """Where the numbers have BEEN, which is the only way to say if they moved.

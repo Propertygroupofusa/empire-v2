@@ -360,6 +360,12 @@
         <div class="combined-observations" id="combined-observations"></div>
     </div>
 
+    <div class="panel" id="growth-panel">
+        <div class="panel-title">🚀 What would make Alpaca grow faster</div>
+        <div class="panel-sub">Real closed trades from both Alpaca bots, judged by the same rule as the crypto side: is the edge positive, and is the capital cap what's holding the cash back? Read-only — it changes nothing.</div>
+        <div id="growth-body">Loading…</div>
+    </div>
+
     <div class="grid-2" style="display:none;">
         <div class="panel">
             <div class="panel-title">Bucket Profit Ranking</div>
@@ -1792,6 +1798,42 @@ async function loadTicker() {
 
 refresh();
 loadTicker();
+
+const GROWTH_LEVER_LABELS = {
+    RAISE_RISK_CAP: ['var(--green)', '✅ Raise the risk cap — the edge is positive and the cap is full'],
+    DEPLOY_WITHIN_CAP: ['var(--green)', '✅ Edge is positive — room exists, waiting on entry signals'],
+    FIX_EDGE_FIRST: ['var(--red)', '🛑 Fix the edge first — more money would lose faster'],
+    KEEP_CAP_GATHER_SAMPLE: ['var(--orange, #d97706)', '⏳ Too few trades to tell yet — keep the cap'],
+    WAIT_FOR_TRADES: ['var(--orange, #d97706)', '⏳ No closed trades yet — nothing to scale'],
+    HOLD_COURSE: ['var(--green)', '✅ Healthy — size is the only lever left'],
+};
+async function loadGrowth() {
+    const el = document.getElementById('growth-body');
+    if (!el) return;
+    let d;
+    try { d = await apiGet('/alpaca-growth', 30000); }
+    catch (e) { el.textContent = 'Could not load right now (' + e.message + ').'; return; }
+    const k = d.kpis || {}, cap = d.cap || {};
+    const [color, label] = GROWTH_LEVER_LABELS[d.lever] || ['inherit', d.lever];
+    const edge = k.net_edge_per_trade_usd;
+    const rows = (d.by_symbol || []).map(s =>
+        `<tr><td>${s.symbol}</td><td>${s.trades}</td><td>${s.win_rate_pct}%</td>` +
+        `<td style="color:${s.net_usd >= 0 ? 'var(--green)' : 'var(--red)'}">${fmtUsd(s.net_usd)}</td></tr>`).join('');
+    el.innerHTML =
+        `<div style="font-weight:700;color:${color};margin-bottom:6px;">${label}</div>` +
+        `<div style="margin-bottom:8px;">${d.lever_detail}</div>` +
+        `<div class="panel-sub">Last ${d.window_days} days: ${k.trades} closed trades, ` +
+        `net ${fmtUsd(k.net_usd || 0)}, ` +
+        `edge ${edge == null ? '—' : (edge >= 0 ? '+' : '') + edge.toFixed(4) + '/trade'}, ` +
+        `win rate ${k.win_rate_pct == null ? '—' : k.win_rate_pct + '%'}. ` +
+        `Deployed ${cap.deployed_usd == null ? '—' : fmtUsd(cap.deployed_usd)} of a ` +
+        `${cap.cap_usd == null ? '—' : fmtUsd(cap.cap_usd)} cap ` +
+        `(${cap.max_risk_pct == null ? '—' : Math.round(cap.max_risk_pct * 100) + '% of equity'}).</div>` +
+        (d.concentration ? `<div class="panel-sub">${d.concentration}</div>` : '') +
+        (rows ? `<table style="width:100%;margin-top:8px;"><tr><th align="left">Symbol</th><th align="left">Trades</th><th align="left">Win</th><th align="left">Net</th></tr>${rows}</table>` : '');
+}
+loadGrowth();
+setInterval(loadGrowth, 300000);
 loadCombinedProgress();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
