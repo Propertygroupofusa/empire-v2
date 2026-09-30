@@ -8375,6 +8375,45 @@ async def get_grid_status_endpoint():
     except Exception as _exc:
         data["backing"] = {"readable": False,
                            "reason": f"{type(_exc).__name__}: {_exc}"}
+
+    # IS THE QUIET BENIGN OR IS IT THE SEPTEMBER OUTAGE AGAIN? Between
+    # 2026-09-10 and 09-25 this fleet closed ZERO round trips because a
+    # mis-signed JWT meant "no maker order was ever placed" - and nobody
+    # knew for eleven days. Silence alone is never the alarm (a 3% grid on
+    # coins with a 2.71% median daily range is supposed to be quiet
+    # sometimes); silence WITH refusals, or a branch sitting past its own
+    # trigger, is.
+    try:
+        import trading_silence
+        _ref, _last, _errs = {}, None, 0
+        try:
+            _blocked = await orders_not_placed()
+            _ref = {g.get("product_id"): g.get("count")
+                    for g in (_blocked.get("by_product_and_side") or [])
+                    if g.get("side") == "sell"}
+        except Exception:
+            _ref = {}
+        for _b in (data.get("branches") or []):
+            for _sl in (_b.get("slices") or []):
+                _o = _sl.get("opened_at")
+                if _o and (_last is None or str(_o) > str(_last)):
+                    _last = _o
+        _hrs = None
+        if _last:
+            try:
+                _dt = datetime.fromisoformat(str(_last).replace("Z", "+00:00"))
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                _hrs = (datetime.now(timezone.utc) - _dt).total_seconds() / 3600.0
+            except ValueError:
+                _hrs = None
+        data["silence"] = trading_silence.assess(
+            hours_since_last_fill=_hrs, refusals_by_product=_ref,
+            cycle_errors=_errs, branches=data.get("branches") or [])
+    except Exception as _exc:
+        data["silence"] = {"verdict": "UNKNOWN", "alarm": False,
+                           "reason": f"{type(_exc).__name__}: {_exc}",
+                           "this_is_unknown_not_healthy": True}
     # Force fresh data on every request - prevent browser caching stale grid status
     return JSONResponse(
         content=data,
