@@ -37,6 +37,7 @@ import datetime
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -61,20 +62,37 @@ def money(x):
     return f"{sign}${abs(x):,.2f}"
 
 
-def get(path, timeout=45):
+def get(path, timeout=45, attempts=2, pause=3.0):
     """Fetch one feed. A failure is recorded as a GAP and returns None.
 
     Never returns {} on failure: an empty dict reads downstream as "nothing
     is wrong", which is the exact confusion this whole script exists to
     prevent.
+
+    RETRIED ONCE, because a single miss is not evidence of anything. These
+    endpoints answer in 0.2-5.8s against a 45s timeout, so a failure is not
+    slowness - it is the container being restarted, and every push to main
+    redeploys. Eight pushes in one night produced NO_EXIT, UNTRACKED and the
+    free-cash check each going dark on separate passes, which is a monitor
+    reporting blind spots it created itself.
+
+    One retry converts a restart into a successful read. When it still fails
+    the gap is stronger evidence than before - it means twice, seconds apart
+    - and the message says so, so nobody reads a transient as an outage.
     """
     url = path if path.startswith("http") else API + path
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
-            return json.loads(r.read().decode())
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
-        gaps.append(f"{path}: {type(e).__name__}: {e}")
-        return None
+    last = None
+    for attempt in range(max(1, attempts)):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                return json.loads(r.read().decode())
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
+            last = e
+            if attempt + 1 < attempts:
+                time.sleep(pause)
+    gaps.append(f"{path}: {type(last).__name__}: {last} "
+                f"(failed {attempts}x, {pause:.0f}s apart)")
+    return None
 
 
 def _age_seconds(stamp, now):
