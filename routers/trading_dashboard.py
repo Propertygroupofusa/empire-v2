@@ -8341,6 +8341,40 @@ async def get_grid_status_endpoint():
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
     data = await crypto_grid_bot_module.get_grid_status()
+
+    # DOES THE COIN BEHIND THESE NUMBERS EXIST? Measured 2026-09-30
+    # 20:35Z: QNT-USD reported +$87.90 unrealized - the largest single
+    # gain in the fleet - on 0.675982 units the venue did not have, and
+    # its escape sell had been refused 182 times in 24 hours with
+    # BELOW_BASE_INCREMENT. Fleet-wide the books claimed $7,053.11 of
+    # coin with $1,199.90 of it absent. None of that was visible beside
+    # the gain it invalidates.
+    #
+    # available_units is what a sell is actually sized against, so it is
+    # the figure that decides whether a gain can be taken - not `held`,
+    # which includes coin sitting under someone else's resting order.
+    # held_including_zero separates a CONFIRMED ZERO (the venue listed
+    # the currency at 0.0 - the largest shortfall there is) from an
+    # asset the reading never mentioned, which is UNKNOWN. Folding the
+    # second into the first would invent shortfalls out of a rate limit.
+    try:
+        import account_census
+        import slice_backing
+        async with aiohttp.ClientSession() as _s:
+            _bal = await account_census.fetch_balances(_s)
+        if _bal and _bal.get("available"):
+            _avail = dict(_bal.get("available_units") or {})
+            for _cur, _tot in (_bal.get("held_including_zero") or {}).items():
+                _avail.setdefault(_cur, 0.0 if not _tot else _avail.get(_cur, 0.0))
+            data["backing"] = slice_backing.assess(
+                data.get("branches") or [], _avail)
+        else:
+            data["backing"] = {"readable": False,
+                               "reason": "balances unreadable this pass - "
+                                         "backing is UNKNOWN, not zero"}
+    except Exception as _exc:
+        data["backing"] = {"readable": False,
+                           "reason": f"{type(_exc).__name__}: {_exc}"}
     # Force fresh data on every request - prevent browser caching stale grid status
     return JSONResponse(
         content=data,
