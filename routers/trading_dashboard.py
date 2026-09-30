@@ -8973,6 +8973,23 @@ async def grid_force_buy_endpoint(payload: ForceBuyRequest):
     return result
 
 
+class _ProfitRatchetToggle(BaseModel):
+    enabled: bool
+
+
+@router.post("/grid-status/profit-ratchet")
+async def set_grid_profit_ratchet(payload: _ProfitRatchetToggle):
+    """Arm or disarm the profit ratchet (tiers every 5% of fleet value, lock
+    half of each tier's gain, pause new buys if the fleet falls back to the
+    locked tier). Arming starts fresh at the current fleet value. It never
+    sells anything."""
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    await crypto_grid_bot_module.set_profit_ratchet_armed(payload.enabled)
+    log.warning(f"[dashboard] 🪜 profit ratchet {'ARMED' if payload.enabled else 'disarmed'}")
+    return await crypto_grid_bot_module.get_profit_ratchet_status()
+
+
 @router.get("/grid-status/fee-reality")
 async def grid_fee_reality_endpoint(limit: int = 250):
     """What Coinbase says the fills ACTUALLY cost - maker vs taker, and the

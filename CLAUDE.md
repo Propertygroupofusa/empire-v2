@@ -13712,6 +13712,31 @@ endpoint sends; the snapshot writer only sets columns the table has.
 
 ---
 
+## Lock-in tiers (profit ratchet) for Grid Bot, 2026-09-30
+
+Owner's choices: tiers every **5% of fleet value** (compounding), **half** of
+each tier's gain locked, and at the floor **pause new buys - never sell**.
+
+- `profit_ratchet.py` - pure arithmetic. Tier k = base x 1.05^k. The tier
+  only ratchets up. Floor = the tier below the highest reached, so after the
+  first +5% the starting value is the floor.
+- Locked money is **real cash only**: capped at grid profit realized since
+  arming. A tier crossed on paper gains locks the rest as sells bank it.
+- `crypto_grid_bot`: fleet value is the SUM of a COMPLETE pass of per-branch
+  equities - one unpriceable branch means no fleet value that pass, and an
+  unknown never pauses anything or anchors the base. Locked cash is added to
+  the buy's deployment reserve and subtracted from free cash. The pause is one
+  more reason on the existing buy gate (`PROFIT_RATCHET` gate decision).
+- **Off by default.** Arm from the Grid Bot section of the Coinbase dashboard
+  or `POST /api/trading-dashboard/grid-status/profit-ratchet {enabled}`.
+  Arming anchors on the next complete pass; disarming releases the lock.
+- **It cannot make a negative impossible.** Nothing is sold to defend a tier,
+  so open coin can fall below it. What it guarantees is that banked profit is
+  not respent and the fleet stops adding to a fall. Tests:
+  `test_profit_ratchet.py`.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md

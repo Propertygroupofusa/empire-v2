@@ -1129,6 +1129,7 @@
     <div id="grid-governs-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
+    <div id="grid-profit-ratchet" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <!-- EXECUTION & INVENTORY. Added because none of it was on this page:
          /grid-status/invariants was reporting FAIL with $639.28 short across
@@ -2925,6 +2926,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridGovernsPanel(data);
     renderGridFeeRateBadge(data);
     renderGridMakerOrdersToggle(data);
+    renderGridProfitRatchet(data);
     renderGridOpportunityPanel(data);
     renderAccountCensus();
     renderExecutionInventory();
@@ -3945,6 +3947,59 @@ function renderGridMakerOrdersToggle(data) {
         ` ` +
         `<a href="#" onclick="toggleGridMakerOrders(${!on});return false;" style="color:var(--accent)">` +
         `${on ? 'Switch back to market orders' : 'Switch to limit orders'}</a>`;
+}
+
+// Profit ratchet: tiers every 5% of fleet value, half of each tier's gain
+// locked, new buys paused if the fleet falls back to the locked tier.
+// Prints what the server computed; never sells anything.
+function renderGridProfitRatchet(data) {
+    const el = document.getElementById('grid-profit-ratchet');
+    if (!el || data == null) return;
+    const r = data.profit_ratchet || {};
+    const link = (on) => `<a href="#" onclick="toggleGridProfitRatchet(${on});return false;" ` +
+        `style="color:var(--accent)">${on ? 'Turn on lock-in tiers' : 'Turn off'}</a>`;
+    if (!r.armed) {
+        el.innerHTML = `🪜 Lock-in tiers: <strong>OFF</strong>. When on, every 5% the fleet grows ` +
+            `locks half of that gain as untouchable cash, and new buys pause if the fleet falls ` +
+            `back to the last locked level. ${link(true)}`;
+        return;
+    }
+    if (!r.base) {
+        el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong> — measuring the starting fleet value ` +
+            `on the next full pass. ${link(false)}`;
+        return;
+    }
+    const tierLine = r.tier >= 1
+        ? `Tier <strong>${r.tier}</strong> reached. Locked floor <strong>${fmtUsd(r.floor)}</strong>.`
+        : `No tier reached yet (start ${fmtUsd(r.base)}).`;
+    const pending = r.locked_unfunded > 0
+        ? ` (${fmtUsd(r.locked_unfunded)} more locks as sells bank profit)` : '';
+    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>. ${tierLine} ` +
+        `Next tier at <strong>${fmtUsd(r.next_tier)}</strong>. ` +
+        `Locked cash <strong>${fmtUsd(r.locked_usd)}</strong>${pending}. ` +
+        (r.buys_paused ? `<strong style="color:var(--red, #c0392b)">New buys paused</strong> — fleet is at the locked floor. ` : '') +
+        link(false);
+}
+
+async function toggleGridProfitRatchet(enable) {
+    const msg = enable
+        ? 'Turn on lock-in tiers?\n\nStarts from today\'s fleet value. Every +5% locks half that gain as cash ' +
+          'the bot will not spend. If the fleet falls back to the last locked level, new buys pause.\n\n' +
+          'Nothing is ever sold to defend a tier, so open coins can still dip below it.'
+        : 'Turn off lock-in tiers?\n\nLocked cash becomes spendable again and the pause is lifted.';
+    if (!confirm(msg)) return;
+    try {
+        const res = await fetch(API_BASE + '/grid-status/profit-ratchet', {
+            method: 'POST',
+            headers: writeHeaders(),
+            body: JSON.stringify({ enabled: enable }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        loadGridStatus();
+    } catch (e) {
+        alert('Could not change lock-in tiers: ' + e.message);
+    }
 }
 
 async function toggleGridMakerOrders(enable) {
