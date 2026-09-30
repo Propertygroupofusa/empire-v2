@@ -7901,7 +7901,18 @@ async def capital_mobility():
     try:
         # Calls the invariants endpoint function directly rather than
         # reimplementing its checks - one source, and it cannot drift.
+        #
+        # IT RETURNS A JSONResponse, NOT A DICT. Awaiting it and calling
+        # .get() raised AttributeError on the first live request. The gap
+        # path caught it and reported missing_inventory_usd as null with a
+        # named cause rather than 0.00, which is the behaviour this codebase
+        # wants - but a permanent UNKNOWN is still a broken card, so the
+        # body is decoded here.
         inv = await grid_invariants_endpoint()
+        if isinstance(inv, JSONResponse):
+            inv = json.loads(inv.body)
+        elif hasattr(inv, "body"):
+            inv = json.loads(inv.body)
         for chk in ((inv or {}).get("checks") or []):
             if chk.get("name") == "coin_tracked_is_held":
                 short_usd = chk.get("short_usd")
