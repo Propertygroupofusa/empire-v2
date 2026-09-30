@@ -153,6 +153,22 @@ def run(routes, prev_snapshot=None):
         os.unlink(state)
 
 
+
+def _fire_rise_trigger(d, product="AAA-USD"):
+    """Make a non-parked branch's OWN sell rule true.
+
+    The rule is price >= reference_price * (1 + grid_pct) - a BRANCH-level
+    price test, not the slice's own gain. Setting unrealized_net_pct used to
+    stand in for this and does not: ALGO-USD sat +7.7% over its slice entry
+    while its branch was 3.3% short of its trigger, and the watchdog called it
+    ready. These fixtures move the PRICE, the way the live rule reads it.
+    """
+    for b in d["/api/trading-dashboard/grid-status"]["branches"]:
+        if b["product_id"] != product:
+            continue
+        b["current_price"] = b["reference_price"] * (1 + b["grid_pct"]) * 1.001
+    return d
+
 # A baseline snapshot that matches `healthy()`, so delta checks are ARMED.
 # Without this every delta check skips and the scenarios below would pass
 # vacuously - which is the exact failure mode the first watchdog run had.
@@ -260,9 +276,9 @@ ok("and a FALLING figure on the same assets is not a CRITICAL",
 
 # IDLE_PROFIT - the one that shipped UNVERIFIED because production had no
 # reachable profitable slice to force it with. Here it does.
-d = healthy()
+d = _fire_rise_trigger(healthy())
 sl = d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0]
-sl["unrealized_net_pct"] = 0.05           # well clear of the +1.0% floor
+sl["unrealized_net_pct"] = 0.05
 snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
 ok("IDLE_PROFIT when reachable profit sits across two passes",
    "IDLE_PROFIT" in run(d, snap))
@@ -294,19 +310,29 @@ snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"], full_usd=9000.0
 out = run(d, snap)
 ok("IDLE_PROFIT when a PARKED slice past the 1.0% floor sits",
    "IDLE_PROFIT" in out, out)
-ok("and it names the threshold that governed it",
-   "parked-sell floor at +1.0%" in out, out)
+ok("and it names the rule that fired",
+   "parked-sell floor has fired" in out, out)
 
-# A non-parked slice past the FULL step is still a real finding.
-d = healthy()
+# A non-parked branch whose PRICE crossed its trigger is a real finding.
+d = _fire_rise_trigger(healthy())
 sl = d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0]
-sl["unrealized_net_pct"] = 0.05            # past the 3.0% step
 snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
 out = run(d, snap)
-ok("IDLE_PROFIT still fires past the rise trigger on a non-parked branch",
+ok("IDLE_PROFIT still fires once the rise trigger is crossed",
    "IDLE_PROFIT" in out, out)
-ok("and names THAT threshold instead",
-   "grid rise trigger at +3.0%" in out, out)
+ok("and names THAT rule instead",
+   "grid rise trigger has fired" in out, out)
+
+# THE BUG THIS RULE REPLACED: a slice deep in profit on a branch nowhere near
+# its trigger. ALGO-USD live: +7.7% over its own entry, 3.3% short of the
+# branch trigger. Called ready, blamed on a resting order, and I told the
+# owner to cancel that order. It must stay silent.
+d = healthy()
+sl = d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0]
+sl["unrealized_net_pct"] = 0.077           # deep profit on its OWN entry
+snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
+ok("a profitable slice on a branch short of its trigger is NOT reachable",
+   "IDLE_PROFIT" not in run(d, snap))
 
 # An unreadable step is UNKNOWN, never "not reachable".
 d = healthy()
@@ -384,6 +410,53 @@ ok("and it does not suggest moving the breaker",
    "is the owner's and is not touched here" in out, out)
 ok("a standing breach stays a WARN",
    "WARN     DRAWDOWN_BREACHED" in run(d, dict(BASE_SNAP, breached=["AAA-USD"])), out)
+
+# AN ADOPTED-ONLY BRANCH IS PARKED HOWEVER MANY RUNGS IT HAS FREE.
+#
+# crypto_grid_bot.py:7004 - _parked is (full on rungs) OR (adopted only). The
+# live log: QNT-USD "parked (2 slices / 3 levels - cannot buy), and a slice is
+# +77.56% net of fees. Selling on its own merit rather than waiting for a 3.00%
+# rise off a reference it will never rebuy from." Two of three rungs, parked.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"][
+    "days_since_last_close"] = 0.35
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]   # 1 slice / 3 levels
+b["slices"][0]["adopted"] = True
+b["slices"][0]["unrealized_net_pct"] = 0.0719                # past the 1.0% floor
+out = run(d, BASE_SNAP)
+ok("an adopted-only branch uses the parked floor, not the rise trigger",
+   "parked-sell floor (adopted-only branch)" in out, out)
+
+# And a branch with a BOUGHT slice on free rungs still waits for the trigger.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"][
+    "days_since_last_close"] = 0.35
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["slices"][0]["adopted"] = False
+b["slices"][0]["unrealized_net_pct"] = 0.0719
+ok("a bought slice on free rungs is NOT parked",
+   "parked-sell floor" not in run(d, BASE_SNAP))
+
+# READINESS - the distance to the next sell, which took hours to work out by
+# hand tonight and which I got wrong twice on the way.
+d = healthy()
+out = run(d, BASE_SNAP)
+ok("READINESS reports the nearest sell and its distance",
+   "READINESS" in out and "nearest sell is AAA-USD" in out, out)
+ok("and counts the branches within 1% and 2%",
+   "within 1%" in out and "within 2%" in out, out)
+ok("and refuses to dress a distance up as a forecast",
+   "not a forecast that it will" in out, out)
+
+# The distance must be the RULE's distance. healthy(): reference 100.0, step
+# 3.0%, price 100.0 -> trigger 103.0 -> 3.00% to travel.
+ok("the distance is measured against the rule that governs the branch",
+   "AAA-USD at 3.00% away (grid rise trigger)" in out, out)
+
+# Move the price most of the way and the distance must shrink accordingly.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["current_price"] = 102.0
+ok("and it tracks the price", "AAA-USD at 0.98% away" in run(d, BASE_SNAP))
 
 # ADOPTED_BASIS: a "loss" measured against a price nobody paid.
 d = healthy()
@@ -641,9 +714,9 @@ ok("a dry spell with nothing ready says the fleet is waiting on price",
    "waiting on price, not stuck" in out, out)
 
 # Something ready and BLOCKED: names the blocker, and says price is not it.
-d = _dry()
+d = _fire_rise_trigger(_dry())
 b = d["/api/trading-dashboard/grid-status"]["branches"][0]
-b["slices"][0]["unrealized_net_pct"] = 0.0719        # past the 3.0% step
+b["slices"][0]["unrealized_net_pct"] = 0.0719
 d["/api/trading-dashboard/grid-status/invariants"] = {
     "failed": 1, "headline": "1 broken",
     "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
@@ -653,14 +726,14 @@ d["/api/trading-dashboard/grid-status/invariants"] = {
 out = run(d, BASE_SNAP)
 ok("a ready-but-locked slice is named in the dry-spell line",
    "coin locked by a resting order" in out, out)
-ok("and it says the close rate is not waiting on price",
-   "not waiting on price" in out, out)
+ok("and it says the OTHER branches are the ones waiting on price",
+   "waiting on price - only these ones are blocked" in out, out)
 ok("and it carries the number and the rule that governs it",
    "+7.19%" in out and "grid rise trigger" in out, out)
 
 # An ADOPTED gain is measured against a price nobody paid - that is a blocker
 # on the CREDIBILITY of the number, and QNT's +78.84% is exactly that trap.
-d = _dry()
+d = _fire_rise_trigger(_dry())
 b = d["/api/trading-dashboard/grid-status"]["branches"][0]
 b["slices"][0]["unrealized_net_pct"] = 0.7884
 b["slices"][0]["adopted"] = True
@@ -676,7 +749,7 @@ ok("an all-adopted ready slice is flagged as measured against a price nobody pai
 # invariants feed had briefly reported "4 invariant(s) BROKEN (was 2)" with
 # grid_inventory_is_free among the missing, so the blocker lookup came back
 # empty and absence read as "nothing locked".
-d = _dry()
+d = _fire_rise_trigger(_dry())
 d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0][
     "unrealized_net_pct"] = 0.0719
 out = run(d, dict(BASE_SNAP, free_ready=["AAA-USD"]))

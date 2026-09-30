@@ -99,24 +99,60 @@ PARKED_FLOOR_PCT = 0.010  # GRID_PARKED_MIN_NET_PCT
 
 
 def _exit_threshold(branch):
-    """The net % a slice on this branch must clear to have ANY way out, and
-    the name of the rule that sets it. (None, reason) when it cannot be read.
+    """Can this branch sell RIGHT NOW, and by which rule?
 
-    ONE DEFINITION. A branch full on its rungs exits through the parked-sell
-    path at GRID_PARKED_MIN_NET_PCT; a branch with a rung free exits on the
-    grid rise trigger, one grid step. Computing that in two places is how the
-    two drift apart and start contradicting each other in the same output.
+    Returns (can_sell, rule_name, detail) - detail is the gap still to go when
+    it cannot, in percent, or None when the rule does not express one.
+
+    THE RULE IS NOT WHAT I ASSUMED, and the wrong version reached the owner as
+    advice. The grid's sell trigger is crypto_grid_bot.py:7050:
+
+        _rise_hit = price >= branch.reference_price * (1 + grid_pct)
+
+    It compares the PRICE to the BRANCH REFERENCE. It does not look at the
+    slice's own entry at all. I had modelled it as "slice net% >= grid_pct",
+    which is a different quantity, and on ALGO-USD the two disagreed
+    completely: a slice +7.7% above its own entry of 0.115930, while the
+    branch reference was 0.125990 and the trigger 0.129770 against a price of
+    0.1256 - still 3.3% away. The watchdog called that slice ready and named a
+    resting order as the thing blocking it, and I told the owner to cancel that
+    order. It would have freed the coin and produced no sale.
+
+    The parked route is the one that DOES use the slice's own gain, and it
+    applies only to a branch full on its rungs. ALGO holds 1 of 3, so it was
+    never on that route either.
     """
     sl = branch.get("slices") or []
     lv = branch.get("num_levels") or 0
     if not sl:
-        return None, "no slices"
-    if len(sl) >= lv:
-        return PARKED_FLOOR_PCT, "parked-sell floor"
+        return False, "no slices", None
+    # PARKED IS TWO CONDITIONS, NOT ONE. crypto_grid_bot.py:7004:
+    #
+    #     _parked = bool(slices) and (len(slices) >= num_levels
+    #                                 or branch_is_adopted_only(slices))
+    #
+    # A branch whose slices are ALL ADOPTED is parked however many rungs it
+    # has free, because it will never rebuy from that reference. QNT-USD
+    # proves it in the live log: "parked (2 slices / 3 levels - cannot buy),
+    # and a slice is +77.56% net of fees. Selling on its own merit rather than
+    # waiting for a 3.00% rise off a reference it will never rebuy from."
+    # Two of three rungs, and still on the parked route.
+    adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
+    if len(sl) >= lv or adopted_only:
+        best = max((x.get("unrealized_net_pct") or 0) for x in sl)
+        why = ("parked-sell floor (adopted-only branch)" if adopted_only
+               and len(sl) < lv else "parked-sell floor")
+        return (best >= PARKED_FLOOR_PCT, why,
+                None if best >= PARKED_FLOOR_PCT
+                else (PARKED_FLOOR_PCT - best) * 100.0)
     gp = branch.get("grid_pct")
-    if not gp:
-        return None, "grid step unreadable"
-    return gp, "grid rise trigger"
+    ref = branch.get("reference_price")
+    px = branch.get("current_price")
+    if not gp or not ref or not px:
+        return None, "rise trigger unreadable", None
+    trigger = ref * (1 + gp)
+    return (px >= trigger, "grid rise trigger",
+            None if px >= trigger else (trigger / px - 1) * 100.0)
 
 
 def _phantom_short_positions(inv):
@@ -452,6 +488,39 @@ def main():
                "so this capital is out of the dip-buying strategy until the "
                "branch recovers. The breaker level is the owner's and is not "
                "touched here.")
+
+    # ---- 1f. How close is the fleet to its NEXT sell? ----------------------
+    #
+    # THE QUESTION THAT TOOK HOURS TO ANSWER BY HAND. "Why haven't there been
+    # sells today?" was answered tonight by pulling every branch, working out
+    # which rule governed it, and computing the distance one at a time - and I
+    # got the rule wrong twice on the way. _exit_threshold() now returns that
+    # distance directly, so the answer is one line instead of an investigation.
+    #
+    # DISTANCE, NOT A FORECAST. Each number is "how far this branch's own rule
+    # still has to travel", read off published prices and references. There is
+    # no probability here and no expected-value estimate: a figure like
+    # "expected realization $31.40, confidence 78%" would be a model's opinion
+    # wearing a dollar sign, and this codebase has already retracted one set of
+    # invented numbers.
+    ladder = []
+    for b3 in branches:
+        can3, why3, gap3 = _exit_threshold(b3)
+        if can3 is None or gap3 is None:
+            continue
+        ladder.append((b3.get("product_id"), gap3, why3))
+    if ladder:
+        ladder.sort(key=lambda r: r[1])
+        w1 = sum(1 for r in ladder if r[1] <= 1.0)
+        w2 = sum(1 for r in ladder if r[1] <= 2.0)
+        cur["nearest_gap"] = round(ladder[0][1], 4)
+        flag(INFO, "READINESS",
+             f"nearest sell is {ladder[0][0]} at {ladder[0][1]:.2f}% away "
+             f"({ladder[0][2]}); {w1} branch(es) within 1%, {w2} within 2%, of "
+             f"{len(ladder)} measurable. Next five: "
+             + ", ".join(f"{p4} {g4:.2f}%" for p4, g4, _ in ladder[:5])
+             + ". These are distances the price still has to travel, not a "
+               "forecast that it will.")
 
     # ---- 2. Any cycle error at all -----------------------------------------
     if ops is not None:
@@ -1063,13 +1132,12 @@ def main():
                 ready = []
                 for b2 in branches:
                     pid2 = b2.get("product_id")
-                    thr2, why2 = _exit_threshold(b2)
-                    if thr2 is None:
+                    can2, why2, gap2 = _exit_threshold(b2)
+                    if not can2:
                         continue
                     best2 = max(((x.get("unrealized_net_pct") or 0)
-                                 for x in (b2.get("slices") or [])), default=None)
-                    if best2 is None or best2 < thr2:
-                        continue
+                                 for x in (b2.get("slices") or [])), default=0)
+                    thr2 = 0.0
                     blockers = []
                     if pid2 in _locked_ids:
                         blockers.append("coin locked by a resting order")
@@ -1121,11 +1189,13 @@ def main():
                     diag = (f" {len(ready)} slice-holding branch(es) of "
                             f"{len(branches)} ARE past their own threshold and "
                             f"every one is blocked: "
-                            + "; ".join(f"{p3} at {n3*100:+.2f}% vs its {w3} "
-                                        f"({t3*100:.2f}%) - {', '.join(bl)}"
+                            + "; ".join(f"{p3} best slice {n3*100:+.2f}%, past its "
+                                        f"{w3} - {', '.join(bl)}"
                                         for p3, n3, t3, w3, bl in
                                         sorted(ready, key=lambda r: -r[1]))
-                            + ". The close rate is not waiting on price.")
+                            + f". The other {len(branches) - len(ready)} branch(es) "
+                              f"are not past their own sell rule yet, so THEY are "
+                              f"waiting on price - only these ones are blocked.")
                 elif free_confirmed:
                     diag = (f" {len(free_confirmed)} branch(es) are past their "
                             f"own threshold with NOTHING blocking them on this "
@@ -1267,20 +1337,24 @@ def main():
         # below gross, so clearing the step on NET means the gross move
         # certainly cleared it - deliberately conservative, because a false
         # IDLE_PROFIT is the defect being fixed.
+        # A slice is only "reachable" if its BRANCH can actually sell right
+        # now. Measuring the slice against grid_pct was the same mistake the
+        # helper's docstring records: the rise trigger is a branch-level
+        # price-vs-reference test, so a slice deep in profit on a branch far
+        # from its trigger is not reachable at all.
         _thr = {b.get("product_id"): _exit_threshold(b) for b in branches}
         reachable = []
         unreadable_step = []
         for p, s2 in slices:
             if p in blocked:
                 continue
-            net = s2.get("unrealized_net_pct") or 0
-            thr, why = _thr.get(p, (None, "branch not found"))
-            if thr is None:
+            can, why, _gap = _thr.get(p, (None, "branch not found", None))
+            if can is None:
                 # UNKNOWN, not "not reachable". Saying nothing here would hide
                 # a slice whose exit rule could not be read at all.
                 unreadable_step.append(p)
-            elif net >= thr:
-                reachable.append((p, s2, thr, why))
+            elif can:
+                reachable.append((p, s2, 0.0, why))
         if unreadable_step:
             gaps.append(f"exit rule unreadable for {', '.join(sorted(set(unreadable_step)))}"
                         f" - profit sitting there would be invisible")
@@ -1290,10 +1364,10 @@ def main():
             _why = {p: (thr, name) for p, s2, thr, name in reachable
                     if f"{p}|{s2.get('opened_at')}" in held}
             flag(WARN, "IDLE_PROFIT",
-                 f"{len(held)} slice(s) cleared the threshold that actually "
-                 f"governs them and did not sell across two passes, with no "
-                 f"reserved or short inventory to explain it: "
-                 + ", ".join(f"{p} (past its {name} at +{thr*100:.1f}%)"
+                 f"{len(held)} slice(s) sit on a branch whose own sell rule is "
+                 f"SATISFIED, with no reserved or short inventory to explain "
+                 f"it, and did not sell across two passes: "
+                 + ", ".join(f"{p} (its {name} has fired)"
                              for p, (thr, name) in sorted(_why.items())[:6]))
         elif reachable:
             flag(INFO, "REACHABLE",
@@ -1501,7 +1575,18 @@ def main():
         print(f"fleet watchdog {now}   serving={served or 'UNKNOWN'}")
         print(f"  slices {cur['slice_count']} | buy legs {cur['buy_legs']} | "
               f"§1 populated {cur['populated']} | stuck {cur['stuck']}")
-        if not findings and not gaps:
+        # QUIET MEANS NOTHING NEEDS ATTENTION, NOT THAT NOTHING WAS PRINTED.
+        #
+        # This used to require an empty findings list, so adding the first INFO
+        # line silenced the all-clear on a healthy fleet - caught by the
+        # control case. An INFO is context (what is parked, how far the next
+        # sell is); only CRITICAL and WARN are things to act on.
+        #
+        # The exit code is deliberately NOT changed here. It has treated any
+        # finding as reportable since before tonight, and quietly redefining a
+        # guard's machine-readable signal to suit a new line is how a
+        # monitoring change becomes an outage nobody sees.
+        if not any(f["level"] in (CRITICAL, WARN) for f in findings) and not gaps:
             print("  quiet - every conservation check balanced.")
         for f in sorted(findings, key=lambda f: [CRITICAL, WARN, INFO].index(f["level"])):
             print(f"  {f['level']:8s} {f['code']:18s} {f['message']}")
