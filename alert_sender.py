@@ -304,21 +304,35 @@ def send_digest(alerts: list, *, force: bool = False) -> tuple:
     if not (email_armed() or force):
         return False, (f"{EMAIL_MODE_ENV} is '{email_mode()}' - nothing sent. "
                        f"Set it to 'send' to arm this route.")
+    ok, err = send_email(d["subject"], d["body"])
+    if ok:
+        log.info(f"[alerts] digest sent: {d['groups']} issue(s), "
+                 f"{d['alerts']} alert(s)")
+    return ok, err
+
+
+def send_email(subject: str, body: str) -> tuple:
+    """(ok, error). One plain message through the account that already
+    exists. Never raises, and never returns the exception TEXT - an SMTP
+    error can echo the conversation, login line included."""
+    if not email_configured():
+        missing = [v for v in (GMAIL_USER_ENV, GMAIL_PASS_ENV)
+                   if not (os.getenv(v) or "").strip()]
+        return False, ("email not configured: "
+                       + (", ".join(missing) or "no recipient resolved")
+                       + " (names only - no value is ever read out here)")
     try:
         import smtplib
         from email.mime.text import MIMEText
         sender = os.getenv(GMAIL_USER_ENV, "").strip()
         to = recipient()
-        msg = MIMEText(d["body"])
-        msg["Subject"] = d["subject"]
+        msg = MIMEText(body)
+        msg["Subject"] = subject
         msg["From"] = sender
         msg["To"] = to
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
             server.login(sender, os.getenv(GMAIL_PASS_ENV, ""))
             server.sendmail(sender, to, msg.as_string())
-        log.info(f"[alerts] digest sent to {to}: {d['groups']} issue(s), "
-                 f"{d['alerts']} alert(s)")
         return True, None
     except Exception as e:
-        # The exception text can carry the SMTP conversation. Type only.
-        return False, f"{type(e).__name__} sending the digest"
+        return False, f"{type(e).__name__} sending the message"

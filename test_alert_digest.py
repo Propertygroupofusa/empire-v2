@@ -125,13 +125,18 @@ def test_a_missing_credential_is_named_never_valued():
 def test_a_send_failure_reports_the_type_only():
     # SMTP exception text can echo the conversation, including the login
     # line. Only the exception type is ever returned.
-    import smtplib
+    # The SMTP call moved into send_email() when trade notifications
+    # started reusing it. Follow the code rather than a line number:
+    # whichever function holds the smtplib call must return the TYPE only.
     src = open("alert_sender.py").read()
-    i = src.index("def send_digest")
-    body = src[i:]
-    assert 'f"{type(e).__name__} sending the digest"' in body
-    assert "{e}" not in body.split("except Exception as e:")[-1][:200], \
-        "the exception text itself must never be returned"
+    assert src.count("smtplib.SMTP_SSL") == 1, "more than one place sends mail"
+    i = src.index("smtplib.SMTP_SSL")
+    tail = src[i:]
+    j = tail.index("except Exception as e:")
+    handler = tail[j:j + 200]
+    assert "{type(e).__name__}" in handler, "the type is not reported"
+    assert "{e}" not in handler.replace("{type(e).__name__}", ""), \
+        "the exception text itself must never be returned - SMTP errors echo the login"
 
 
 def test_the_recipient_reuses_the_existing_convention():
