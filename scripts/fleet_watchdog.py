@@ -655,8 +655,40 @@ def main():
              f"it failed before 30.")
 
     # ---- 9. Stuck slices ----------------------------------------------------
-    stuck = [(p, s["qty"]) for p, s in slices
-             if s.get("qty") and 0 < s["qty"] < 0.011 and abs(s["qty"] - 0.01) < 1e-12]
+    # A slice sitting ONE ULP below a single tradeable unit can never be
+    # sold, at any price, ever. grid_sell_residual's float subtraction made
+    # two of them - LINK at 0.009999999999998899 and PRIME at
+    # 0.00999999999999801, both against a 0.01 increment - and that cause is
+    # fixed now (exact Decimal arithmetic), so these two are legacy.
+    #
+    # The DETECTOR was not fixed. It hardcoded 0.01, which is LINK's and
+    # PRIME's increment and nobody else's: the same defect at QNT's 0.001, or
+    # at 1.0, would have been invisible. A check that only finds the instance
+    # that prompted it is not a check, it is a memory of one bug.
+    #
+    # Generalised: any quantity that is a hair BELOW a round multiple of a
+    # plausible increment, where that multiple is exactly one - so rounding
+    # it to what the venue accepts gives zero units, and the slice is dead.
+    # Larger residue is harmless (ALGO at 279.4 is 27,940 units and misses by
+    # 3.6e-14); it is only fatal when the whole quantity is one unit.
+    def _is_stuck(q):
+        try:
+            q = float(q)
+        except (TypeError, ValueError):
+            return False
+        if not (q > 0):
+            return False
+        for unit in (1.0, 0.1, 0.01, 0.001, 0.0001, 0.00001, 0.000001):
+            units = q / unit
+            nearest = round(units)
+            if nearest != 1:
+                continue
+            # below the unit, but only by floating-point error
+            if 0 < (nearest - units) < 1e-6:
+                return True
+        return False
+
+    stuck = [(p, s["qty"]) for p, s in slices if _is_stuck(s.get("qty"))]
     cur["stuck"] = len(stuck)
     if prev.get("stuck") is not None and len(stuck) > prev["stuck"]:
         flag(CRITICAL, "STUCK_ROSE",

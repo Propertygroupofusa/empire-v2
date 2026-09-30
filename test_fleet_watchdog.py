@@ -710,6 +710,46 @@ d3["/api/trading-dashboard/grid-status/invariants"] = {
 ok("and a branch holding what it claims is never phantom",
    "PHANTOM_BRANCH" not in run(d3, BASE_SNAP))
 
+# STUCK at any increment, not just 0.01.
+#
+# grid_sell_residual's float subtraction made two slices one ULP below a
+# single tradeable unit - LINK 0.009999999999998899 and PRIME
+# 0.00999999999999801, both against 0.01 - and neither can ever be sold at
+# any price. That CAUSE is fixed (exact Decimal arithmetic). The detector
+# was not: it hardcoded 0.01, so the same defect at QNT's 0.001 increment,
+# or at 1.0, would have been invisible. A check that only finds the instance
+# that prompted it is a memory of one bug, not a check.
+def _stuck_slice(qty):
+    return {"opened_at": "2026-09-29T10:00:00Z", "qty": qty, "entry_price": 1.0,
+            "entry_fee_rate": 0.0035, "adopted": False,
+            "slice_state": "ACCOUNTED", "unrealized_net_pct": 0.0}
+
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    _stuck_slice(0.0009999999999998))          # one unit of a 0.001 increment
+ok("STUCK_ROSE at an increment the old check never looked at",
+   "STUCK_ROSE" in run(d, BASE_SNAP), "0.001-scale residue must be caught")
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    _stuck_slice(0.9999999999999))             # one unit of a 1.0 increment
+ok("and at whole-unit scale too", "STUCK_ROSE" in run(d, BASE_SNAP))
+
+# Residue on a LARGE quantity is harmless - ALGO at 279.4 is 27,940 units
+# and misses by 3.6e-14. Only a quantity that IS one unit is fatal.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    _stuck_slice(279.4))
+ok("but harmless residue on a large quantity is NOT stuck",
+   "STUCK_ROSE" not in run(d, BASE_SNAP))
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
+    _stuck_slice(0.01))
+ok("and a clean single unit is not stuck either",
+   "STUCK_ROSE" not in run(d, BASE_SNAP))
+
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]
 out = run(d, BASE_SNAP)
