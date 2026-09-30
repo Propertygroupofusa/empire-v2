@@ -25,10 +25,13 @@ the message goes and should not need editing to change its mind.
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 WEBHOOK_ENV = "ALERT_WEBHOOK_URL"
 FORMAT_ENV = "ALERT_WEBHOOK_FORMAT"
+
+log = logging.getLogger(__name__)
 
 SEVERITY_PREFIX = {"CRITICAL": "[CRITICAL]", "HIGH": "[HIGH]", "INFO": "[INFO]"}
 
@@ -168,3 +171,154 @@ async def deliver(session, alert: dict) -> tuple:
             return False, f"HTTP {r.status}: {body}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+# ---------------------------------------------------------------------------
+# EMAIL DELIVERY - the route that needs no new secret
+# ---------------------------------------------------------------------------
+#
+# 76 alerts were queued and 0 delivered because ALERT_WEBHOOK_URL has
+# never been set. Meanwhile GMAIL_EMAIL and GMAIL_PASSWORD are ALREADY in
+# this process - daily_brief.py, prop_bot.py and notary_bot.py all send
+# through them. A working route existed the whole time; nothing used it.
+#
+# ONE DIGEST, NEVER A FLOOD. The backlog is not 76 separate facts. The
+# live queue is dominated by one branch retrying one order - QNT's exit
+# was refused 200 times in 24 hours - and 76 emails about it would get
+# the sender muted, which is strictly worse than silence because the
+# muting also swallows the next real one. So repeats are grouped and
+# counted, and the whole backlog goes as a single message.
+#
+# ARMED DELIBERATELY, like every other outbound path here. Default is
+# off: build_digest() is pure and can be read before anything is sent, so
+# the account owner sees the exact first message before it starts
+# arriving rather than after.
+
+EMAIL_MODE_ENV = "ALERT_EMAIL_MODE"
+RECIPIENT_ENV = ("TRADE_ALERT_EMAIL", "DAILY_BRIEF_EMAIL")
+GMAIL_USER_ENV, GMAIL_PASS_ENV = "GMAIL_EMAIL", "GMAIL_PASSWORD"
+
+# A digest that runs to hundreds of lines is not read on a phone. Past
+# this, the rest is summarised as a count - the tail of a flood carries
+# no information the head did not already give.
+MAX_DIGEST_GROUPS = 25
+
+
+def email_mode() -> str:
+    return (os.getenv(EMAIL_MODE_ENV) or "off").strip().strip('"').strip("'").lower()
+
+
+def email_armed() -> bool:
+    return email_mode() == "send"
+
+
+def recipient() -> str:
+    """Where alerts go. Same resolution order the daily brief already uses,
+    so there is one destination convention and not two. Falls back to the
+    sending account itself, which is always a real inbox."""
+    for var in RECIPIENT_ENV:
+        v = (os.getenv(var) or "").strip()
+        if v:
+            return v
+    return (os.getenv(GMAIL_USER_ENV) or "").strip()
+
+
+def email_configured() -> bool:
+    return bool((os.getenv(GMAIL_USER_ENV) or "").strip()
+                and (os.getenv(GMAIL_PASS_ENV) or "").strip()
+                and recipient())
+
+
+def _group_key(alert: dict) -> tuple:
+    return (str(alert.get("severity") or "ALERT"),
+            str(alert.get("kind") or ""),
+            str(alert.get("asset") or ""),
+            str(alert.get("message") or ""))
+
+
+_SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "INFO": 2}
+
+
+def build_digest(alerts: list) -> dict:
+    """(subject, body, groups) for a backlog, as ONE message. Pure.
+
+    Deliberately has no side effects and touches no network, so the exact
+    text can be read before a single send happens.
+    """
+    alerts = [a for a in (alerts or []) if isinstance(a, dict)]
+    if not alerts:
+        return {"subject": None, "body": None, "groups": 0, "alerts": 0,
+                "reason": "nothing queued"}
+
+    grouped = {}
+    for a in alerts:
+        k = _group_key(a)
+        g = grouped.setdefault(k, {"n": 0, "alert": a})
+        g["n"] += 1
+
+    rows = sorted(grouped.items(),
+                  key=lambda kv: (_SEVERITY_ORDER.get(kv[0][0], 9), -kv[1]["n"]))
+    worst = rows[0][0][0]
+    n_alerts, n_groups = len(alerts), len(rows)
+
+    subject = (f"[{worst}] empire-v2: {n_groups} issue"
+               f"{'' if n_groups == 1 else 's'}"
+               + (f" ({n_alerts} alerts)" if n_alerts != n_groups else ""))
+
+    lines = [f"{n_alerts} queued alert(s), grouped into {n_groups} distinct issue(s).",
+             "Most severe first. A repeat count means the same condition fired again,",
+             "not that it got worse.", ""]
+    for (sev, kind, asset, message), g in rows[:MAX_DIGEST_GROUPS]:
+        times = f"  (x{g['n']})" if g["n"] > 1 else ""
+        head = SEVERITY_PREFIX.get(sev, "[ALERT]")
+        who = f" {asset}" if asset else ""
+        lines.append(f"{head}{who} {message}{times}".rstrip())
+        detail = (g["alert"].get("detail") or "").strip()
+        if detail:
+            lines.append(f"    {detail[:400]}")
+        lines.append("")
+    if n_groups > MAX_DIGEST_GROUPS:
+        lines.append(f"... and {n_groups - MAX_DIGEST_GROUPS} further distinct "
+                     f"issue(s) not listed here.")
+        lines.append("")
+    lines.append("This message reports. It places no order and moves no money.")
+    return {"subject": subject, "body": "\n".join(lines),
+            "groups": n_groups, "alerts": n_alerts, "worst_severity": worst}
+
+
+def send_digest(alerts: list, *, force: bool = False) -> tuple:
+    """(ok, error). Sends the whole backlog as ONE email. Never raises.
+
+    `force` sends a single message even while ALERT_EMAIL_MODE is off -
+    used once, deliberately, so the owner sees the first one and can
+    judge it before the route is armed for good.
+    """
+    d = build_digest(alerts)
+    if not d.get("subject"):
+        return False, d.get("reason", "nothing to send")
+    if not email_configured():
+        missing = [v for v in (GMAIL_USER_ENV, GMAIL_PASS_ENV)
+                   if not (os.getenv(v) or "").strip()]
+        return False, ("email not configured: "
+                       + (", ".join(missing) or "no recipient resolved")
+                       + " (names only - no value is ever read out here)")
+    if not (email_armed() or force):
+        return False, (f"{EMAIL_MODE_ENV} is '{email_mode()}' - nothing sent. "
+                       f"Set it to 'send' to arm this route.")
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        sender = os.getenv(GMAIL_USER_ENV, "").strip()
+        to = recipient()
+        msg = MIMEText(d["body"])
+        msg["Subject"] = d["subject"]
+        msg["From"] = sender
+        msg["To"] = to
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+            server.login(sender, os.getenv(GMAIL_PASS_ENV, ""))
+            server.sendmail(sender, to, msg.as_string())
+        log.info(f"[alerts] digest sent to {to}: {d['groups']} issue(s), "
+                 f"{d['alerts']} alert(s)")
+        return True, None
+    except Exception as e:
+        # The exception text can carry the SMTP conversation. Type only.
+        return False, f"{type(e).__name__} sending the digest"
