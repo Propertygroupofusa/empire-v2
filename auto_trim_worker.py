@@ -230,18 +230,49 @@ async def check_once(session_factory, *, place=True) -> dict:
         holdings = census.get("holdings") or []
         total = census.get("total_usd")
         # Coins the grid currently holds open slices on. Trimming those
-        # sells coin the grid still has on its books - see the note in
-        # plan_trims. Fails OPEN on an unreadable grid: an empty set
-        # protects nothing, which is the behaviour this loop had before.
+        # sells coin the grid still has on its books, which is how a
+        # branch ends up claiming units the wallet does not have.
+        #
+        # THIS NOW FAILS CLOSED, and it is the whole point of this block.
+        # It used to fail OPEN, and the way it did so was invisible:
+        # fleet_tracked_units_by_product returns (None, None) on a failed
+        # read - deliberately, its docstring says "never an empty dict,
+        # which would read as 'the fleet holds nothing' and pass every
+        # check trivially" - and the old `if _units:` collapsed that None
+        # straight back into "protect nothing". No exception was raised,
+        # so the warning below never fired either. Under the venue rate
+        # limiting this account actually sees, that is a silent licence
+        # to market-sell coin the grid is holding.
+        #
+        # Measured 2026-09-30: ALGO, TIA and PRIME each carried REAL grid
+        # buys (adopted=False) and held 0.017%, 0.000% and 0.000% of the
+        # units their slices claim. $1,195.34 across eight branches, and
+        # QNT's exit had been refused 200 times because the coin behind it
+        # was gone. That is the shape this produces.
+        #
+        # A skipped trim costs a few more minutes of concentration, and
+        # the ceiling is still there next pass. A blind trim costs coin,
+        # a phantom slice row, and a manual reconcile. Every other
+        # unreadable input in this function already returns rather than
+        # guessing; this one was the outlier.
         protected = ()
         try:
             import crypto_grid_bot as _grid
             _units, _ = await _grid.fleet_tracked_units_by_product()
-            if _units:
-                protected = {p.split("-")[0].upper() for p in _units}
         except Exception as exc:
-            log.warning(f"[auto_trim] could not read grid positions ({type(exc).__name__}) "
-                        f"- trimming without that protection this pass")
+            _units = None
+            log.warning(f"[auto_trim] grid positions raised ({type(exc).__name__}: {exc})")
+        if _units is None:
+            log.warning("[auto_trim] grid positions UNREADABLE - skipping this pass "
+                        "rather than trimming coin the grid may be holding")
+            return {"mode": mode, "armed": True, "acted": 0,
+                    "detail": ("grid positions could not be read, so which coins are "
+                               "actively traded is UNKNOWN; nothing placed. Trimming "
+                               "without that list sells coin the grid still has on its "
+                               "books and leaves a slice claiming units the wallet no "
+                               "longer holds."),
+                    "skipped_because": "grid_positions_unreadable"}
+        protected = {p.split("-")[0].upper() for p in _units}
         plans = auto_trim.plan_trims(holdings, total, now=now, history=history,
                                      actively_traded=protected)
         summary = auto_trim.summarise(plans, mode)
