@@ -721,7 +721,10 @@ def main():
         full_usd += sum((x.get("qty") or 0) * (x.get("entry_price") or 0) for x in sl)
     full_usd = round(full_usd, 2)
 
-    if branches:
+    # Only when something is ACTUALLY parked. Reporting "$0.00 across 0
+    # branch(es)" on a healthy fleet is noise, and noise on a quiet pass is
+    # what trains a reader to skim.
+    if full_n:
         cur["full_usd"], cur["full_n"] = full_usd, full_n
         # The endpoint's own prose is kept ONLY as a second opinion. Two
         # sources that disagree is an UNKNOWN worth saying out loud, not a

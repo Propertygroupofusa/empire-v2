@@ -282,17 +282,34 @@ ok("ADOPTED_GREW when fee-less adopted book grows",
    "ADOPTED_GREW" in run(d, dict(BASE_SNAP, adopted_nofee_usd=0.0)))
 
 # PARKED_GREW - the deadlock that produced sixteen days of zero closes.
-# Parsed off the invariant's own STABLE phrase, never the underwater figure
-# beside it, which that text warns swings hundreds of dollars on price alone.
+#
+# Driven off the BRANCH DATA, because that is what the check now reads. It
+# used to be regexed out of the invariant's English prose, which meant a
+# reworded sentence would silently disable the most valuable alarm here -
+# and which reported $3,492.09 live while the branches summed to $3,647.40.
+# Basis (qty x entry), never market value: a parked branch's cost does not
+# move with price, so a change means a branch joined or left.
 d = healthy()
-d["/api/trading-dashboard/grid-status/invariants"]["checks"] = [
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["num_levels"] = 1                      # 1 slice on 1 rung == full
+ok("PARKED_GREW when capital full on its rungs grows",
+   "PARKED_GREW" in run(d, dict(BASE_SNAP, full_usd=10.0)))
+ok("and it does NOT fire when that capital is flat or falling",
+   "PARKED_GREW" not in run(d, dict(BASE_SNAP, full_usd=9000.0)))
+
+# Two sources disagreeing is an UNKNOWN, not a number to quietly prefer.
+d2 = healthy()
+d2["/api/trading-dashboard/grid-status"]["branches"][0]["num_levels"] = 1
+d2["/api/trading-dashboard/grid-status/invariants"]["checks"] = [
     {"name": "no_dead_capital", "status": "FAIL",
      "detail": "$5,000.00 across 12 branch(es) full on their rungs, which "
                "cannot buy at any price until a slice sells."}]
-ok("PARKED_GREW when capital full on its rungs grows",
-   "PARKED_GREW" in run(d, dict(BASE_SNAP, full_usd=1000.0)))
-ok("and it does NOT fire when that capital is flat or falling",
-   "PARKED_GREW" not in run(d, dict(BASE_SNAP, full_usd=9000.0)))
+ok("a prose figure that disagrees with the branches is reported as a gap",
+   "parked capital disagrees" in run(d2, BASE_SNAP))
+
+# And a fleet with nothing parked says nothing at all about parking.
+ok("no PARKED line when nothing is full",
+   "PARKED " not in run(healthy(), BASE_SNAP))
 
 # ALPACA_FLOOR / HALT / BP - the half of the account nothing watched.
 d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["equity"] = 800.0
