@@ -88,6 +88,13 @@ def healthy():
             "account_blocked": False, "trading_blocked": False,
             "trade_suspended_by_user": False,
         },
+        # One winning close, so the loss check runs and finds nothing.
+        "/api/trading-dashboard/grid-status/trade-history?limit=1000": {
+            "recent_trades": [
+                {"id": 1, "product_id": "AAA-USD", "pnl": 0.5,
+                 "exit_reason": "profit_target"}],
+            "recent_trades_truncated": False,
+        },
         # The real local HEAD, so the control case does not trip DEPLOY_LAG.
         # Hardcoding a commit here made the healthy fixture fail against its
         # own repo - the check was right and the fixture was wrong, which is
@@ -150,7 +157,7 @@ BASE_SNAP = {"at": "2026-09-29T10:00:00Z", "buy_legs": 10, "sell_legs": 5,
              "slice_count": 1, "realized": 100.0, "stuck": 0, "inv_failed": 0,
              "uncovered_usd": 0, "cycle_errors": [], "reachable": [],
              "alpaca_equity": 2000.0, "populated": 1, "adopted_nofee_usd": 0.0,
-             "full_usd": 0.0}
+             "full_usd": 0.0, "last_trade_id": 1}
 
 print("\n-- the control: a healthy fleet must raise NOTHING --")
 # THE CONTROL MUST PASS FOR THE RIGHT REASON. The healthy fixture serves the
@@ -345,6 +352,82 @@ ok("and carries the allocated figure alongside it",
 # And a fleet with nothing parked says nothing at all about parking.
 ok("no PARKED line when nothing is full",
    "PARKED " not in run(healthy(), BASE_SNAP))
+
+# LOSS_CLOSED - the blind spot REALIZED_FELL could not see.
+#
+# Two stops booked -$7.29 and -$2.89 on 2026-09-29 and the running total went
+# UP, because the grid's wins over the same hours covered them. The total-based
+# check is blind to that by construction, so this one watches single closes.
+def _with_trades(rows, truncated=False):
+    d = healthy()
+    d["/api/trading-dashboard/grid-status/trade-history?limit=1000"] = {
+        "recent_trades": rows, "recent_trades_truncated": truncated}
+    return d
+
+WIN = {"id": 1, "product_id": "AAA-USD", "pnl": 0.5,
+       "exit_reason": "profit_target"}
+TON = {"id": 2, "product_id": "TON-USD", "pnl": -7.29,
+       "exit_reason": "stop_loss"}
+
+d = _with_trades([WIN, TON])
+out = run(d, BASE_SNAP)
+ok("LOSS_CLOSED when a new close books a loss", "LOSS_CLOSED" in out)
+ok("and it is CRITICAL when one loss exceeds the mean win",
+   "CRITICAL LOSS_CLOSED" in out)
+ok("and it names the coin, the amount and the exit route",
+   "TON-USD" in out and "-$7.29" in out and "stop_loss" in out)
+ok("and it says how much of the edge that handed back",
+   "of them" in out)
+ok("and it states the owner's rule rather than acting on it",
+   "nothing negative realized" in out and "owner's call" in out)
+
+# A loss SMALLER than the mean win is real but not an edge-eater.
+d = _with_trades([{"id": 1, "product_id": "AAA-USD", "pnl": 5.0,
+                   "exit_reason": "profit_target"},
+                  {"id": 2, "product_id": "BBB-USD", "pnl": -0.10,
+                   "exit_reason": "stop_loss"}])
+out = run(d, BASE_SNAP)
+ok("a loss under the mean win is a WARN, not a CRITICAL",
+   "WARN     LOSS_CLOSED" in out)
+
+# THE TRANSITION, NOT THE LEVEL. The same loss already seen must stay quiet,
+# or every pass for ever re-reports one stop from yesterday.
+d = _with_trades([WIN, TON])
+ok("a loss already seen last pass does NOT fire again",
+   "LOSS_CLOSED" not in run(d, dict(BASE_SNAP, last_trade_id=2)))
+
+# And the total going UP must not suppress it - that is the whole point.
+d = _with_trades([WIN, TON])
+d["/api/trading-dashboard/live-ops"]["headline"]["data"]["realized_usd"] = 500.0
+out = run(d, dict(BASE_SNAP, last_trade_id=1))
+ok("a rising realized total does not hide a losing close",
+   "LOSS_CLOSED" in out and "REALIZED_FELL" not in out)
+
+# NO BASELINE: no transition exists, so no claim - but an existing loss book
+# is still said out loud rather than read as a clean run of wins.
+d = _with_trades([WIN, TON])
+snap = {k: v for k, v in BASE_SNAP.items() if k != "last_trade_id"}
+out = run(d, snap)
+ok("no baseline means no new-loss claim", "LOSS_CLOSED" not in out)
+ok("but the standing loss book is reported instead", "LOSS_BOOK" in out)
+ok("and it says realized P&L is a NET figure", "not a run of wins" in out)
+
+# A CAPPED list makes the count a floor, and it has to say so.
+d = _with_trades([WIN, TON], truncated=True)
+out = run(d, snap)
+ok("a truncated history reports its loss count as a floor",
+   "at least - the list is capped" in out)
+
+# GAPS: unreadable is never zero.
+d = _with_trades([WIN, {"id": 2, "product_id": "CCC-USD", "pnl": None,
+                        "exit_reason": None}])
+ok("an unreadable pnl is a gap, not a clean close",
+   "unreadable pnl" in run(d, BASE_SNAP))
+
+d = healthy()
+d["/api/trading-dashboard/grid-status/trade-history?limit=1000"] = {"recent_trades_truncated": False}
+ok("a history with no trade list at all is a gap",
+   "recent_trades missing" in run(d, BASE_SNAP))
 
 # ALPACA_FLOOR / HALT / BP - the half of the account nothing watched.
 d = healthy(); d["/api/trading-dashboard/alpaca-overview"]["equity"] = 800.0

@@ -202,11 +202,17 @@ def main():
 
     # ---- 1c. Realized P&L must never go backwards --------------------------
     #
-    # A normal grid exit only ever sells ABOVE its own entry, so realized P&L
-    # is monotonic by design. If it falls, something closed a position
-    # OUTSIDE that rule - an emergency exit, a retirement, a liquidation -
-    # and that books a real loss that the "realized cannot go negative"
-    # reassurance would otherwise hide.
+    # A GRID exit only ever sells above its own entry. The STOP route does
+    # not, and this comment used to claim realized P&L was "monotonic by
+    # design" on the strength of the grid route alone. It is not: on
+    # 2026-09-29 two stops closed TON-USD at -$7.29 and ONDO-USD at -$2.89,
+    # and the lifetime book holds 21 negative round trips totalling -$17.45.
+    #
+    # So this check is necessary and NOT sufficient. It only sees a loss big
+    # enough to drag the RUNNING TOTAL down, and wins landing in the same
+    # interval cover for it - which is exactly what happened: both stops fired
+    # and the total never fell, so nothing here said a word. Section 1d below
+    # watches individual closes for that reason. Keep both.
     if ops is not None:
         try:
             realized = ops["headline"]["data"].get("realized_usd")
@@ -220,6 +226,96 @@ def main():
                  f"realized P&L fell {money(prev['realized'])} -> {money(realized)}. "
                  f"A normal exit cannot do that - something forced a close and "
                  f"booked a real loss.")
+
+    # ---- 1d. A SINGLE close that booked a loss ------------------------------
+    #
+    # THE BLIND SPOT SECTION 1c COULD NOT SEE, and the owner's standing rule
+    # is "nothing negative realized".
+    #
+    # 1c watches the running total, and a total only falls when the losses in
+    # an interval outweigh the wins. On 2026-09-29 the stop route closed
+    # TON-USD at -$7.29 and ONDO-USD at -$2.89 - the grid's wins over the same
+    # hours more than covered them, the total went UP, and nothing reported
+    # either one. A protection whose firing cannot be observed is
+    # indistinguishable from one that never fires, and that cuts both ways: a
+    # stop that fires unseen is a loss nobody was told about.
+    #
+    # Tracked BY TRADE ID, not by a count or a sum. An id is a transition - a
+    # close either is new to this pass or it is not - so a duplicate run
+    # cannot re-fire it and a rounding drift cannot invent one.
+    #
+    # The severity threshold comes from the FLEET'S OWN measured win, not a
+    # number anybody chose: if one stop gives back more than the mean winning
+    # round trip earns, the stop layer is eating the edge faster than the grid
+    # makes it, and that is a CRITICAL. Measured on 2026-09-30 the mean win
+    # was $0.74, so TON's -$7.29 was ten wins handed back in one close.
+    hist = get("/grid-status/trade-history?limit=1000")
+    if hist is not None:
+        rows = hist.get("recent_trades")
+        if rows is None:
+            gaps.append("/grid-status/trade-history: recent_trades missing - "
+                        "individual losing closes cannot be seen")
+        else:
+            def _pnl(r):
+                try:
+                    return float(r.get("pnl"))
+                except (TypeError, ValueError):
+                    return None
+            unreadable = [r for r in rows if _pnl(r) is None]
+            if unreadable:
+                gaps.append(f"{len(unreadable)} closed trade(s) carry an "
+                            f"unreadable pnl - a loss among them would be "
+                            f"invisible")
+            ids = [r.get("id") for r in rows if isinstance(r.get("id"), int)]
+            high = max(ids) if ids else None
+            if high is not None:
+                cur["last_trade_id"] = high
+
+            losses = [r for r in rows if (_pnl(r) or 0) < 0]
+            loss_usd = round(sum(_pnl(r) or 0 for r in losses), 2)
+            wins = [_pnl(r) for r in rows if (_pnl(r) or 0) > 0]
+            mean_win = round(sum(wins) / len(wins), 4) if wins else None
+
+            # TRUNCATION IS NOT AN EMPTY BOOK. A capped list makes the loss
+            # count a floor, and saying so is the difference between "none" and
+            # "none in the part I was shown".
+            floor = " (at least - the list is capped)" if hist.get(
+                "recent_trades_truncated") else ""
+
+            seen = prev.get("last_trade_id")
+            fresh = [r for r in losses
+                     if isinstance(r.get("id"), int)
+                     and seen is not None and r["id"] > seen]
+            if fresh:
+                worst = min(fresh, key=lambda r: _pnl(r) or 0)
+                w = _pnl(worst) or 0.0
+                sev = CRITICAL if (mean_win and abs(w) > mean_win) else WARN
+                mw = (f" The mean winning round trip earns {money(mean_win)}, so "
+                      f"this one close handed back "
+                      f"{abs(w) / mean_win:.1f} of them."
+                      if mean_win else
+                      " The mean winning round trip is unreadable, so how much "
+                      "of the edge this gave back is UNKNOWN.")
+                flag(sev, "LOSS_CLOSED",
+                     f"{len(fresh)} close(s) since the last pass booked a REAL "
+                     f"loss totalling "
+                     f"{money(round(sum(_pnl(r) or 0 for r in fresh), 2))}. "
+                     f"Worst: {worst.get('product_id')} {money(w)} via "
+                     f"{worst.get('exit_reason') or 'an unlabelled exit'}."
+                     f"{mw} Lifetime: {len(losses)} losing round trip(s), "
+                     f"{money(loss_usd)}{floor}. The owner's rule is nothing "
+                     f"negative realized - arming or disarming a stop is the "
+                     f"owner's call, never this script's.")
+            elif seen is None and losses:
+                # First run against a book that already holds losses. Not an
+                # alarm - there is no transition to report - but reporting
+                # nothing would let a reader carry on believing the book is
+                # clean, which is the belief this section exists to correct.
+                flag(INFO, "LOSS_BOOK",
+                     f"no baseline yet, so no new-loss claim. The book already "
+                     f"holds {len(losses)} losing round trip(s) totalling "
+                     f"{money(loss_usd)}{floor} - realized P&L is a NET figure, "
+                     f"not a run of wins.")
 
     # ---- 2. Any cycle error at all -----------------------------------------
     if ops is not None:
