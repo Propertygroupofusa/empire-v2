@@ -547,6 +547,42 @@ def main():
                  f"No alert channel configured ({(alerts.get('channel_diagnosis') or {}).get('expected_variable')} "
                  f"absent) - {pending} alert(s) held, {sent} ever delivered. "
                  f"Nothing reaches anyone.")
+            # A COUNT IS NOT THE CONTENTS. "74 held" reads like a backlog to
+            # clear at leisure; among those 74 sat "XRP broke its level -
+            # $2,098.72 exposed", written 2026-09-28 and seen by nobody. The
+            # number is the one thing about a dead queue that does NOT matter.
+            #
+            # Ranked by the queue's OWN severity field and recency. The dollar
+            # figures live only inside the English message, so they are quoted
+            # whole and never parsed - a reworded sentence must not become a
+            # wrong number here.
+            rows = alerts.get("alerts")
+            if rows is None:
+                gaps.append("alert-queue returned no alert bodies - what is "
+                            "being held is UNKNOWN, not nothing")
+            else:
+                # The feed caps what it returns, so this is the worst of what
+                # was SHOWN. Saying "the worst held" of a truncated list would
+                # be a claim the data cannot support.
+                short = len(rows) < (pending or 0)
+                by_sev = {}
+                for r in rows:
+                    by_sev[r.get("severity") or "?"] = by_sev.get(
+                        r.get("severity") or "?", 0) + 1
+                crit = sorted((r for r in rows if r.get("severity") == "CRITICAL"),
+                              key=lambda r: r.get("created_at") or "", reverse=True)
+                mix = ", ".join(f"{v} {k}" for k, v in
+                                sorted(by_sev.items(), key=lambda kv: -kv[1]))
+                oldest = min((r.get("created_at") or "" for r in rows), default="")
+                flag(CRITICAL, "ALARM_DEAD",
+                     f"  of the {len(rows)} held alert(s) shown"
+                     + (f" (of {pending} - the feed caps the list, so this is a "
+                        f"floor)" if short else "")
+                     + f": {mix}. Oldest {oldest[:19] or 'UNKNOWN'}.")
+                for r in crit[:5]:
+                    flag(CRITICAL, "ALARM_DEAD",
+                         f"    [{(r.get('created_at') or '')[:19]}] "
+                         f"{r.get('message')} - {r.get('detail') or ''}")
         elif pending and not sent:
             flag(CRITICAL, "ALARM_STUCK",
                  f"{pending} alert(s) pending and {sent} sent - the channel is "

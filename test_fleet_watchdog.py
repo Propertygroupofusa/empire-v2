@@ -564,6 +564,51 @@ ok("ALPACA_BP when buying power is under its floor", "ALPACA_BP" in run(d, BASE_
 d = healthy(); d["/health"] = {"commit": "0000000", "uptime_human": "1h"}
 ok("DEPLOY_LAG when the served commit is not local HEAD", "DEPLOY_LAG" in run(d, BASE_SNAP))
 
+# ALARM_DEAD must show WHAT is held, not just how many.
+#
+# "74 held" reads like a backlog to clear at leisure. Among those 74 sat
+# "XRP broke its level - $2,098.72 exposed", written 2026-09-28 and seen by
+# nobody. The count is the one thing about a dead queue that does not matter.
+def _dead_queue(rows, pending=74):
+    d = healthy()
+    d["/api/trading-dashboard/alert-queue"] = {
+        "channel_configured": False,
+        "channel_diagnosis": {"expected_variable": "ALERT_WEBHOOK_URL"},
+        "counts": {"pending": pending, "sent": 0, "failed": 0},
+        "alerts": rows,
+    }
+    return d
+
+ROWS = [
+    {"id": 1, "kind": "BREACH", "asset": "XRP", "severity": "CRITICAL",
+     "message": "XRP broke its level - $2,098.72 exposed",
+     "detail": "14.0% off its peak.", "created_at": "2026-09-28T06:25:23Z"},
+    {"id": 2, "kind": "BLIND", "asset": "ZEC", "severity": "HIGH",
+     "message": "ZEC dropped out of coverage", "detail": "",
+     "created_at": "2026-09-28T06:17:55Z"},
+]
+out = run(_dead_queue(ROWS), BASE_SNAP)
+ok("ALARM_DEAD still reports the dead channel", "ALARM_DEAD" in out, out)
+ok("and quotes the held CRITICAL verbatim rather than counting it",
+   "XRP broke its level - $2,098.72 exposed" in out, out)
+ok("and breaks the backlog down by severity",
+   "1 CRITICAL" in out and "1 HIGH" in out, out)
+ok("and names the oldest held alert",
+   "2026-09-28T06:17:55" in out, out)
+
+# A CAPPED list is a floor, not the worst held - claiming otherwise would be
+# a statement the data cannot support.
+ok("a truncated list says so", "the feed caps the list, so this is a floor"
+   in run(_dead_queue(ROWS, pending=74), BASE_SNAP))
+ok("and an untruncated one does not",
+   "floor" not in run(_dead_queue(ROWS, pending=2), BASE_SNAP))
+
+# NO BODIES is UNKNOWN, never "nothing is held".
+d = _dead_queue(None)
+del d["/api/trading-dashboard/alert-queue"]["alerts"]
+ok("missing alert bodies are a gap, not an empty queue",
+   "what is being held is UNKNOWN" in run(d, BASE_SNAP))
+
 # DRY_SPELL: the loop is alive but nothing has closed. This is the ONLY check
 # that would have caught the sixteen-day dead period - the heartbeat was fresh
 # throughout it, so check 7 called the fleet healthy for sixteen days.
