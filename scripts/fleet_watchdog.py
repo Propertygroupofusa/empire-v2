@@ -506,6 +506,43 @@ def main():
                 nm = chk.get("name")
                 if nm == "coin_tracked_is_held":
                     pos = chk.get("short_positions") or []
+
+                    # HOLDS NONE is a different thing from HOLDS LESS, and
+                    # sorting by dollars hides it. PRIME is $8.95 short and
+                    # holds literally zero; XRP is $104 short and holds 95%.
+                    # The first can never trade again at any price - every
+                    # order it places is for units that do not exist, which is
+                    # what ORDER_REFUSED already shows for TIA and QNT. The
+                    # second is a rounding drift that still trades fine.
+                    #
+                    # This is also what "lock state unreadable" actually
+                    # meant: a locked PERCENTAGE cannot be computed against a
+                    # zero balance, so that gap was never an observability
+                    # quirk - it was this, arriving one branch at a time.
+                    phantom = []
+                    for c in pos:
+                        tr = c.get("tracked") or 0.0
+                        hd = c.get("held")
+                        if hd is None or tr <= 0:
+                            continue
+                        if hd / tr < 0.01:          # holds under 1% of claim
+                            phantom.append((c.get("product_id"), tr, hd,
+                                            c.get("short_usd") or 0.0))
+                    if phantom:
+                        cur["phantom"] = sorted(x[0] for x in phantom)
+                        prev_ph = prev.get("phantom")
+                        joined = ([x for x in sorted(x[0] for x in phantom)
+                                   if x not in prev_ph] if prev_ph is not None else [])
+                        flag(CRITICAL if joined else WARN, "PHANTOM_BRANCH",
+                             f"{len(phantom)} branch(es) track coin the wallet has "
+                             f"essentially NONE of"
+                             + (f" - {', '.join(joined)} newly so" if joined else "")
+                             + ": "
+                             + ", ".join(f"{p2} claims {tr:,.4f} holds {hd:,.6f}"
+                                         for p2, tr, hd, _ in
+                                         sorted(phantom, key=lambda x: -x[3]))
+                             + ". These cannot trade at any price.")
+
                     worst = sorted(pos, key=lambda c: -(c.get("short_usd") or 0))[:4]
                     flag(level, "INVENTORY_SHORT",
                          f"{money(chk.get('short_usd'))} of coin is claimed by "

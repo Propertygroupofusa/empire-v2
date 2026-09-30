@@ -659,6 +659,57 @@ del d3["/api/trading-dashboard/grid-status"]["real_round_trip_fee_rate"]
 ok("an unreadable taker round trip is reported as a gap",
    "cannot judge step safety" in run(d3, BASE_SNAP))
 
+# PHANTOM_BRANCH: holds NONE is categorically different from holds LESS,
+# and sorting the short list by dollars hides it. PRIME is $8.95 short and
+# holds literally zero; XRP is $104 short and holds 95%. The first can never
+# place an order that exists; the second trades fine. Live it finds four -
+# QNT, PEPE, TIA, PRIME - which is also exactly the set whose "lock state
+# unreadable" gap I had been reporting as an observability quirk for hours.
+# A locked percentage cannot be computed against a zero balance.
+d = healthy()
+d["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "coin_tracked_is_held",
+    "checks": [{"name": "coin_tracked_is_held", "status": "FAIL",
+                "short_usd": 200.0,
+                "short_positions": [
+                    {"product_id": "GHOST-USD", "tracked": 100.0, "held": 0.0,
+                     "short_usd": 9.0},
+                    {"product_id": "DRIFT-USD", "tracked": 100.0, "held": 95.0,
+                     "short_usd": 191.0}]}]}
+out = run(d, BASE_SNAP)
+ok("PHANTOM_BRANCH when a branch holds none of what it claims",
+   "PHANTOM_BRANCH" in out and "GHOST-USD" in out, out)
+ok("and it says they cannot trade at any price",
+   "cannot trade at any price" in out, out)
+ok("a branch merely SHORT is not called phantom",
+   "DRIFT-USD claims" not in out, out)
+ok("even though the short one carries far more dollars",
+   "INVENTORY_SHORT" in out, out)
+
+# A newly phantom branch escalates; a standing one does not.
+SNAP_PH = dict(BASE_SNAP, phantom=["GHOST-USD"])
+out = run(d, SNAP_PH)
+ok("a standing phantom stays a WARN",
+   not [l for l in out.splitlines()
+        if "PHANTOM_BRANCH" in l and l.strip().startswith("CRITICAL")], out)
+d2 = json.loads(json.dumps(d))
+d2["/api/trading-dashboard/grid-status/invariants"]["checks"][0]["short_positions"].append(
+    {"product_id": "NEW-USD", "tracked": 50.0, "held": 0.0, "short_usd": 5.0})
+out = run(d2, SNAP_PH)
+ok("a NEWLY phantom branch escalates to CRITICAL",
+   "CRITICAL" in out and "NEW-USD newly so" in out, out)
+
+# A branch holding everything it claims is not a finding at all.
+d3 = healthy()
+d3["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "coin_tracked_is_held",
+    "checks": [{"name": "coin_tracked_is_held", "status": "FAIL",
+                "short_usd": 1.0,
+                "short_positions": [{"product_id": "FINE-USD", "tracked": 100.0,
+                                     "held": 99.9, "short_usd": 1.0}]}]}
+ok("and a branch holding what it claims is never phantom",
+   "PHANTOM_BRANCH" not in run(d3, BASE_SNAP))
+
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]
 out = run(d, BASE_SNAP)
