@@ -3519,6 +3519,21 @@ async function closeAllGridSlices(btn) {
     }
 }
 
+// Threshold tiers for the horizon capture-rate bars (the share of entries
+// that ever clear the round trip, by how long you wait). One rule, applied
+// to every horizon: below 50% is orange and still developing; 50% and up is
+// green. 80%+ and 100% keep green and add a stronger indicator. An unmeasured
+// horizon (null) is neither - it is shown grey, never as a failing orange.
+function horizonCaptureTier(pct) {
+    if (pct === null || pct === undefined || !isFinite(pct)) {
+        return { tier: 'unmeasured', color: '#9ca3af', label: 'Not measured', icon: '&middot;', strong: false };
+    }
+    if (pct >= 100) return { tier: 'complete', color: '#10b981', label: 'Complete capture', icon: '&#9733;', strong: true };
+    if (pct >= 80)  return { tier: 'excellent', color: '#10b981', label: 'Excellent trajectory', icon: '&#9650;', strong: true };
+    if (pct >= 50)  return { tier: 'qualified', color: '#10b981', label: 'Qualified', icon: '&#10003;', strong: false };
+    return { tier: 'developing', color: '#f59e0b', label: 'Developing', icon: '&#9679;', strong: false };
+}
+
 // Real, live visual per grid branch - a horizontal real price axis showing
 // where the current live price sits against this branch's own reference
 // price and its real 1% buy/sell trigger levels, plus every real open
@@ -4706,13 +4721,18 @@ function renderGridOpportunityPanel(d) {
             const a = hs.share_clearing_cost_at_30m_pct, b = hs.share_clearing_cost_at_6h_pct;
             // One bar per horizon, drawn to the same scale, so the shape of
             // the answer is visible before any of the numbers are read.
+            // Colour and label come from horizonCaptureTier(), one rule for
+            // every horizon, so a bar turns green on its own the moment its
+            // real share crosses 50% - nobody edits this code for it.
             const bar = (label, pct) => {
                 const v = (pct === null || pct === undefined) ? 0 : pct;
+                const t = horizonCaptureTier(pct);
                 return `<div style="display:flex; align-items:center; gap:8px; padding:2px 0;">` +
                     `<span style="min-width:3.2em; color:var(--text-dim); text-align:right;">${label}</span>` +
                     `<span style="flex:1; background:rgba(128,128,128,.18); height:10px; border-radius:2px; overflow:hidden; max-width:220px;">` +
-                    `<span style="display:block; height:100%; width:${Math.max(0, Math.min(100, v)).toFixed(1)}%; background:${v >= 50 ? '#10b981' : '#f59e0b'};"></span></span>` +
-                    `<span style="min-width:3.5em; font-variant-numeric:tabular-nums;">${n(v === 0 && pct == null ? null : v.toFixed(1) + '%')}</span></div>`;
+                    `<span style="display:block; height:100%; width:${Math.max(0, Math.min(100, v)).toFixed(1)}%; background:${t.color};"></span></span>` +
+                    `<span style="min-width:3.5em; font-variant-numeric:tabular-nums;">${n(v === 0 && pct == null ? null : v.toFixed(1) + '%')}</span>` +
+                    `<span style="min-width:9em; font-size:0.85em; color:${t.color}; font-weight:${t.strong ? 700 : 500};">${t.icon} ${t.label}</span></div>`;
             };
             // Averaged across the coins, from the per-coin shares below.
             const share = h => {
@@ -4724,6 +4744,10 @@ function renderGridOpportunityPanel(d) {
             html += `<div style="color:var(--text-dim); margin-bottom:3px;">Share of entries that ever reach the ` +
                     `${n(hs.all_in_pct)}% round trip, by how long you wait:</div>`;
             ['30m', '2h', '6h', '24h', '72h'].forEach(h => { html += bar(h, share(h)); });
+            html += `<div style="margin-top:3px; font-size:0.85em; color:var(--text-dim);">` +
+                    `<span style="color:#f59e0b;">&#9632;</span> under 50% = developing &middot; ` +
+                    `<span style="color:#10b981;">&#9632;</span> 50%+ = qualified positive capture rate &mdash; moving toward excellence ` +
+                    `(80%+ excellent trajectory, 100% complete capture). Measured over the sample below, not a forecast.</div>`;
             if (a != null && b != null) {
                 html += `<div style="margin-top:5px;">The ledger above stops looking at <strong>30m</strong>, ` +
                         `where <strong>${a.toFixed(1)}%</strong> of entries clear cost. At <strong>6h</strong> it is ` +
