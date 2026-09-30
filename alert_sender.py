@@ -57,6 +57,29 @@ def diagnose() -> dict:
                   if k != WEBHOOK_ENV
                   and any(w in k.upper() for w in ("ALERT", "WEBHOOK", "SLACK",
                                                    "DISCORD", "NOTIF")))
+    # IS THERE ALREADY A WAY TO REACH HIM? This only ever looked for a
+    # webhook, so "nothing is being delivered" was true and offered no way
+    # out that did not involve setting a new secret. This app ALREADY sends
+    # email elsewhere - daily_brief.py and prop_bot.py use GMAIL_EMAIL /
+    # GMAIL_PASSWORD, routers/support.py uses SENDGRID_API_KEY - so if one
+    # of those is present in THIS process, a delivery path exists that
+    # needs no new credential from anybody.
+    #
+    # NAMES ONLY. Nothing here reads or reports a value, same contract as
+    # the rest of this function.
+    _email_sets = {
+        "gmail_smtp": ("GMAIL_EMAIL", "GMAIL_PASSWORD"),
+        "sendgrid": ("SENDGRID_API_KEY",),
+    }
+    fallbacks = {}
+    for name, keys in _email_sets.items():
+        present = [k for k in keys if (os.environ.get(k) or "").strip()]
+        fallbacks[name] = {
+            "variables": list(keys),
+            "present": sorted(present),
+            "complete": len(present) == len(keys),
+        }
+    _usable = sorted(n for n, v in fallbacks.items() if v["complete"])
     if url is None:
         why = (f"{WEBHOOK_ENV} is not present in this process at all. Either it "
                f"was set on a different service than the one running this app, "
@@ -77,6 +100,16 @@ def diagnose() -> dict:
         "looks_like_url": bool((url or "").strip().lower().startswith(
             ("http://", "https://"))),
         "similar_variables_seen": near,
+        "email_fallbacks": fallbacks,
+        "a_delivery_path_already_exists": bool(_usable),
+        "usable_without_a_new_secret": _usable,
+        "what_that_means": (
+            f"credentials for {', '.join(_usable)} are already present in this "
+            f"process, so alerts could be delivered by email without anyone "
+            f"setting a new secret. Nothing is wired to them yet."
+            if _usable else
+            "no email credentials are present either, so a webhook really is "
+            "the only route and ALERT_WEBHOOK_URL has to be set."),
         "why_not": why,
         "format_variable": FORMAT_ENV,
         "format_value": (os.getenv(FORMAT_ENV) or "generic (default)"),
