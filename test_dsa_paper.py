@@ -80,6 +80,13 @@ async def endpoint():
     src = open("routers/dsa_paper.py").read() + open("dsa_paper.py").read()
     check("no order endpoint anywhere", "/v2/orders" not in src and "place_order" not in src)
 
+import write_guard as wg
+check("write guard lets only the exact webhook through",
+      not wg.is_protected("POST", "/api/trading-dashboard/dsa-paper/webhook")
+      and wg.is_protected("POST", "/api/trading-dashboard/dsa-paper/webhook/x")
+      and wg.is_protected("POST", "/api/trading-dashboard/grid-status/force-buy")
+      and wg.is_protected("POST", "/api/trading-dashboard/dsa-paper/status"))
+
 asyncio.run(endpoint())
 print("ALL PASS" if not fails else f"{fails} FAILED")
 raise SystemExit(1 if fails else 0)

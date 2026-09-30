@@ -86,6 +86,13 @@ MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 # again.
 OPEN_PREFIXES = ("/api/auth/",)
 OPEN_SUFFIXES = ("/webhook/stripe",)
+#   dsa-paper/webhook  daily_stock_analysis posts its report here from GitHub
+#                      Actions. It authenticates with its own Bearer token
+#                      (DSA_WEBHOOK_TOKEN, checked in the handler, fails
+#                      closed) and can only write PAPER rows - the module has
+#                      no order call. Exact path, not a suffix, so nothing
+#                      else can ride on it.
+OPEN_EXACT = frozenset({"/api/trading-dashboard/dsa-paper/webhook"})
 
 
 def _configured_token() -> str:
@@ -106,6 +113,8 @@ def is_protected(method: str, path: str) -> bool:
     if method.upper() not in MUTATING:
         return False
     if any(path.startswith(p) for p in OPEN_PREFIXES):
+        return False
+    if path in OPEN_EXACT:
         return False
     if any(path.endswith(s) for s in OPEN_SUFFIXES):
         return False

@@ -13812,4 +13812,6 @@ touches a real account.
 - `GET /api/trading-dashboard/dsa-paper/status` (admin key) compares against SPY
   and the live Alpaca account over the same window. The panel is on
   `alpaca_dashboard.html`.
-- **No order endpoint exists in this code.** Tests: `test_dsa_paper.py` (25).
+- `write_guard.py` exempts exactly this webhook path (its own Bearer check
+  fails closed; it writes paper rows only).
+- **No order endpoint exists in this code.** Tests: `test_dsa_paper.py` (26).
