@@ -144,7 +144,26 @@ class ComprehensiveHealthMonitor:
             for error in errors_found:
                 log.warning(f"⚠ {error['type'].upper()}: {error['error']}")
         else:
-            log.info("✓ All systems healthy - comprehensive check passed")
+            # SAY WHAT WAS CHECKED, NOT "ALL SYSTEMS".
+            #
+            # This line sits in the same log stream as the bots, and on
+            # 2026-09-30 it printed directly beneath six "the price driving
+            # entries and exits for this symbol is not current" warnings and a
+            # "NO GRID STOP - nothing sells SHIB-USD automatically at any
+            # price". Both were true. Neither is anything this function looks
+            # at: it checks the database, required files, routers, endpoints,
+            # background tasks, resources, configuration and data integrity -
+            # the plumbing. It has no view of prices, positions, stops or bot
+            # signals at all.
+            #
+            # "All systems healthy" over the top of real warnings is how an
+            # operator learns to stop reading the lines above it. The check is
+            # correct; only its scope was overstated.
+            log.info("✓ Infrastructure healthy - database, files, routers, "
+                     "endpoints, tasks, resources, config and data integrity "
+                     "passed. This check does NOT look at prices, positions, "
+                     "stops or bot signals - warnings about those are above "
+                     "this line and still stand.")
 
         # Save metrics
         await self._save_metrics_to_db(metrics)
