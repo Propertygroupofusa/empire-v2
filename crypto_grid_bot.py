@@ -1825,6 +1825,50 @@ async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> f
     return entry_rate + exit_leg_rate
 
 
+async def _fee_safe_floor_check():
+    """Does the published fee-safe floor actually clear the MEASURED cost?
+
+    Returns a verdict, never a bare number, and never raises: a floor whose
+    own check is unreadable is UNKNOWN, not safe.
+    """
+    try:
+        floor = await fee_safe_floor_pct()
+    except Exception as exc:
+        return {"readable": False, "error": f"{type(exc).__name__}: {exc}",
+                "verdict": "the floor itself could not be computed - UNKNOWN, not safe"}
+    measured = _cached_real_round_trip_fee_rate
+    if not measured:
+        return {"readable": False, "floor_pct": floor,
+                "verdict": ("no measured round-trip fee cached yet, so whether this "
+                            "floor clears the real cost is UNKNOWN. It is NOT "
+                            "confirmed safe."),
+                "how_to_measure": "GET /api/trading-dashboard/grid-status/fee-reality"}
+    margin = floor - measured
+    return {
+        "readable": True,
+        "floor_pct": round(floor, 6),
+        "measured_round_trip_fee_rate": round(measured, 6),
+        "margin_pct": round(margin, 6),
+        "floor_clears_measured_cost": margin > 0,
+        "verdict": (
+            f"the floor is {floor * 100:.4f}% and a round trip really costs "
+            f"{measured * 100:.4f}%, so a step AT the floor loses "
+            f"{abs(margin) * 100:.4f}% on every completed cycle before adverse "
+            f"selection. The floor does not do what it exists to do."
+            if margin <= 0 else
+            f"the floor is {floor * 100:.4f}% against a measured round trip of "
+            f"{measured * 100:.4f}% - {margin * 100:.4f}% of margin."),
+        "why_it_can_be_too_low": (
+            "the floor prices the MAKER leg while maker-only is on, assuming a "
+            "leg that does not fill as a maker does not fill at all. The fills "
+            "say otherwise - taker fills happen - so the assumption, not the "
+            "arithmetic, is what fails."),
+        "this_changes_nothing": (
+            "a measurement beside the floor. Raising the floor is a live "
+            "trading decision and is not taken here."),
+    }
+
+
 async def fee_safe_floor_pct() -> float:
     """The real minimum grid spacing that can actually clear a round trip,
     priced against the WORST fee the round trip can really pay.
@@ -8435,6 +8479,29 @@ async def get_grid_status() -> dict:
         "effective_round_trip_fee_rate": (await expected_leg_fee_rate()) * 2,
         "real_fee_rate_observed": _cached_real_round_trip_fee_rate is not None,
         "fee_safe_min_grid_pct": await fee_safe_floor_pct(),
+        # IS THE FLOOR ACTUALLY ABOVE WHAT A ROUND TRIP COSTS? Measured.
+        #
+        # fee_safe_floor_pct() prices the MAKER leg while maker-only is on,
+        # on the stated ground that "a leg that does not fill as a maker does
+        # not fill at all", and its own docstring says the whole contract is
+        # that "a branch can never be set to a spacing whose full cycle is a
+        # guaranteed real loss".
+        #
+        # The fills contradict the premise. /grid-status/fee-reality measured
+        # 234 fills: 207 maker, 27 TAKER - an 88.5% maker rate, not 100% -
+        # for a real blended round trip of 0.9495%. The published floor is
+        # 0.90%. A step set at the floor therefore loses 0.0495% on every
+        # completed cycle before adverse selection, which is precisely the
+        # state the function exists to make impossible.
+        #
+        # It is also the exact number in the warning beside it: 0.9% is what
+        # took this fleet from +65.4% to -71.1%. The floor and the disaster
+        # are the same figure.
+        #
+        # This block CHANGES NOTHING - it sets the measured cost beside the
+        # floor so the contradiction cannot be read past. Raising the floor
+        # is a live trading decision and is the owner's.
+        "fee_safe_floor_check": await _fee_safe_floor_check(),
         # Measured, not assumed: how the legs REALLY filled. The floor
         # above prices the taker round trip; this is the evidence that
         # would justify relaxing it.
