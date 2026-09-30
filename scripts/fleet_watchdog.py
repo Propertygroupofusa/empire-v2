@@ -1031,24 +1031,61 @@ def main():
                     # naming on its own: it is reachable, unlike an underwater
                     # branch, and the only thing between it and a sale is a
                     # resting order the owner armed on purpose.
+                    #
+                    # "REACHABLE" MUST MEAN THE BRANCH'S OWN RULE, and this
+                    # check used a flat 1.0% - the PARKED-sell floor - against
+                    # every branch whether it was parked or not. d7f0bb7 fixed
+                    # exactly that error in _exit_threshold and missed this
+                    # second site, so the same wrong rule kept shipping here.
+                    #
+                    # It pointed at ALGO-USD again, the same branch as the
+                    # first time: a slice +6.67% above its own entry, reported
+                    # as "past the exit floor", while ALGO is NOT parked (1
+                    # slice, 3 levels) and its real rule is the rise trigger,
+                    # still +4.24% away. Acting on that line means cancelling a
+                    # protective order to free coin that would not have sold.
+                    # Telling the owner to give up protection for a sale that
+                    # cannot happen is the whole harm this file exists to stop.
+                    #
+                    # So the verdict comes from _exit_threshold - the one place
+                    # that models both live rules - and a branch that cannot
+                    # sell is named as LOCKED_AND_NOT_READY instead, because
+                    # its lock is not what is holding the money.
                     lk = {c.get("product_id"): c for c in pos}
                     for b2 in branches:
                         c = lk.get(b2.get("product_id"))
                         if not c or (c.get("locked_pct") or 0) < 50:
                             continue
                         sl2 = b2.get("slices") or []
-                        good = [x for x in sl2
-                                if (x.get("unrealized_net_pct") or 0) >= 0.010]
-                        if not good:
+                        if not sl2:
                             continue
-                        best = max((x.get("unrealized_net_pct") or 0) for x in good)
-                        flag(WARN, "LOCKED_PROFIT",
-                             f"{b2['product_id']} has a slice at +{best * 100:.2f}% "
-                             f"- past the exit floor - but {c.get('locked_pct')}% of "
-                             f"its coin ({money(c.get('locked_usd'))}) is reserved by "
-                             f"a resting order. The profit is reachable; the coin is "
-                             f"not. Cancelling that order frees it and gives up the "
-                             f"protection it was armed for - the owner's call.")
+                        best = max((x.get("unrealized_net_pct") or 0) for x in sl2)
+                        can_sell, rule, gap_pct = _exit_threshold(b2)
+                        if can_sell is None:
+                            gaps.append(
+                                f"{b2['product_id']} is {c.get('locked_pct')}% locked "
+                                f"and its sell rule is unreadable ({rule}) - whether "
+                                f"that lock is costing anything is UNKNOWN")
+                            continue
+                        if can_sell:
+                            flag(WARN, "LOCKED_PROFIT",
+                                 f"{b2['product_id']} can sell RIGHT NOW by its own "
+                                 f"rule ({rule}; best slice +{best * 100:.2f}%) but "
+                                 f"{c.get('locked_pct')}% of its coin "
+                                 f"({money(c.get('locked_usd'))}) is reserved by a "
+                                 f"resting order. The sale is available; the coin is "
+                                 f"not. Cancelling that order frees it and gives up "
+                                 f"the protection it was armed for - the owner's call.")
+                        elif (best or 0) >= 0.010:
+                            flag(INFO, "LOCKED_AND_NOT_READY",
+                                 f"{b2['product_id']} has a slice at +{best * 100:.2f}% "
+                                 f"and {c.get('locked_pct')}% of its coin "
+                                 f"({money(c.get('locked_usd'))}) locked - but it "
+                                 f"CANNOT sell yet anyway ({rule}"
+                                 + (f", {gap_pct:.2f}% still to go" if gap_pct is not None else "")
+                                 + "). A slice above its own entry is not a sale the "
+                                 f"rule allows. Freeing the coin would NOT book this "
+                                 f"profit, so the lock is not what is costing you.")
 
     # ---- 7. Is the loop actually running -----------------------------------
     hb = grid.get("heartbeat") or {}

@@ -1037,10 +1037,60 @@ b = d["/api/trading-dashboard/grid-status"]["branches"][0]
 b["slices"] = [{"opened_at": "2026-09-29T10:00:00Z", "qty": 100.0,
                 "entry_price": 1.0, "entry_fee_rate": 0.0035, "adopted": False,
                 "slice_state": "ACCOUNTED", "unrealized_net_pct": 0.0221}]
+_fire_rise_trigger(d)
 out = run(d, BASE_SNAP)
-ok("LOCKED_PROFIT when a slice past the floor sits on reserved coin",
+ok("LOCKED_PROFIT when a branch that CAN sell sits on reserved coin",
    "LOCKED_PROFIT" in out, out)
 ok("and it says whose decision freeing it is", "the owner's call" in out, out)
+
+# THE ALGO CASE, and the reason this check was rewritten. A slice can sit
+# well above its own entry while the BRANCH cannot sell at all - the rule is
+# price vs the branch reference, not the slice's gain. Calling that
+# "reachable" tells the owner to cancel a protective order to free coin that
+# would not have sold. It pointed at ALGO-USD twice before it was caught.
+d3 = healthy()
+d3["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "grid_inventory_is_free",
+    "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
+                "locked_usd": 142.18,
+                "locked_positions": [{"product_id": "AAA-USD", "locked_pct": 100.0,
+                                      "locked_usd": 142.18}],
+                "unreadable": []}]}
+b3 = d3["/api/trading-dashboard/grid-status"]["branches"][0]
+b3["slices"] = [{"opened_at": "2026-09-29T10:00:00Z", "qty": 100.0,
+                 "entry_price": 1.0, "entry_fee_rate": 0.0035, "adopted": False,
+                 "slice_state": "ACCOUNTED", "unrealized_net_pct": 0.0667}]
+# Branch is NOT parked (1 slice, 3 levels) and the price is BELOW its trigger.
+b3["num_levels"] = 3
+b3["current_price"] = b3["reference_price"] * 0.99
+out3 = run(d3, BASE_SNAP)
+ok("a +6.67% slice on a branch that CANNOT sell is not LOCKED_PROFIT",
+   "LOCKED_PROFIT" not in out3, out3)
+ok("it is reported as LOCKED_AND_NOT_READY instead",
+   "LOCKED_AND_NOT_READY" in out3, out3)
+ok("and it says freeing the coin would NOT book the profit",
+   "would NOT book this profit" in out3, out3)
+ok("and it names the rule and the distance still to go",
+   "rise trigger" in out3 and "still to go" in out3, out3)
+
+# An unreadable sell rule on a locked branch is a GAP, never a verdict.
+d4 = healthy()
+d4["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "grid_inventory_is_free",
+    "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
+                "locked_usd": 50.0,
+                "locked_positions": [{"product_id": "AAA-USD", "locked_pct": 100.0,
+                                      "locked_usd": 50.0}],
+                "unreadable": []}]}
+b4 = d4["/api/trading-dashboard/grid-status"]["branches"][0]
+b4["slices"] = [{"opened_at": "2026-09-29T10:00:00Z", "qty": 100.0,
+                 "entry_price": 1.0, "entry_fee_rate": 0.0035, "adopted": False,
+                 "slice_state": "ACCOUNTED", "unrealized_net_pct": 0.05}]
+b4["num_levels"] = 3
+b4["reference_price"] = None
+out4 = run(d4, BASE_SNAP)
+ok("an unreadable sell rule on locked coin is a GAP, not a claim",
+   "LOCKED_PROFIT" not in out4 and "is UNKNOWN" in out4, out4)
 
 # Not a finding when the coin is free, however profitable the slice is.
 d2 = healthy()
