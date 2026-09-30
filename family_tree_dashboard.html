@@ -1165,6 +1165,7 @@
          They are not on the page any more, so they cannot be flipped by
          accident. Everything below is READ-ONLY and measured. -->
     <div id="grid-governs-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
+    <div id="grid-ratchet" style="margin-bottom: 12px;"></div>
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
@@ -8905,6 +8906,60 @@ async function loadCombinedProgress(isRetry) {
     }
 }
 
+// PROFIT RATCHET - the locked floor on the whole Coinbase account. Each 5%
+// rise locks a new floor; below it the bot opens no new buys (sells keep
+// running). Read from the database-stored floor, so it shows the same state
+// the trading service is acting on.
+async function loadProfitRatchet() {
+    const el = document.getElementById('grid-ratchet');
+    if (!el) return;
+    let d;
+    try { d = await apiGet('/grid-status/profit-ratchet', 30000); }
+    catch (e) { el.innerHTML = ''; return; }
+    if (!d.active) {
+        el.innerHTML = `<div style="font-size:0.8em; color:var(--text-dim);">🔒 Profit lock is OFF.</div>`;
+        return;
+    }
+    const f = d.floor_usd, nw = d.net_worth_usd, nt = d.next_tier_usd;
+    const blocked = d.buys_blocked === true;
+    const toNext = (nw != null && nt != null) ? Math.max(nt - nw, 0) : null;
+    const pct = (f && nt && nw != null) ? Math.max(0, Math.min(100, (nw - f) / (nt - f) * 100)) : 0;
+    const color = blocked ? 'var(--red)' : 'var(--green)';
+    el.innerHTML = `
+      <div style="border:1px solid var(--border); border-radius:10px; padding:12px 14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px;">
+          <strong style="color:var(--navy);">🔒 Profit lock — ${(d.step_pct*100).toFixed(0)}% tiers</strong>
+          <span style="font-size:0.75em; font-weight:700; color:${color};">
+            ${blocked ? 'BELOW FLOOR · new buys paused, sells continue' : (d.buys_blocked === false ? 'ABOVE FLOOR · trading normally' : 'checking…')}</span>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; margin-top:8px; font-size:0.82em;">
+          <div><div style="color:var(--text-dim);">Locked floor</div><strong>${f != null ? fmtUsd(f) : '—'}</strong></div>
+          <div><div style="color:var(--text-dim);">Account now</div><strong>${nw != null ? fmtUsd(nw) : '—'}</strong></div>
+          <div><div style="color:var(--text-dim);">Next tier</div><strong>${nt != null ? fmtUsd(nt) : '—'}</strong></div>
+          <div><div style="color:var(--text-dim);">To next lock</div><strong>${toNext != null ? fmtUsd(toNext) : '—'}</strong></div>
+        </div>
+        <div style="height:6px; border-radius:3px; background:#eef1f6; margin-top:8px; overflow:hidden;">
+          <i style="display:block; height:100%; width:${pct}%; background:var(--green);"></i></div>
+        <div style="font-size:0.72em; color:var(--text-dim); margin-top:6px; line-height:1.45;">
+          The floor only ever moves up. It stops the bot adding new money while the account is under it;
+          it cannot stop coin already held from moving with the market.
+          <a href="#" onclick="rebaseProfitRatchet(); return false;" style="color:inherit;">Reset floor to today (after a withdrawal)</a></div>
+      </div>`;
+}
+async function rebaseProfitRatchet() {
+    if (!confirm('Reset the locked floor to the account value right now? Only needed after you withdraw money.')) return;
+    try {
+        const res = await fetch(API_BASE + '/grid-status/profit-ratchet', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rebase: true }) });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        loadProfitRatchet();
+    } catch (e) { alert('Could not reset: ' + e.message); }
+}
+
+loadProfitRatchet();
+setInterval(loadProfitRatchet, 60000);
 refresh();
 loadTicker();
 loadActivityFeed();
