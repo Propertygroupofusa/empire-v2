@@ -288,6 +288,48 @@ def main():
             print("   That is idle capital INSIDE branches plus free cash - a different")
             print("   cut from the parked total above. The two are not additive.")
 
+    # ---- 4b. Would NEW money help? ---------------------------------------
+    #
+    # Asked directly: "how can we take three to four hundred dollars we
+    # already have and deploy it so it starts making money for us." The
+    # honest answer is a measurement, not an opinion, and it turned out to
+    # refute the premise: the branches that could spend new money are
+    # already sitting on idle capital they are not spending. They are
+    # waiting on a dip that passes the gate, not on funding.
+    print("\n4b. WOULD NEW MONEY HELP? - only branches that can BUY can use it")
+    takers = []
+    for b in branches:
+        sl = b.get("slices") or []
+        levels = b.get("num_levels") or 0
+        adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
+        parked = len(sl) >= levels or adopted_only
+        if parked or b.get("buys_paused") or b.get("drawdown_breached"):
+            continue
+        alloc = b.get("allocated_usd") or 0.0
+        spent = sum((x.get("qty") or 0) * (x.get("entry_price") or 0) for x in sl)
+        takers.append({
+            "product": b.get("product_id"),
+            "idle": alloc - spent,
+            "free_rungs": levels - len(sl),
+            "realized": realized.get(b.get("product_id"), 0.0),
+        })
+    if not takers:
+        print("   NO branch can buy right now. Every one is parked, breakered or "
+              "paused, so new money would sit as cash. Funding is not the blocker.")
+    else:
+        idle_here = sum(t["idle"] for t in takers)
+        print(f"   {len(takers)} of {len(branches)} branches can take new money at all, "
+              f"and they ALREADY hold {money(idle_here)} of idle capital:")
+        for t in sorted(takers, key=lambda x: -x["realized"]):
+            print(f"     {t['product']:<11} idle {money(t['idle']):>10}  "
+                  f"{t['free_rungs']} free rung(s)  realized {money(t['realized'])}")
+        print(f"   Adding cash makes that {money(idle_here)} into a larger idle pile.")
+        print("   These branches are waiting for a dip their gate accepts, NOT for")
+        print("   funding. New money buys nothing until a buy fires, and the same")
+        print("   dip fires it whether the branch holds this much or more.")
+        print("   Deciding what a branch is allocated is a money-moving call and is")
+        print("   the owner's, never this script's.")
+
     # ---- 5. Owner decisions, named and left alone -----------------------
     print("\n5. OWNER DECISIONS - named here, NOT taken here")
     over = [r for r in rows if r["share_pct"] >= CONCENTRATION_CEILING_PCT]
