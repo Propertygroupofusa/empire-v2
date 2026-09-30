@@ -7848,6 +7848,89 @@ async def get_profit_locks():
 
 @router.get("/adaptive-capital-fleet-status")
 @router.get("/capital-fleet-status")
+@router.get("/capital-mobility")
+async def capital_mobility():
+    """Why is capital not cycling? Read-only. Places nothing, moves nothing.
+
+    The operational question shifted from "am I profitable?" to "why isn't
+    capital cycling?", and Portfolio Value and Net P&L cannot answer the
+    second one. This does, with the split that matters.
+
+    IT IS THREE FIGURES, NOT ONE. A single "mobility %" was proposed and
+    measured wrong on this fleet: 18.7% could buy, 1.8% could sell and 0.0%
+    could do both, so the blended number would have read ~20% while not one
+    dollar could complete a round trip. can_buy and can_sell are different
+    capabilities - buy-only is ACCUMULATING, sell-only is DRAINING - and are
+    never averaged here.
+
+    THE TWO BLOCKERS OVERLAP AND ARE NOT ADDITIVE. Coin that is missing sits
+    inside branches that are also parked; live, 10 of the 11 short branches
+    were parked too. Summing them reports more frozen capital than the fleet
+    holds, so the overlap is measured and named.
+
+    The rule comes from trigger_model.py, the one canonical reader, which
+    test_trigger_consistency.py asserts against crypto_grid_bot.py's own
+    source. Nothing here re-derives it.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import trigger_model
+
+    try:
+        grid = await crypto_grid_bot_module.get_grid_status()
+    except Exception as exc:
+        raise HTTPException(status_code=503,
+                            detail=f"grid status unreadable: {type(exc).__name__}: {exc}")
+    branches = (grid or {}).get("branches") or []
+    if not branches:
+        return {"readable": False,
+                "detail": "no branches in grid status - mobility is UNKNOWN, not zero"}
+
+    out = {"readable": True, "as_of": datetime.utcnow().isoformat() + "Z",
+           "mobility": trigger_model.mobility(branches)}
+
+    parked = {b.get("product_id") for b in branches if trigger_model.is_parked(b)}
+    out["parked"] = {
+        "usd": round(sum((b.get("allocated_usd") or 0.0)
+                         for b in branches if trigger_model.is_parked(b)), 2),
+        "branches": len(parked),
+    }
+
+    # Missing inventory, and how much of it the parked figure already counts.
+    short_usd, short_products = None, set()
+    try:
+        # Calls the invariants endpoint function directly rather than
+        # reimplementing its checks - one source, and it cannot drift.
+        inv = await grid_invariants_endpoint()
+        for chk in ((inv or {}).get("checks") or []):
+            if chk.get("name") == "coin_tracked_is_held":
+                short_usd = chk.get("short_usd")
+                short_products = {c.get("product_id")
+                                  for c in (chk.get("short_positions") or [])}
+    except Exception as exc:
+        out["missing_inventory_gap"] = (
+            f"invariants unreadable: {type(exc).__name__}: {exc} - the missing-"
+            f"inventory figure is UNKNOWN this pass, which is not zero")
+
+    overlap = sorted(short_products & parked)
+    out["blockers"] = {
+        "missing_inventory_usd": short_usd,
+        "frozen_in_parked_usd": out["parked"]["usd"],
+        "overlapping_products": overlap,
+        "DO_NOT_ADD_THESE": (
+            f"{len(overlap)} branch(es) are BOTH short of coin and parked, so the "
+            f"two figures above share dollars. Adding them reports more frozen "
+            f"capital than exists." if overlap else
+            "the two figures are measured on different cuts and are still not "
+            "additive - check the overlap before combining them"),
+        "which_is_worse": (
+            "missing inventory. A parked branch frees when price moves; coin "
+            "that is not held cannot be sold at ANY price."),
+    }
+    out["is_a_measurement_not_a_change"] = True
+    return out
+
+
 @router.get("/grid-status")
 async def get_grid_status_endpoint():
     if crypto_grid_bot_module is None:

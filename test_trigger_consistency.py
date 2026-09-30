@@ -139,6 +139,41 @@ ok(f"over {len(cases)} generated branches, no disagreement",
    f"{len(mismatch2)} mismatch(es), first: {mismatch2[0] if mismatch2 else ''}")
 
 print()
+print("trigger_model.can_sell - the canonical reader - agrees with the executor")
+import trigger_model as tm
+
+mismatch3 = [(b, reference_can_sell(b), tm.can_sell(b))
+             for b in cases if reference_can_sell(b) != tm.can_sell(b)]
+ok(f"over {len(cases)} generated branches, no disagreement",
+   not mismatch3,
+   f"{len(mismatch3)} mismatch(es), first: {mismatch3[0] if mismatch3 else ''}")
+ok("and it is the module the /capital-mobility endpoint imports",
+   "import trigger_model" in open(os.path.join(HERE, "routers", "trading_dashboard.py")).read()
+   or "from trigger_model" in open(os.path.join(HERE, "routers", "trading_dashboard.py")).read())
+
+print()
+print("can_buy counts the breaker, not just the parked rule")
+ok("a breakered branch with a free rung cannot buy",
+   tm.can_buy({"num_levels": 3, "slices": [], "drawdown_breached": True}) is False)
+ok("a buys_paused branch with a free rung cannot buy",
+   tm.can_buy({"num_levels": 3, "slices": [], "buys_paused": True}) is False)
+ok("an ordinary branch with a free rung can",
+   tm.can_buy({"num_levels": 3, "slices": []}) is True)
+
+print()
+print("mobility never blends the two capabilities")
+m = tm.mobility(cases[:200])
+ok("can_buy, can_sell and can_do_both are reported separately",
+   all(k in m for k in ("can_buy", "can_sell", "can_do_both")))
+ok("can_do_both is never larger than either leg",
+   m["can_do_both"]["usd"] <= m["can_buy"]["usd"]
+   and m["can_do_both"]["usd"] <= m["can_sell"]["usd"],
+   str(m["can_do_both"]) + " vs " + str(m["can_buy"]) + " / " + str(m["can_sell"]))
+ok("unreadable branches are in none of the three",
+   m["sell_unreadable"]["branches"] == sum(1 for b in cases[:200]
+                                           if tm.can_sell(b) is None))
+
+print()
 print("the mutants the invariant exists to kill")
 
 def _mut(fn_name, b):

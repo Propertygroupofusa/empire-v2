@@ -4039,8 +4039,67 @@ async function renderExecutionInventory() {
         return;
     }
 
+    // CAPITAL BLOCKERS - why capital is not cycling.
+    //
+    // Three figures, never one. A single "mobility %" measured 20% on this
+    // fleet while 0.0% could actually complete a round trip, because can-buy
+    // and can-sell are different capabilities: buy-only is ACCUMULATING,
+    // sell-only is DRAINING. The server computes all of it from
+    // trigger_model.py, the one canonical reader, so this card renders
+    // numbers and does NOT re-derive the sell rule - re-deriving it is how
+    // three separate drifts shipped.
+    let mob = null, mobErr = null;
+    try {
+        const r = await fetch('/api/trading-dashboard/capital-mobility');
+        mob = await r.json();
+        if (!r.ok) { mobErr = 'HTTP ' + r.status; mob = null; }
+    } catch (e) { mobErr = String(e); }
+
     let h = '<div class="panel" style="padding:10px 12px;">';
     h += '<div style="font-weight:600; margin-bottom:6px;">Execution &amp; inventory</div>';
+
+    if (mobErr || !mob || mob.readable === false) {
+        h += '<div style="border-left:3px solid #f59e0b; padding:4px 10px; margin-bottom:10px;">'
+           + '<strong>Capital mobility: UNREADABLE.</strong> <span style="color:var(--text-dim);">'
+           + escText(mobErr || (mob && mob.detail) || 'no answer')
+           + ' &mdash; this is a GAP, not an all-clear.</span></div>';
+    } else {
+        const m = mob.mobility || {};
+        const leg = (o, label, note) => {
+            const pct = (o && o.pct !== null && o.pct !== undefined) ? o.pct.toFixed(1) + '%' : '&mdash;';
+            return '<div style="display:flex; justify-content:space-between; gap:10px; padding:2px 0;">'
+                 + '<span style="color:var(--text-dim);">' + label + '</span>'
+                 + '<span style="font-variant-numeric:tabular-nums;"><strong>' + pct + '</strong> &middot; '
+                 + usd(o && o.usd) + ' &middot; ' + ((o && o.branches) || 0) + ' branch(es)'
+                 + (note ? ' <span style="color:var(--text-dim);">' + note + '</span>' : '')
+                 + '</span></div>';
+        };
+        const both = (m.can_do_both && m.can_do_both.usd) || 0;
+        h += '<div style="border-left:3px solid ' + (both > 0 ? 'var(--green)' : '#f59e0b')
+           + '; padding:6px 10px; margin-bottom:10px;">';
+        h += '<div style="font-weight:600; margin-bottom:4px;">Capital blockers &mdash; why capital is not cycling</div>';
+        h += leg(m.can_buy, 'can BUY (open a rung)');
+        h += leg(m.can_sell, 'can SELL (close a rung)');
+        h += leg(m.can_do_both, 'can do BOTH &mdash; a real round trip');
+        if (m.sell_unreadable && m.sell_unreadable.branches)
+            h += leg(m.sell_unreadable, 'sell rule UNREADABLE', '(in none of the above)');
+        h += '<div style="font-size:0.78em; color:var(--text-dim); margin-top:4px;">'
+           + 'These are three capabilities, not one number. Buy-only is accumulating; '
+           + 'sell-only is draining. Only the third means a complete cycle is available now.'
+           + '</div>';
+        const bl = mob.blockers || {};
+        h += '<div style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border);">';
+        h += '<div style="display:flex; justify-content:space-between;"><span style="color:var(--text-dim);">'
+           + 'missing inventory (claimed, not held)</span><span>' + usd(bl.missing_inventory_usd) + '</span></div>';
+        h += '<div style="display:flex; justify-content:space-between;"><span style="color:var(--text-dim);">'
+           + 'frozen in parked branches</span><span>' + usd(bl.frozen_in_parked_usd) + '</span></div>';
+        h += '<div style="font-size:0.78em; color:#f59e0b; margin-top:3px;"><strong>Do not add these two.</strong> '
+           + escText(bl.DO_NOT_ADD_THESE || '') + '</div>';
+        if (bl.which_is_worse)
+            h += '<div style="font-size:0.78em; color:var(--text-dim);">Worse of the two: '
+               + escText(bl.which_is_worse) + '</div>';
+        h += '</div></div>';
+    }
 
     // ---- Does the fleet hold the coin it claims? ----
     const check = inv && (inv.checks || []).find(c => c.name === 'coin_tracked_is_held');
