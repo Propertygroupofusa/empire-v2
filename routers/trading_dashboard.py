@@ -311,6 +311,52 @@ def _bot_pl(bot: TradingBotState) -> float:
     return bot.base_capital - baseline
 
 
+async def _alpaca_realized_record(session: aiohttp.ClientSession) -> dict:
+    """The account's REAL closed-trade record, or an explicit UNKNOWN.
+
+    Never returns zeros on failure. A fetch that did not happen and a
+    genuine flat record are different facts, and this figure is read to
+    decide whether a strategy is working - the most expensive place in
+    the app to confuse the two.
+    """
+    import closed_trades
+    try:
+        params = {"status": "closed", "direction": "asc", "limit": "500"}
+        async with session.get(f"{ALPACA_BASE_URL}/v2/orders",
+                               headers=ALPACA_HEADERS, params=params) as r:
+            if r.status != 200:
+                return {"readable": False,
+                        "reason": f"HTTP {r.status} fetching order history"}
+            orders = await r.json()
+    except Exception as exc:
+        return {"readable": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    out = closed_trades.pair_round_trips(orders, _KNOWN_ORDER_SOURCES)
+    t = out["totals"]
+    n = t["round_trips"]
+    if not n:
+        return {"readable": True, "round_trips": 0, "net_pnl": 0.0,
+                "winners": 0, "losers": 0, "win_rate_pct": None,
+                "avg_per_trade": None,
+                "note": "No closed round trip in the fetched order window."}
+    net = t["realised_pnl"]
+    return {
+        "readable": True,
+        "round_trips": n,
+        "net_pnl": round(net, 2),
+        "winners": t["winners"],
+        "losers": t["losers"],
+        "win_rate_pct": round(t["winners"] / n * 100, 1),
+        "avg_per_trade": round(net / n, 4),
+        "is_losing": net < 0,
+        "orders_scanned": len(orders) if isinstance(orders, list) else 0,
+        "note": ("This is what the trading EARNED. The per-bot 'profit' "
+                 "field below is a capital-bucket delta floored at zero, "
+                 "so it reads 0.00 for a bucket that is down - it is not "
+                 "this number and never was."),
+    }
+
+
 async def _fetch_dividend_activities(session: aiohttp.ClientSession) -> list:
     """Real dividend cash actually paid into the account, from Alpaca's
     account-activities history (activity_type=DIV) - not a projection or
@@ -5697,6 +5743,21 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
             if sym:
                 opened_at_by_symbol[sym] = await _fetch_position_opened_at(session, sym)
 
+        # THE REAL TRADING RECORD, on the page the owner actually reads.
+        # This account ran 232 closed round trips to a net of -$3.20 at a
+        # 32.8% win rate, and this endpoint showed "profit: 0.00" for all
+        # eight buckets the entire time - because _bot_profit floors at 0
+        # and _bot_pl measures a bucket's capital delta, which is not the
+        # same question as "what did the trading actually earn". Nobody
+        # could see a losing strategy for 141 days, over which equity
+        # ranged $973.03 to $1,016.50 and never grew.
+        #
+        # Reuses closed_trades.pair_round_trips - the same tested pure
+        # function /trades/closed serves - rather than a second copy of
+        # the pairing arithmetic, because two implementations of "what did
+        # we earn" is how the two numbers start disagreeing.
+        realized = await _alpaca_realized_record(session)
+
     try:
         equity = float(account.get("equity", 0))
         cash = float(account.get("cash", 0))
@@ -5764,6 +5825,12 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "auto_close_profit_pct": ALPACA_AUTO_CLOSE_PROFIT_PCT,
         "auto_close_max_hold_days": ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS,
         "profit_skim_pct": ALPACA_PROFIT_SKIM_PCT,
+        "realized": realized,
+        "bot_profit_is_floored_at_zero": (
+            "bots[].profit is max(0, pl) for withdrawal eligibility, so a "
+            "bucket that is DOWN reports 0.00 rather than a negative "
+            "number. Read bots[].pl for the signed bucket delta, and "
+            "realized.net_pnl for what the trading actually earned."),
         "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2), "pl": round(_bot_pl(b), 2)} for b in bots],
         "positions": [
             {
