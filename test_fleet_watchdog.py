@@ -54,6 +54,8 @@ def healthy():
             "heartbeat": {"age_seconds": 20},
             "maker_only_skipped_cycles": {"buy": 1},
             "maker_expiry_drift": {"buy": 1},
+            "real_round_trip_fee_rate": 0.015,
+            "maker_only_active": True,
             "order_refusals": {"available": True, "by_product": {},
                                "product_rules_unreadable": []},
             # A fleet closing about once an hour, last close an hour ago.
@@ -625,6 +627,37 @@ d3 = healthy()
 d3["/api/trading-dashboard/account-census"] = {"available": False}
 ok("an unavailable census is a gap, not a quiet pass",
    "account-census unavailable" in run(d3, BASE_SNAP))
+
+# MAKER_DEPENDENT_STEP: a branch above the ACTIVE floor and below the one
+# that would apply if maker-only came off. fee_floor.py exists because a
+# target under the round trip means a WINNING trade still loses; the fleet's
+# live floor is computed off the maker round trip, so that safety is resting
+# on an environment variable. Live it finds BTC-USD at 1.38% against a 1.70%
+# taker floor, while maker_only_holds is already a broken invariant.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["grid_pct"] = 0.0138
+out = run(d, BASE_SNAP)
+ok("MAKER_DEPENDENT_STEP when a step clears only the maker floor",
+   "MAKER_DEPENDENT_STEP" in out, out)
+ok("and it names the taker floor it fails", "1.70% taker floor" in out, out)
+
+# A step above the taker floor is not a finding - most of the fleet is here.
+ok("but NOT when the step clears the taker floor too",
+   "MAKER_DEPENDENT_STEP" not in run(healthy(), BASE_SNAP))
+
+# With maker-only OFF the floor is already the taker one, so this particular
+# warning has nothing to add - the fleet's own floor covers it.
+d2 = healthy()
+d2["/api/trading-dashboard/grid-status"]["branches"][0]["grid_pct"] = 0.0138
+d2["/api/trading-dashboard/grid-status"]["maker_only_active"] = False
+ok("and not when maker-only is already off",
+   "MAKER_DEPENDENT_STEP" not in run(d2, BASE_SNAP))
+
+# An unreadable fee rate is UNKNOWN, never a quiet pass.
+d3 = healthy()
+del d3["/api/trading-dashboard/grid-status"]["real_round_trip_fee_rate"]
+ok("an unreadable taker round trip is reported as a gap",
+   "cannot judge step safety" in run(d3, BASE_SNAP))
 
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]

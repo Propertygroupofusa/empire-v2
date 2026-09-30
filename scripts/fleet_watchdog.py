@@ -431,6 +431,40 @@ def main():
                  f"managed by no grid branch - {100 - (share or 0):.1f}% of the "
                  f"account. Nothing buys or sells it; it only moves on price.")
 
+    # ---- 4e. A step that is safe only while maker-only holds ---------------
+    #
+    # fee_floor.py exists because the same defect appeared in four places in
+    # one evening: a target below the round-trip fee, where a WINNING trade
+    # still loses. The fleet's live floor is computed off the MAKER round
+    # trip, which is correct while maker-only is armed and wrong the instant
+    # it is not - the market fallback returns, the round trip roughly doubles,
+    # and a step that cleared 0.90% no longer clears 1.70%.
+    #
+    # So a branch can sit above the active floor and below the one that would
+    # apply if an environment variable changed. That is not a bug today; it is
+    # a dependency worth naming, because nothing else states it. Measured when
+    # written: BTC-USD at 1.38%, and maker_only_holds already BROKEN with
+    # taker legs observed after maker-only was armed.
+    _rt_taker = grid.get("real_round_trip_fee_rate")
+    _maker_on = grid.get("maker_only_active")
+    if _rt_taker is None:
+        gaps.append("taker round trip unreadable - cannot judge step safety")
+    elif _maker_on:
+        _taker_floor = (_rt_taker + 0.002) * 100
+        _exposed = []
+        for b in branches:
+            gp = (b.get("grid_pct") or 0) * 100
+            if 0 < gp < _taker_floor:
+                _exposed.append((b["product_id"], gp))
+        if _exposed:
+            cur["maker_dependent"] = sorted(p2 for p2, _ in _exposed)
+            flag(WARN, "MAKER_DEPENDENT_STEP",
+                 f"{len(_exposed)} branch(es) clear the fee floor ONLY because "
+                 f"maker-only is on: "
+                 + ", ".join(f"{p2} {gp:.2f}%" for p2, gp in sorted(_exposed, key=lambda x: x[1]))
+                 + f" — all below the {_taker_floor:.2f}% taker floor. If "
+                 f"maker-only comes off, a winning trade there nets a loss.")
+
     # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
     #
     # The grid marks an adopted slice against a reference price nobody paid,
