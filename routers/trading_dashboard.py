@@ -1295,6 +1295,12 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                     if price is not None:
                         current_price_by_bot[bot_name] = price
                 real_balance, balance_err = await engine.get_usd_balance(session)
+                if real_balance is None:
+                    # One retry. A single 429/timeout on the key the trading
+                    # loop is also using is the common failure, and it was
+                    # blanking the whole Coinbase figure for a full poll.
+                    await asyncio.sleep(1.0)
+                    real_balance, balance_err = await engine.get_usd_balance(session)
                 # Real, read-only visibility into a confirmed-live confusion:
                 # get_usd_balance() (and therefore spendable_for_spawn below)
                 # only ever sees the literal USD account - a real balance
@@ -2045,11 +2051,11 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         # would recreate exactly that phantom crash.
         crypto_equity = crypto_data["real_crypto_net_worth_usd"]
         if crypto_equity is None:
+            missing = crypto_data.get("real_crypto_net_worth_missing") or []
             crypto_error = (
-                "Real Coinbase net worth couldn't be fully priced this poll "
-                "(a real balance or live price fetch came back empty) - skipped "
-                "rather than reported as a partial total."
-            )
+                ("Could not read: " + ", ".join(missing) + ". ") if missing else ""
+            ) + ("The Coinbase total is skipped this poll rather than shown "
+                 "as a partial number.")
     except Exception as exc:
         crypto_error = str(exc)
         log.warning(f"[dashboard] combined-equity: crypto side unavailable this poll: {exc}")

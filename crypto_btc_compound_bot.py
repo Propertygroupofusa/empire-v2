@@ -1253,6 +1253,51 @@ async def get_best_bid_ask(session, product_id: str = PRODUCT_ID):
         return None, None
 
 
+async def get_mid_prices(session, product_ids, chunk: int = 50) -> dict:
+    """Real mid price (bid+ask)/2 for many products in ONE request per chunk.
+
+    Returns {product_id: price_or_None}. A product the venue did not price
+    comes back None - never a fabricated or stale number.
+
+    WHY THIS EXISTS. Valuing the grid's holdings used to download a full
+    candle history per coin (get_price_and_volatility) one after another -
+    ~23 sequential requests on every dashboard poll, on the same API key the
+    trading loop is using. Any one timeout or 429 blanked the whole Coinbase
+    net-worth figure, because that total is (correctly) all-or-nothing. A
+    price needs one top-of-book read, not 300 candles, and one request can
+    carry every product.
+    """
+    ids = [p for p in dict.fromkeys(product_ids or ()) if p]
+    out = {p: None for p in ids}
+    path = "/api/v3/brokerage/best_bid_ask"
+    for i in range(0, len(ids), max(1, chunk)):
+        part = ids[i:i + chunk]
+        try:
+            async with session.get(COINBASE_BASE_URL + path,
+                                   headers=_auth_headers("GET", path),
+                                   params=[("product_ids", p) for p in part],
+                                   timeout=15) as r:
+                if r.status != 200:
+                    log.warning(f"[PRICES] best_bid_ask HTTP {r.status} for {len(part)} product(s)")
+                    continue
+                books = (await r.json()).get("pricebooks") or []
+        except Exception as e:
+            log.warning(f"[PRICES] best_bid_ask failed: {type(e).__name__}: {e}")
+            continue
+        for b in books:
+            pid = b.get("product_id")
+            if pid not in out:
+                continue
+            try:
+                bid = float((b.get("bids") or [{}])[0].get("price"))
+                ask = float((b.get("asks") or [{}])[0].get("price"))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if bid > 0 and ask > 0:
+                out[pid] = (bid + ask) / 2
+    return out
+
+
 async def get_book_top_and_depth(session, product_id: str = PRODUCT_ID, levels: int = 5):
     """Top of book plus cumulative USD depth on each side.
 

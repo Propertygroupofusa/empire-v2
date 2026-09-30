@@ -2788,11 +2788,19 @@ async def get_grid_holdings_market_value():
     if not needed_products:
         return 0.0, True
 
-    live_prices = {}
+    # One batched top-of-book read for every product; the old per-coin
+    # candle download is kept only as a fallback for anything the batch
+    # did not price, so a missing quote is retried rather than guessed.
     async with engine.aiohttp.ClientSession() as session:
+        try:
+            live_prices = await engine.get_mid_prices(session, needed_products)
+        except Exception as e:
+            log.warning(f"[GRID] batched pricing failed, falling back per coin: {e}")
+            live_prices = {}
         for product_id in needed_products:
-            price, _atr = await engine.get_price_and_volatility(session, product_id)
-            live_prices[product_id] = price
+            if live_prices.get(product_id) is None:
+                price, _atr = await engine.get_price_and_volatility(session, product_id)
+                live_prices[product_id] = price
 
     total = 0.0
     complete = True

@@ -80,6 +80,78 @@
     .wl-manual-toggle:hover { color: var(--gold); }
     .wl-manual-toggle:disabled { color: var(--text-dim); cursor: default; text-decoration: none; }
 </style>
+<script>
+// WRITE TOKEN - shared by every dashboard page (keep the copies identical).
+//
+// write_guard refuses EVERY POST/PUT/PATCH/DELETE without an
+// x-dashboard-token header - including backtest "Run" buttons, which are
+// POSTs. Pages that never sent it had every button failing with the
+// server's raw "Missing x-dashboard-token header" text. This wraps fetch
+// once, so no call site can forget the header, and refuses a write BEFORE
+// sending it when the tab is locked, with a message that says what to do.
+// The token is kept in sessionStorage (this tab only) under the same key the
+// Coinbase page uses, so unlocking one page unlocks the others in the tab.
+(function () {
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;
+    var KEY = 'empire_write_token';
+    var WRITES = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
+    function tok() { try { return sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } }
+    window.empireSetWriteToken = function (v) {
+        try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch (e) {}
+        drawBar();
+    };
+    var orig = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        init = init || {};
+        var method = String(init.method || (input && input.method) || 'GET').toUpperCase();
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (WRITES[method] && url.indexOf('/api/') !== -1) {
+            var t = tok();
+            if (!t) {
+                return Promise.reject(new Error('This browser tab is locked, so nothing was sent '
+                    + 'and nothing changed. Tap the \u{1F512} LOCKED bar at the top of the page, paste '
+                    + 'your dashboard token and press Unlock. It is kept for this tab only, so it '
+                    + 'is needed again after the browser restarts.'));
+            }
+            var h = new Headers(init.headers || {});
+            h.set('x-dashboard-token', t);
+            init = Object.assign({}, init, { headers: h });
+        }
+        return orig(input, init);
+    };
+    function drawBar() {
+        if (document.getElementById('token-bar')) return;   // page has its own bar
+        var el = document.getElementById('empire-lock-bar');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'empire-lock-bar';
+            el.style.cssText = 'position:sticky;top:0;z-index:50;display:flex;gap:8px;'
+                + 'align-items:center;flex-wrap:wrap;padding:8px 14px;font:600 13px system-ui,sans-serif;'
+                + 'background:#0f172a;color:#e2e8f0;border-bottom:1px solid #1e293b;';
+            document.body.insertBefore(el, document.body.firstChild);
+        }
+        if (tok()) {
+            el.innerHTML = '<span style="color:#34d399">\u{1F513} UNLOCKED</span>'
+                + '<span style="font-weight:400;opacity:.7">buttons on this page can act</span>'
+                + '<button id="empire-lock-btn" style="margin-left:auto;padding:4px 10px;border-radius:6px;'
+                + 'border:1px solid #334155;background:#1e293b;color:#e2e8f0">Lock</button>';
+            document.getElementById('empire-lock-btn').onclick = function () { window.empireSetWriteToken(''); };
+        } else {
+            el.innerHTML = '<span style="color:#fbbf24">\u{1F512} LOCKED</span>'
+                + '<input id="empire-token-in" type="password" autocomplete="off" placeholder="paste dashboard token" '
+                + 'style="flex:1;min-width:160px;padding:6px 9px;border-radius:6px;border:1px solid #334155;'
+                + 'background:#1e293b;color:#e2e8f0">'
+                + '<button id="empire-unlock-btn" style="padding:6px 12px;border-radius:6px;border:0;'
+                + 'background:#4f46e5;color:#fff">Unlock</button>';
+            document.getElementById('empire-unlock-btn').onclick = function () {
+                window.empireSetWriteToken(document.getElementById('empire-token-in').value.trim());
+            };
+        }
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', drawBar);
+    else drawBar();
+})();
+</script>
 </head>
 <body>
 <div class="container">
