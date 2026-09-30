@@ -666,6 +666,35 @@ MAKER_ONLY_ARMED_AT_STATE_KEY = "grid_maker_only_armed_at"
 # In-process cache of the same, refreshed each cycle by refresh_real_fee_rate().
 _cached_real_round_trip_fee_rate = None
 
+# The BLENDED round trip the fills really cost - maker and taker legs mixed in
+# the proportion they actually happened - as last measured by
+# /grid-status/fee-reality. Deliberately separate from the figure above:
+# _cached_real_round_trip_fee_rate is taker x 2 from the fee TIER, a worst
+# case that assumes every leg missed its maker wait. Comparing the floor to
+# that and calling it "measured" overstated the shortfall ~12x (1.50% vs a
+# real 0.9495%). Only a fee-reality read with enough classified fills to
+# conclude is ever stored here; this module never fetches fills itself, so
+# /grid-status gains no Coinbase call from it.
+_cached_measured_round_trip = None
+
+
+def record_measured_round_trip_fee(rate, classified_fills=None, maker_rate=None):
+    """Store the blended round trip a fee-reality read measured. Ignores a
+    missing or non-positive rate rather than overwriting a real one."""
+    global _cached_measured_round_trip
+    try:
+        rate = float(rate)
+    except (TypeError, ValueError):
+        return
+    if rate <= 0:
+        return
+    _cached_measured_round_trip = {
+        "rate": rate,
+        "classified_fills": classified_fills,
+        "maker_rate": maker_rate,
+        "measured_at": datetime.utcnow().isoformat() + "Z",
+    }
+
 # The account's real per-leg MAKER rate, cached alongside it. A maker
 # (resting limit) fill costs roughly half a taker (market) fill, so once
 # maker orders are live this is the rate that actually applies - assuming
@@ -1823,6 +1852,63 @@ async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> f
         exit_leg_rate = await expected_leg_fee_rate(
             getattr(slice_row, "product_id", None))
     return entry_rate + exit_leg_rate
+
+
+async def _fee_safe_floor_check():
+    """Does the published fee-safe floor clear what a round trip REALLY costs?
+
+    Compares against the BLENDED cost the fills measured (maker and taker
+    legs in their real mix), never the taker-x-2 worst case - that one is
+    reported beside it, labelled as a worst case. Returns a verdict, never a
+    bare number, and never raises: an unreadable check is UNKNOWN, not safe.
+    Places no order and makes no Coinbase call.
+    """
+    try:
+        floor = await fee_safe_floor_pct()
+    except Exception as exc:
+        return {"readable": False, "error": f"{type(exc).__name__}: {exc}",
+                "verdict": "the floor itself could not be computed - UNKNOWN, not safe"}
+    worst = _cached_real_round_trip_fee_rate
+    worst_case = None
+    if worst:
+        worst_case = {
+            "round_trip_fee_rate": round(worst, 6),
+            "margin_pct": round(floor - worst, 6),
+            "note": ("if EVERY leg paid taker (every maker wait missed). A "
+                     "worst case from the fee tier, not a measurement."),
+        }
+    measured = _cached_measured_round_trip
+    if not measured:
+        return {"readable": False, "floor_pct": round(floor, 6),
+                "if_every_leg_taker": worst_case,
+                "verdict": ("no measured blended round trip cached yet, so whether "
+                            "this floor clears the real cost is UNKNOWN. It is NOT "
+                            "confirmed safe."),
+                "how_to_measure": "GET /api/trading-dashboard/grid-status/fee-reality"}
+    rate = measured["rate"]
+    margin = floor - rate
+    return {
+        "readable": True,
+        "floor_pct": round(floor, 6),
+        "measured_round_trip_fee_rate": round(rate, 6),
+        "measured_from_fills": measured.get("classified_fills"),
+        "measured_maker_rate": measured.get("maker_rate"),
+        "measured_at": measured.get("measured_at"),
+        "margin_pct": round(margin, 6),
+        "floor_clears_measured_cost": margin > 0,
+        "if_every_leg_taker": worst_case,
+        "verdict": (
+            f"the floor is {floor * 100:.4f}% and the fills measured a real "
+            f"blended round trip of {rate * 100:.4f}%, so a step AT the floor "
+            f"loses {abs(margin) * 100:.4f}% on every completed cycle before "
+            f"adverse selection."
+            if margin <= 0 else
+            f"the floor is {floor * 100:.4f}% against a measured blended round "
+            f"trip of {rate * 100:.4f}% - {margin * 100:.4f}% of margin."),
+        "this_changes_nothing": (
+            "a measurement beside the floor. Raising the floor is a live "
+            "trading decision and is not taken here."),
+    }
 
 
 async def fee_safe_floor_pct() -> float:
@@ -8435,6 +8521,10 @@ async def get_grid_status() -> dict:
         "effective_round_trip_fee_rate": (await expected_leg_fee_rate()) * 2,
         "real_fee_rate_observed": _cached_real_round_trip_fee_rate is not None,
         "fee_safe_min_grid_pct": await fee_safe_floor_pct(),
+        # Does that floor clear what a round trip REALLY costs? Compared to the
+        # blended cost the fills measured, not the taker-x-2 worst case.
+        # Changes nothing - raising the floor is the owner's decision.
+        "fee_safe_floor_check": await _fee_safe_floor_check(),
         # Measured, not assumed: how the legs REALLY filled. The floor
         # above prices the taker round trip; this is the evidence that
         # would justify relaxing it.

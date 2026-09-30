@@ -9017,6 +9017,11 @@ async def grid_fee_reality_endpoint(limit: int = 250):
         data["current_floor_pct"] = await crypto_grid_bot_module.fee_safe_floor_pct()
         if rt:
             data["implied_fee_safe_floor_pct"] = round(fee_floor.fee_floor_pct(rt), 6)
+        if rt and data.get("enough_to_conclude"):
+            # Hand the measured blended cost to /grid-status's floor check,
+            # so that endpoint never has to fetch fills itself.
+            crypto_grid_bot_module.record_measured_round_trip_fee(
+                rt, classified_fills=classified, maker_rate=maker_rate)
 
         if not data.get("enough_to_conclude"):
             data["verdict"] = (
