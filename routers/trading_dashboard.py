@@ -1998,6 +1998,34 @@ def combine_equity(alpaca_equity, crypto_equity, goal_usd):
     return combined, pct, None
 
 
+
+TRADING_PACE_WINDOW_DAYS = 30
+
+
+async def _measured_trading_pace(db, window_days: int = TRADING_PACE_WINDOW_DAYS) -> dict:
+    """What TRADING alone has earned: realized Grid Bot profit over the last
+    `window_days`, as a yearly rate on the capital it traded. Deliberately not
+    the equity line, which includes coin adopted and cash added. Simple
+    annualization (x 365/days), not compounded - the conservative reading.
+    Never raises; unknown fields are None, never 0."""
+    out = {"window_days": window_days, "realized_usd": None, "capital_usd": None,
+           "annual_rate": None, "daily_usd": None}
+    try:
+        from models import CryptoGridTradeHistory
+        since = datetime.utcnow() - timedelta(days=window_days)
+        realized = (await db.execute(select(func.coalesce(func.sum(CryptoGridTradeHistory.pnl), 0.0))
+                                     .where(CryptoGridTradeHistory.closed_at >= since))).scalar()
+        out["realized_usd"] = round(float(realized or 0.0), 2)
+        out["daily_usd"] = round(out["realized_usd"] / window_days, 2)
+        if crypto_grid_bot_module is not None:
+            cap = await crypto_grid_bot_module.get_grid_allocated_total()
+            if cap and cap > 0:
+                out["capital_usd"] = round(cap, 2)
+                out["annual_rate"] = round(out["realized_usd"] / cap * 365 / window_days, 4)
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
 @router.get("/combined-equity-progress")
 async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     """Real, combined progress toward the account owner's own $1,000,000
@@ -2099,8 +2127,10 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
     else:
         projected_years_to_goal, projection_basis_days = _project_years_to_goal(history, combined_equity, COMBINED_GOAL_USD)
     observations = _build_progress_observations(alpaca_data, crypto_data)
+    trading_pace = await _measured_trading_pace(db)
 
     return {
+        "trading_pace": trading_pace,
         "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
         "alpaca_error": alpaca_error,
         "crypto_equity": round(crypto_equity, 2) if crypto_equity is not None else None,

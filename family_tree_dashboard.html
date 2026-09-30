@@ -947,6 +947,29 @@
 @media (max-width:420px) {
     #status-strip.tv .tv-cells { grid-template-columns:1fr; }
 }
+    /* Milestone ladder (replaces the half-circle gauge) + 4-year planner */
+    .ladder { width: 100%; max-width: 260px; }
+    .ladder-row { display:flex; align-items:center; gap:10px; padding:5px 0; position:relative; }
+    .ladder-dot { width:16px; height:16px; border-radius:50%; border:3px solid #cfe9da; background:#fff; flex:none; }
+    .ladder-row.done .ladder-dot { background: var(--green); border-color: var(--green); }
+    .ladder-row.next .ladder-dot { border-color: var(--green); animation: ladderPulse 1.6s ease-in-out infinite; }
+    .ladder-row .ladder-amt { font-weight:700; color: var(--navy); min-width:80px; }
+    .ladder-row.done .ladder-amt { color: var(--green); }
+    .ladder-row .ladder-note { font-size:0.8em; color: var(--text-dim); }
+    .ladder-bar { height:10px; border-radius:6px; background: var(--green-bg); overflow:hidden; margin:8px 0 4px; }
+    .ladder-bar > div { height:100%; background: linear-gradient(90deg, #00c060, var(--green)); border-radius:6px; }
+    @keyframes ladderPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(0,152,69,.45); } 50% { box-shadow: 0 0 0 7px rgba(0,152,69,0); } }
+    .planner { margin-top:18px; padding:16px; border-radius:12px; background: var(--green-bg); border:1px solid #bfe3cd; }
+    .planner h4 { margin:0 0 4px; color: var(--green); }
+    .planner-presets { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+    .planner-presets button { border:1px solid var(--green); background:#fff; color: var(--green); border-radius:18px;
+                              padding:6px 12px; font-weight:600; cursor:pointer; font-size:0.85em; }
+    .planner-presets button.on { background: var(--green); color:#fff; }
+    .planner-row { display:flex; align-items:center; gap:10px; margin:6px 0; flex-wrap:wrap; }
+    .planner-row label { min-width:150px; font-size:0.9em; }
+    .planner-row input[type=range] { flex:1; min-width:160px; accent-color: var(--green); }
+    .planner-out { font-size:1.25em; font-weight:800; color: var(--green); margin-top:8px; }
+    .planner-note { font-size:0.8em; color: var(--text-dim); margin-top:6px; line-height:1.5; }
 </style>
 </head>
 <body>
@@ -1061,6 +1084,7 @@
             </div>
         </div>
         <div class="combined-observations" id="combined-observations"></div>
+        <div class="planner" id="combined-planner"></div>
     </div>
 
     <div class="panel">
@@ -8609,6 +8633,38 @@ async function loadTicker() {
     }
 }
 
+// Milestone ladder - replaces the half-circle gauge, which showed 0.97% as a
+// sliver that looked like nothing was happening. $1M is ~100x today, so the
+// honest picture is a staircase of milestones: each one done turns green,
+// the next one pulses, and the bar shows progress to THAT milestone.
+// Unknown equity draws the ladder with no position - never a fake zero.
+const LADDER_MILESTONES = [10000, 25000, 50000, 100000, 250000, 500000, 1000000];
+function renderMilestoneLadder(containerId, equity, caption) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    const known = equity != null && isFinite(equity);
+    const nextIdx = known ? LADDER_MILESTONES.findIndex(m => equity < m) : -1;
+    const prev = nextIdx > 0 ? LADDER_MILESTONES[nextIdx - 1] : 0;
+    const next = nextIdx >= 0 ? LADDER_MILESTONES[nextIdx] : null;
+    const toNextPct = known && next ? Math.max(0, Math.min(100, (equity - prev) / (next - prev) * 100)) : (known ? 100 : 0);
+    const short = v => v >= 1e6 ? '$1M' : '$' + (v / 1000) + 'k';
+    const rows = LADDER_MILESTONES.slice().reverse().map((m, ri) => {
+        const i = LADDER_MILESTONES.length - 1 - ri;
+        const cls = known && equity >= m ? 'done' : (i === nextIdx ? 'next' : '');
+        const note = cls === 'done' ? '✓ reached'
+            : (i === nextIdx ? `${fmtUsd(m - equity)} to go` : '');
+        return `<div class="ladder-row ${cls}"><span class="ladder-dot"></span>` +
+               `<span class="ladder-amt">${short(m)}</span><span class="ladder-note">${note}</span></div>`;
+    }).join('');
+    const head = known
+        ? `<div class="gauge-value" style="color:var(--green)">${fmtUsd(equity)}</div>` +
+          (next ? `<div class="ladder-bar"><div style="width:${toNextPct.toFixed(1)}%"></div></div>` +
+                  `<div class="gauge-caption">${toNextPct.toFixed(0)}% of the way to ${short(next)}</div>`
+                : `<div class="gauge-caption">🎉 $1,000,000 reached</div>`)
+        : `<div class="gauge-value" style="color:#7a869a;">&mdash;</div><div class="gauge-caption">${caption}</div>`;
+    el.innerHTML = `<div class="ladder">${head}${rows}</div>`;
+}
+
 function renderGauge(containerId, pct, caption) {
     // A gap is not a zero. A null percentage means the figure behind it
     // could not be read this poll - draw the empty track and an em-dash,
@@ -8661,12 +8717,24 @@ function buildCombinedEquitySparklineSvg(history) {
     };
     const lastX = x(history.length - 1).toFixed(1);
     const lastY = y(history[history.length - 1].combined_equity).toFixed(1);
+    // A dot that rides the REAL combined line from the first snapshot to the
+    // latest - every up and down it passes is a real reading, nothing drawn
+    // in between is invented. The latest point pulses.
+    const ridePts = history.map((h, i) => (h.combined_equity != null
+        ? `${x(i).toFixed(1)},${y(h.combined_equity).toFixed(1)}` : null)).filter(Boolean);
+    const ridePath = ridePts.length >= 2 ? 'M ' + ridePts.join(' L ') : null;
     return `
         <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
             ${line('alpaca_equity', '#1f3864', 1.5)}
             ${line('crypto_equity', '#e8752c', 1.5)}
             ${line('combined_equity', '#009845', 3)}
-            <circle cx="${lastX}" cy="${lastY}" r="4.5" fill="#009845"/>
+            <circle cx="${lastX}" cy="${lastY}" r="4.5" fill="#009845">
+                <animate attributeName="r" values="4.5;8;4.5" dur="1.6s" repeatCount="indefinite"/>
+                <animate attributeName="fill-opacity" values="1;0.5;1" dur="1.6s" repeatCount="indefinite"/>
+            </circle>
+            ${ridePath ? `<circle r="5" fill="#00c060" stroke="#fff" stroke-width="1.5">
+                <animateMotion dur="7s" repeatCount="indefinite" path="${ridePath}"/>
+            </circle>` : ''}
         </svg>`;
 }
 
@@ -8772,7 +8840,7 @@ function renderCombinedProgress(data) {
     const combinedCaption = data.combined_equity != null
         ? fmtUsd(data.combined_equity) + ' of ' + fmtUsd(data.goal)
         : 'Combined total unavailable this poll - one side could not be read';
-    renderGauge('combined-goal-gauge', data.combined_progress_pct, combinedCaption);
+    renderMilestoneLadder('combined-goal-gauge', data.combined_equity, combinedCaption);
 
     const momentumEl = document.getElementById('combined-momentum');
     const momentum = fmtCombinedMomentum(data.history);
@@ -8809,6 +8877,104 @@ function renderCombinedProgress(data) {
     `;
 
     renderObservations(data.observations);
+    renderFourYearPlanner(data);
+}
+
+// "What gets to $1M in 4 years?" - a what-if calculator, never a forecast.
+// Starts from today's REAL combined total and the REAL trading pace the
+// server measured (realized Grid Bot profit, last 30 days, on the capital it
+// traded). Each preset solves for the monthly cash that reaches $1M in 48
+// months at that yearly return. Sliders keep their values across the 60s
+// refresh; only the starting balance and measured pace update.
+const plannerState = { rate: null, monthly: null, preset: null };
+function plannerYearsTo(goal, start, annualRate, monthly) {
+    let bal = start, m = 0;
+    // A yearly rate means what it says after 12 months: the monthly rate is
+    // its 12th root, not a 12th of it (which overstates large rates).
+    const mr = Math.pow(1 + annualRate, 1 / 12) - 1;
+    // Half a dollar of slack so a plan that lands exactly on $1M is not
+    // reported a month late by floating-point rounding.
+    while (bal < goal - 0.5 && m < 1200) { bal = bal * (1 + mr) + monthly; m++; }
+    return bal >= goal - 0.5 ? m / 12 : null;
+}
+function plannerMonthlyFor(goal, start, annualRate, months) {
+    const mr = Math.pow(1 + annualRate, 1 / 12) - 1;
+    const growth = Math.pow(1 + mr, months);
+    const annuity = mr === 0 ? months : (growth - 1) / mr;
+    return Math.max(0, (goal - start * growth) / annuity);
+}
+function renderFourYearPlanner(data) {
+    const el = document.getElementById('combined-planner');
+    if (!el) return;
+    const start = data.combined_equity;
+    if (start == null) { el.innerHTML = ''; return; }
+    const goal = data.goal || 1000000;
+    const pace = data.trading_pace || {};
+    const measured = pace.annual_rate;
+    const noCashRate = Math.pow(goal / start, 1 / 4) - 1;
+    const presets = [];
+    if (measured != null) presets.push({ id: 'pace', label: `Today's pace (${(measured * 100).toFixed(0)}%/yr)`, rate: Math.max(0, measured) });
+    presets.push({ id: 'r30', label: '30%/yr', rate: 0.30 });
+    presets.push({ id: 'r50', label: '50%/yr', rate: 0.50 });
+    presets.push({ id: 'r100', label: '100%/yr', rate: 1.00 });
+    presets.push({ id: 'nocash', label: `No added cash (${(noCashRate * 100).toFixed(0)}%/yr)`, rate: noCashRate, monthly: 0 });
+    presets.forEach(p => { if (p.monthly == null) p.monthly = plannerMonthlyFor(goal, start, p.rate, 48); });
+    if (plannerState.rate == null) {
+        const d = presets[0];
+        plannerState.rate = d.rate; plannerState.monthly = Math.round(d.monthly); plannerState.preset = d.id;
+    }
+    const rows = presets.map(p => `<tr><td>${p.label}</td><td style="text-align:right"><strong>${fmtUsd(Math.round(p.monthly))}</strong>/mo</td></tr>`).join('');
+    const paceLine = measured != null
+        ? `Measured: Grid Bot banked <strong>${fmtUsd(pace.realized_usd)}</strong> in the last ${pace.window_days} days on ` +
+          `${fmtUsd(pace.capital_usd)} (~${fmtUsd(pace.daily_usd)}/day, about <strong>${(measured * 100).toFixed(1)}%/yr</strong>).`
+        : `Today's trading pace could not be measured this poll.`;
+    el.innerHTML = `
+        <h4>🚀 What gets to $1,000,000 in 4 years?</h4>
+        <div class="planner-note" style="margin-top:0">${paceLine} Starting from today's ${fmtUsd(start)}.
+          Each row is the monthly cash that reaches $1M in 48 months at that yearly return:</div>
+        <table style="width:100%;max-width:420px;font-size:0.9em;margin:8px 0">${rows}</table>
+        <div class="planner-presets">${presets.map(p =>
+            `<button class="${plannerState.preset === p.id ? 'on' : ''}" onclick="plannerPick('${p.id}')">${p.label}</button>`).join('')}</div>
+        <div class="planner-row"><label>Yearly return: <strong id="pl-rate-v"></strong></label>
+            <input type="range" id="pl-rate" min="0" max="250" step="1" oninput="plannerSlide()"></div>
+        <div class="planner-row"><label>Cash added per month: <strong id="pl-cash-v"></strong></label>
+            <input type="range" id="pl-cash" min="0" max="20000" step="100" oninput="plannerSlide()"></div>
+        <div class="planner-out" id="pl-out"></div>
+        <div class="planner-note">A what-if, not a promise. The only return this account has actually measured is the
+          "today's pace" figure above; anything higher has not been achieved here yet, and the no-added-cash row needs about
+          ${(noCashRate * 100).toFixed(0)}% a year compounded, every year for four years.</div>`;
+    el._presets = presets; el._start = start; el._goal = goal;
+    document.getElementById('pl-rate').value = Math.round(plannerState.rate * 100);
+    document.getElementById('pl-cash').value = plannerState.monthly;
+    plannerUpdateOut();
+}
+function plannerPick(id) {
+    const el = document.getElementById('combined-planner');
+    const p = (el._presets || []).find(q => q.id === id);
+    if (!p) return;
+    plannerState.rate = p.rate; plannerState.preset = id;
+    plannerState.monthly = Math.min(20000, Math.round(p.monthly / 100) * 100 || Math.round(p.monthly));
+    el.querySelectorAll('.planner-presets button').forEach(b => b.classList.toggle('on', b.getAttribute('onclick').includes(`'${id}'`)));
+    document.getElementById('pl-rate').value = Math.round(p.rate * 100);
+    document.getElementById('pl-cash').value = plannerState.monthly;
+    plannerUpdateOut();
+}
+function plannerSlide() {
+    plannerState.rate = Number(document.getElementById('pl-rate').value) / 100;
+    plannerState.monthly = Number(document.getElementById('pl-cash').value);
+    plannerState.preset = null;
+    document.querySelectorAll('#combined-planner .planner-presets button').forEach(b => b.classList.remove('on'));
+    plannerUpdateOut();
+}
+function plannerUpdateOut() {
+    const el = document.getElementById('combined-planner');
+    document.getElementById('pl-rate-v').textContent = Math.round(plannerState.rate * 100) + '%/yr';
+    document.getElementById('pl-cash-v').textContent = fmtUsd(plannerState.monthly);
+    const yrs = plannerYearsTo(el._goal, el._start, plannerState.rate, plannerState.monthly);
+    const out = document.getElementById('pl-out');
+    if (yrs == null) { out.textContent = '$1M not reached within 100 years at these settings'; out.style.color = 'var(--text-dim)'; return; }
+    out.style.color = '';
+    out.textContent = (yrs <= 4 ? '✅ ' : '') + `$1M in about ${yrs < 1 ? Math.round(yrs * 12) + ' months' : yrs.toFixed(1) + ' years'}`;
 }
 
 async function loadCombinedProgress(isRetry) {

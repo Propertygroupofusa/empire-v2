@@ -13758,6 +13758,28 @@ Final design, merged from two passes and confirmed by the owner:
 
 ---
 
+## Combined $1M panel: milestone ladder + 4-year planner, 2026-09-30
+
+- The half-circle gauge (0.97% read as "nothing is happening") is replaced
+  by a milestone ladder: $10k / $25k / $50k / $100k / $250k / $500k / $1M,
+  done steps green, the next one pulsing, a bar to the next milestone.
+  Unknown equity shows a dash - never a position or a zero.
+- The chart has a dot that rides the REAL combined line and a pulse on the
+  latest point. Nothing between real snapshots is invented.
+- "What gets to $1M in 4 years?" planner. Inputs are today's combined total
+  and `trading_pace` from `/combined-equity-progress`: realized Grid Bot
+  profit over 30 days / grid capital x 365/30 (~11.8%/yr on 2026-09-30) -
+  never the equity line, which includes adopted coin and deposits. Presets
+  solve for the monthly cash that hits $1M in 48 months. Rates are
+  EFFECTIVE yearly (monthly = 12th root); dividing by 12 overstated large
+  rates and showed 2.3 years for a 4-year plan.
+- The honest numbers: with no added cash, 4 years needs ~218%/yr compounded;
+  the account has measured ~12%. At that pace 4 years needs ~$16k/month.
+- Both dashboards ship identical code; `node test_progress_planner.js`
+  enforces it. Pace: `test_trading_pace.py`.
+
+---
+
 ## References
 
 - **API Endpoints:** See API_ENDPOINTS.md
