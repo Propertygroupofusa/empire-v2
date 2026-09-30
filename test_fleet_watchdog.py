@@ -54,6 +54,7 @@ def healthy():
             "heartbeat": {"age_seconds": 20},
             "maker_only_skipped_cycles": {"buy": 1},
             "maker_expiry_drift": {"buy": 1},
+            "real_free_cash_usd": 500.0,
             "real_round_trip_fee_rate": 0.015,
             "maker_only_active": True,
             "order_refusals": {"available": True, "by_product": {},
@@ -61,7 +62,8 @@ def healthy():
             # A fleet closing about once an hour, last close an hour ago.
             "realized_edge": {"available": True,
                               "current": {"closes_per_day": 24.0,
-                                          "days_since_last_close": 0.04}},
+                                          "days_since_last_close": 0.04,
+                                          "mean_slice_usd": 42.0}},
         },
         "/api/trading-dashboard/live-ops": {
             "gate": {"data": {"events": []}},
@@ -749,6 +751,48 @@ d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"].append(
     _stuck_slice(0.01))
 ok("and a clean single unit is not stuck either",
    "STUCK_ROSE" not in run(d, BASE_SNAP))
+
+# CASH_STARVED / CASH_LOW - the silent stop nothing watched.
+#
+# A grid earns by buying a rung and selling it higher. When free cash runs
+# out it simply stops buying: closes continue until there is nothing left to
+# close, then the fleet goes quiet with a healthy heartbeat and no errors -
+# the same shape as the sixteen-day deadlock, reached by a different road.
+#
+# Measured against the fleet's OWN mean slice, never a hardcoded dollar
+# figure. GRID_CASH_RESERVE_USD is deliberately NOT baked in: the endpoint
+# does not publish it, and inventing a number the system never stated is how
+# the parked figure sat $155 wrong for hours.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["real_free_cash_usd"] = 30.0   # < 1 slice
+out = run(d, BASE_SNAP)
+ok("CASH_STARVED when free cash is under one more buy",
+   "CASH_STARVED" in out, out)
+ok("and it warns the quiet looks healthy", "healthy heartbeat" in out, out)
+ok("and admits the real room is smaller than reported",
+   "not published" in out, out)
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["real_free_cash_usd"] = 84.0   # 2 slices
+out = run(d, BASE_SNAP)
+ok("CASH_LOW at about two more buys", "CASH_LOW" in out, out)
+ok("and CASH_STARVED does not also fire", "CASH_STARVED" not in out, out)
+
+# The live fleet has room; that must stay silent.
+ok("silent when the fleet has plenty of buying room",
+   "CASH_LOW" not in run(healthy(), BASE_SNAP)
+   and "CASH_STARVED" not in run(healthy(), BASE_SNAP))
+
+# Unknowns are gaps, never quiet passes.
+d = healthy()
+del d["/api/trading-dashboard/grid-status"]["real_free_cash_usd"]
+ok("unreadable free cash is a gap",
+   "cannot tell if the fleet can still buy" in run(d, BASE_SNAP))
+
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"]["mean_slice_usd"] = 0
+ok("and an unreadable slice size is a gap, not a division by zero",
+   "no baseline for buying room" in run(d, BASE_SNAP))
 
 print("\n-- a gap is a finding, never a pass --")
 d = healthy(); del d["/api/trading-dashboard/alert-queue"]

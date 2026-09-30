@@ -465,6 +465,45 @@ def main():
                  + f" — all below the {_taker_floor:.2f}% taker floor. If "
                  f"maker-only comes off, a winning trade there nets a loss.")
 
+    # ---- 4f. Running out of money to buy dips with --------------------------
+    #
+    # Nothing watched this. A grid earns by buying a rung and selling it
+    # higher; when free cash runs out it simply stops buying. Closes keep
+    # happening until there is nothing left to close, and then the fleet goes
+    # quiet - a healthy heartbeat, no errors, no trades. The same silent
+    # shape as the sixteen-day deadlock, arriving by a different road.
+    #
+    # Measured against the fleet's OWN mean slice rather than a hardcoded
+    # dollar figure, so the alarm cannot drift out of date the way a copied
+    # constant does. Deliberately NOT hardcoding GRID_CASH_RESERVE_USD: the
+    # endpoint does not publish it, and inventing a number the system never
+    # told me is how the parked figure ended up $155 wrong for hours. The
+    # true usable amount is LOWER than what is reported here by that unread
+    # reserve, and the message says so rather than pretending otherwise.
+    _free = grid.get("real_free_cash_usd")
+    _slice = ((grid.get("realized_edge") or {}).get("current") or {}).get("mean_slice_usd")
+    if _free is None:
+        gaps.append("real_free_cash_usd unreadable - cannot tell if the fleet "
+                    "can still buy")
+    elif not _slice or _slice <= 0:
+        gaps.append("mean slice size unreadable - no baseline for buying room")
+    else:
+        _buys = _free / _slice
+        cur["free_cash"] = round(_free, 2)
+        if _buys < 1:
+            flag(CRITICAL, "CASH_STARVED",
+                 f"{money(_free)} of free cash against a {money(_slice)} mean "
+                 f"slice - under one more buy. The fleet stops deploying and "
+                 f"goes quiet with a healthy heartbeat. Less than this is "
+                 f"usable: the cash reserve is not published, so the real "
+                 f"room is smaller.")
+        elif _buys < 3:
+            flag(WARN, "CASH_LOW",
+                 f"{money(_free)} of free cash is about {_buys:.1f} more buys "
+                 f"at the {money(_slice)} mean slice. Below one, the fleet "
+                 f"stops buying dips entirely. The unpublished cash reserve "
+                 f"makes the real room smaller than this.")
+
     # ---- 5. An ADOPTED basis is not a cost basis ---------------------------
     #
     # The grid marks an adopted slice against a reference price nobody paid,
