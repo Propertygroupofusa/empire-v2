@@ -43,6 +43,11 @@ BANDS = [(0, 15), (15, 25), (25, 50), (50, 100), (100, float("inf"))]
 # concentration ceiling. Reported, never acted on.
 CONCENTRATION_CEILING_PCT = 20.0
 
+# GRID_PARKED_MIN_NET_PCT - the floor a PARKED branch's slice must clear to
+# be sold. It is not the rule for an unparked branch; using it everywhere is
+# the error that twice told the owner to cancel a protective ALGO order.
+PARKED_FLOOR_PCT = 0.010
+
 # Below this many closed round trips a band is reported but never quoted as
 # the benchmark. Chosen before looking at which band it would exclude.
 MIN_TRIPS_TO_QUOTE = 15
@@ -107,6 +112,53 @@ def measured_bands(trades):
             "net_pct_per_trip": sum(p / nl for nl, p in rows) / n * 100.0,
         }
     return out
+
+
+def branch_can_buy(b):
+    """Can this branch open a new rung right now?
+
+    Parked is the live rule (crypto_grid_bot.py:7004). The drawdown breaker
+    and buys_paused are separate and ALSO stop a buy - leaving them out
+    counted JASMY and ONDO as able to trade when both had stopped buying,
+    which overstated the tradeable pile by $108.98.
+    """
+    sl = b.get("slices") or []
+    levels = b.get("num_levels") or 0
+    adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
+    parked = len(sl) >= levels or adopted_only
+    blocked = bool(b.get("buys_paused") or b.get("drawdown_breached"))
+    return (not parked) and (not blocked)
+
+
+def branch_can_sell(b):
+    """Can this branch close a rung RIGHT NOW? None when unreadable.
+
+    Separate from branch_can_buy on purpose, and that separation is the
+    whole point. A single blended "mobility %" reads as one capability and
+    is two. Measured on this fleet the two sets barely overlap:
+
+        can buy   $1,594.23  (18.7% of allocated)
+        can sell  $  149.91  ( 1.8%)
+        can BOTH  $    0.00  ( 0.0%)
+
+    A branch that can buy but not sell is ACCUMULATING; one that can sell
+    but not buy is DRAINING. Both score the same under one number, and they
+    are opposite conditions. So they are never blended here.
+    """
+    sl = b.get("slices") or []
+    if not sl:
+        return False  # nothing to sell - not unknown, just empty
+    gp, ref, px = b.get("grid_pct"), b.get("reference_price"), b.get("current_price")
+    if not gp or not ref or not px:
+        return None  # UNKNOWN is the third verdict, never folded into False
+    if px >= ref * (1 + gp):
+        return True
+    levels = b.get("num_levels") or 0
+    adopted_only = all(x.get("adopted") for x in sl)
+    if len(sl) >= levels or adopted_only:
+        # A parked branch may still clear the parked-sell floor.
+        return max((x.get("unrealized_net_pct") or 0) for x in sl) >= PARKED_FLOOR_PCT
+    return False
 
 
 def branch_mobility(b):
@@ -232,16 +284,72 @@ def main():
     s_real = sum(r["realized"] for r in stuck)
 
     print("\n3. THE SPLIT")
-    print(f"   CAN trade now : {money(m_alloc):>10} across {len(mobile):2d} branch(es), "
+    print(f"   not parked     : {money(m_alloc):>10} across {len(mobile):2d} branch(es), "
           f"realized {money(m_real)}")
-    print(f"   CANNOT (parked): {money(s_alloc):>10} across {len(stuck):2d} branch(es), "
+    print(f"   parked         : {money(s_alloc):>10} across {len(stuck):2d} branch(es), "
           f"realized {money(s_real)}")
     if unknown:
         print(f"   UNKNOWN        : {money(u_alloc):>10} across {len(unknown):2d} branch(es) "
               f"- unreadable, which is a third verdict, not a zero")
-    if total_alloc:
-        print(f"   {100.0 * s_alloc / total_alloc:.1f}% of allocated capital cannot currently "
-              f"complete a round trip.")
+    print("   'Not parked' is NOT the same as 'can trade' - the drawdown breaker")
+    print("   and buys_paused stop a buy too, and selling has its own rule. This")
+    print("   line once read 'CAN trade now $1,703.21' while two of those branches")
+    print("   had stopped buying and NONE could complete a cycle. 3b is the real")
+    print("   answer; this split is only about the parked rule.")
+
+    # ---- 3b. CAPITAL MOBILITY - the number that explains the slowdown ----
+    #
+    # Proposed as one figure: capital_capable_of_round_trip / total_tracked.
+    # The idea is right and the single number is not, for three reasons this
+    # block fixes rather than inherits:
+    #
+    #   1. "Capable of a round trip" is TWO capabilities. Measured here they
+    #      barely overlap - 18.7% can buy, 1.8% can sell, 0.0% can do both.
+    #      One blended figure would have printed "20% mobile" while not one
+    #      dollar could actually complete a cycle.
+    #   2. THE DENOMINATOR DECIDES THE ANSWER. Against allocated capital the
+    #      number flatters itself, because untracked coin - the most frozen
+    #      money there is, managed by no branch at all - is silently outside
+    #      it. Both denominators are printed, never one.
+    #   3. The blockers OVERLAP. Coin that is missing sits inside branches
+    #      that are also parked, so the two figures share dollars and must
+    #      never be added. A card that sums them reports more frozen capital
+    #      than the fleet contains.
+    buy_ok = [b for b in branches if branch_can_buy(b)]
+    sell_ok = [b for b in branches if branch_can_sell(b) is True]
+    sell_unknown = [b for b in branches if branch_can_sell(b) is None]
+    both = [b for b in buy_ok if branch_can_sell(b) is True]
+
+    def _sum(bs):
+        return sum((b.get("allocated_usd") or 0.0) for b in bs)
+
+    print("\n3b. CAPITAL MOBILITY")
+    if not total_alloc:
+        print("   allocated capital is zero or unreadable - mobility is UNKNOWN")
+    else:
+        for label, bs in (("can BUY (open a rung)", buy_ok),
+                          ("can SELL (close a rung)", sell_ok),
+                          ("can do BOTH - a real round trip", both)):
+            amt = _sum(bs)
+            print(f"   {label:<32} {money(amt):>10}  "
+                  f"{100.0 * amt / total_alloc:5.1f}% of allocated  "
+                  f"({len(bs)} branch(es))")
+        if sell_unknown:
+            print(f"   sell rule UNREADABLE on {len(sell_unknown)} branch(es) "
+                  f"({money(_sum(sell_unknown))}) - counted in NONE of the above, "
+                  f"because unknown is not a no")
+        print("   'Can buy' and 'can sell' are different capabilities and are not")
+        print("   blended. A branch that can only buy is ACCUMULATING; one that can")
+        print("   only sell is DRAINING. One percentage cannot tell those apart.")
+
+    if gm and isinstance(gm.get("capital"), dict):
+        whole = gm["capital"].get("total_capital_usd")
+        if whole:
+            amt = _sum(buy_ok)
+            print(f"   Against the WHOLE capital base ({money(whole)}, which includes")
+            print(f"   cash and coin no branch manages): {100.0 * amt / whole:.1f}% can buy.")
+            print("   The denominator changes the answer, so it is always named.")
+
 
     if stuck:
         worst = sorted((r for r in stuck if r["gap"] is not None),
@@ -329,6 +437,48 @@ def main():
         print("   dip fires it whether the branch holds this much or more.")
         print("   Deciding what a branch is allocated is a money-moving call and is")
         print("   the owner's, never this script's.")
+
+    # ---- 4c. CAPITAL BLOCKERS - why the cycling is slow, in one place ----
+    #
+    # Requested as a card listing missing inventory beside frozen-in-parked
+    # capital. They OVERLAP: the branches holding coin they do not have are
+    # themselves parked, so the same dollars appear in both figures. Printed
+    # side by side with no warning, the natural move is to add them, and the
+    # sum is larger than the money that exists. The overlap is measured and
+    # named here instead.
+    inv = get("/grid-status/invariants")
+    print("\n4c. CAPITAL BLOCKERS")
+    short_total, short_products = None, set()
+    if inv is None:
+        print("   invariants feed did not answer - the missing-inventory figure is")
+        print("   UNKNOWN this pass, which is not the same as zero.")
+    else:
+        for chk in (inv.get("checks") or []):
+            if chk.get("name") == "coin_tracked_is_held":
+                short_total = chk.get("short_usd")
+                short_products = {c.get("product_id")
+                                  for c in (chk.get("short_positions") or [])}
+    parked_products = {r["product"] for r in stuck}
+    overlap = short_products & parked_products
+
+    print(f"   missing inventory (claimed, not held) : {money(short_total)}")
+    print(f"   frozen in parked branches             : {money(s_alloc)}")
+    print(f"   mobility (can buy / can sell / both)  : "
+          f"{100.0 * _sum(buy_ok) / total_alloc:.1f}% / "
+          f"{100.0 * _sum(sell_ok) / total_alloc:.1f}% / "
+          f"{100.0 * _sum(both) / total_alloc:.1f}%"
+          if total_alloc else "   mobility: UNKNOWN")
+    print(f"   branches that can buy                 : {len(buy_ok)} of {len(branches)}")
+    if overlap:
+        print(f"   DO NOT ADD THE FIRST TWO. {len(overlap)} branch(es) are in both - "
+              + ", ".join(sorted(overlap)) + ".")
+        print("   Their coin is missing AND their branch is parked, so those dollars")
+        print("   are counted twice. The two figures share money; a total is wrong.")
+    elif short_total is not None:
+        print("   The two figures above are measured on different cuts and are still")
+        print("   not additive - check the overlap before combining them.")
+    print("   Missing inventory is the worse of the two: a parked branch frees when")
+    print("   price moves, while coin that is not held cannot be sold at ANY price.")
 
     # ---- 5. Owner decisions, named and left alone -----------------------
     print("\n5. OWNER DECISIONS - named here, NOT taken here")
