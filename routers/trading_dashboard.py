@@ -7936,6 +7936,142 @@ async def get_profit_locks():
 
 @router.get("/adaptive-capital-fleet-status")
 @router.get("/capital-fleet-status")
+@router.get("/flow-compare")
+async def flow_compare(hours: float = 24.0, max_pages: int = 4):
+    """Your fills beside the market's, on the same coins. Read-only.
+
+    ASKED FOR DIRECTLY - "add a percentage on the other people's stuff and a
+    percentage on ours so we'll know how it's going, if it's keeping up with
+    them other people's trades."
+
+    Two sources, never mixed:
+      YOURS   Coinbase /orders/historical/fills - the exchange's record of
+              this account. 36 orders / 43 fills / $1,812.93 in one 24h
+              window when this was built, which is why the tape panel's old
+              claim that "this account is not currently placing orders" was
+              false.
+      THEIRS  the public trade feed on the coins held - every fill on the
+              venue, almost none of it this account's.
+
+    WHAT "KEEPING UP" CAN AND CANNOT MEAN. Your share of venue volume is a
+    SIZE comparison and nothing more. The market's buy/sell mix is not a
+    benchmark to beat: matching it would mean trading like everyone else,
+    which is not an edge and is not what this fleet does. Whether the money
+    was made is the realised book, not this page. Both facts are in the
+    payload so the comparison cannot be read as a score.
+    """
+    import trade_tape
+    try:
+        import crypto_btc_compound_bot as mod
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"fills reader unavailable: {exc}")
+
+    hours = max(0.5, min(float(hours), 168.0))
+    _end = datetime.now(timezone.utc)
+    _start = _end - timedelta(hours=hours)
+    start_iso = _start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = _end.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    out = {"window": {"start": start_iso, "end": end_iso, "hours": hours},
+           "as_of": _end.isoformat()}
+
+    # ---- YOURS -----------------------------------------------------------
+    mine = None
+    try:
+        async with mod.aiohttp.ClientSession() as session:
+            raw = await mod.fetch_fills_between(session, start_iso, end_iso,
+                                                max_pages=max_pages)
+        if not raw.get("available"):
+            out["yours"] = {"readable": False, "error": raw.get("error"),
+                            "what_this_means": ("the exchange's fill record could "
+                                                "not be read. UNKNOWN, not zero - "
+                                                "do NOT read this as 'you placed "
+                                                "no orders'.")}
+        else:
+            fills = raw.get("fills") or []
+            buy_usd = sell_usd = 0.0
+            buys = sells = 0
+            per = {}
+            for f in fills:
+                try:
+                    price = float(f.get("price") or 0)
+                    size = float(f.get("size") or 0)
+                    if f.get("size_in_quote"):
+                        usd, qty = size, (size / price if price else 0)
+                    else:
+                        qty, usd = size, size * price
+                except (TypeError, ValueError):
+                    continue
+                side = (f.get("side") or "").upper()
+                pid = f.get("product_id") or "?"
+                per[pid] = round(per.get(pid, 0.0) + usd, 2)
+                if side == "BUY":
+                    buy_usd += usd; buys += 1
+                elif side == "SELL":
+                    sell_usd += usd; sells += 1
+            total = buy_usd + sell_usd
+            mine = {"readable": True, "fills": len(fills),
+                    "buy_fills": buys, "sell_fills": sells,
+                    "buy_usd": round(buy_usd, 2), "sell_usd": round(sell_usd, 2),
+                    "total_usd": round(total, 2),
+                    "buy_pct_of_your_volume": (round(100.0 * buy_usd / total, 1)
+                                               if total else None),
+                    "sell_pct_of_your_volume": (round(100.0 * sell_usd / total, 1)
+                                                if total else None),
+                    "by_product_usd": dict(sorted(per.items(),
+                                                  key=lambda kv: -kv[1])[:12]),
+                    "truncated": raw.get("truncated")}
+            out["yours"] = mine
+    except Exception as exc:
+        out["yours"] = {"readable": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "what_this_means": "UNKNOWN, not zero."}
+
+    # ---- THEIRS ----------------------------------------------------------
+    try:
+        theirs_raw = await trade_tape_endpoint()
+        if hasattr(theirs_raw, "body"):
+            theirs_raw = json_module.loads(theirs_raw.body)
+        t_buy = float(theirs_raw.get("buy_usd") or 0)
+        t_sell = float(theirs_raw.get("sell_usd") or 0)
+        t_tot = t_buy + t_sell
+        out["theirs"] = {
+            "readable": True,
+            "prints": theirs_raw.get("prints"),
+            "buy_prints": theirs_raw.get("buy_prints"),
+            "sell_prints": theirs_raw.get("sell_prints"),
+            "buy_usd": round(t_buy, 2), "sell_usd": round(t_sell, 2),
+            "total_usd": round(t_tot, 2),
+            "buy_pct_of_their_volume": (round(100.0 * t_buy / t_tot, 1)
+                                        if t_tot else None),
+            "sell_pct_of_their_volume": (round(100.0 * t_sell / t_tot, 1)
+                                         if t_tot else None),
+            "busiest": theirs_raw.get("busiest"),
+            "window_note": ("the public tape is a RECENT SNAPSHOT of prints, not "
+                            "the same window as your fills above. The two volumes "
+                            "are therefore not a like-for-like ratio - see "
+                            "why_you_cannot_just_divide_these."),
+        }
+    except Exception as exc:
+        out["theirs"] = {"readable": False,
+                         "error": f"{type(exc).__name__}: {exc}",
+                         "what_this_means": "UNKNOWN, not zero."}
+
+    out["why_you_cannot_just_divide_these"] = (
+        "Your fills cover the requested window from the exchange's account "
+        "record; the public tape is a short snapshot of recent prints. "
+        "Dividing one by the other gives a share of volume that depends on "
+        "how long each side happened to look, so no such ratio is computed "
+        "here.")
+    out["matching_the_market_is_not_the_goal"] = (
+        "The market's buy/sell mix is not a benchmark. Matching it would mean "
+        "trading like everyone else, which is not an edge. Whether money was "
+        "made is the realised book - 156 closed round trips, +$82.72, 85.9% "
+        "won - and not this page.")
+    out["is_a_measurement_not_a_change"] = True
+    return out
+
+
 @router.get("/goal-pace")
 async def goal_pace(goal_usd: float = 800000.0, days: int = 30):
     """Day by day: where the fleet actually is, against a goal path. Read-only.
@@ -12657,6 +12793,80 @@ async def growth_curve(hours: float = 24.0, limit: int = 500):
               **{f: getattr(r, f, None) for f in growth_ledger.FIELDS}} for r in rows]
 
     out = growth_ledger.summarise(snaps, hours=float(hours or 24.0))
+
+    # ---- PRICING COVERAGE POISONS EVERY "CHANGE OVER WINDOW" FIGURE ------
+    #
+    # The owner circled three of them - CAPITAL PLACED -134.77, OUTSIDE
+    # EVERY BRANCH -2.53, COIN -403.01 - and the vertical craters beside
+    # them, and asked what happened and how to stop it happening again.
+    #
+    # It is not money. The census prices what it can reach, and the count
+    # it CANNOT price moves between polls. When it does, the total is a
+    # different measurement, so plotting the two side by side draws a cliff.
+    # Measured on the live series:
+    #
+    #   2026-09-28T17:10:31   -$2,202.10   unpriced 7 -> 9
+    #                         and the very next poll  +$2,289.45
+    #   2026-09-28T03:54:59   -$2,071.13   unpriced 4 -> 6
+    #
+    # Seven of the eight deepest drops coincide with a coverage change, and
+    # most recover on the next reading. Worse, coverage flips on 185 of 419
+    # points - 44% - and the window's two ENDPOINTS do not share a coverage,
+    # so the headline change subtracts a total priced over one asset set
+    # from a total priced over another.
+    #
+    # THE COUNTERACTION: a change across a coverage boundary is not reported
+    # as a change. It is named as not comparable, with the flips counted and
+    # the worst artifact quoted, so nobody reads a census gap as a loss. This
+    # measures and labels; it does not smooth, interpolate or hide a point.
+    try:
+        _ser = (out or {}).get("series") or []
+        _cov = [(x.get("at"), x.get("assets_unpriced"), x.get("account_total_usd"))
+                for x in _ser]
+        _flips, _worst = 0, None
+        for i in range(1, len(_cov)):
+            if _cov[i][1] != _cov[i - 1][1]:
+                _flips += 1
+                if _cov[i][2] is not None and _cov[i - 1][2] is not None:
+                    _d = _cov[i][2] - _cov[i - 1][2]
+                    if _worst is None or abs(_d) > abs(_worst["move_usd"]):
+                        _worst = {"at": _cov[i][0], "move_usd": round(_d, 2),
+                                  "unpriced_before": _cov[i - 1][1],
+                                  "unpriced_after": _cov[i][1]}
+        _ends_match = None
+        _priced = [c for c in _cov if c[1] is not None]
+        if len(_priced) >= 2:
+            _ends_match = _priced[0][1] == _priced[-1][1]
+        out["pricing_coverage"] = {
+            "flips_in_window": _flips,
+            "points": len(_cov),
+            "flip_rate_pct": (round(100.0 * _flips / (len(_cov) - 1), 1)
+                              if len(_cov) > 1 else None),
+            "window_endpoints_share_coverage": _ends_match,
+            "biggest_single_poll_artifact": _worst,
+            "change_over_window_is_comparable": _ends_match,
+            "what_this_means": (
+                "assets_unpriced is how many holdings the census could not "
+                "price on that poll. When it changes, the account total is a "
+                "DIFFERENT measurement and the gap between the two readings "
+                "is not a move. A change measured across such a boundary is "
+                "not a change - it is two different yardsticks subtracted."
+                if _ends_match is False else
+                "the window's endpoints were priced over the same asset set, "
+                "so the change between them is a like-for-like comparison."),
+            "not_smoothed": (
+                "no point is hidden, interpolated or averaged away. The "
+                "craters are real readings of a census that could not price "
+                "everything; they are labelled, not removed."),
+        }
+    except Exception as _exc:
+        out["pricing_coverage"] = {
+            "readable": False,
+            "error": f"{type(_exc).__name__}: {_exc}",
+            "what_this_means": ("whether the window's figures span a coverage "
+                                "change is UNKNOWN - do not treat them as "
+                                "comparable on that basis"),
+        }
 
     # THE HEARTBEAT COUNTS THIS PROCESS ONLY, AND MUST SAY SO.
     #

@@ -9199,6 +9199,40 @@ async function loadGrowthCurve(hours) {
             ${d.points} reading(s) over ${d.span_hours}h · window ${d.window_hours}h
             <br>${esc2((d.recorder||{}).verdict || 'recorder state unknown')}</div>
 
+          ${(() => {
+             // A CHANGE ACROSS A PRICING-COVERAGE BOUNDARY IS NOT A CHANGE.
+             // The craters in these charts are the census failing to price
+             // some holdings for one poll - -$2,202.10 at 2026-09-28T17:10,
+             // then +$2,289.45 on the very next reading. Coverage flips on
+             // 44% of points and the window's endpoints do not match, so the
+             // change figures below subtract two different yardsticks.
+             const c = d.pricing_coverage;
+             if (!c) return '';
+             if (c.readable === false) {
+               return `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;
+                 border-left:3px solid ${warn};background:var(--panel2,#0000000a);margin-bottom:14px">
+                 <strong>Pricing coverage could not be checked.</strong> ${esc2(c.what_this_means || '')}</div>`;
+             }
+             if (c.change_over_window_is_comparable === false) {
+               const w = c.biggest_single_poll_artifact;
+               return `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;
+                 border-left:3px solid ${warn};background:var(--panel2,#0000000a);margin-bottom:14px">
+                 <strong>The &ldquo;change over window&rdquo; figures below are NOT comparable.</strong>
+                 The census could not price the same set of holdings at both ends of this window,
+                 so those numbers subtract one yardstick from another.
+                 Coverage changed <strong>${c.flips_in_window}</strong> time(s) across
+                 ${c.points} reading(s)${c.flip_rate_pct != null ? ` (${c.flip_rate_pct}% of them)` : ''}.
+                 ${w ? `The largest single-poll artefact was <strong>${money(w.move_usd)}</strong>
+                 at ${esc2(String(w.at).slice(0,19))}, when the unpriced count went
+                 ${w.unpriced_before} &rarr; ${w.unpriced_after}.` : ''}
+                 <br><strong>The vertical drops in these charts are that, not money leaving.</strong>
+                 Nothing is smoothed or hidden &mdash; the readings are real, and what they measured changed.</div>`;
+             }
+             return `<div style="font-size:0.82em;color:${dim};margin-bottom:12px">
+               Pricing coverage held at both ends of this window, so the change figures below are
+               like-for-like. Coverage changed ${c.flips_in_window} time(s) inside it.</div>`;
+           })()}
+
           ${breaks.length ? `<div style="font-size:0.84em;line-height:1.6;padding:10px 12px;
              border-left:3px solid ${bad};background:var(--panel2,#0000000a);margin-bottom:14px">
              <strong>This series is not trustworthy.</strong> Realised profit and the trade count
