@@ -8029,7 +8029,7 @@ async def flow_compare(hours: float = 24.0, max_pages: int = 4):
 
     # ---- THEIRS ----------------------------------------------------------
     try:
-        theirs_raw = await trade_tape_endpoint()
+        theirs_raw = await get_trade_tape()
         if hasattr(theirs_raw, "body"):
             theirs_raw = json_module.loads(theirs_raw.body)
         t_buy = float(theirs_raw.get("buy_usd") or 0)
