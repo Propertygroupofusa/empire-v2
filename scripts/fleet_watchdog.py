@@ -95,6 +95,30 @@ def get(path, timeout=45, attempts=2, pause=3.0):
     return None
 
 
+def _phantom_short_positions(inv):
+    """Branches that hold under 1% of the coin they claim, as
+    (product_id, tracked, held, short_usd).
+
+    ONE DEFINITION, TWO READERS. The refusal check in section 2 and the
+    invariant readout in section 6 both need this, and a second inline copy
+    is a second thing to drift. Returns [] when the invariant is unreadable -
+    which means UNKNOWN, not "no branch is phantom", so callers must not read
+    an empty list as an all-clear.
+    """
+    out = []
+    for chk in ((inv or {}).get("checks") or []):
+        if chk.get("status") != "FAIL" or chk.get("name") != "coin_tracked_is_held":
+            continue
+        for c in (chk.get("short_positions") or []):
+            tr = c.get("tracked") or 0.0
+            hd = c.get("held")
+            if hd is None or tr <= 0:
+                continue
+            if hd / tr < 0.01:
+                out.append((c.get("product_id"), tr, hd, c.get("short_usd") or 0.0))
+    return out
+
+
 def _age_seconds(stamp, now):
     """Seconds between two "%Y-%m-%dT%H:%M:%SZ" stamps, or None if either is
     unreadable. None is a real answer meaning UNKNOWN - a gap is not a zero,
@@ -358,10 +382,42 @@ def main():
             blocked = [c for c in coins if c in _refused_now]
             waiting = [c for c in coins if c not in _refused_now]
             if blocked:
-                flag(CRITICAL, "PARKED_RETRY_LOOP",
-                     f"{', '.join(blocked)} cannot place the escape sell at all "
-                     f"(see ORDER_REFUSED) - the gate passes every cycle and the "
-                     f"order can never fill. This one does not resolve by waiting.")
+                # WHY it cannot resolve decides what to do about it, and the
+                # two reasons want opposite actions.
+                #
+                # QNT-USD looked like a rounding problem: it holds 0.00097323
+                # against a 0.001 venue increment, a shortfall of 0.00002677 -
+                # three-quarters of one cent at $281.99 - and its branch still
+                # had a free rung, so the obvious reading was "its next buy
+                # lifts it over the minimum and this clears itself".
+                #
+                # That reading is wrong, and shipping it would have been a
+                # reassurance. The branch claims 0.676 QNT and holds 0.00097 -
+                # 0.14% of it. Clearing the increment only makes the order
+                # PLACEABLE; it would then ask to sell units that still do not
+                # exist. The increment is a symptom, the shortfall is the
+                # trap, and only reconciliation - the owner's call, never this
+                # script's - closes it.
+                ph_ids = {x[0] for x in _phantom_short_positions(inv)}
+                trapped = [c for c in blocked if c in ph_ids]
+                short_only = [c for c in blocked if c not in ph_ids]
+                if trapped:
+                    flag(CRITICAL, "PARKED_RETRY_LOOP",
+                         f"{', '.join(trapped)} cannot place the escape sell at "
+                         f"all (see ORDER_REFUSED) - and raising inventory past "
+                         f"the venue's minimum would NOT fix it: these branches "
+                         f"hold under 1% of the coin they claim (see "
+                         f"PHANTOM_BRANCH), so the order would then be for units "
+                         f"that still do not exist. Reconciliation is the only "
+                         f"way out and it is the owner's call.")
+                if short_only:
+                    flag(CRITICAL, "PARKED_RETRY_LOOP",
+                         f"{', '.join(short_only)} cannot place the escape sell "
+                         f"at all (see ORDER_REFUSED) - the gate passes every "
+                         f"cycle and the order can never fill. The branch does "
+                         f"hold roughly what it claims, so this is the venue's "
+                         f"own rule and not a shortfall. It does not resolve by "
+                         f"waiting.")
             if waiting:
                 flag(INFO, "PARKED_SELL_WAITING",
                      f"{', '.join(waiting)}: escape sell posted and not taken yet. "
@@ -672,15 +728,7 @@ def main():
                     # meant: a locked PERCENTAGE cannot be computed against a
                     # zero balance, so that gap was never an observability
                     # quirk - it was this, arriving one branch at a time.
-                    phantom = []
-                    for c in pos:
-                        tr = c.get("tracked") or 0.0
-                        hd = c.get("held")
-                        if hd is None or tr <= 0:
-                            continue
-                        if hd / tr < 0.01:          # holds under 1% of claim
-                            phantom.append((c.get("product_id"), tr, hd,
-                                            c.get("short_usd") or 0.0))
+                    phantom = _phantom_short_positions(inv)  # holds <1% of claim
                     if phantom:
                         cur["phantom"] = sorted(x[0] for x in phantom)
                         prev_ph = prev.get("phantom")

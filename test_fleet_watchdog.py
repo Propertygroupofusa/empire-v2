@@ -555,6 +555,43 @@ ok("PARKED_RETRY_LOOP when the venue refuses the escape sell outright",
 ok("and it names the coin", "LINK-USD" in out, out)
 ok("and says waiting will not fix it", "does not resolve by waiting" in out, out)
 
+# A REFUSAL ON A BRANCH THAT IS ALSO PHANTOM WANTS A DIFFERENT ANSWER.
+#
+# QNT-USD reads as a rounding problem: 0.00097323 held against a 0.001 venue
+# increment, a shortfall of three-quarters of one cent, on a branch that still
+# had a free rung. The obvious conclusion - "its next buy lifts it over the
+# minimum and it clears itself" - is false. It claims 0.676 QNT and holds
+# 0.14% of that, so clearing the increment only makes the order PLACEABLE; it
+# would then be for units that still do not exist.
+d3 = healthy()
+d3["/api/trading-dashboard/live-ops"]["gate"]["data"]["events"] = [
+    {"event_type": "PARKED_SELL_NOFILL", "product_id": "QNT-USD",
+     "created_at": "2026-09-29T18:00:00", "message": "did not fill"},
+]
+d3["/api/trading-dashboard/grid-status"]["order_refusals"] = {
+    "available": True,
+    "by_product": {"QNT-USD": "BELOW_BASE_INCREMENT: 0.00097323 available"},
+    "product_rules_unreadable": []}
+d3["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "1 broken",
+    "checks": [{"name": "coin_tracked_is_held", "status": "FAIL",
+                "detail": "short", "short_positions": [
+                    {"product_id": "QNT-USD", "tracked": 0.676,
+                     "held": 0.00097323, "short_usd": 190.35}]}]}
+out = run(d3, BASE_SNAP)
+ok("a refused branch that is ALSO phantom is still CRITICAL",
+   "CRITICAL PARKED_RETRY_LOOP" in out, out)
+ok("and it says raising inventory would NOT fix it",
+   "would NOT fix it" in out, out)
+ok("and it points at reconciliation as the owner's call",
+   "Reconciliation" in out and "owner's call" in out, out)
+ok("and it does NOT claim the venue rule alone is the trap",
+   "not a shortfall" not in out, out)
+
+# And the plain refusal - branch holds what it claims - keeps its own wording.
+ok("a refused branch that is NOT phantom says the venue rule is the trap",
+   "not a shortfall" in run(d, BASE_SNAP), out)
+
 # The same no-fills with NO refusal are an unfilled maker order, not a trap.
 d2 = healthy()
 d2["/api/trading-dashboard/live-ops"]["gate"]["data"]["events"] = [
