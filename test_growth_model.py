@@ -14,9 +14,13 @@ def T(entry, qty, pnl):
 
 
 def B(pid, alloc, levels, slices, unreal=0.0, adopted=False):
+    # opened_at is REQUIRED by the over-levels rule: it asks when a slice was
+    # bought, not how many there are. Ordered, one minute apart, so the
+    # fixture's list order is also its chronological order.
     return {"product_id": pid, "allocated_usd": alloc, "num_levels": levels,
-            "slices": [{"entry_price": p, "qty": q, "adopted": adopted}
-                       for p, q in slices],
+            "slices": [{"entry_price": p, "qty": q, "adopted": adopted,
+                        "opened_at": f"2026-09-27T00:{i:02d}:00Z"}
+                       for i, (p, q) in enumerate(slices)],
             "total_unrealized_net_usd": unreal}
 
 
@@ -115,11 +119,22 @@ def test_a_branch_holding_more_slices_than_levels_is_flagged():
 # A rule that fires on code it has no opinion about is a rule nobody can
 # act on.
 
-def _mixed(pid, levels, adopted_n, bought_n):
-    """The real live shape: N adopted slices plus M bought ones."""
+def _mixed(pid, levels, adopted_n, bought_n, buys_first=False):
+    """Two real live shapes, and which one it is decides the verdict.
+
+    buys_first=False (default) - the GRANT shape. The adopted slices are
+    oldest and the bought ones opened last, while the branch was already
+    full. That is the one-rung grant firing: BCH, SOL, LTC and ZEC all
+    look like this live.
+
+    buys_first=True - the HBAR shape. The bought slices are OLDEST, opened
+    when the branch held 0 and 1 slices and was nowhere near its cap; the
+    adoption landed on top afterwards and overshot it. No buy broke a rule,
+    and the old count-based test called this one a breach."""
     b = B(pid, 300.0, levels, [(10, 1)] * (adopted_n + bought_n), adopted=True)
-    for i in range(bought_n):
-        b["slices"][-(i + 1)]["adopted"] = False
+    idx = range(bought_n) if buys_first else range(-bought_n, 0)
+    for i in idx:
+        b["slices"][i]["adopted"] = False
     return b
 
 
@@ -139,15 +154,56 @@ def test_adopted_plus_exactly_one_bought_is_the_designed_shape():
     assert out["slices_over_levels_unexplained"] == []
 
 
-def test_two_bought_slices_past_the_cap_is_unexplained():
-    """The one-rung grant only ever allows ONE. Two means the clamp did
-    not snap back."""
+def test_two_buys_made_WHILE_FULL_is_unexplained():
+    """The one-rung grant only ever allows ONE. Two buys opened while the
+    branch was already full means the clamp did not snap back."""
     out = gm.measure_capital([_mixed("X", 3, 5, 2)], free_cash_usd=0)
     row = out["slices_over_levels"][0]
     assert row["bought_slices"] == 2
+    assert len(row["buys_past_the_cap"]) == 2
     assert row["deliberate"] is False
     assert len(out["slices_over_levels_unexplained"]) == 1
     assert "did not snap back" in row["why"]
+
+
+def test_two_bought_slices_that_PREDATE_the_adoption_is_NOT_a_breach():
+    """THE HBAR CASE, and the reason this rule was rewritten.
+
+    HBAR live: 5 slices over a cap of 3, two of them bought. The old rule
+    was `deliberate = adopted and bought <= 1` - a pure count - so it
+    flagged HBAR as a breach and told the owner the clamp had failed.
+
+    The timestamps say otherwise. Its two buys opened at 2026-09-28T18:37
+    and 2026-09-29T00:25, when the branch held 0 and then 1 slice, days
+    inside a cap of 3. The three ADOPTED slices all landed afterwards in
+    one instant at 2026-09-29T13:01:32 and overshot the cap - which
+    coin_adoption_worker documents as expected, because the spacing
+    override rewrites num_levels back down every cycle.
+
+    Not one buy broke a rule. Counting could never have shown that."""
+    out = gm.measure_capital([_mixed("HBAR", 3, 3, 2, buys_first=True)],
+                             free_cash_usd=0)
+    row = out["slices_over_levels"][0]
+    assert row["bought_slices"] == 2
+    assert row["buys_past_the_cap"] == []
+    assert row["deliberate"] is True
+    assert "NOT ONE of the bought slices opened while the branch was full" in row["why"]
+    assert out["slices_over_levels_unexplained"] == []
+
+
+def test_a_missing_opened_at_makes_the_verdict_UNKNOWN_not_a_pass():
+    """A gap is not a zero, and it is not a clean bill of health either."""
+    b = _mixed("Y", 3, 3, 2, buys_first=True)
+    b["slices"][0].pop("opened_at")
+    out = gm.measure_capital([b], free_cash_usd=0)
+    row = out["slices_over_levels"][0]
+    assert row["timestamps_complete"] is False
+    assert row["deliberate"] is None
+    assert "UNKNOWN" in row["why"]
+    # None is not False: an unreadable branch is not reported as a breach,
+    # and it does not vanish either - it gets its own list.
+    assert out["slices_over_levels_unexplained"] == []
+    assert [r["product_id"] for r in out["slices_over_levels_unknown"]] == ["Y"]
 
 
 def test_a_wholly_unadopted_branch_over_its_levels_is_unexplained():

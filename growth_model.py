@@ -229,17 +229,86 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
         # would mean the clamp failed to snap back.
         bought = entry["open_slices"] - entry["adopted_slices"]
         entry["bought_slices"] = bought
-        entry["deliberate"] = bool(adopted) and bought <= 1
-        entry["why"] = (
-            f"{entry['adopted_slices']} adopted slice(s) plus {bought} bought "
-            f"one. An adopted-only branch is granted ONE extra rung so it can "
-            f"take a single dip; buying it makes the branch mixed and the cap "
-            f"snaps back. This is that mechanism, not a breach."
-            if entry["deliberate"] else
-            f"{bought} slice(s) were BOUGHT past a cap of {entry['num_levels']} "
-            f"with {entry['adopted_slices']} adopted. The one-rung grant only "
-            f"ever allows ONE, so the clamp did not snap back. Worth looking "
-            f"at.")
+        # COUNTING BOUGHT SLICES DOES NOT ANSWER THE QUESTION, and the old
+        # rule - `deliberate = adopted and bought <= 1` - got HBAR exactly
+        # backwards. Its two bought slices opened when the branch held 0 and
+        # then 1 slice, days inside a cap of 3. The three ADOPTED slices
+        # landed on top afterwards, at 2026-09-29T13:01:32, all in one
+        # instant. Nothing bought its way past anything; the adoption
+        # overshot the cap, which coin_adoption_worker documents as
+        # expected ("THIS WRITE DOES NOT SURVIVE ... the branch ends up with
+        # MORE open slices than levels - measured live: ZEC 6/3, XRP 9/3").
+        #
+        # Meanwhile the four branches the old rule waved through as
+        # deliberate - BCH, SOL, LTC, ZEC - each DID buy while already at or
+        # past the cap, which is the grant firing and is genuinely fine. So
+        # the rule flagged the one clean branch and cleared the four that
+        # used the grant. Backwards in both directions.
+        #
+        # The question is WHEN, not HOW MANY. A buy only used the grant if
+        # the branch was already full when it opened. Count those.
+        #
+        # LIMIT, stated because it changes what this can conclude: the cap
+        # in force at the time of a buy is not stored - num_levels is
+        # rewritten every cycle by the spacing override - so the CURRENT
+        # value stands in for it. A branch whose allocation changed since
+        # could be judged against a cap it never had.
+        def _opened(sli):
+            return sli.get("opened_at") or ""
+
+        cap = int(row["num_levels"])
+        grant_buys = []
+        for s in sl:
+            if s.get("adopted"):
+                continue
+            t = _opened(s)
+            if not t:
+                continue
+            prior = [x for x in sl if _opened(x) and _opened(x) < t]
+            if len(prior) >= cap:
+                grant_buys.append({
+                    "opened_at": t,
+                    "slices_before_it": len(prior),
+                    "all_prior_adopted": all(x.get("adopted") for x in prior),
+                })
+        entry["buys_past_the_cap"] = grant_buys
+        unreadable = any(not _opened(s) for s in sl)
+        entry["timestamps_complete"] = not unreadable
+
+        if unreadable:
+            entry["deliberate"] = None
+            entry["why"] = (
+                f"{entry['open_slices']} slice(s) over a cap of {cap}, but at "
+                f"least one slice carries no opened_at, so WHEN each was "
+                f"bought cannot be established. UNKNOWN - not a breach and "
+                f"not a clean bill of health.")
+        elif not grant_buys:
+            entry["deliberate"] = True
+            entry["why"] = (
+                f"{entry['adopted_slices']} adopted slice(s) and {bought} "
+                f"bought, and NOT ONE of the bought slices opened while the "
+                f"branch was full - every buy was inside the cap at the time. "
+                f"The adoption landed on top afterwards and overshot the cap, "
+                f"which coin_adoption_worker documents as expected. No buy "
+                f"broke a rule.")
+        elif len(grant_buys) == 1 and grant_buys[0]["all_prior_adopted"]:
+            entry["deliberate"] = True
+            entry["why"] = (
+                f"exactly one buy opened while the branch was full, at "
+                f"{grant_buys[0]['opened_at']}, and every slice before it was "
+                f"adopted. That is the one-rung grant firing once, which is "
+                f"the mechanism, not a breach.")
+        else:
+            entry["deliberate"] = False
+            mixed = [g for g in grant_buys if not g["all_prior_adopted"]]
+            entry["why"] = (
+                f"{len(grant_buys)} buy(s) opened while the branch was ALREADY "
+                f"full (cap {cap})"
+                + (f", and {len(mixed)} of them with a non-adopted slice "
+                   f"already open, so the grant did not apply at all"
+                   if mixed else
+                   ", and the grant only ever allows ONE")
+                + ". The clamp did not snap back. Worth looking at.")
         over.append(entry)
 
     return {
@@ -287,7 +356,14 @@ def measure_capital(branches, free_cash_usd=0.0, concentration_top_n=2):
             [r for r in rows if r["idle_usd"] > 20],
             key=lambda r: -r["idle_usd"]),
         "slices_over_levels": over,
-        "slices_over_levels_unexplained": [r for r in over if not r["deliberate"]],
+        # `not r["deliberate"]` folded None into False, so a branch whose
+        # timestamps could not be read was reported as a BREACH. UNKNOWN is a
+        # third verdict and gets its own list - absent from both the clean
+        # set and the breach set, present in neither by accident.
+        "slices_over_levels_unexplained": [r for r in over
+                                           if r["deliberate"] is False],
+        "slices_over_levels_unknown": [r for r in over
+                                       if r["deliberate"] is None],
         "unreadable_branches": unreadable or None,
     }
 
