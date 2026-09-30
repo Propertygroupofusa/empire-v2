@@ -13739,8 +13739,16 @@ Final design, merged from two passes and confirmed by the owner:
   actually due, so an ordinary pass adds no venue call.
 - A due tier held by a dirty ledger shows as `tiers_pending_reconciliation`;
   it locks on the first clean pass.
-- Dashboard shows LOCKED, REALIZED and trading capital vs floor as separate
-  numbers. Only LOCKED is monotone.
+- Dashboard shows five separate lines, never one figure: LOCKED PROFIT,
+  REALIZED AVAILABLE (realized - locked), OPEN P&L (moves nothing; "unknown"
+  if any slice is unpriced), TRADING CAPITAL vs floor, TOTAL EQUITY
+  (trading capital + locked + open). The guarantee is stated precisely:
+  verified locked profit cannot decrease through ordinary trading losses.
+  Test: `node test_ratchet_panel.js`.
+- Known imprecision: slice sizing reads branch `allocated_usd`, which still
+  includes the locked share. Spending is capped (locked is a deployment
+  reserve), so the only effect is sizing up to locked/allocated larger -
+  about 0.5% per tier at today's size.
 - **Off by default.** Arm from the Grid Bot section, or
   `POST /api/trading-dashboard/grid-status/profit-ratchet {enabled}`; the
   response says whether the seed was credited and why not.

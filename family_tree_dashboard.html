@@ -3973,11 +3973,23 @@ function renderGridProfitRatchet(data) {
           `tiers are held until it does (${(rec.findings || []).join('; ')}).`);
     const pending = r.tiers_pending_reconciliation > 0
         ? ` <strong>${r.tiers_pending_reconciliation}</strong> tier(s) earned, waiting on reconciliation.` : '';
-    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>, tier <strong>${r.tier}</strong>.<br>` +
-        `🔒 LOCKED <strong>${fmtUsd(r.locked_usd)}</strong> (never goes down) · ` +
-        `💵 REALIZED <strong>${fmtUsd(r.realized_total)}</strong> · ` +
-        `Trading capital <strong>${fmtUsd(r.trading_capital)}</strong> vs floor ` +
-        `<strong>${fmtUsd(r.floor)}</strong>.<br>` +
+    // Five separate lines, never collapsed into one figure. OPEN P&L is shown
+    // for honesty but moves nothing, and is "unknown" whenever any open slice
+    // could not be priced - never a partial sum presented as a total.
+    const open = data.total_unrealized_net_usd;
+    const openStr = open != null ? fmtUsd(open) : 'unknown';
+    const equity = (open != null && r.trading_capital != null)
+        ? fmtUsd(r.trading_capital + r.locked_usd + open) : 'unknown';
+    const row = (label, value, note) =>
+        `<div style="display:flex;justify-content:space-between;max-width:420px">` +
+        `<span>${label}</span><span><strong>${value}</strong>${note ? ` <span style="opacity:.7">${note}</span>` : ''}</span></div>`;
+    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>, tier <strong>${r.tier}</strong>.` +
+        row('🔒 LOCKED PROFIT', fmtUsd(r.locked_usd), 'never decreases from trading losses') +
+        row('💰 REALIZED AVAILABLE', fmtUsd(r.realized_total - r.locked_usd), 'compounding') +
+        row('📈 OPEN P&L', openStr, 'never moves the ratchet') +
+        `<div style="max-width:420px;border-top:1px solid var(--border, #ccc);margin:2px 0"></div>` +
+        row('TRADING CAPITAL', fmtUsd(r.trading_capital), `floor ${fmtUsd(r.floor)}`) +
+        row('TOTAL EQUITY', equity, '') +
         `Next tier: <strong>${fmtUsd(r.progress_usd)}</strong> of ` +
         `${r.next_tier_size != null ? fmtUsd(r.next_tier_size) : '—'} banked.` +
         (r.seed_credited ? '' : ' Past profit was not credited (ledger was not clean when switched on).') +
