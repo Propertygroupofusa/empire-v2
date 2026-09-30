@@ -2892,13 +2892,19 @@ async def get_grid_holdings_market_value():
 
 
 # ---- Profit ratchet (see profit_ratchet.py) ------------------------------
-# Four TradingBotState rows, value in base_capital. armed_at is a unix
-# timestamp; 0/absent means OFF. base is the fleet value the tiers grow from,
-# set on the first COMPLETE pass after arming (0 = not yet measured).
+# TradingBotState rows, value in base_capital. armed_at is a unix timestamp;
+# 0/absent means OFF. Tiers move on BANKED profit only; the pause compares
+# fleet value to (fleet value at arming + profit locked since).
 RATCHET_ARMED_AT_KEY = "grid_ratchet_armed_at"
-RATCHET_BASE_KEY = "grid_ratchet_base"
+RATCHET_PRINCIPAL_KEY = "grid_ratchet_principal"
+RATCHET_ANCHOR_KEY = "grid_ratchet_anchor_equity"
 RATCHET_TIER_KEY = "grid_ratchet_tier"
-RATCHET_LOCKED_TARGET_KEY = "grid_ratchet_locked_target"
+RATCHET_CONSUMED_KEY = "grid_ratchet_consumed"
+RATCHET_LOCKED_KEY = "grid_ratchet_locked"
+RATCHET_LOCKED_AT_ARM_KEY = "grid_ratchet_locked_at_arm"
+_RATCHET_KEYS = (RATCHET_ARMED_AT_KEY, RATCHET_PRINCIPAL_KEY, RATCHET_ANCHOR_KEY,
+                 RATCHET_TIER_KEY, RATCHET_CONSUMED_KEY, RATCHET_LOCKED_KEY,
+                 RATCHET_LOCKED_AT_ARM_KEY)
 
 # In-process mirror for the trading loop, so a buy never waits on a query.
 _ratchet_buys_paused = False
@@ -2910,13 +2916,11 @@ _pass_equity = {}
 
 
 async def _ratchet_read_all() -> dict:
-    keys = (RATCHET_ARMED_AT_KEY, RATCHET_BASE_KEY, RATCHET_TIER_KEY,
-            RATCHET_LOCKED_TARGET_KEY)
     async with get_session_factory()() as db:
         rows = (await db.execute(select(TradingBotState).where(
-            TradingBotState.bot_name.in_(keys)))).scalars().all()
+            TradingBotState.bot_name.in_(_RATCHET_KEYS)))).scalars().all()
     got = {r.bot_name: float(r.base_capital or 0.0) for r in rows}
-    return {k: got.get(k, 0.0) for k in keys}
+    return {k: got.get(k, 0.0) for k in _RATCHET_KEYS}
 
 
 async def _ratchet_write(values: dict):
@@ -2931,46 +2935,66 @@ async def _ratchet_write(values: dict):
         await db.commit()
 
 
-async def set_profit_ratchet_armed(enabled: bool):
-    """Arm or disarm. Arming starts FRESH: the base is re-measured on the next
-    complete pass and nothing is locked until a tier is actually crossed.
-    Disarming releases the lock - the cash becomes spendable again."""
-    await _ratchet_write({
-        RATCHET_ARMED_AT_KEY: datetime.utcnow().timestamp() if enabled else 0.0,
-        RATCHET_BASE_KEY: 0.0,
-        RATCHET_TIER_KEY: 0.0,
-        RATCHET_LOCKED_TARGET_KEY: 0.0,
-    })
-    global _ratchet_buys_paused, _ratchet_locked_usd
-    _ratchet_buys_paused = False
-    _ratchet_locked_usd = 0.0
-
-
-async def _realized_grid_pnl_since(since: datetime) -> float:
+async def _realized_grid_pnl_total() -> float:
+    """Every dollar of grid profit ever banked. Pre-arm profit counts toward
+    the first tier by the owner's choice."""
     async with get_session_factory()() as db:
-        total = (await db.execute(select(func.coalesce(func.sum(CryptoGridTradeHistory.pnl), 0.0))
-                                  .where(CryptoGridTradeHistory.closed_at >= since))).scalar()
+        total = (await db.execute(select(func.coalesce(
+            func.sum(CryptoGridTradeHistory.pnl), 0.0)))).scalar()
     return float(total or 0.0)
 
 
+async def set_profit_ratchet_armed(enabled: bool):
+    """Arm or disarm. Arming credits profit already banked toward the first
+    tiers at once; the fleet-value anchor for the pause is measured on the
+    next complete pass. Disarming releases the lock and lifts the pause."""
+    global _ratchet_buys_paused, _ratchet_locked_usd
+    if not enabled:
+        await _ratchet_write({k: 0.0 for k in _RATCHET_KEYS})
+        _ratchet_buys_paused, _ratchet_locked_usd = False, 0.0
+        return
+    import profit_ratchet
+    realized = await _realized_grid_pnl_total()
+    # allocated_usd already carries compounded profit; the principal is what
+    # was there before it, so a tier is 1% of real trading capital.
+    principal = max(0.0, (await get_grid_allocated_total()) - max(0.0, realized))
+    view, _ = profit_ratchet.advance(principal, 0, 0.0, 0.0, realized)
+    await _ratchet_write({
+        RATCHET_ARMED_AT_KEY: datetime.utcnow().timestamp(),
+        RATCHET_PRINCIPAL_KEY: principal,
+        RATCHET_ANCHOR_KEY: 0.0,
+        RATCHET_TIER_KEY: view["tier"],
+        RATCHET_CONSUMED_KEY: view["consumed"],
+        RATCHET_LOCKED_KEY: view["locked_usd"],
+        RATCHET_LOCKED_AT_ARM_KEY: view["locked_usd"],
+    })
+    _ratchet_buys_paused, _ratchet_locked_usd = False, view["locked_usd"]
+
+
 async def get_profit_ratchet_status(fleet_equity=None) -> dict:
-    """Read-only view of the ratchet. Never raises; OFF on any failure."""
+    """Read-only view. Never raises; reads OFF on any failure."""
     import profit_ratchet
     try:
         st = await _ratchet_read_all()
-        armed_ts = st[RATCHET_ARMED_AT_KEY]
-        if not armed_ts:
+        if not st[RATCHET_ARMED_AT_KEY]:
             return {"armed": False, "locked_usd": 0.0, "buys_paused": False}
-        armed_at = datetime.utcfromtimestamp(armed_ts)
-        realized = await _realized_grid_pnl_since(armed_at)
-        base = st[RATCHET_BASE_KEY]
-        view, _ = profit_ratchet.advance(base, int(st[RATCHET_TIER_KEY]),
-                                         st[RATCHET_LOCKED_TARGET_KEY], fleet_equity, realized)
-        view.update({"armed": True, "armed_at": armed_at.isoformat() + "Z",
-                     "base": round(base, 2) if base else None,
-                     "realized_since_arm": round(realized, 2),
-                     "tier_step_pct": profit_ratchet.TIER_STEP_PCT,
-                     "lock_fraction": profit_ratchet.LOCK_FRACTION})
+        realized = await _realized_grid_pnl_total()
+        view, _ = profit_ratchet.advance(st[RATCHET_PRINCIPAL_KEY], st[RATCHET_TIER_KEY],
+                                         st[RATCHET_CONSUMED_KEY], st[RATCHET_LOCKED_KEY],
+                                         realized)
+        anchor = st[RATCHET_ANCHOR_KEY]
+        floor = profit_ratchet.floor_value(anchor, view["locked_usd"],
+                                           st[RATCHET_LOCKED_AT_ARM_KEY])
+        view.update({
+            "armed": True,
+            "armed_at": datetime.utcfromtimestamp(st[RATCHET_ARMED_AT_KEY]).isoformat() + "Z",
+            "realized_total": round(realized, 2),
+            "anchor_equity": round(anchor, 2) if anchor else None,
+            "floor": floor,
+            "buys_paused": profit_ratchet.buys_paused(fleet_equity, floor),
+            "tier_step_pct": profit_ratchet.TIER_STEP_PCT,
+            "lock_fraction": profit_ratchet.LOCK_FRACTION,
+        })
         return view
     except Exception as exc:
         log.warning(f"[GRID] profit ratchet unreadable: {exc}")
@@ -2979,41 +3003,39 @@ async def get_profit_ratchet_status(fleet_equity=None) -> dict:
 
 
 async def update_profit_ratchet(fleet_equity):
-    """End-of-pass step, trading loop only. Crosses tiers, persists them, and
-    sets the in-process pause/lock the next pass's buys obey."""
+    """End-of-pass step, trading loop only. Crosses tiers from banked profit,
+    persists them, and sets the pause/lock the next pass's buys obey."""
     global _ratchet_buys_paused, _ratchet_locked_usd
     import profit_ratchet
     st = await _ratchet_read_all()
-    armed_ts = st[RATCHET_ARMED_AT_KEY]
-    if not armed_ts:
+    if not st[RATCHET_ARMED_AT_KEY]:
         _ratchet_buys_paused, _ratchet_locked_usd = False, 0.0
         return None
-    base = st[RATCHET_BASE_KEY]
-    if not base:
-        if fleet_equity is None or fleet_equity <= 0:
-            return None  # cannot anchor on an unknown
-        base = float(fleet_equity)
-        await _ratchet_write({RATCHET_BASE_KEY: base})
-        log.info(f"[GRID] 🪜 profit ratchet anchored at fleet value ${base:,.2f}")
-    realized = await _realized_grid_pnl_since(datetime.utcfromtimestamp(armed_ts))
-    view, events = profit_ratchet.advance(base, int(st[RATCHET_TIER_KEY]),
-                                          st[RATCHET_LOCKED_TARGET_KEY], fleet_equity, realized)
+    anchor = st[RATCHET_ANCHOR_KEY]
+    if not anchor and fleet_equity is not None and fleet_equity > 0:
+        anchor = float(fleet_equity)
+        await _ratchet_write({RATCHET_ANCHOR_KEY: anchor})
+        log.info(f"[GRID] 🪜 profit ratchet anchored at fleet value ${anchor:,.2f}")
+    realized = await _realized_grid_pnl_total()
+    view, events = profit_ratchet.advance(st[RATCHET_PRINCIPAL_KEY], st[RATCHET_TIER_KEY],
+                                          st[RATCHET_CONSUMED_KEY], st[RATCHET_LOCKED_KEY],
+                                          realized)
     if events:
         await _ratchet_write({RATCHET_TIER_KEY: view["tier"],
-                              RATCHET_LOCKED_TARGET_KEY: view["locked_target"]})
-        for k, level, add in events:
+                              RATCHET_CONSUMED_KEY: view["consumed"],
+                              RATCHET_LOCKED_KEY: view["locked_usd"]})
+        for k, size, add in events:
             await _log_activity_safe("grid_profit_ratchet", "", "LOCK",
-                                     f"🪜 fleet reached tier {k} (${level:,.2f}) - locked "
-                                     f"${add:,.2f}, half that tier's gain. Locked total "
-                                     f"${view['locked_usd']:,.2f} banked"
-                                     + (f", ${view['locked_unfunded']:,.2f} still to bank"
-                                        if view['locked_unfunded'] else ""))
+                                     f"🪜 banked profit reached tier {k} (${size:,.2f} tier) - "
+                                     f"locked ${add:,.2f}. Locked total ${view['locked_usd']:,.2f}")
+    floor = profit_ratchet.floor_value(anchor, view["locked_usd"], st[RATCHET_LOCKED_AT_ARM_KEY])
     if fleet_equity is not None:
-        _ratchet_buys_paused = view["buys_paused"]
+        _ratchet_buys_paused = profit_ratchet.buys_paused(fleet_equity, floor)
     _ratchet_locked_usd = view["locked_usd"]
     if _ratchet_buys_paused and fleet_equity is not None:
-        log.warning(f"[GRID] 🪜 fleet value ${fleet_equity:,.2f} is at/below the locked tier "
-                    f"${view['floor']:,.2f} - new buys paused, open slices still sell")
+        log.warning(f"[GRID] 🪜 fleet value ${fleet_equity:,.2f} is below the locked floor "
+                    f"${floor:,.2f} - new buys paused, open slices still sell")
+    view.update({"floor": floor, "buys_paused": _ratchet_buys_paused})
     return view
 
 

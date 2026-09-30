@@ -13714,26 +13714,35 @@ endpoint sends; the snapshot writer only sets columns the table has.
 
 ## Lock-in tiers (profit ratchet) for Grid Bot, 2026-09-30
 
-Owner's choices: tiers every **5% of fleet value** (compounding), **half** of
-each tier's gain locked, and at the floor **pause new buys - never sell**.
+Owner's choices (revised same day after a second design pass):
+- **Tiers move on BANKED profit only**, never on price or paper gains, so a
+  phantom unrealized gain (QNT showed +$86.84 on coin the venue did not
+  report) can never raise the floor.
+- **Tier = 1% of trading capital**, recomputed after every tier.
+- **Half of each tier is locked**; half keeps compounding.
+- **Profit already banked counts** toward the first tiers at arming.
+- **At the floor, new buys pause. Nothing is ever sold.**
 
-- `profit_ratchet.py` - pure arithmetic. Tier k = base x 1.05^k. The tier
-  only ratchets up. Floor = the tier below the highest reached, so after the
-  first +5% the starting value is the floor.
-- Locked money is **real cash only**: capped at grid profit realized since
-  arming. A tier crossed on paper gains locks the rest as sells bank it.
-- `crypto_grid_bot`: fleet value is the SUM of a COMPLETE pass of per-branch
-  equities - one unpriceable branch means no fleet value that pass, and an
-  unknown never pauses anything or anchors the base. Locked cash is added to
-  the buy's deployment reserve and subtracted from free cash. The pause is one
-  more reason on the existing buy gate (`PROFIT_RATCHET` gate decision).
-- **Off by default.** Arm from the Grid Bot section of the Coinbase dashboard
-  or `POST /api/trading-dashboard/grid-status/profit-ratchet {enabled}`.
-  Arming anchors on the next complete pass; disarming releases the lock.
-- **It cannot make a negative impossible.** Nothing is sold to defend a tier,
-  so open coin can fall below it. What it guarantees is that banked profit is
-  not respent and the fleet stops adding to a fall. Tests:
-  `test_profit_ratchet.py`.
+How it works:
+- `profit_ratchet.py`, pure arithmetic. `principal` = grid allocated at
+  arming minus profit it already carries. Locked only ever rises; a realized
+  loss moves the counter back instead of unlocking anything.
+- Floor = fleet value at arming + profit locked SINCE arming. It is not
+  starting capital: open losses at arming (-$491 on 2026-09-30) would
+  otherwise pause buying the moment it is switched on. Pause is strict `<`.
+- Fleet value = sum of a COMPLETE pass of branch equities. An unreadable
+  branch means no value that pass; an unknown never pauses or anchors.
+- Locked cash joins the buy's deployment reserve and leaves free cash. It has
+  its own bucket, deliberately NOT the family tree's `locked_usd`.
+- **Off by default.** Dashboard switch in the Grid Bot section, or
+  `POST /api/trading-dashboard/grid-status/profit-ratchet {enabled}`.
+  Disarming releases the lock.
+- **Reconcile QNT before arming.** The pause compares fleet value, which
+  includes unrealized P&L; a phantom gain that later vanishes can drop the
+  fleet below its anchor and pause buying.
+- It cannot make a negative impossible: open coin can sit below any floor.
+  Show locked, banked and open as separate numbers; only locked is monotone.
+- Tests: `test_profit_ratchet.py`.
 
 ---
 

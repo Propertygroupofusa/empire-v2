@@ -1,75 +1,80 @@
-"""Profit ratchet: lock gains in tiers, pause new buys if the fleet falls back.
+"""Profit ratchet: lock banked profit in tiers; pause new buys if the fleet
+falls back to the locked floor. Never sells.
 
-Chosen by the account owner on 2026-09-30:
-  * tiers every 5% of fleet value, so they grow with the account;
-  * when a tier is crossed, HALF of that tier's gain is locked and half
-    keeps compounding;
-  * if fleet value falls back to the locked tier, new buys PAUSE. Nothing
-    is sold - that is the owner's explicit choice over forced liquidation.
+Owner's choices, 2026-09-30:
+  * tiers move on BANKED (realized) profit only - never on price or paper
+    gains, so a phantom unrealized gain can never raise the floor;
+  * each tier is 1% of trading capital, recomputed after every tier, so
+    tiers grow as the account does;
+  * half of each tier's profit is locked; half keeps compounding;
+  * profit already banked before arming counts toward the first tier;
+  * at the floor, new buys pause. Nothing is sold.
 
-What this can and cannot promise
---------------------------------
-It cannot make a negative number impossible. A pause stops the fleet adding
-to a falling market; it does not stop open coin from falling further, and
-this code will never force a sale to defend a line. What it does guarantee:
+Locked only ever goes UP. A realized loss moves the counter back (the next
+tier needs the loss earned back first) but never unlocks anything; only the
+owner disarming releases it.
 
-  * locked cash is never spent by a grid buy, so profit that was banked
-    stays banked;
-  * the fleet stops buying once it has given back a whole tier.
+What this cannot promise: open P&L is just price. Coin already held can sit
+below any floor, and this code never sells to defend one. The guarantees are
+that banked profit, once locked, is never respent, and that the fleet stops
+buying into a fall.
 
-Locked money is REAL cash only. A tier can be crossed on unrealized gains,
-but only realized (banked) profit exists in the wallet, so the locked amount
-is capped at realized profit since arming. The unfunded remainder is carried
-and locks itself as sells bank more.
-
-Pure functions only - no database, no network - so every number here can be
-tested by hand.
+Pure functions only - no database, no network.
 """
 
-TIER_STEP_PCT = 0.05
+TIER_STEP_PCT = 0.01
 LOCK_FRACTION = 0.5
 
 
-def tier_level(base: float, k: int, step: float = TIER_STEP_PCT) -> float:
-    """Fleet value at tier k: base grown by `step` k times."""
-    return base * (1.0 + step) ** k
-
-
-def advance(base, tier, locked_target, fleet_equity, realized_since_arm,
+def advance(principal, tier, consumed, locked, realized_total,
             step=TIER_STEP_PCT, lock_fraction=LOCK_FRACTION):
-    """One measurement. Returns (new_state, events).
+    """Cross every tier that realized profit now covers.
 
-    new_state: dict with tier, locked_target, locked_usd, floor, next_tier,
-    buys_paused. events: list of crossed tiers (k, level, locked_add).
+    principal       trading capital at arming, net of profit already banked
+    consumed        realized profit already used up by crossed tiers
+    realized_total  all realized grid profit counted (incl. pre-arm profit)
 
-    `tier` never goes down: a tier, once reached, stays reached. That is the
-    ratchet. A fleet_equity of None (any branch unreadable this pass) changes
-    nothing and pauses nothing - an unknown is not a breach.
+    Returns (state, events); events are (tier, tier_size, locked_add).
     """
     tier = int(tier or 0)
-    locked_target = float(locked_target or 0.0)
+    consumed = float(consumed or 0.0)
+    locked = float(locked or 0.0)
+    realized_total = float(realized_total or 0.0)
     events = []
-    if base and base > 0 and fleet_equity is not None:
-        while fleet_equity >= tier_level(base, tier + 1, step):
-            prev = tier_level(base, tier, step)
-            tier += 1
-            level = tier_level(base, tier, step)
-            add = lock_fraction * (level - prev)
-            locked_target += add
-            events.append((tier, round(level, 2), round(add, 2)))
-
-    banked = max(0.0, float(realized_since_arm or 0.0))
-    locked_usd = round(min(locked_target, banked), 2)
-
-    floor = tier_level(base, tier - 1, step) if (base and tier >= 1) else None
-    buys_paused = (floor is not None and fleet_equity is not None
-                   and fleet_equity <= floor)
+    principal = float(principal or 0.0)
+    for _ in range(10000):  # hard stop; a real account crosses a handful
+        trading_capital = principal + consumed - locked
+        size = step * trading_capital
+        if size <= 0 or realized_total - consumed < size:
+            break
+        consumed += size
+        add = lock_fraction * size
+        locked += add
+        tier += 1
+        events.append((tier, round(size, 2), round(add, 2)))
+    trading_capital = principal + consumed - locked
+    next_size = step * trading_capital if trading_capital > 0 else None
     return {
         "tier": tier,
-        "locked_target": round(locked_target, 2),
-        "locked_usd": locked_usd,
-        "locked_unfunded": round(max(0.0, locked_target - locked_usd), 2),
-        "floor": round(floor, 2) if floor is not None else None,
-        "next_tier": round(tier_level(base, tier + 1, step), 2) if base else None,
-        "buys_paused": buys_paused,
+        "consumed": round(consumed, 6),
+        "locked_usd": round(locked, 2),
+        "trading_capital": round(trading_capital, 2),
+        "progress_usd": round(realized_total - consumed, 2),
+        "next_tier_size": round(next_size, 2) if next_size else None,
     }, events
+
+
+def floor_value(anchor_equity, locked, locked_at_arm):
+    """The fleet value new buys must stay above: where the fleet stood when
+    armed, plus everything locked SINCE. Profit locked from pre-arm earnings
+    is already inside the anchor, so it does not raise the floor twice."""
+    if not anchor_equity:
+        return None
+    return round(anchor_equity + max(0.0, locked - (locked_at_arm or 0.0)), 2)
+
+
+def buys_paused(fleet_equity, floor):
+    """Paused only once the fleet is genuinely BELOW the floor - at the floor
+    exactly (the moment it is anchored, for one) is not a breach. An unknown
+    fleet value never pauses anything."""
+    return floor is not None and fleet_equity is not None and fleet_equity < floor

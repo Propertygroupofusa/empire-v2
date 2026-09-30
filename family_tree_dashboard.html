@@ -3949,9 +3949,10 @@ function renderGridMakerOrdersToggle(data) {
         `${on ? 'Switch back to market orders' : 'Switch to limit orders'}</a>`;
 }
 
-// Profit ratchet: tiers every 5% of fleet value, half of each tier's gain
-// locked, new buys paused if the fleet falls back to the locked tier.
-// Prints what the server computed; never sells anything.
+// Profit ratchet: tiers move on BANKED profit only (1% of trading capital
+// each), half of each tier locked, new buys paused if the fleet falls back
+// to the floor. Three numbers, never summed: locked (can only go up),
+// banked, and the floor. Prints what the server computed; never sells.
 function renderGridProfitRatchet(data) {
     const el = document.getElementById('grid-profit-ratchet');
     if (!el || data == null) return;
@@ -3959,33 +3960,27 @@ function renderGridProfitRatchet(data) {
     const link = (on) => `<a href="#" onclick="toggleGridProfitRatchet(${on});return false;" ` +
         `style="color:var(--accent)">${on ? 'Turn on lock-in tiers' : 'Turn off'}</a>`;
     if (!r.armed) {
-        el.innerHTML = `🪜 Lock-in tiers: <strong>OFF</strong>. When on, every 5% the fleet grows ` +
-            `locks half of that gain as untouchable cash, and new buys pause if the fleet falls ` +
-            `back to the last locked level. ${link(true)}`;
+        el.innerHTML = `🪜 Lock-in tiers: <strong>OFF</strong>. When on, every time banked profit ` +
+            `reaches 1% of trading capital, half of it is locked as cash the bot never spends, and ` +
+            `new buys pause if the fleet falls back to the locked floor. ${link(true)}`;
         return;
     }
-    if (!r.base) {
-        el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong> — measuring the starting fleet value ` +
-            `on the next full pass. ${link(false)}`;
-        return;
-    }
-    const tierLine = r.tier >= 1
-        ? `Tier <strong>${r.tier}</strong> reached. Locked floor <strong>${fmtUsd(r.floor)}</strong>.`
-        : `No tier reached yet (start ${fmtUsd(r.base)}).`;
-    const pending = r.locked_unfunded > 0
-        ? ` (${fmtUsd(r.locked_unfunded)} more locks as sells bank profit)` : '';
-    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>. ${tierLine} ` +
-        `Next tier at <strong>${fmtUsd(r.next_tier)}</strong>. ` +
-        `Locked cash <strong>${fmtUsd(r.locked_usd)}</strong>${pending}. ` +
-        (r.buys_paused ? `<strong style="color:var(--red, #c0392b)">New buys paused</strong> — fleet is at the locked floor. ` : '') +
+    const floor = r.floor != null
+        ? `Floor <strong>${fmtUsd(r.floor)}</strong>.`
+        : `Floor set on the next full pass.`;
+    el.innerHTML = `🪜 Lock-in tiers: <strong>ON</strong>, tier <strong>${r.tier}</strong>. ` +
+        `🔒 Locked <strong>${fmtUsd(r.locked_usd)}</strong> (only ever goes up). ` +
+        `Banked toward next tier <strong>${fmtUsd(r.progress_usd)}</strong> of ` +
+        `${r.next_tier_size != null ? fmtUsd(r.next_tier_size) : '—'}. ${floor} ` +
+        (r.buys_paused ? `<strong style="color:var(--red, #c0392b)">New buys paused</strong> — fleet is at the floor. ` : '') +
         link(false);
 }
 
 async function toggleGridProfitRatchet(enable) {
     const msg = enable
-        ? 'Turn on lock-in tiers?\n\nStarts from today\'s fleet value. Every +5% locks half that gain as cash ' +
-          'the bot will not spend. If the fleet falls back to the last locked level, new buys pause.\n\n' +
-          'Nothing is ever sold to defend a tier, so open coins can still dip below it.'
+        ? 'Turn on lock-in tiers?\n\nEvery time banked profit reaches 1% of trading capital, half of it is ' +
+          'locked as cash the bot will not spend. Profit already banked counts right away. If the fleet ' +
+          'falls back to the floor, new buys pause.\n\nNothing is ever sold, so open coins can still dip below it.'
         : 'Turn off lock-in tiers?\n\nLocked cash becomes spendable again and the pause is lifted.';
     if (!confirm(msg)) return;
     try {
