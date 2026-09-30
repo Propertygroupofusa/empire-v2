@@ -1037,8 +1037,8 @@
             <div class="value" id="stat-profit">—</div>
             <div class="profit-breakdown" id="stat-profit-breakdown"></div>
         </div>
-        <div class="kpi"><div class="label">Branches / Coins</div><div class="value" id="stat-count">—</div></div>
-        <div class="kpi"><div class="label">Total Allocated</div><div class="value" id="stat-total">—</div></div>
+        <div class="kpi"><div class="label">Grid branches / coins</div><div class="value" id="stat-count">—</div></div>
+        <div class="kpi"><div class="label">Total allocated (grid)</div><div class="value" id="stat-total">—</div></div>
         <div class="kpi gold">
             <div class="label">🔒 Locked Profit</div>
             <div class="value" id="stat-locked">—</div>
@@ -7643,8 +7643,32 @@ async function refresh() {
     const statusEl = document.getElementById('status');
     try {
         const data = await apiGet('/family-tree-status');
-        document.getElementById('stat-count').textContent = data.branch_count;
-        document.getElementById('stat-total').textContent = fmtUsd(data.total_allocated_usd);
+
+        // THESE TWO TILES WERE READING A SYSTEM THAT IS NOT RUNNING.
+        //
+        // family-tree-status reports branch_count 2 and total_allocated_usd
+        // 0.00 - its two branches are crypto_btc_compound and
+        // crypto_tree_aave_usd, both allocated $0.00, leftovers from before
+        // this deploy switched to grid_fleet. The page then showed those
+        // zeros beside a TOTAL PROFIT computed from the GRID, which has 23
+        // branches and $8,521.42 allocated. The owner read the page as
+        // frozen, and he was right to: the tiles could not move, because
+        // nothing was driving them.
+        //
+        // family_tree_loop_running is False and grid_bot_active is True, so
+        // the grid is where the money is. The labels now say "grid" outright
+        // rather than leaving the reader to work out which system a number
+        // belongs to - two systems on one page is exactly how the zeros went
+        // unnoticed.
+        let gridData = null;
+        try { gridData = await apiGet('/grid-status'); } catch (e) { gridData = null; }
+        // A failed fetch must not print 0 - a gap is not a zero, and a zero
+        // here is the bug being fixed.
+        document.getElementById('stat-count').textContent =
+            (gridData && gridData.branch_count != null) ? gridData.branch_count : '—';
+        document.getElementById('stat-total').textContent =
+            (gridData && gridData.total_allocated_usd != null)
+                ? fmtUsd(gridData.total_allocated_usd) : '—';
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         lastLockedProfit = data.locked_usd || 0;
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();

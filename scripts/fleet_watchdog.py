@@ -749,6 +749,52 @@ def main():
                  f"managed by no grid branch - {100 - (share or 0):.1f}% of the "
                  f"account. Nothing buys or sells it; it only moves on price.")
 
+    # ---- 4d2. The total moved because the PRICING changed, not the price ---
+    #
+    # The owner, watching his own dashboard: "I'm not seeing no updates on
+    # these numbers and accounts."
+    #
+    # The crypto total went $9,086.67 -> $9,993.56 in about an hour while the
+    # fleet's unrealized P&L got WORSE, -$444.70 -> -$465.00. Those two should
+    # move together. They did not, because coin_usd is a sum over the assets
+    # the census could PRICE, and that set changes: the payload's own warning
+    # says "4 of 60 assets could not be priced and are NOT in total_usd... The
+    # real total is higher than the figure shown by whatever they are worth."
+    #
+    # So the headline total is not comparable across passes unless the same
+    # assets were priced in both. A jump with no trade behind it is alarming
+    # to read and impossible to explain from the number alone. This records
+    # the priced/unpriced counts so the next move is attributable to one cause
+    # or the other instead of guessed at afterwards - which is all that could
+    # be done this time, and was not enough.
+    if census is not None:
+        unp = census.get("assets_unpriced")
+        held = census.get("assets_held")
+        cur["assets_unpriced"], cur["assets_held"] = unp, held
+        cur["coin_usd"] = census.get("coin_usd")
+        prev_unp = prev.get("assets_unpriced")
+        # A census that publishes NEITHER count simply does not report
+        # coverage - there is nothing to say and nothing missing. Gapping on
+        # that fired on every healthy fleet, which is the cry-wolf failure this
+        # file keeps having to unlearn. Only a payload that gives one count
+        # without the other is genuinely incomplete.
+        if (unp is None) != (held is None):
+            gaps.append("census reports one asset-pricing count without the "
+                        "other - a move in the coin total cannot be attributed")
+        elif unp is not None and prev_unp is not None and unp != prev_unp:
+            names = ", ".join(str((x or {}).get("asset")) for x in
+                              (census.get("unpriced") or [])) or "unnamed"
+            flag(WARN, "PRICING_COVERAGE",
+                 f"the census priced a DIFFERENT set of assets this pass - "
+                 f"{prev_unp} unpriced before, {unp} now ({names}). The coin "
+                 f"total moves when coverage changes, with no trade behind it, "
+                 f"so this pass's total is not comparable with the last one.")
+        elif unp:
+            flag(INFO, "PRICING_COVERAGE",
+                 f"{unp} of {held} assets cannot be priced and are NOT in the "
+                 f"total ({', '.join(str((x or {}).get('asset')) for x in (census.get('unpriced') or []))}). "
+                 f"The real total is higher by whatever they are worth.")
+
     # ---- 4e. A step that is safe only while maker-only holds ---------------
     #
     # fee_floor.py exists because the same defect appeared in four places in
