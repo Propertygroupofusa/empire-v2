@@ -85,6 +85,62 @@ def get_base_url():
     """Dynamically read Alpaca base URL from env var. Default: production API (not paper trading)."""
     return os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
 
+# ── MARKET CLOCK: new entries only while the market is actually open ─────
+#
+# This bot's universe is US stocks and ETFs (MES->SPY, AAPL, NVDA, ...), but
+# its cycle runs around the clock - the "24/7" comment in run_prop_cycle is
+# a leftover from when it also traded crypto. A DAY market order sent while
+# the market is closed is not rejected: Alpaca QUEUES it and fills it at the
+# next open, at whatever price the gap delivers. So an overnight cycle could
+# decide a buy from yesterday's 15:45 bar (the log already warns those bars
+# are hundreds of minutes old) and have it filled at 09:30 at a different
+# price entirely. The decision and the fill would share nothing but a symbol.
+#
+# Gates NEW ENTRIES only. Exits are never gated here: a stop that must fire
+# at the open should still be queued, and blocking exits is the failure this
+# file has spent several commits removing.
+#
+# Fails CLOSED: a clock that cannot be read blocks entries, never assumes
+# the market is open. Cached briefly so three subsystems per cycle cost one
+# request.
+MARKET_CLOSED_PREFIX = "market closed"
+_market_clock_cache = {"at": 0.0, "is_open": None, "next_open": None}
+MARKET_CLOCK_TTL_SECONDS = 60
+
+
+async def get_market_is_open(session):
+    """(is_open, next_open_iso). is_open is None when the clock can't be read."""
+    now = time.time()
+    c = _market_clock_cache
+    if c["is_open"] is not None and now - c["at"] < MARKET_CLOCK_TTL_SECONDS:
+        return c["is_open"], c["next_open"]
+    try:
+        async with session.get(f"{get_base_url()}/v2/clock", headers=get_headers()) as r:
+            if r.status != 200:
+                return None, None
+            body = await r.json()
+        c.update(at=now, is_open=bool(body.get("is_open")), next_open=body.get("next_open"))
+        return c["is_open"], c["next_open"]
+    except Exception as e:
+        log.warning(f"[APEX_589296] market clock unreadable ({type(e).__name__}: {e}) - "
+                    f"no new entries this cycle")
+        return None, None
+
+
+async def market_entry_block_reason(session):
+    """None when entries may open; otherwise the reason they may not."""
+    is_open, next_open = await get_market_is_open(session)
+    if is_open is True:
+        return None
+    if is_open is None:
+        return ("market clock could not be read - no new entries until it can "
+                "(a gap is not an open market)")
+    return (f"{MARKET_CLOSED_PREFIX} - no new entries until the open"
+            + (f" ({next_open})" if next_open else "")
+            + ". An order sent now would be queued and filled at the opening "
+              "price, not the price this decision is based on.")
+
+
 # Live trading mode
 LIVE_TRADE = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
 
@@ -2240,6 +2296,9 @@ async def run_prop_cycle():
                 # position ($197.46 of DOG) unable to exit.
                 entries_halted = _kill_detail
 
+        if not entries_halted:
+            entries_halted = await market_entry_block_reason(session)
+
         global _last_auto_backtest_at
         now_ts = time.time()
         if now_ts - _last_auto_backtest_at >= AUTO_BACKTEST_INTERVAL_SECONDS:
@@ -2466,7 +2525,11 @@ async def run_prop_cycle():
             # across every symbol scanned. Every genuine MANDATE refusal
             # below does record one - test_every_refusing_return_in_
             # try_open_logs_a_decision holds that line.
-            log.warning(f"[KILL CONDITION] {contract} entry blocked - {entries_halted}")
+            if entries_halted.startswith(MARKET_CLOSED_PREFIX):
+                # Every symbol, every cycle, all night: a known, expected state.
+                log.debug(f"[MARKET CLOSED] {contract} entry deferred to the open")
+            else:
+                log.warning(f"[KILL CONDITION] {contract} entry blocked - {entries_halted}")
             return False
         """Wraps open_position with dollar-based sizing against whatever
         cash is actually left this cycle (tracked in cash_remaining, closed
@@ -4028,6 +4091,11 @@ async def run_alpaca_branches_cycle():
         )
         if should_halt:
             log.warning(f"[ALPACA-BRANCH] real account-wide kill condition active ({halt_reason}) - no branch entries this cycle")
+        if not should_halt:
+            _closed = await market_entry_block_reason(session)
+            if _closed:
+                should_halt = True
+                log.info(f"[ALPACA-BRANCH] {_closed}")
         strategy_family = await get_live_strategy_family()
         live_entry_variant = await get_live_entry_variant()
 
@@ -4324,6 +4392,11 @@ async def run_opening_bar_live_cycle():
         )
         if should_halt:
             log.warning(f"[OPENING-BAR] real account-wide kill condition active ({halt_reason}) - no new opening-bar entries this cycle")
+        if not should_halt:
+            _closed = await market_entry_block_reason(session)
+            if _closed:
+                should_halt = True
+                log.info(f"[OPENING-BAR] {_closed}")
 
         for contract, config in FUTURES.items():
             try:
