@@ -264,6 +264,55 @@ snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
 ok("IDLE_PROFIT when reachable profit sits across two passes",
    "IDLE_PROFIT" in run(d, snap))
 
+# THE THRESHOLD THAT GOVERNS A SLICE DEPENDS ON ITS BRANCH.
+#
+# The 1.0% parked-sell floor applies only to branches FULL on their rungs.
+# A branch with a free rung exits on the grid rise trigger - one grid step.
+# TON-USD sat at +1.33% net on a 3.0% step with 2 of 3 rungs filled: real
+# profit, nothing reserved, nothing short, and nothing wrong - it was 0.94%
+# short of the only trigger that applies to it. Reported against the 1.0%
+# floor it read as a stuck sell path.
+d = healthy()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]   # 1 slice / 3 levels
+sl = b["slices"][0]
+sl["unrealized_net_pct"] = 0.0133          # past 1.0%, short of the 3.0% step
+snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
+out = run(d, snap)
+ok("no IDLE_PROFIT when a NON-parked slice is short of its rise trigger",
+   "IDLE_PROFIT" not in out, out)
+
+# Same number, parked branch: now the 1.0% floor really does govern it.
+d = healthy()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["num_levels"] = 1                        # 1 slice on 1 rung == full
+sl = b["slices"][0]
+sl["unrealized_net_pct"] = 0.0133
+snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"], full_usd=9000.0)
+out = run(d, snap)
+ok("IDLE_PROFIT when a PARKED slice past the 1.0% floor sits",
+   "IDLE_PROFIT" in out, out)
+ok("and it names the threshold that governed it",
+   "parked-sell floor at +1.0%" in out, out)
+
+# A non-parked slice past the FULL step is still a real finding.
+d = healthy()
+sl = d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0]
+sl["unrealized_net_pct"] = 0.05            # past the 3.0% step
+snap = dict(BASE_SNAP, reachable=[f"AAA-USD|{sl['opened_at']}"])
+out = run(d, snap)
+ok("IDLE_PROFIT still fires past the rise trigger on a non-parked branch",
+   "IDLE_PROFIT" in out, out)
+ok("and names THAT threshold instead",
+   "grid rise trigger at +3.0%" in out, out)
+
+# An unreadable step is UNKNOWN, never "not reachable".
+d = healthy()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["grid_pct"] = None
+b["slices"][0]["unrealized_net_pct"] = 0.05
+ok("an unreadable exit rule is a gap, not a silent skip",
+   "exit rule unreadable" in run(d, BASE_SNAP))
+
 # ADOPTED_BASIS: a "loss" measured against a price nobody paid.
 d = healthy()
 b = d["/api/trading-dashboard/grid-status"]["branches"][0]

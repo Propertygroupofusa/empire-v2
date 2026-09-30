@@ -933,20 +933,69 @@ def main():
         det = {c.get("name"): (c.get("detail") or "") for c in (inv.get("checks") or [])}
         blocked = set(_re.findall(r"([A-Z0-9]+-USD)", det.get("grid_inventory_is_free", "")))
         blocked |= set(_re.findall(r"([A-Z0-9]+-USD)", det.get("coin_tracked_is_held", "")))
-        FLOOR = 0.010  # GRID_PARKED_MIN_NET_PCT
-        reachable = [(p, s) for p, s in slices
-                     if (s.get("unrealized_net_pct") or 0) >= FLOOR and p not in blocked]
-        cur["reachable"] = sorted({f"{p}|{s.get('opened_at')}" for p, s in reachable})
+        # THE FLOOR A SLICE IS MEASURED AGAINST DEPENDS ON ITS BRANCH.
+        #
+        # This used to apply GRID_PARKED_MIN_NET_PCT (1.0%) to EVERY slice.
+        # That floor governs PARKED branches - ones full on their rungs, whose
+        # only way out is the parked-sell path. A branch with a rung still
+        # free does not use it at all: its exit is the grid rise trigger, one
+        # grid step above entry.
+        #
+        # TON-USD showed the difference live. Its branch held 2 of 3 rungs, so
+        # it was not parked, and a slice sat at +1.33% net on a 3.0% step -
+        # entry 1.4609, trigger 1.5047, price 1.4907. Real profit, genuinely
+        # unreserved, and nothing was wrong: it was 0.94% short of the only
+        # trigger that applies to it. Reported as "cleared the floor and did
+        # not sell across two passes", it reads as a stuck sell path, and an
+        # alarm that fires where no action exists is one the reader learns to
+        # skip.
+        #
+        # For a non-parked branch this requires net >= grid_pct. Net is always
+        # below gross, so clearing the step on NET means the gross move
+        # certainly cleared it - deliberately conservative, because a false
+        # IDLE_PROFIT is the defect being fixed.
+        PARKED_FLOOR = 0.010  # GRID_PARKED_MIN_NET_PCT
+        _bstate = {}
+        for b in branches:
+            sl2 = b.get("slices") or []
+            lv2 = b.get("num_levels") or 0
+            _bstate[b.get("product_id")] = (
+                bool(sl2) and len(sl2) >= lv2, b.get("grid_pct"))
+        reachable = []
+        unreadable_step = []
+        for p, s2 in slices:
+            if p in blocked:
+                continue
+            net = s2.get("unrealized_net_pct") or 0
+            full, gp = _bstate.get(p, (None, None))
+            if full:
+                if net >= PARKED_FLOOR:
+                    reachable.append((p, s2, PARKED_FLOOR, "parked-sell floor"))
+            elif gp:
+                if net >= gp:
+                    reachable.append((p, s2, gp, "grid rise trigger"))
+            elif full is None or gp is None:
+                # UNKNOWN, not "not reachable". Saying nothing here would hide
+                # a slice whose exit rule could not be read at all.
+                unreadable_step.append(p)
+        if unreadable_step:
+            gaps.append(f"exit rule unreadable for {', '.join(sorted(set(unreadable_step)))}"
+                        f" - profit sitting there would be invisible")
+        cur["reachable"] = sorted({f"{p}|{s2.get('opened_at')}" for p, s2, _, _ in reachable})
         held = set(prev.get("reachable") or []) & set(cur["reachable"])
         if held:
+            _why = {p: (thr, name) for p, s2, thr, name in reachable
+                    if f"{p}|{s2.get('opened_at')}" in held}
             flag(WARN, "IDLE_PROFIT",
-                 f"{len(held)} slice(s) cleared the +{FLOOR*100:.1f}% floor, are NOT "
-                 f"reserved or short, and did not sell across two passes: "
-                 f"{', '.join(sorted(h.split('|')[0] for h in held)[:6])}")
+                 f"{len(held)} slice(s) cleared the threshold that actually "
+                 f"governs them and did not sell across two passes, with no "
+                 f"reserved or short inventory to explain it: "
+                 + ", ".join(f"{p} (past its {name} at +{thr*100:.1f}%)"
+                             for p, (thr, name) in sorted(_why.items())[:6]))
         elif reachable:
             flag(INFO, "REACHABLE",
-                 f"{len(reachable)} profitable slice(s) reachable this pass - "
-                 f"expect them to retire shortly.")
+                 f"{len(reachable)} profitable slice(s) past their own exit "
+                 f"threshold this pass - expect them to retire shortly.")
 
     # ---- 11b. Bought coin quietly becoming "adopted" ------------------------
     #
