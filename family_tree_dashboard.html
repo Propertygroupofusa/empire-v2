@@ -8691,13 +8691,56 @@ function renderObservations(observations) {
     `).join('');
 }
 
+// LAST KNOWN, WITH ITS AGE - never a blank, never a zero.
+//
+// A poll that fails is not a balance of zero, and this panel already
+// refuses to caption one leg as the combined total. What it did NOT do
+// was keep the real number it had sixty seconds earlier: the gauge fell
+// to "unavailable this poll" and the legend to "—", throwing away a
+// measured figure because the NEXT read missed. On a phone dropping in
+// and out of signal that is most reads.
+//
+// So the last non-null reading is kept per field with the time it was
+// taken, and a failed poll shows that figure WITH ITS AGE. Stale and
+// labelled stale beats blank, and it is still never a fabricated zero.
+// Nothing is kept for a field that has never once been read.
+const _lastGood = { combined: null, alpaca: null, crypto: null };
+
+function _remember(key, value) {
+    if (value != null && isFinite(value)) {
+        _lastGood[key] = { value: value, at: Date.now() };
+    }
+    return _lastGood[key];
+}
+
+function _fmtAge(ms) {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return Math.round(s / 86400) + 'd ago';
+}
+
+// The whole rule in one place: a real reading, else the last real
+// reading with its age, else an honest gap. Never 0, never invented.
+function _lastKnownStr(key, live) {
+    const seen = _remember(key, live);
+    if (live != null && isFinite(live)) return fmtUsd(live);
+    if (seen) return fmtUsd(seen.value) + ' \u00b7 as of ' + _fmtAge(seen.at);
+    return null;
+}
+
 function renderCombinedProgress(data) {
     // No combined total when either real side failed to read - the
     // surviving leg alone is not the combined number and must never be
-    // captioned as if it were.
+    // captioned as if it were. What CAN be shown is the last real
+    // combined figure, plainly marked with how old it is.
+    const combinedStr = _lastKnownStr('combined', data.combined_equity);
     const combinedCaption = data.combined_equity != null
         ? fmtUsd(data.combined_equity) + ' of ' + fmtUsd(data.goal)
-        : 'Combined total unavailable this poll - one side could not be read';
+        : (combinedStr
+            ? combinedStr + ' of ' + fmtUsd(data.goal) + ' - last good read, this poll failed'
+            : 'Combined total unavailable this poll - one side could not be read');
     renderGauge('combined-goal-gauge', data.combined_progress_pct, combinedCaption);
 
     const momentumEl = document.getElementById('combined-momentum');
@@ -8727,8 +8770,13 @@ function renderCombinedProgress(data) {
     }
 
     const splitEl = document.getElementById('combined-split');
-    const alpacaStr = data.alpaca_equity != null ? fmtUsd(data.alpaca_equity) : (data.alpaca_error ? 'unavailable' : '—');
-    const cryptoStr = data.crypto_equity != null ? fmtUsd(data.crypto_equity) : (data.crypto_error ? 'unavailable' : '—');
+    // Same rule as the gauge: the live figure, else the last real one
+    // with its age, else the honest gap. 'unavailable' is kept for the
+    // case where nothing has ever been read - it is a gap, not a zero.
+    const alpacaStr = _lastKnownStr('alpaca', data.alpaca_equity)
+        || (data.alpaca_error ? 'unavailable' : '\u2014');
+    const cryptoStr = _lastKnownStr('crypto', data.crypto_equity)
+        || (data.crypto_error ? 'unavailable' : '\u2014');
     splitEl.innerHTML = `
         <span class="side"><span class="swatch" style="background:#1f3864;"></span>Alpaca <span class="num">${alpacaStr}</span></span>
         <span class="side"><span class="swatch" style="background:#e8752c;"></span>Coinbase <span class="num">${cryptoStr}</span></span>
