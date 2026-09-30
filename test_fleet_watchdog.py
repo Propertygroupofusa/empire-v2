@@ -301,15 +301,46 @@ ok("PARKED_GREW when capital full on its rungs grows",
 ok("and it does NOT fire when that capital is flat or falling",
    "PARKED_GREW" not in run(d, dict(BASE_SNAP, full_usd=9000.0)))
 
-# Two sources disagreeing is an UNKNOWN, not a number to quietly prefer.
+# THE CROSS-CHECK IS THE BRANCH SET, NOT THE DOLLARS.
+#
+# The two dollar figures measure different things: no_dead_capital sums each
+# branch's allocated_usd (capital committed), this check sums qty x entry over
+# its slices (what they cost). Live on 2026-09-30 those ran $155.31 apart over
+# the SAME ten branches, both directions per branch - and the old guard called
+# that a gap on every pass. What cannot both be true is the branch COUNT.
+def _dead_detail(usd, n):
+    return {"name": "no_dead_capital", "status": "FAIL",
+            "detail": f"${usd} across {n} branch(es) full on their rungs, which "
+                      f"cannot buy at any price until a slice sells."}
+
 d2 = healthy()
 d2["/api/trading-dashboard/grid-status"]["branches"][0]["num_levels"] = 1
 d2["/api/trading-dashboard/grid-status/invariants"]["checks"] = [
-    {"name": "no_dead_capital", "status": "FAIL",
-     "detail": "$5,000.00 across 12 branch(es) full on their rungs, which "
-               "cannot buy at any price until a slice sells."}]
-ok("a prose figure that disagrees with the branches is reported as a gap",
-   "parked capital disagrees" in run(d2, BASE_SNAP))
+    _dead_detail("5,000.00", 12)]
+out = run(d2, BASE_SNAP)
+ok("a branch COUNT the two sources disagree on is reported as a gap",
+   "parked branch COUNT disagrees" in out)
+ok("and that gap names both counts, so neither is the silent default",
+   "sees 1 branch(es)" in out and "invariant sees 12" in out)
+
+# The live case the old guard got wrong: same branch count, different dollars.
+d3 = healthy()
+d3["/api/trading-dashboard/grid-status"]["branches"][0]["num_levels"] = 1
+d3["/api/trading-dashboard/grid-status/invariants"]["checks"] = [
+    _dead_detail("5,000.00", 1)]
+out3 = run(d3, dict(BASE_SNAP, full_usd=9000.0))
+ok("matching counts with differing dollars is NOT a gap - two measurements",
+   "disagrees" not in out3)
+ok("but both figures still appear, each named for what it measures",
+   "slice cost (qty x entry)" in out3 and "$5,000.00 allocated" in out3)
+
+# And the growth alarm carries both too - a reader who only ever sees
+# PARKED_GREW would otherwise never meet the invariant's figure.
+out4 = run(d3, dict(BASE_SNAP, full_usd=10.0))
+ok("PARKED_GREW names the measurement it grew on",
+   "PARKED_GREW" in out4 and "slice cost (qty x entry)" in out4)
+ok("and carries the allocated figure alongside it",
+   "$5,000.00 allocated" in out4)
 
 # And a fleet with nothing parked says nothing at all about parking.
 ok("no PARKED line when nothing is full",

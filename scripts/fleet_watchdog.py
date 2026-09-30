@@ -894,26 +894,57 @@ def main():
         for c in (inv.get("checks") or []) if inv else []:
             if c.get("name") == "no_dead_capital":
                 _dead = c.get("detail") or ""
+        # THE TWO DOLLAR FIGURES MEASURE DIFFERENT THINGS. NOT A DISAGREEMENT.
+        #
+        # This block used to flag the dollar difference as a GAP, and it fired
+        # on every single pass - $3,647.40 here against $3,492.09 there, for
+        # days on end. Neither source was wrong. no_dead_capital sums each
+        # branch's allocated_usd, the capital the fleet COMMITTED to it; this
+        # block sums qty x entry_price over that branch's slices, what those
+        # slices actually COST. Measured live on 2026-09-30 the per-branch
+        # spread ran both directions over the same ten branches - LTC +$139.74
+        # on $214.22 allocated, HBAR -$55.69 on $332.71 - which is what
+        # off-rung fills and adopted slices look like, not an error anybody can
+        # fix. A gap line that fires every pass on an explained structural
+        # difference is the noise that teaches a reader to skim past the gaps
+        # that mean something.
+        #
+        # What IS a real cross-check is the branch SET. If the two sources
+        # count a different number of branches full on their rungs, one of them
+        # cannot see a branch the other can, and THAT is an UNKNOWN. Both
+        # dollar figures are now carried in the PARKED line instead, each named
+        # for what it measures, so neither is hidden and neither can be
+        # mistaken for the other.
+        _said = None
         m = _re2.search(r"\$([\d,]+\.\d{2}) across (\d+) branch\(es\) full on their rungs", _dead)
         if m:
             _said = float(m.group(1).replace(",", ""))
-            if full_usd and abs(_said - full_usd) > max(1.0, full_usd * 0.01):
-                gaps.append(f"parked capital disagrees: branches sum to "
-                            f"{money(full_usd)}, the invariant says {money(_said)}")
+            _said_n = int(m.group(2))
+            if _said_n != full_n:
+                gaps.append(f"parked branch COUNT disagrees: this pass sees "
+                            f"{full_n} branch(es) full on their rungs, the "
+                            f"no_dead_capital invariant sees {_said_n} - one of "
+                            f"the two cannot see a branch the other can")
+        # Carried on BOTH lines. A reader who only ever sees the growth alarm
+        # would otherwise never meet the invariant's figure, and would be left
+        # comparing two numbers with nothing to tell them apart.
+        _alloc = ("" if _said is None
+                  else f" ({money(_said)} allocated to them - a different "
+                       f"measurement, not a contradiction)")
         if True:
             prev_usd = prev.get("full_usd")
             if prev_usd is not None and full_usd > prev_usd + 0.01:
                 flag(CRITICAL, "PARKED_GREW",
-                     f"capital in branches FULL on their rungs grew "
-                     f"{money(prev_usd)} -> {money(full_usd)} ({full_n} branches). "
-                     f"A full branch cannot buy and will not sell below entry - "
-                     f"this is the state that produced 16 days of zero closes "
-                     f"from 2026-09-10.")
+                     f"slice cost (qty x entry) in branches FULL on their rungs "
+                     f"grew {money(prev_usd)} -> {money(full_usd)} "
+                     f"({full_n} branches){_alloc}. A full branch cannot buy and "
+                     f"will not sell below entry - this is the state that produced "
+                     f"16 days of zero closes from 2026-09-10.")
             else:
                 flag(INFO, "PARKED",
-                     f"{money(full_usd)} across {full_n} branch(es) is full on its "
-                     f"rungs and can only move when a slice clears the parked-sell "
-                     f"floor.")
+                     f"{money(full_usd)} of slice cost (qty x entry){_alloc} across "
+                     f"{full_n} branch(es) is full on its rungs and can only move "
+                     f"when a slice clears the parked-sell floor.")
 
     # ---- 12. ALPACA - the half of the account nobody was watching ----------
     #
