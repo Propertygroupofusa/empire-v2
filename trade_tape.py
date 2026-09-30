@@ -136,7 +136,14 @@ def summarise(rows) -> dict:
         "by_asset_usd": per,
         "busiest": busiest,
         "biggest_print": max(rows, key=lambda r: r["usd"]) if rows else None,
+        # "this account is not currently placing orders" WAS FALSE, and the
+        # owner caught it: he wrote "MINE" across this panel asking for his
+        # own fills. /fills-by-source reads Coinbase's own record and found
+        # 36 orders and 43 fills in the last 24 hours - $1,812.93 of notional,
+        # all maker. A tape of his own fills is not an empty box; nobody had
+        # built one, which is a different sentence and the true one.
         "note": ("Market flow on the coins you hold, from Coinbase's public "
-                 "trade feed. These are OTHER PEOPLE'S trades, not yours - "
-                 "this account is not currently placing orders."),
+                 "trade feed. These are OTHER PEOPLE'S trades, not yours. "
+                 "Your own fills are a separate record - see /fills-by-source, "
+                 "which reads the exchange's account-level fill history."),
     }

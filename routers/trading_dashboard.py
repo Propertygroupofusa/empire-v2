@@ -2140,8 +2140,13 @@ async def get_trade_tape(assets: str = "", limit: int = 40):
     Read-only, public data, no key. Coinbase publishes every fill on every
     product, so this is the whole market's flow - other people's trades -
     on the holdings that matter here. Said plainly in the payload, because
-    a tape someone reads as their OWN activity is worse than no tape, and
-    this account is not currently placing orders.
+    a tape someone reads as their OWN activity is worse than no tape.
+
+    IT USED TO SAY "and this account is not currently placing orders", which
+    was FALSE. /fills-by-source reads Coinbase's own account-level record and
+    found 36 orders and 43 fills in a 24-hour window - $1,812.93 of notional,
+    every one of them maker. The account trades; nobody had built a tape of
+    its own fills, which is a different statement and the true one.
 
     Defaults to the largest holdings by value, which is the set worth
     watching; `assets` overrides with a comma-separated list.

@@ -9587,18 +9587,62 @@ async function loadLossStudy() {
                  border-left:3px solid ${dim};background:var(--panel2,#0000000a)">
                  <strong>The stop comparison is withheld.</strong> ${esc2(sw.reason || '')}</div>`;
 
-        wrap.innerHTML = `
+        // THIS PANEL SHOWS ONLY THE LOSSES, so every figure in it is red by
+        // construction - and it was read as the whole book: "this is not a
+        // win rate this is a loss rate, all of this stuff is in red."
+        //
+        // The verdict compounds it. "A FEW LOSSES DOMINATE" is true INSIDE
+        // the losses (the three biggest are 71% of the $17.45 lost) and false
+        // about the account (they are 12.4% of the $100.17 won). Unscoped, on
+        // a page of red tiles, it reads as a verdict on the system.
+        //
+        // So the whole book goes first, above the verdict, and the verdict is
+        // scoped to what it actually measures. The two numbers that say
+        // whether a system makes money - profit factor and expectancy - were
+        // absent from a panel about profitability and are now the headline.
+        const _gw = (d.wins != null && d.avg_win_usd != null) ? d.wins * d.avg_win_usd : null;
+        const _gl = (d.total_lost_usd != null) ? Math.abs(d.total_lost_usd) : null;
+        const _net = (_gw != null && _gl != null) ? _gw - _gl : null;
+        const _pf = (_gw != null && _gl) ? _gw / _gl : null;
+        const _exp = (_net != null && d.trades) ? _net / d.trades : null;
+        const bookBlock = (_net == null) ? '' : `
+          <div style="border-left:4px solid ${_net >= 0 ? good : bad};padding:10px 14px;
+               margin-bottom:12px;background:var(--panel2,#0000000a)">
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">
+              The whole book first &mdash; this panel below it shows ONLY the losses</div>
+            <div style="font-size:1.15em;font-weight:700;color:${_net >= 0 ? good : bad};margin:4px 0 6px">
+              ${money(_net)} net &middot; ${money(_gw)} won across ${d.wins} trades,
+              ${money(-_gl)} lost across ${d.losses}</div>
+            <div style="font-size:0.88em;line-height:1.6">
+              Profit factor <strong>${_pf ? _pf.toFixed(2) + '×' : '&mdash;'}</strong>
+              (above 1.0 means the wins outweigh the losses) &middot;
+              <strong>${_exp != null ? money(_exp) : '&mdash;'}</strong> expected per trade.
+              The losses are <strong>${(_gw ? (100 * _gl / _gw) : 0).toFixed(1)}%</strong> of what the wins brought in.
+              Every tile below is red because it is a loss tile, not because the account is losing.</div>
+          </div>`;
+
+        wrap.innerHTML = bookBlock + `
           <div style="border-left:4px solid ${tone};padding:10px 14px;margin-bottom:16px;background:var(--panel2,#0000000a)">
-            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">The losses</div>
-            <div style="font-size:1.2em;font-weight:700;color:${tone};margin:2px 0 6px">${esc2((d.verdict || '').replace(/_/g, ' '))}</div>
+            <div style="font-size:0.7em;letter-spacing:.14em;text-transform:uppercase;color:${dim}">The losses, on their own</div>
+            <div style="font-size:1.2em;font-weight:700;color:${tone};margin:2px 0 6px">${esc2((d.verdict || '').replace(/_/g, ' '))}<span style="font-weight:400;font-size:0.72em;color:${dim}"> &mdash; within the losses, not within the book</span></div>
             <div style="font-size:0.88em;line-height:1.6">${esc2(d.verdict_detail || '')}</div>
           </div>
 
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">
             ${tile('Average win', money(d.avg_win_usd), d.avg_win_pct != null ? d.avg_win_pct.toFixed(2) + '% of capital risked' : '', good)}
             ${tile('Average loss', money(d.avg_loss_usd), d.avg_loss_pct != null ? d.avg_loss_pct.toFixed(2) + '% of capital risked' : '', bad)}
+            ${/* "above 1.5 is comfortable" alone reads as a fail at 0.90x. It is
+                  not one: a win/loss SIZE ratio only has to beat what the win
+                  RATE demands, and at 85.9% against a 52.6% breakeven this
+                  ratio has enormous room. Judged against the breakeven rather
+                  than against a constant. */''}
             ${tile('Win ÷ loss size', d.win_loss_size_ratio != null ? d.win_loss_size_ratio.toFixed(2) + '×' : null,
-                   'above 1.5 is comfortable', d.win_loss_size_ratio == null ? null : (d.win_loss_size_ratio >= 1.5 ? good : warn))}
+                   (d.margin_of_safety_points != null && d.margin_of_safety_points > 0)
+                     ? 'fine at this win rate - ' + d.margin_of_safety_points + ' points above breakeven'
+                     : 'needs a win rate above breakeven to carry it',
+                   (d.margin_of_safety_points != null && d.margin_of_safety_points > 15)
+                     ? good
+                     : (d.win_loss_size_ratio == null ? null : (d.win_loss_size_ratio >= 1.5 ? good : warn)))}
             ${tile('Worst single loss', money(d.worst_loss_usd), d.worst_loss_pct != null ? d.worst_loss_pct.toFixed(2) + '%' : '', bad)}
           </div>
 

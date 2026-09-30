@@ -36,8 +36,15 @@ print("\nIT NEVER IMPLIES A PRINT IS YOURS")
 s = T.summarise(T.normalise("ZEC-USD", [raw()]))
 ok("the summary says these are other people's trades",
    "OTHER PEOPLE'S trades" in s["note"], s["note"])
-ok("and that this account is not placing orders",
-   "not currently placing orders" in s["note"])
+# THIS TEST ASSERTED A FALSE CLAIM AND SO PROTECTED IT. The note said "this
+# account is not currently placing orders", and /fills-by-source reads
+# Coinbase's own account-level record: 36 orders and 43 fills in 24 hours,
+# $1,812.93 of notional, every one maker. The account trades. What was true
+# is that nobody had built a tape of its OWN fills - a different sentence.
+ok("it does NOT claim the account places no orders - it does place them",
+   "not currently placing orders" not in s["note"], s["note"])
+ok("and it points at where the owner's own fills really are",
+   "fills-by-source" in s["note"], s["note"])
 ok("the panel says it too", "other people's trades, not yours" in HTML)
 ok("and explains why a tape of your own fills would be empty",
    "empty box" in HTML)
