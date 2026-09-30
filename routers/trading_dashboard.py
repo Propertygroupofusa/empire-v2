@@ -7908,11 +7908,13 @@ async def capital_mobility():
         # named cause rather than 0.00, which is the behaviour this codebase
         # wants - but a permanent UNKNOWN is still a broken card, so the
         # body is decoded here.
+        # json_module, NOT json - this module imports it under an alias
+        # (line 25). Writing `json` raised NameError, and my pre-flight grep
+        # for "^import json" matched the aliased line and reported it bound.
+        # A check that can pass while the name is unbound is not a check.
         inv = await grid_invariants_endpoint()
-        if isinstance(inv, JSONResponse):
-            inv = json.loads(inv.body)
-        elif hasattr(inv, "body"):
-            inv = json.loads(inv.body)
+        if hasattr(inv, "body"):
+            inv = json_module.loads(inv.body)
         for chk in ((inv or {}).get("checks") or []):
             if chk.get("name") == "coin_tracked_is_held":
                 short_usd = chk.get("short_usd")
