@@ -95,6 +95,30 @@ def get(path, timeout=45, attempts=2, pause=3.0):
     return None
 
 
+PARKED_FLOOR_PCT = 0.010  # GRID_PARKED_MIN_NET_PCT
+
+
+def _exit_threshold(branch):
+    """The net % a slice on this branch must clear to have ANY way out, and
+    the name of the rule that sets it. (None, reason) when it cannot be read.
+
+    ONE DEFINITION. A branch full on its rungs exits through the parked-sell
+    path at GRID_PARKED_MIN_NET_PCT; a branch with a rung free exits on the
+    grid rise trigger, one grid step. Computing that in two places is how the
+    two drift apart and start contradicting each other in the same output.
+    """
+    sl = branch.get("slices") or []
+    lv = branch.get("num_levels") or 0
+    if not sl:
+        return None, "no slices"
+    if len(sl) >= lv:
+        return PARKED_FLOOR_PCT, "parked-sell floor"
+    gp = branch.get("grid_pct")
+    if not gp:
+        return None, "grid step unreadable"
+    return gp, "grid rise trigger"
+
+
 def _phantom_short_positions(inv):
     """Branches that hold under 1% of the coin they claim, as
     (product_id, tracked, held, short_usd).
@@ -895,6 +919,32 @@ def main():
     # So measure the thing the heartbeat cannot see: time since the last
     # close, against the fleet's OWN measured close rate rather than a magic
     # number, because a slow fleet and a stuck fleet are different failures.
+    # The three ways a ready slice can still be unable to sell, read from
+    # STRUCTURED fields rather than out of any English sentence: a wording
+    # change must never silence this quietly.
+    # AN ABSENT INVARIANT IS NOT AN UNREADABLE ONE. grid_inventory_is_free
+    # appears in the checks list when it FAILS; a fleet with nothing reserved
+    # has no row at all, and that is a real answer meaning nothing is locked.
+    # The first version of this gapped on the absence and fired on every
+    # healthy fleet - a gap that cries wolf is worse than the one it replaced.
+    # The only genuine unknown is the check failing while withholding its
+    # structured positions.
+    _locked_ids = set()
+    _lock_unreadable = False
+    for chk2 in ((inv or {}).get("checks") or []):
+        if chk2.get("name") != "grid_inventory_is_free":
+            continue
+        lp2 = chk2.get("locked_positions")
+        if lp2 is None:
+            _lock_unreadable = chk2.get("status") == "FAIL"
+        else:
+            _locked_ids = {x.get("product_id") for x in lp2}
+    _phantom_ids = {x[0] for x in _phantom_short_positions(inv)}
+    _refused_ids = set(((grid.get("order_refusals") or {}).get("by_product") or {}))
+    if _lock_unreadable:
+        gaps.append("locked_positions unreadable - a ready slice held behind a "
+                    "resting order would look like a working sell path")
+
     edge = ((grid.get("realized_edge") or {}).get("current") or {})
     if not (grid.get("realized_edge") or {}).get("available"):
         gaps.append("realized_edge unavailable - cannot tell a dry spell from a quiet one")
@@ -920,10 +970,60 @@ def main():
                 level = CRITICAL if dry_h > 12.0 else WARN
                 grew = ("" if prev_dry is None
                         else f" (was {prev_dry:.1f}h last pass)")
+                # WHY, not just HOW LONG. The hours alone send a reader
+                # looking for a broken loop, and on 2026-09-30 the loop was
+                # fine: of 79 slices exactly 3 stood at or past the threshold
+                # that governs them, and every one of the 3 was unsellable -
+                # two on a phantom branch marked against an adopted price, one
+                # behind a resting order. A symptom with no diagnosis is a
+                # number the reader cannot act on, and this is the alarm most
+                # worth acting on.
+                ready = []
+                for b2 in branches:
+                    pid2 = b2.get("product_id")
+                    thr2, why2 = _exit_threshold(b2)
+                    if thr2 is None:
+                        continue
+                    best2 = max(((x.get("unrealized_net_pct") or 0)
+                                 for x in (b2.get("slices") or [])), default=None)
+                    if best2 is None or best2 < thr2:
+                        continue
+                    blockers = []
+                    if pid2 in _locked_ids:
+                        blockers.append("coin locked by a resting order")
+                    if pid2 in _phantom_ids:
+                        blockers.append("branch holds almost none of its claim")
+                    if pid2 in _refused_ids:
+                        blockers.append("venue refuses the order")
+                    if all((x.get("adopted") for x in (b2.get("slices") or []))):
+                        blockers.append("ADOPTED basis - the gain is measured "
+                                        "against a price nobody paid")
+                    ready.append((pid2, best2, thr2, why2, blockers))
+                free = [r for r in ready if not r[4]]
+                if not ready:
+                    diag = (f" NOTHING to sell: no slice of {len(slices)} stands at "
+                            f"the threshold that governs it, so the fleet is "
+                            f"waiting on price, not stuck.")
+                elif not free:
+                    diag = (f" {len(ready)} slice-holding branch(es) of "
+                            f"{len(branches)} ARE past their own threshold and "
+                            f"every one is blocked: "
+                            + "; ".join(f"{p3} at {n3*100:+.2f}% vs its {w3} "
+                                        f"({t3*100:.2f}%) - {', '.join(bl)}"
+                                        for p3, n3, t3, w3, bl in
+                                        sorted(ready, key=lambda r: -r[1]))
+                            + ". The close rate is not waiting on price.")
+                else:
+                    diag = (f" {len(free)} branch(es) are past their own threshold "
+                            f"with NOTHING blocking them - "
+                            + ", ".join(f"{p3} at {n3*100:+.2f}%"
+                                        for p3, n3, _, _, _ in free)
+                            + " - so the sell path itself is the suspect.")
                 flag(level, "DRY_SPELL",
                      f"{dry_h:.1f}h since the last close{grew}, on a fleet that "
                      f"averages one every {mean_h:.1f}h ({cpd:.2f}/day). The loop "
-                     f"is alive - this is the shape the 16-day dead period had.")
+                     f"is alive - this is the shape the 16-day dead period had."
+                     + diag)
 
     # ---- 8. A pushed fix that never went live ------------------------------
     #
@@ -1042,30 +1142,20 @@ def main():
         # below gross, so clearing the step on NET means the gross move
         # certainly cleared it - deliberately conservative, because a false
         # IDLE_PROFIT is the defect being fixed.
-        PARKED_FLOOR = 0.010  # GRID_PARKED_MIN_NET_PCT
-        _bstate = {}
-        for b in branches:
-            sl2 = b.get("slices") or []
-            lv2 = b.get("num_levels") or 0
-            _bstate[b.get("product_id")] = (
-                bool(sl2) and len(sl2) >= lv2, b.get("grid_pct"))
+        _thr = {b.get("product_id"): _exit_threshold(b) for b in branches}
         reachable = []
         unreadable_step = []
         for p, s2 in slices:
             if p in blocked:
                 continue
             net = s2.get("unrealized_net_pct") or 0
-            full, gp = _bstate.get(p, (None, None))
-            if full:
-                if net >= PARKED_FLOOR:
-                    reachable.append((p, s2, PARKED_FLOOR, "parked-sell floor"))
-            elif gp:
-                if net >= gp:
-                    reachable.append((p, s2, gp, "grid rise trigger"))
-            elif full is None or gp is None:
+            thr, why = _thr.get(p, (None, "branch not found"))
+            if thr is None:
                 # UNKNOWN, not "not reachable". Saying nothing here would hide
                 # a slice whose exit rule could not be read at all.
                 unreadable_step.append(p)
+            elif net >= thr:
+                reachable.append((p, s2, thr, why))
         if unreadable_step:
             gaps.append(f"exit rule unreadable for {', '.join(sorted(set(unreadable_step)))}"
                         f" - profit sitting there would be invisible")

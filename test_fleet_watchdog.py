@@ -578,6 +578,69 @@ out = run(d, BASE_SNAP)
 ok("and it escalates to CRITICAL past half a day", "CRITICAL  DRY_SPELL" in out
    or "CRITICAL DRY_SPELL" in out, out)
 
+# WHY IT IS DRY, NOT JUST HOW LONG.
+#
+# The hours alone send a reader hunting a broken loop. Live on 2026-09-30 the
+# loop was fine: of 79 slices exactly 3 stood at or past the threshold that
+# governs them, and every one was unsellable - two on a phantom branch marked
+# against an adopted price, one behind a resting order.
+def _dry(days=0.35):
+    d = healthy()
+    d["/api/trading-dashboard/grid-status"]["realized_edge"]["current"][
+        "days_since_last_close"] = days
+    return d
+
+# Nothing anywhere near an exit: waiting on price, and it says so.
+out = run(_dry(), BASE_SNAP)
+ok("a dry spell with nothing ready says the fleet is waiting on price",
+   "waiting on price, not stuck" in out, out)
+
+# Something ready and BLOCKED: names the blocker, and says price is not it.
+d = _dry()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["slices"][0]["unrealized_net_pct"] = 0.0719        # past the 3.0% step
+d["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "1 broken",
+    "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
+                "detail": "locked", "locked_positions": [
+                    {"product_id": "AAA-USD", "locked_pct": 100.0,
+                     "locked_usd": 141.74}]}]}
+out = run(d, BASE_SNAP)
+ok("a ready-but-locked slice is named in the dry-spell line",
+   "coin locked by a resting order" in out, out)
+ok("and it says the close rate is not waiting on price",
+   "not waiting on price" in out, out)
+ok("and it carries the number and the rule that governs it",
+   "+7.19%" in out and "grid rise trigger" in out, out)
+
+# An ADOPTED gain is measured against a price nobody paid - that is a blocker
+# on the CREDIBILITY of the number, and QNT's +78.84% is exactly that trap.
+d = _dry()
+b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+b["slices"][0]["unrealized_net_pct"] = 0.7884
+b["slices"][0]["adopted"] = True
+out = run(d, BASE_SNAP)
+ok("an all-adopted ready slice is flagged as measured against a price nobody paid",
+   "price nobody paid" in out, out)
+
+# Ready with NOTHING blocking it - then the sell path itself is the suspect,
+# and saying "blocked" there would send the reader the wrong way entirely.
+d = _dry()
+d["/api/trading-dashboard/grid-status"]["branches"][0]["slices"][0][
+    "unrealized_net_pct"] = 0.0719
+out = run(d, BASE_SNAP)
+ok("a ready slice with no blocker points at the sell path",
+   "the sell path itself is the suspect" in out, out)
+
+# Unreadable lock state must not read as "nothing is locked".
+d = _dry()
+d["/api/trading-dashboard/grid-status/invariants"] = {
+    "failed": 1, "headline": "1 broken",
+    "checks": [{"name": "grid_inventory_is_free", "status": "FAIL",
+                "detail": "locked"}]}
+ok("unreadable lock state is a gap, not an all-clear",
+   "locked_positions unreadable" in run(d, BASE_SNAP))
+
 # The threshold is the fleet's OWN rate, not a fixed number of hours. A fleet
 # that closes twice a day is not broken because it went 8 hours without one,
 # and an alarm that cannot tell those apart would fire on every slow fleet
