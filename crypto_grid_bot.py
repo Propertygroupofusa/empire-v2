@@ -7398,6 +7398,39 @@ _HEARTBEAT_STAGES = {"entered": 1.0, "no_active_branches": 2.0, "cycled": 3.0,
 # constantly and keeps the lease forever; the web service can never steal
 # it from a healthy owner. If the dedicated service dies, the lease expires
 # and the web service picks the fleet up rather than leaving it dead.
+# Set once this process has swept orphaned maker orders (see
+# engine.sweep_orphan_maker_orders). Per process on purpose: a restart is
+# exactly when orphans exist, so every new process must sweep once.
+_orphan_sweep_done = False
+
+
+async def _sweep_orphans_once() -> bool:
+    """Returns True when the sweep completed (even if it found nothing)."""
+    try:
+        async with engine.aiohttp.ClientSession() as session:
+            res = await engine.sweep_orphan_maker_orders(session)
+    except Exception as e:
+        log.warning(f"[GRID] orphan sweep failed: {type(e).__name__}: {e}")
+        return False
+    if res is None:
+        return False
+    if res["found"]:
+        log.warning(f"[GRID] restart: {res['found']} maker order(s) left resting by a "
+                    f"previous process - cancelled {len(res['cancelled'])}, "
+                    f"failed {len(res['failed'])}")
+    for o in res["cancelled"] + res["failed"]:
+        ok = o in res["cancelled"]
+        msg = (f"Order {o['order_id']} ({o['side']} {o['product_id']}) was left resting "
+               f"by a process that stopped mid-wait; "
+               + ("cancelled on restart." if ok else "cancel FAILED - still resting on Coinbase."))
+        if o["filled_size"] > 0:
+            msg += (f" It had already filled {o['filled_size']} with no slice recording "
+                    f"it - reconciliation will pick up the difference.")
+        await _log_activity_safe("grid_fleet", o["product_id"], "ORPHAN_ORDER", msg)
+    # A failed cancel is still out there: sweep again next cycle.
+    return not res["failed"]
+
+
 GRID_LEASE_KEY = "grid_bot_loop_owner"
 GRID_LEASE_STALE_SECONDS = int(os.getenv("GRID_LEASE_STALE_SECONDS", "180"))
 
@@ -7768,6 +7801,14 @@ async def run_grid_branches_cycle():
         return
     if "TAKEN OVER" in why:
         log.warning(f"[GRID] {why}")
+
+    # First cycle this process owns the loop: clear out any maker order a
+    # previous process left resting when it was killed mid-wait. Runs before
+    # this process places anything, so every "gmk-" order it finds is an
+    # orphan. Retried next cycle if the open orders could not be read.
+    global _orphan_sweep_done
+    if not _orphan_sweep_done:
+        _orphan_sweep_done = await _sweep_orphans_once()
 
     if not await is_grid_bot_active():
         # The master switch being OFF is a DECISION, and a decision that

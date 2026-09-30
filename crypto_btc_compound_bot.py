@@ -1340,6 +1340,80 @@ async def cancel_order(session, order_id: str) -> bool:
         return False
 
 
+# Every post-only maker order this module places carries this prefix.
+#
+# WHY. A maker order is placed, waited on for up to 45s, then cancelled -
+# all inside one call. If the process dies inside that window (a Railway
+# redeploy sends SIGTERM), nothing cancels it, and because it is GTC it rests
+# on Coinbase indefinitely: owned by no process, invisible to the ledger,
+# holding cash or coin, and able to fill hours later with no slice recording
+# it. With a bare uuid4 client_order_id it could not even be told apart from
+# an order the account owner placed by hand. The prefix is what lets a
+# restarted process find and cancel exactly these, and nothing else.
+# (The FILLS feed carries no client_order_id - see test_order_attribution -
+# but the OPEN-orders list does; resting_stops_worker relies on the same.)
+GRID_MAKER_COID_PREFIX = "gmk-"
+
+
+def select_orphan_maker_orders(orders):
+    """The OPEN orders that are this module's own maker orders.
+
+    Pure, so it can be tested without a venue. Anything without the prefix -
+    a resting stop ("rstop-"), an order placed by hand - is never selected.
+    """
+    out = []
+    for o in orders or ():
+        if not isinstance(o, dict):
+            continue
+        if not str(o.get("client_order_id") or "").startswith(GRID_MAKER_COID_PREFIX):
+            continue
+        if str(o.get("status") or "OPEN").upper() not in ("OPEN", "PENDING", "QUEUED"):
+            continue
+        try:
+            filled = float(o.get("filled_size") or 0)
+        except (TypeError, ValueError):
+            filled = 0.0
+        out.append({"order_id": o.get("order_id"),
+                    "product_id": o.get("product_id"),
+                    "side": o.get("side"),
+                    "filled_size": filled,
+                    "created_time": o.get("created_time")})
+    return out
+
+
+async def sweep_orphan_maker_orders(session):
+    """Cancel every OPEN maker order a previous process left behind.
+
+    Call ONCE, when a process first takes the loop, before it places any
+    order of its own - at that point every OPEN "gmk-" order belongs to a
+    process that is gone. Returns None if the open orders could not be read
+    (a gap is not a zero: "could not look" must never read as "none left").
+
+    A partial fill on an orphan is REPORTED, not booked. Coin or cash moved
+    with no slice behind it; the existing reconciliation (slice_reconcile,
+    reconcile.py, adoption) is where that is corrected, and inventing a
+    slice here would be a guess written where a measurement belongs.
+    """
+    path = "/api/v3/brokerage/orders/historical/batch"
+    try:
+        async with session.get(f"{COINBASE_BASE_URL}{path}?order_status=OPEN&limit=250",
+                               headers=_auth_headers("GET", path), timeout=25) as r:
+            if r.status != 200:
+                log.warning(f"[ORPHANS] open orders HTTP {r.status} - sweep not run")
+                return None
+            body = await r.json()
+    except Exception as e:
+        log.warning(f"[ORPHANS] open orders unreadable: {type(e).__name__}: {e}")
+        return None
+
+    orphans = select_orphan_maker_orders(body.get("orders"))
+    cancelled, failed = [], []
+    for o in orphans:
+        (cancelled if await cancel_order(session, o["order_id"]) else failed).append(o)
+    return {"found": len(orphans), "cancelled": cancelled, "failed": failed,
+            "partially_filled": [o for o in orphans if o["filled_size"] > 0]}
+
+
 async def _await_fill(session, order_id: str, wait_seconds: int):
     """Poll a real resting order for up to wait_seconds. Returns
     (filled_qty, avg_price) on a real fill, or None if it is still
@@ -1515,7 +1589,7 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
         return None
 
     order = {
-        "client_order_id": str(uuid.uuid4()),
+        "client_order_id": GRID_MAKER_COID_PREFIX + str(uuid.uuid4()),
         "product_id": product_id,
         "side": "BUY",
         "order_configuration": {"limit_limit_gtc": {
@@ -1631,7 +1705,7 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     qty = float(plan.executable_quantity)
 
     order = {
-        "client_order_id": str(uuid.uuid4()),
+        "client_order_id": GRID_MAKER_COID_PREFIX + str(uuid.uuid4()),
         "product_id": product_id,
         "side": "SELL",
         "order_configuration": {"limit_limit_gtc": {
