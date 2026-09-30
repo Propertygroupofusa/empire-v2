@@ -293,12 +293,22 @@ function renderGate(gate){
   if (!gate.ok){ tallyEl.innerHTML=''; evEl.innerHTML = panelError('p-gate', gate.error); return; }
 
   const t = gate.data.tally_24h || {};
+  // CYCLE_ERROR is collected into this same feed and was counted by
+  // nothing, so the header read "errors 0" above a list that was wall to
+  // wall TimeoutError - a branch cycle that dies never reaches its buy or
+  // its sell, which is the throughput loss this page exists to surface.
+  // PARKED_SELL_NOFILL gets its own chip rather than being folded in: a
+  // full branch trying to take profit and failing to fill, over and over,
+  // is a specific and findable condition, not a generic error.
+  const errs = (t.GATE_ERROR||0) + (t.CYCLE_ERROR||0);
+  const noFill = t.PARKED_SELL_NOFILL||0;
   tallyEl.innerHTML = `
     <span class="chip pass">bought <b>${t.GATE_PASS||0}</b></span>
     <span class="chip block">blocked <b>${t.GATE_BLOCK||0}</b></span>
     <span class="chip obs">would block <b>${t.GATE_OBSERVE||0}</b></span>
-    <span class="chip errc">errors <b>${t.GATE_ERROR||0}</b></span>
-    <span class="chip">last 24h</span>`;
+    <span class="chip errc">errors <b>${errs}</b></span>` +
+    (noFill ? `<span class="chip errc">exit didn't fill <b>${noFill}</b></span>` : ``) +
+    `<span class="chip">last 24h</span>`;
 
   const evs = gate.data.events || [];
   if (!evs.length){
@@ -579,10 +589,30 @@ function renderCapital(cap){
     } else {                                           // Coinbase
       rows.push([name + ' USD', money(v.usd_cash), '']);
       if (v.coin_usd !== undefined){
-        rows.push([name + ' coins', money(v.coin_usd),
-                   (v.unpriced && v.unpriced.length)
-                     ? 'excludes ' + v.unpriced.join(', ') + ' — could not be priced'
-                     : '']);
+        // The same rule the venue rows above obey, applied one level down.
+        // A coin subtotal of $0.00 assembled entirely out of holdings the
+        // venue refused to price is not a balance, it is a failed reading,
+        // and it used to render as money directly beneath "every venue
+        // read successfully" while thousands of dollars of coin sat
+        // unpriced. coin_usd is null in exactly that case.
+        const held = v.coin_holdings_count, got = v.coin_priced_count;
+        if (v.coin_usd === null || v.coin_usd_readable === false){
+          rows.push([name + ' coins', '<span class="none">unreadable</span>',
+                     'none of ' + (held || 0) + ' holdings could be priced'
+                       + (v.unpriced_reasons
+                            ? ' (' + Object.entries(v.unpriced_reasons)
+                                .map(([k,n]) => k + ' \u00d7' + n).join(', ') + ')'
+                            : '')
+                       + ' — this is UNKNOWN, not zero, and coin held here is '
+                       + 'missing from every total on this reading']);
+        } else {
+          rows.push([name + ' coins', money(v.coin_usd),
+                     (v.unpriced && v.unpriced.length)
+                       ? 'priced ' + (got !== undefined ? got : '?') + ' of '
+                         + (held !== undefined ? held : '?') + ' holdings — excludes '
+                         + v.unpriced.join(', ')
+                       : '']);
+        }
       }
     }
   }
@@ -591,10 +621,22 @@ function renderCapital(cap){
   // all, a "verified cash: $0.00" line would be a fabricated total
   // wearing the word "verified" - exactly the thing this panel must not do.
   if (venues.length && d.verified_usd_cash !== undefined){
-    rows.push(['Verified cash across readable venues', money(d.verified_usd_cash),
-               (d.venues_unknown && d.venues_unknown.length)
-                 ? 'excludes ' + d.venues_unknown.join(', ') + ' — not readable right now'
-                 : 'every venue read successfully']);
+    // "every venue read successfully" is about CASH, and it was being read
+    // as a clean bill of health for the whole panel - including by the
+    // reading where all 55 coin prices had failed. Say what it covers.
+    const coinGap = venues.some(v => v.status === 'OK'
+                                  && v.coin_usd !== undefined
+                                  && (v.coin_usd === null || v.coin_usd_readable === false));
+    let note;
+    if (d.venues_unknown && d.venues_unknown.length){
+      note = 'excludes ' + d.venues_unknown.join(', ') + ' — not readable right now';
+    } else if (coinGap){
+      note = 'cash only — every venue answered for cash, but coin could not be '
+           + 'priced at all, so this is NOT the account total';
+    } else {
+      note = 'cash only — every venue read successfully';
+    }
+    rows.push(['Verified cash across readable venues', money(d.verified_usd_cash), note]);
   }
 
   el.innerHTML = rows.length
