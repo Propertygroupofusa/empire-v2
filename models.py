@@ -3150,3 +3150,33 @@ class OrderAttribution(Base):
         return {"order_id": self.order_id, "source": self.source,
                 "product_id": self.product_id, "side": self.side,
                 "placed_at": self.placed_at.isoformat() + "Z" if self.placed_at else None}
+
+
+class DsaPaperState(Base):
+    """The one paper account for the daily_stock_analysis test (dsa_paper.py).
+    A single row, id=1. `state` is the account dict; the two baselines are
+    what SPY and the live Alpaca account were worth when the test started, so
+    the comparison is measured over the same window."""
+    __tablename__ = "dsa_paper_state"
+
+    id = Column(Integer, primary_key=True)
+    state = Column(JSON)
+    spy_start_price = Column(Float, nullable=True)
+    alpaca_start_equity = Column(Float, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
+class DsaPaperLog(Base):
+    """Every signal received and every paper trade taken, append-only."""
+    __tablename__ = "dsa_paper_log"
+
+    id = Column(Integer, primary_key=True, index=True)
+    at = Column(DateTime, index=True, default=datetime.utcnow)
+    kind = Column(String, index=True)      # "signal" | "trade" | "skip"
+    ticker = Column(String, index=True)
+    action = Column(String)
+    score = Column(Integer, nullable=True)
+    qty = Column(Float, nullable=True)
+    price = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+    note = Column(String, nullable=True)

@@ -13794,3 +13794,22 @@ Final design, merged from two passes and confirmed by the owner:
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/
 - **FastAPI docs:** http://localhost:8000/docs (when running locally)
+
+---
+
+## $1,000 paper test of daily_stock_analysis picks, 2026-09-30
+
+The owner forked ZhuLinsen/daily_stock_analysis (reviewed: no malware found)
+and wants its daily AI picks tested with pretend money before any of it
+touches a real account.
+
+- DSA's custom webhook posts its report to
+  `POST /api/trading-dashboard/dsa-paper/webhook` (Bearer = `DSA_WEBHOOK_TOKEN`;
+  unset -> refused). `dsa_paper.py` parses the English summary lines.
+- Fixed rules: $1,000; Buy/Strong Buy -> one slot of equity/5 at the live
+  Alpaca price +0.1%; Sell/Strong Sell -> sell all at -0.1%; Hold, Watch and
+  Reduce do nothing. An unpriced ticker is skipped, never guessed.
+- `GET /api/trading-dashboard/dsa-paper/status` (admin key) compares against SPY
+  and the live Alpaca account over the same window. The panel is on
+  `alpaca_dashboard.html`.
+- **No order endpoint exists in this code.** Tests: `test_dsa_paper.py` (25).

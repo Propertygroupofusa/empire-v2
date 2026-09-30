@@ -117,6 +117,7 @@ routers_to_load = {
     'bot_race': None,
     'alpaca_dashboard': None,
     'trading_hub': None,
+    'dsa_paper': None,
 }
 
 for router_name in routers_to_load:
@@ -149,6 +150,7 @@ sweep = routers_to_load['sweep']
 bot_race = routers_to_load['bot_race']
 alpaca_dashboard = routers_to_load['alpaca_dashboard']
 trading_hub = routers_to_load['trading_hub']
+dsa_paper_router = routers_to_load['dsa_paper']
 
 # Load remaining modules gracefully
 payee_router = None
@@ -1636,6 +1638,7 @@ routers_list = [
     (bot_race, "/api", "Bot Race Dashboard"),
     (alpaca_dashboard, "/alpaca", "Alpaca Trading Dashboard"),
     (trading_hub, "/trading-hub", "Trading Hub - Live Bot Dashboard"),
+    (dsa_paper_router, "/api/trading-dashboard", "DSA Paper Test"),
 ]
 
 for router_module, prefix, tag in routers_list:

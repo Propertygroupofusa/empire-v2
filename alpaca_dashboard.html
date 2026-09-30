@@ -446,6 +446,16 @@
         <div id="opening-bar-content" class="empty">Loading…</div>
     </div>
 
+    <div class="section-title">🧪 AI Stock Picks — $1,000 Paper Test</div>
+    <div class="panel" id="dsa-paper-panel">
+        <div style="font-size:0.8em; color:var(--text-dim); margin-bottom:6px;">
+            Pretend money only - no real orders. Follows the daily_stock_analysis Buy/Sell calls at live
+            prices (up to 5 stocks, 0.1% slippage each way) and compares against SPY and your live account
+            over the same days.
+        </div>
+        <div id="dsa-paper-content" class="empty">Loading…</div>
+    </div>
+
     <div class="modal-overlay" id="create-branch-modal-overlay">
         <div class="modal-card">
             <div class="modal-title">🌱 New Real Branch</div>
@@ -1943,9 +1953,60 @@ async function loadTicker() {
     }
 }
 
+
+function fmtPct(p) {
+    if (p === null || p === undefined) return '—';
+    const c = p > 0 ? '#10b981' : (p < 0 ? '#ef4444' : 'inherit');
+    return `<strong style="color:${c}">${p > 0 ? '+' : ''}${p.toFixed(2)}%</strong>`;
+}
+
+function renderDsaPaper(d) {
+    if (!d || !d.started) {
+        return 'Waiting for the first report from daily_stock_analysis. Nothing has been traded yet.';
+    }
+    const p = d.paper || {};
+    const days = Math.max(0, (Date.now() - Date.parse(d.started_at)) / 86400000);
+    let h = `<div style="display:flex; gap:16px; flex-wrap:wrap; margin-bottom:8px;">` +
+        `<div>Paper equity<br><strong>${p.equity == null ? 'unknown' : fmtUsd(p.equity)}</strong> ${fmtPct(p.return_pct)}</div>` +
+        `<div>SPY same days<br>${fmtPct(d.spy_return_pct)}</div>` +
+        `<div>Your Alpaca account<br>${fmtPct(d.alpaca_account_return_pct)}</div>` +
+        `<div>Running<br><strong>${days.toFixed(1)} days</strong></div></div>`;
+    if (days < 30) {
+        h += `<div style="font-size:0.8em; color:var(--text-dim); margin-bottom:6px;">Under 30 days - too early to call a winner either way.</div>`;
+    }
+    h += `<div style="font-size:0.8em; color:var(--text-dim);">Your account figure moves with deposits and withdrawals too.</div>`;
+    if ((p.positions || []).length) {
+        h += `<table style="width:100%; margin-top:6px;"><tr><th>Stock</th><th>Entry</th><th>Now</th><th>P&L</th></tr>` +
+            p.positions.map(x => `<tr><td>${x.ticker}</td><td>${fmtUsd(x.entry)}</td>` +
+                `<td>${x.price == null ? '—' : fmtUsd(x.price)}</td>` +
+                `<td>${x.pnl == null ? '—' : fmtUsd(x.pnl)}</td></tr>`).join('') + `</table>`;
+    } else {
+        h += `<div style="margin-top:6px;">All cash right now: ${fmtUsd(p.cash)}</div>`;
+    }
+    const trades = (d.recent || []).filter(r => r.kind === 'trade').slice(0, 6);
+    if (trades.length) {
+        h += `<div style="margin-top:6px; font-size:0.85em;">` + trades.map(t =>
+            `${t.at.slice(0, 10)} ${t.action.toUpperCase()} ${t.ticker} @ ${fmtUsd(t.price)}` +
+            (t.pnl == null ? '' : ` (${fmtUsd(t.pnl)})`)).join('<br>') + `</div>`;
+    }
+    return h;
+}
+
+async function loadDsaPaper() {
+    const el = document.getElementById('dsa-paper-content');
+    if (!el) return;
+    try {
+        el.innerHTML = renderDsaPaper(await apiGet('/dsa-paper/status'));
+        el.classList.remove('empty');
+    } catch (e) {
+        el.textContent = 'Could not load the paper test right now.';
+    }
+}
 refresh();
 loadTicker();
 loadCombinedProgress();
+loadDsaPaper();
+setInterval(loadDsaPaper, 120000);
 setInterval(refresh, 15000);
 setInterval(loadTicker, 30000);
 setInterval(loadCombinedProgress, 60000);
