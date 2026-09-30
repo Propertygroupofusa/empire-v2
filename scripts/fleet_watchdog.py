@@ -341,6 +341,94 @@ def main():
                      f"{money(loss_usd)}{floor} - realized P&L is a NET figure, "
                      f"not a run of wins.")
 
+    # ---- 1e. A loss that has not happened yet -------------------------------
+    #
+    # LOSS_CLOSED reports a stop AFTER it fires. Both of yesterday's stops
+    # were visible hours ahead in data the fleet already publishes, and
+    # nothing read it. The owner's rule is that nothing negative is realized,
+    # so the pass that matters is the one BEFORE the close, not after.
+    #
+    # Every branch publishes stop_pct (its own adaptive stop) and
+    # stop_daily_vol_pct (the volatility that stop was sized from). The
+    # threshold here is therefore the branch's OWN measured daily move, not a
+    # number anybody picked: a slice within one average day of its stop can
+    # reach it on an ordinary day, not an unusual one.
+    #
+    # UNITS DIFFER IN THE PAYLOAD and getting this backwards would silence the
+    # check entirely: stop_pct and drawdown_pct are FRACTIONS (0.0823), while
+    # stop_daily_vol_pct is a PERCENT (3.292). The /100 below is that, not a
+    # fudge.
+    #
+    # WHAT IS BEING COMPARED, said plainly because it is not exact: the slice
+    # figure is unrealized_net_pct, which is AFTER fees, and the stop triggers
+    # on the gross adverse move. Yesterday's TON close proves the direction -
+    # gross -8.34% against a 8.16% stop, net -9.02%. So net is always the more
+    # negative of the two and this warns slightly EARLY. That is the right way
+    # for a heads-up to be wrong.
+    stop_near = []
+    breached = []
+    no_vol = []
+    for b in branches:
+        pid = b.get("product_id")
+        dd = b.get("drawdown_pct")
+        if b.get("drawdown_breached"):
+            breached.append((pid, dd))
+        sp = b.get("stop_pct") or 0.0
+        vol_pct = b.get("stop_daily_vol_pct")
+        sl3 = b.get("slices") or []
+        if sp <= 0 or not sl3:
+            continue                      # no stop armed, or nothing to stop
+        if vol_pct is None:
+            no_vol.append(pid)
+            continue
+        worst = min((x.get("unrealized_net_pct") or 0) for x in sl3)
+        margin = sp - (vol_pct / 100.0)
+        if worst <= -margin:
+            stop_near.append((pid, worst, sp, vol_pct / 100.0))
+    if no_vol:
+        gaps.append(f"daily volatility unreadable for {', '.join(sorted(set(no_vol)))}"
+                    f" - how close their slices are to stopping out is UNKNOWN")
+
+    if stop_near:
+        cur["stop_near"] = sorted(x[0] for x in stop_near)
+        prev_sn = prev.get("stop_near")
+        joined = ([x for x in cur["stop_near"] if x not in prev_sn]
+                  if prev_sn is not None else [])
+        # A branch that holds none of its coin cannot execute the stop either,
+        # so calling it "about to stop out" would be the wrong warning.
+        ph_ids2 = {x[0] for x in _phantom_short_positions(inv)}
+        flag(CRITICAL if joined else WARN, "STOP_NEAR",
+             f"{len(stop_near)} branch(es) hold a slice within ONE average day's "
+             f"move of their own stop"
+             + (f" - {', '.join(joined)} newly so" if joined else "")
+             + ": "
+             + ", ".join(
+                 f"{p2} worst slice {w*100:+.2f}% vs a {sp2*100:.2f}% stop "
+                 f"({v*100:.2f}% daily vol)"
+                 + (" [holds none of its coin - the stop cannot execute either]"
+                    if p2 in ph_ids2 else "")
+                 for p2, w, sp2, v in sorted(stop_near, key=lambda x: x[1]))
+             + ". Net is after fees and the stop triggers on the gross move, so "
+               "the real distance is a little larger. Arming or disarming a stop "
+               "is the owner's call, never this script's.")
+
+    if breached:
+        cur["breached"] = sorted(x[0] for x in breached)
+        prev_br = prev.get("breached")
+        joined_b = ([x for x in cur["breached"] if x not in prev_br]
+                    if prev_br is not None else [])
+        flag(CRITICAL if joined_b else WARN, "DRAWDOWN_BREACHED",
+             f"{len(breached)} branch(es) have tripped their own drawdown "
+             f"breaker and STOPPED BUYING"
+             + (f" - {', '.join(joined_b)} newly so" if joined_b else "")
+             + ": "
+             + ", ".join(f"{p2} down {(dd or 0)*100:.1f}% from its own peak"
+                         for p2, dd in sorted(breached, key=lambda x: -(x[1] or 0)))
+             + ". Existing slices still sell normally; only new buys are paused, "
+               "so this capital is out of the dip-buying strategy until the "
+               "branch recovers. The breaker level is the owner's and is not "
+               "touched here.")
+
     # ---- 2. Any cycle error at all -----------------------------------------
     if ops is not None:
         try:

@@ -45,6 +45,9 @@ def healthy():
                 "product_id": "AAA-USD", "num_levels": 3, "active": True,
                 "reference_price": 100.0, "current_price": 100.0, "grid_pct": 0.03,
                 "total_unrealized_net_usd": 1.0, "allocated_usd": 300.0,
+                # A stop well clear of the slice, and no drawdown breach.
+                "stop_pct": 0.10, "stop_daily_vol_pct": 2.0,
+                "drawdown_pct": 0.01, "drawdown_breached": False,
                 "slices": [{"opened_at": "2026-09-29T10:00:00Z", "qty": 1.0,
                             "entry_price": 100.0, "entry_fee_rate": 0.0035,
                             "adopted": False, "slice_state": "ACCOUNTED",
@@ -312,6 +315,75 @@ b["grid_pct"] = None
 b["slices"][0]["unrealized_net_pct"] = 0.05
 ok("an unreadable exit rule is a gap, not a silent skip",
    "exit rule unreadable" in run(d, BASE_SNAP))
+
+# STOP_NEAR - the loss that has not happened yet.
+#
+# Both of yesterday's stops were visible hours ahead in data the fleet already
+# publishes. The threshold is the branch's OWN daily volatility: a slice within
+# one average day of its stop can reach it on an ordinary day.
+def _stopnear(stop_pct, vol_pct, net, **kw):
+    d = healthy()
+    b = d["/api/trading-dashboard/grid-status"]["branches"][0]
+    b["stop_pct"] = stop_pct
+    b["stop_daily_vol_pct"] = vol_pct
+    b["slices"][0]["unrealized_net_pct"] = net
+    b.update(kw)
+    return d
+
+# TON live: worst slice -7.42% against an 8.23% stop on 3.29% daily vol.
+out = run(_stopnear(0.0823, 3.292, -0.0742), BASE_SNAP)
+ok("STOP_NEAR when a slice is within one average day of its stop",
+   "STOP_NEAR" in out, out)
+ok("and it names the slice, the stop and the volatility behind it",
+   "-7.42%" in out and "8.23% stop" in out and "3.29% daily vol" in out, out)
+ok("and it says the comparison warns early rather than implying precision",
+   "the real distance is a little larger" in out, out)
+ok("and it leaves the stop to the owner",
+   "owner's call" in out, out)
+
+# Comfortably clear of the stop: silent.
+ok("silent when the slice is more than a day's move from the stop",
+   "STOP_NEAR" not in run(_stopnear(0.0823, 3.292, -0.02), BASE_SNAP))
+
+# THE UNIT TRAP. stop_pct is a FRACTION, stop_daily_vol_pct is a PERCENT.
+# Reading the volatility as a fraction makes the margin ~the stop itself and
+# the check goes quiet on exactly the slices it exists to catch.
+out = run(_stopnear(0.0823, 3.292, -0.06), BASE_SNAP)
+ok("the volatility is read as a percent, not a fraction",
+   "STOP_NEAR" in out,
+   "a -6.00% slice is inside 8.23% - 3.29%; reading vol as 0.0329 would hide it")
+
+# A branch with NO stop armed cannot be near one.
+ok("no STOP_NEAR on a branch whose stop is not armed",
+   "STOP_NEAR" not in run(_stopnear(0.0, 3.292, -0.50), BASE_SNAP))
+
+# Unreadable volatility is UNKNOWN, never "not close".
+ok("unreadable daily volatility is a gap",
+   "daily volatility unreadable" in run(_stopnear(0.0823, None, -0.50), BASE_SNAP))
+
+# A NEWLY near branch escalates; a standing one does not; and with NO
+# baseline there is no transition to claim, so it must not invent one.
+d = _stopnear(0.0823, 3.292, -0.0742)
+ok("a newly near branch is CRITICAL",
+   "CRITICAL STOP_NEAR" in run(d, dict(BASE_SNAP, stop_near=["ZZZ-USD"])))
+ok("and a standing one stays a WARN",
+   "WARN     STOP_NEAR" in run(d, dict(BASE_SNAP, stop_near=["AAA-USD"])))
+ok("and with no baseline it reports the state without claiming it is new",
+   "WARN     STOP_NEAR" in run(d, BASE_SNAP))
+
+# DRAWDOWN_BREACHED - a branch that has stopped buying, and nothing said so.
+d = healthy()
+d["/api/trading-dashboard/grid-status"]["branches"][0].update(
+    {"drawdown_pct": 0.2828, "drawdown_breached": True})
+out = run(d, BASE_SNAP)
+ok("DRAWDOWN_BREACHED when a branch trips its own breaker",
+   "DRAWDOWN_BREACHED" in out, out)
+ok("and it says buys are paused while sells still work",
+   "STOPPED BUYING" in out and "still sell normally" in out, out)
+ok("and it does not suggest moving the breaker",
+   "is the owner's and is not touched here" in out, out)
+ok("a standing breach stays a WARN",
+   "WARN     DRAWDOWN_BREACHED" in run(d, dict(BASE_SNAP, breached=["AAA-USD"])), out)
 
 # ADOPTED_BASIS: a "loss" measured against a price nobody paid.
 d = healthy()
