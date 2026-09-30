@@ -1812,15 +1812,32 @@ def _decompose_combined_delta(history_rows):
                 "step_usd": round(c - prev[1], 2),
             })
         prev = (r.created_at, c)
-    jump_total = round(sum(s["step_usd"] for s in steps), 2)
+    up = round(sum(s["step_usd"] for s in steps if s["step_usd"] > 0), 2)
+    down = round(sum(s["step_usd"] for s in steps if s["step_usd"] < 0), 2)
+    jump_total = round(up + down, 2)
     delta = round((history_rows[-1].combined_equity or 0)
                   - (history_rows[0].combined_equity or 0), 2)
+    # THE SHARE CAN EXCEED 100%, AND THAT IS A FINDING RATHER THAN A BUG.
+    # Live it read 116.2%: the steps netted +$8,849.81 against a total change
+    # of +$7,613.50, which means everything BETWEEN the steps went DOWN by
+    # about $1,236. Left as a bare percentage it just looks broken, so the
+    # drift is computed and named instead of the reader having to infer it.
+    drift = round(delta - jump_total, 2)
     return {
         "delta_usd": delta,
         "single_interval_steps": steps,
+        "steps_up_usd": up,
+        "steps_down_usd": down,
         "sum_of_steps_usd": jump_total,
+        "between_the_steps_usd": drift,
         "step_share_of_delta_pct": (round(100.0 * jump_total / delta, 1)
                                     if delta else None),
+        "why_the_share_can_exceed_100_pct": (
+            "steps run both ways, so their net can be larger than the total "
+            "change. When it is, everything BETWEEN the steps moved the other "
+            "way - see between_the_steps_usd, which is the part of the change "
+            "that did NOT arrive in a jump. A negative figure there means the "
+            "account drifted down between the arrivals."),
         "what_a_step_is": (
             "a move of $400+ between two consecutive polls. This fleet's best "
             "FULL DAY of closed trades is $41.62, so a step that size is money "
