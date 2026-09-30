@@ -7386,7 +7386,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 return
         fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
-            log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
+            # The engine records WHY (maker order rested unfilled, NOTHING_TO_SELL,
+            # balance unreadable, a venue rejection...). "did not fill" alone
+            # made a stuck escape sell undiagnosable from the feed.
+            _nofill_why = engine._last_order_error.get(branch.product_id) or "no reason recorded"
+            log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill "
+                        f"({_nofill_why}) - will retry next cycle")
             # A parked branch that cannot fill its escape sell is stuck in a
             # retry loop: the gate passes every cycle, the order does not
             # fill, and the cycle returns here having done nothing. That is
@@ -7396,8 +7401,8 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                                   branch.product_id):
                 await _record_gate_decision(
                     branch.bot_name, branch.product_id, "PARKED_SELL_NOFILL",
-                    f"escape sell of {oldest.qty:g} did not fill - branch "
-                    f"stays full on its rungs")
+                    f"escape sell of {oldest.qty:g} did not fill ({_nofill_why}) - "
+                    f"branch stays full on its rungs")
             return
         filled_qty, filled_price, sell_leg_fee = fill
         # Priced with the rate THIS slice's buy leg really paid plus the rate
