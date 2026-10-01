@@ -470,6 +470,44 @@ against cost. Before treating that number as the price of acting, it is
 worth checking what the coin actually cost - Coinbase has it, this fleet
 does not.
 
+### Would sell-only help? Mostly no - and ZEC and XRP are NOT the same problem
+
+Asked and answered with the live numbers rather than assumed. `buys_paused`
+only stops a branch BUYING; it never makes anything sell, and the grid still
+refuses a losing sale either way.
+
+| | ZEC | XRP |
+|---|---|---|
+| slices / levels | 7 / 3 | 9 / 10 |
+| **parked?** | **YES — already cannot buy** | **no — can still buy** |
+| capital locked | $1,906.42 | $2,175.58 |
+| nearest exit needs | **+20.10%** (to $1,613.56) | **+4.58%** (to $1.5513) |
+| its big lots need | +24.96% / +25.61% | +4.78% / +5.47% |
+
+Priced against the real parked floor: `GRID_PARKED_MIN_NET_PCT` is 1.00% net
+and the blended round trip is 0.709%, so a slice sells when price reaches its
+own entry × 1.01709. Nothing else can release these branches — ZEC is parked,
+and the parked route is the only exit a parked branch has.
+
+**ZEC: sell-only would do nothing.** It is already parked (7 slices against 3
+levels), so the buy path is closed regardless of the flag.
+
+**XRP: sell-only is worth setting.** It is NOT parked (9 against 10), so it
+can still add to a position that is already 26.25% of the fleet. That is a
+guardrail against getting worse; it frees nothing.
+
+**Neither frees a dollar**, because no slice can sell at a profit today.
+
+### The thing this changes
+
+These two have been treated as one $4,513 problem. They are not.
+
+**XRP is 4.58% from releasing its largest lot** — $1,666 of the $2,175 — on
+an ordinary week's move. Waiting is a real plan for XRP.
+
+**ZEC needs +20% before anything at all can sell.** That is not waiting, it
+is holding with no mechanism. ZEC is the decision; XRP mostly is not.
+
 ### Open question, not a claim
 
 `coin_adoption_worker` sets `buys_paused=True` for a holding over the 20%
