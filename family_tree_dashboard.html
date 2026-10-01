@@ -1158,6 +1158,17 @@
 
          These indicators DESCRIBE price. They do not feed the grid, and
          nothing here places, sizes, or cancels an order. -->
+    <!-- ============ WHY THE FLEET DID OR DID NOT TRADE ============
+         A branch sells when price >= reference_price * (1 + grid_pct).
+         This reports the distance to that line for every branch, using
+         the branch's OWN grid_pct, and separates the branches that are
+         waiting on price from the ones that cannot act at all. -->
+    <div class="panel" id="fleet-readiness-panel">
+        <div class="panel-title">⏱️ Why the fleet did or did not trade</div>
+        <div class="panel-sub">A branch sells when price reaches its reference × (1 + its grid step). This is how far each one is from that line right now — and which ones cannot act even when it is reached. Read-only; it places nothing.</div>
+        <div id="fleet-readiness-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
     <div class="panel" id="adv-charts-panel">
         <div class="panel-title">📈 Advanced charts</div>
         <div class="panel-sub">Candlesticks with a 50-period SMA and EMA, RSI(14), and MACD(12,26,9) — read straight from Coinbase's public candles. This panel is read-only: it describes price, it does not drive the grid and it places no orders.</div>
@@ -1965,6 +1976,8 @@
      would drift from the tested one without anything failing. -->
 
 <script src="/static/advanced_charts.js"></script>
+    <!-- Fleet readiness: the same file test_fleet_readiness.js drives. -->
+    <script src="/static/fleet_readiness.js"></script>
 
 <script>
 const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
@@ -6849,6 +6862,88 @@ function alertRemedy(d, g) {
                    || 'The next send attempt will record what the transport did.');
 }
 
+
+// ---- Fleet readiness ----
+// Reads /grid-status, which already carries reference_price,
+// current_price, grid_pct and the backing report - so this costs one
+// request the page already makes and adds nothing to the trading loop.
+async function loadFleetReadiness() {
+    const wrap = document.getElementById('fleet-readiness-wrap');
+    if (!wrap || typeof FLEET === 'undefined') return;
+    try {
+        const d = await apiGet('/grid-status');
+        const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
+        const rows = FLEET.readiness(d.branches || [], unbacked);
+        const s = FLEET.summarise(rows);
+
+        const pill = (n, label, colour) => `
+            <div style="border:1px solid ${colour}; border-radius:8px; padding:8px 11px;
+                        min-width:0; background:var(--panel-2, transparent);">
+              <div style="font-size:1.25em; font-weight:700; color:${colour};
+                          font-variant-numeric:tabular-nums;">${n}</div>
+              <div style="font-size:0.66em; color:var(--text-dim); margin-top:2px;
+                          line-height:1.4;">${label}</div></div>`;
+
+        const bar = `<div style="display:grid;
+              grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:9px;
+              margin-bottom:11px;">
+            ${pill(s.ready, 'at or past trigger', 'var(--green)')}
+            ${pill(s.waiting, 'waiting on price', 'var(--text-dim)')}
+            ${pill(s.locked, `locked out \u2014 ${_wUSD(s.lockedUsd)}`, 'var(--red)')}
+            ${pill(s.noSlices, 'holding nothing to sell', 'var(--text-dim)')}
+            ${s.unreadable ? pill(s.unreadable, 'unreadable', 'var(--gold)') : ''}
+          </div>`;
+
+        const verdictCol = s.lockedPastTrigger > 0 ? 'var(--red)'
+                         : s.ready > 0 ? 'var(--green)' : 'var(--text-dim)';
+        const verdict = `<div style="border-left:3px solid ${verdictCol};
+              padding:8px 11px; font-size:0.8em; line-height:1.6;
+              margin-bottom:12px; color:var(--text);">
+              ${escText(FLEET.verdict(s))}</div>`;
+
+        // Locked first: those are the only rows anything can be done about
+        // today. Then nearest-to-trigger, because that is what fires next.
+        const order = { LOCKED: 0, READY: 1, WAITING: 2, NO_SLICES: 3, UNREADABLE: 4 };
+        rows.sort((a, b) => (order[a.state] - order[b.state])
+                            || ((b.gapPct ?? -999) - (a.gapPct ?? -999)));
+
+        const body = rows.map(r => {
+            const col = r.state === 'LOCKED' ? 'var(--red)'
+                      : r.state === 'READY' ? 'var(--green)'
+                      : r.state === 'UNREADABLE' ? 'var(--gold)' : 'var(--text-dim)';
+            const gap = r.gapPct === null ? 'unreadable'
+                      : (r.gapPct >= 0 ? '+' : '') + r.gapPct.toFixed(2) + '%';
+            const note = r.state === 'LOCKED'
+                  ? (r.gapPct !== null && r.gapPct >= 0
+                     ? 'PAST its trigger and cannot sell \u2014 the move was missed'
+                     : 'cannot sell: the ledger claims coin the wallet does not hold')
+                  : r.state === 'NO_SLICES' ? 'holds no slices'
+                  : r.state === 'READY' ? 'should sell on the next cycle'
+                  : r.state === 'UNREADABLE' ? 'price or step could not be read'
+                  : `needs ${Math.abs(r.gapPct).toFixed(2)}% more to reach its trigger`;
+            return `<div style="display:grid; grid-template-columns:5.6em 1fr 5.4em 5.6em;
+                        gap:9px; padding:6px 0; border-bottom:1px solid var(--border);
+                        align-items:center;">
+              <div style="font-weight:700; font-size:0.8em;">${escText(r.asset)}</div>
+              <div style="font-size:0.72em; color:var(--text-dim); line-height:1.45;">
+                <span style="color:${col}; font-weight:700;">${escText(r.state)}</span>
+                \u00b7 ${escText(note)}
+                ${r.gridPct !== null ? ` \u00b7 step ${(r.gridPct*100).toFixed(2)}%` : ''}</div>
+              <div style="text-align:right; font-size:0.76em; color:${col};
+                   font-variant-numeric:tabular-nums;">${escText(gap)}</div>
+              <div style="text-align:right; font-size:0.76em;
+                   font-variant-numeric:tabular-nums;">${_wUSD(r.allocated)}</div>
+            </div>`;
+        }).join('');
+
+        wrap.innerHTML = bar + verdict + body;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Could not read fleet readiness: ${escText(e.message)}. That is UNKNOWN,
+            which is not the same as idle.</div>`;
+    }
+}
+
 // ---- Advanced charts controller ----
 // The indicator math lives in /static/advanced_charts.js, loaded above,
 // so the browser runs the SAME file test_advanced_charts.js drives. A
@@ -9323,6 +9418,8 @@ loadTradingProfile();
 // slow or unreachable candles endpoint delays nothing else on the page
 // and adds no load to the process that places orders. It owns its own
 // 60s interval rather than joining refresh().
+loadFleetReadiness();
+setInterval(loadFleetReadiness, 60000);
 initAdvancedCharts();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 15000);
