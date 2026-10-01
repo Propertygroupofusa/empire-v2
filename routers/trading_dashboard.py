@@ -12600,6 +12600,9 @@ async def cost_truth():
     except Exception:
         pass
     in_force = view["adverse_pct_in_force"]
+    cost_in_force_label = (
+        "The bar in force is priced off the worst measured regime; the lower "
+        "number is priced off the friendliest one.")
     cost_now = regime_tag.round_trip_cost_pct(fee, in_force)
     cost_if = regime_tag.round_trip_cost_pct(fee, view["means_by_regime"].get("RISING"))
 
@@ -12622,18 +12625,59 @@ async def cost_truth():
         "gap_pct": (round(cost_now - cost_if, 4)
                     if cost_now is not None and cost_if is not None else None),
         "adverse": view,
+        # TWO STATES, TWO SENTENCES. This template had only one: it said
+        # "It is not [swapped in], because N more falling-market samples
+        # are needed" with no branch for N == 0. Once the 30-sample bar
+        # was cleared the page started printing "It is not, because 0 more
+        # falling-market samples are needed" - a self-contradiction that
+        # reported the fleet as BLOCKED at the moment it stopped being
+        # blocked, and sent the owner looking for something to fix that
+        # had already fixed itself.
+        "measurement_is_in_force": bool(view["may_replace_assumption"]),
         "headline": (
-            f"A round trip is priced at {cost_now}% and would be {cost_if}% if the "
-            f"measured figure were used. It is not, because "
-            f"{view['falling_samples_needed']} more falling-market samples are needed "
-            f"before that measurement has tested the case it exists for."
-            if cost_now is not None and cost_if is not None else
-            "Not enough data to price the gap yet."),
+            ("Not enough data to price this yet."
+             if cost_now is None or cost_if is None else
+             (f"A round trip is priced at {cost_now}%, and that figure is MEASURED: "
+              f"{view['counts'].get('FALLING', 0)} falling-market samples put adverse "
+              f"selection at {in_force}%, so the conservative assumption of "
+              f"{view['assumed_pct']}% has already been retired and the bar came down "
+              f"with it. The {cost_if}% below is NOT a pending improvement - it is what "
+              f"the bar would be if priced off RISING markets only, and that is the "
+              f"mistake this measurement exists to prevent."
+              if view["may_replace_assumption"] else
+              f"A round trip is priced at {cost_now}% and would be {cost_if}% if the "
+              f"measured figure were used. It is not, because "
+              f"{view['falling_samples_needed']} more falling-market samples are needed "
+              f"before that measurement has tested the case it exists for."))),
+        "what_the_gap_is": (
+            (f"A safety margin, not a locked improvement. {cost_in_force_label}"
+             if view["may_replace_assumption"] else
+             "The cost of not yet knowing. It closes by collecting falling-market "
+             "samples, not by lowering the bar.")),
         "what_would_change": (
-            "Halving the cost turns a large share of the refusals into trades. That is "
-            "the point and the danger: passing more and paying worse is what a lowered "
-            "threshold looks like, and the only thing separating this from that is "
-            "whether the cheaper number has been checked in a falling market."),
+            ("The bar is already priced off the worst regime that has been measured. "
+             "Lowering it further would mean pricing risk off rising markets - passing "
+             "more trades and paying worse on each, which is what a lowered threshold "
+             "looks like. More trades from here should come from better setups, not a "
+             "cheaper bar."
+             if view["may_replace_assumption"] else
+             "Halving the cost turns a large share of the refusals into trades. That is "
+             "the point and the danger: passing more and paying worse is what a lowered "
+             "threshold looks like, and the only thing separating this from that is "
+             "whether the cheaper number has been checked in a falling market.")),
+        # The bars on this panel are a CENSUS OF MARKET CONDITIONS, not a
+        # scoreboard. Stated here because a rising bar shorter than a
+        # falling bar reads as losing, and the opposite is true: the
+        # falling-market count is the evidence that retires the
+        # assumption, so MORE of it is better.
+        "how_to_read_the_regime_counts": (
+            "These are sample counts of the market each measurement was taken in, not "
+            "wins and losses. A taller FALLING bar is GOOD: falling-market samples are "
+            "the evidence required to retire the conservative assumption, and reaching "
+            f"{view['counts'].get('FALLING', 0)} of them is what lowered this bar from "
+            f"{round((fee or 0) + (view['assumed_pct'] or 0), 4)}% to {cost_now}%. "
+            "Nothing here can or should be tuned to make RISING larger - that would "
+            "remove the evidence, not improve the result."),
     }
 
 
