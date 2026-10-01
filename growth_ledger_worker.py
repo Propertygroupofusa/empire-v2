@@ -59,8 +59,20 @@ def interval_seconds() -> int:
     return max(INTERVAL_SECONDS, 60)
 
 
+# Fields that come from the trade ledger and from nothing else. When the
+# ledger cannot be read these must be written as NULL, because every one
+# of them computes to a believable zero from an empty list.
+LEDGER_DERIVED = ("trades", "net_usd", "net_edge_per_trade_usd",
+                  "profit_factor", "win_rate_pct", "capital_velocity")
+
+
 async def _read_ledger(session_factory):
-    """The closed book, row by row. DB only - costs the venue nothing."""
+    """The closed book, row by row. DB only - costs the venue nothing.
+
+    Returns None when the read FAILED, and [] only when the ledger is
+    genuinely empty. Those are different facts and the caller must be
+    able to tell them apart - see check_once.
+    """
     from models import CryptoGridTradeHistory
     from sqlalchemy import select
     async with session_factory()() as db:
@@ -117,11 +129,32 @@ async def check_once(session_factory):
     now = datetime.utcnow()
     notes = []
 
-    trades = []
-    try:
-        trades = await _read_ledger(session_factory)
-    except Exception as exc:
-        notes.append(f"ledger unreadable ({type(exc).__name__})")
+    # A FAILED LEDGER READ MUST NOT BECOME "ZERO TRADES".
+    #
+    # This was `trades = []` before the try, so any exception left an
+    # EMPTY LIST, and capital_kpis.compute([]) returns trades=0,
+    # net_usd=0.0 - a perfectly believable reading that then got written
+    # into the permanent series. The integrity check caught the result
+    # and named it exactly: "141 reading(s) show one falling (trades from
+    # 156 to 0). That is a rewritten ledger or a failed read stored as a
+    # number - not a loss." Those are the vertical spikes to zero on
+    # every chart on the growth panel.
+    #
+    # It is the same shape as the auto_trim_worker bug: a failure
+    # collapsing into a falsy value that is indistinguishable from real
+    # data. A gap is not a zero.
+    trades = None
+    for _attempt in range(3):
+        try:
+            trades = await _read_ledger(session_factory)
+            break
+        except Exception as exc:
+            trades = None
+            if _attempt == 2:
+                notes.append(f"ledger unreadable ({type(exc).__name__})")
+            else:
+                await asyncio.sleep(2 ** _attempt)
+    ledger_unreadable = trades is None
 
     allocated = free = claimed = None
     branch_count = open_slices = None
@@ -151,15 +184,29 @@ async def check_once(session_factory):
     if census_note:
         notes.append(census_note)
 
-    k = capital_kpis.compute(trades, allocated_usd=allocated,
+    k = capital_kpis.compute(trades or [], allocated_usd=allocated,
                              free_cash_usd=free or 0.0, account_total_usd=total)
+    if ledger_unreadable:
+        # Blank every figure that was computed out of a ledger nobody
+        # could read. The account figures beside them are still real and
+        # are deliberately kept - this row is a partial reading, not a
+        # void one, and saying so is more useful than dropping it.
+        for f in LEDGER_DERIVED:
+            k[f] = None
     cause, _why = capital_kpis.bottleneck(k)
+    if ledger_unreadable:
+        # A bottleneck named from blanked inputs is a guess wearing a
+        # verdict's clothes.
+        cause = None
 
     row = growth_ledger.from_kpis(
         k, claimed_usd=claimed, branch_count=branch_count,
         open_slices=open_slices, coin_usd=coin_usd, cash_usd=cash_usd,
         assets_unpriced=unpriced, census_carried=carried,
         bottleneck=cause, note="; ".join(notes) or None, captured_at=now)
+    if ledger_unreadable:
+        for f in LEDGER_DERIVED:
+            row[f] = None
 
     # The standings, recorded in the same pass. A league table says who is
     # winning; only a series says who is CLIMBING, and the second reading
