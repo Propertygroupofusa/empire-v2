@@ -2005,7 +2005,60 @@ const TRANSIENT_STATUSES = [502, 503, 504];
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ────────────────── ONE HEAVY READ, NOT TWENTY-ONE ──────────────────
+// /grid-status is 132 KB and twenty different places on this page ask for
+// it. Measured over 60 seconds in a real browser: 21 calls, 2.65 MB - 65%
+// of everything this dashboard downloads.
+//
+// Two things fix that without changing a single caller:
+//
+//   single-flight  callers that ask while a request is already in the air
+//                  share THAT request instead of starting another. This is
+//                  pure win - it cannot serve anything stale, because it
+//                  hands back a response that had not arrived yet.
+//
+//   8s floor       a second ask within 8s reuses the last response.
+//
+// WHY 8s IS NOT NEW STALENESS. The SERVER already caches this endpoint for
+// 25s (_GRID_STATUS_TTL_SECONDS) and says so in cache_age_seconds, so a
+// caller could always be handed a 25s-old reading. An 8s client floor sits
+// inside that envelope - it cannot produce a number the server would not
+// have produced anyway - and the page polls every 15s regardless.
+//
+// Deliberately ONLY the giant read-only status payload. Anything that acts
+// on a button press, and every write, goes straight through untouched.
+const _HEAVY_CACHE_MS = 8000;
+const _HEAVY = { '/grid-status': 1 };
+const _heavyCache = new Map();     // path -> {at, data}
+const _heavyFlight = new Map();    // path -> Promise
+
+function _heavyKey(path) {
+    return _HEAVY[String(path).split('?')[0]] ? String(path) : null;
+}
+
 async function apiGet(path, timeoutMs) {
+    const key = _heavyKey(path);
+    if (key) {
+        const hit = _heavyCache.get(key);
+        if (hit && (Date.now() - hit.at) < _HEAVY_CACHE_MS) return hit.data;
+        const inFlight = _heavyFlight.get(key);
+        if (inFlight) return await inFlight;
+        const promise = (async () => {
+            try {
+                const data = await _apiGetWithRetry(path, timeoutMs);
+                _heavyCache.set(key, { at: Date.now(), data });
+                return data;
+            } finally {
+                _heavyFlight.delete(key);
+            }
+        })();
+        _heavyFlight.set(key, promise);
+        return await promise;
+    }
+    return await _apiGetWithRetry(path, timeoutMs);
+}
+
+async function _apiGetWithRetry(path, timeoutMs) {
     try {
         return await _apiGetOnce(path, timeoutMs);
     } catch (e) {
@@ -9467,23 +9520,68 @@ loadTradingProfile();
 // and adds no load to the process that places orders. It owns its own
 // 60s interval rather than joining refresh().
 loadFleetReadiness();
-setInterval(loadFleetReadiness, 60000);
+
+// ───────────────────────────── POLLING, MEASURED ─────────────────────────
+// A BACKGROUNDED TAB WAS STILL PULLING 4 MB A MINUTE.
+//
+// Measured on 2026-10-01 by loading this page in a real browser for 60s and
+// counting every request it made:
+//
+//     96 calls, 4.04 MB in 60 seconds  ->  242 MB per HOUR, per open tab
+//     /grid-status alone: 21 calls, 2.65 MB  (65% of all of it)
+//
+// Exactly one poll on this page checked document.hidden
+// (refreshProximityOnly). Everything else - refresh, the ticker, the
+// activity feed, the tape, the alarm, the profile, fleet readiness - kept
+// running at full rate on a phone that was not even showing the page. That
+// is the whole bill above, charged to the owner's cellular data and to a
+// mobile browser's patience with a tab that never goes quiet. A tab that
+// never goes quiet is the one the browser evicts, and an evicted tab comes
+// back WHITE.
+//
+// So every interval now goes through onlyWhenVisible(). Nothing polls while
+// hidden; everything catches up the moment the tab is looked at again. The
+// FIRST load is untouched - each loader is still called directly above, so
+// opening the page behaves exactly as it did.
+function onlyWhenVisible(fn) {
+    return function () {
+        if (document.hidden) return;
+        try { return fn.apply(this, arguments); }
+        catch (e) { console.warn('[dashboard] poll failed:', e); }
+    };
+}
+function pollEvery(fn, ms) { return setInterval(onlyWhenVisible(fn), ms); }
+
+setInterval(onlyWhenVisible(loadFleetReadiness), 60000);
 initAdvancedCharts();
-setInterval(refresh, 15000);
-setInterval(loadTicker, 15000);
-setInterval(loadActivityFeed, 5000);
-setInterval(loadCombinedProgress, 60000);
-setInterval(loadAlertQueue, 60000);
-setInterval(loadTradingProfile, 60000);
-// The tape is the one panel that must actually move.
-setInterval(loadTape, 6000);
+pollEvery(refresh, 15000);
+pollEvery(loadTicker, 15000);
+// 5s -> 15s. The feed is a list of things that already happened; three
+// reads a minute of it is not journalism, it is bandwidth.
+pollEvery(loadActivityFeed, 15000);
+pollEvery(loadCombinedProgress, 60000);
+pollEvery(loadAlertQueue, 60000);
+pollEvery(loadTradingProfile, 60000);
+// The tape is the one panel that must actually move - 6s -> 12s, still
+// faster than the 30s cycle that produces anything for it to show.
+pollEvery(loadTape, 12000);
 // The panels that should visibly move, on their own fast loops.
-setInterval(refreshProximityOnly, 6000);
-setInterval(tickProximityAge, 1000);
+pollEvery(refreshProximityOnly, 6000);
+// Pure arithmetic on numbers already in the page - no network, so it is
+// left alone except for not ticking a clock nobody is looking at.
+pollEvery(tickProximityAge, 1000);
+
 // A backgrounded tab skips its polls, so catch up the moment it returns
-// rather than showing a stale price until the next tick.
+// rather than showing a stale page until the next tick. This is now the
+// ONLY thing that runs on return, and it has to be a real refresh: the
+// whole page was frozen, not just the price.
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { refreshProximityOnly(); loadTicker(); }
+    if (document.hidden) return;
+    refresh();
+    loadTicker();
+    refreshProximityOnly();
+    loadActivityFeed();
+    loadTape();
 });
 
 // ------------------------------------------------------------------ THE TRIMMER
