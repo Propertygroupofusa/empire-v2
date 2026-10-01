@@ -335,6 +335,19 @@
     .adv-card canvas { width: 100%; display: block; }
     .adv-note { font-size: 0.72em; color: var(--text-dim); line-height: 1.5;
                 margin-top: 8px; }
+    .fact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                 gap: 10px; }
+    .fact { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+            background: var(--panel-2); min-width: 0; }
+    .fact-k { font-size: 0.66em; text-transform: uppercase; letter-spacing: 0.06em;
+              color: var(--text-dim); font-weight: 700; }
+    .fact-v { font-size: 0.95em; font-weight: 700; color: var(--text); margin-top: 3px;
+              font-variant-numeric: tabular-nums; word-break: break-word; }
+    .fact-sub { font-size: 0.68em; color: var(--text-dim); margin-top: 2px; line-height: 1.45; }
+    .fact-why { font-size: 0.76em; line-height: 1.55; margin-top: 10px;
+                border-left: 3px solid var(--blue); padding-left: 10px; color: var(--text-dim); }
+    .fact-why.bad { border-left-color: var(--red); color: var(--red); }
+    .fact-why.warn { border-left-color: var(--gold); }
     .adv-error { margin-top: 10px; font-size: 0.8em; color: var(--red);
                  border: 1px solid var(--red); border-radius: 8px;
                  padding: 9px 11px; background: var(--red-bg); }
@@ -1168,6 +1181,15 @@
                 <canvas id="adv-price" height="300"></canvas>
             </div>
 
+            <div class="adv-card adv-card-price">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">Volume</span>
+                    <span class="adv-legend">coloured by the candle it belongs to — green bars are volume on an up candle</span>
+                </div>
+                <canvas id="adv-volume" height="110"></canvas>
+                <div class="adv-note">Technical analysis is price <em>and</em> volume. A move on heavy volume carries more conviction than the same move on thin volume.</div>
+            </div>
+
             <div class="adv-card">
                 <div class="adv-card-head">
                     <span class="adv-card-title">RSI 14</span>
@@ -1187,6 +1209,15 @@
                 </div>
                 <canvas id="adv-macd" height="150"></canvas>
                 <div class="adv-note">The histogram is the gap between the two lines. MACD crossing up through the signal is read as bullish, down as bearish; the wider the gap, the stronger the reading.</div>
+            </div>
+
+            <div class="adv-card adv-card-price" id="adv-facts-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">Market facts</span>
+                    <span class="adv-legend">from Coinbase, about this product</span>
+                </div>
+                <div id="adv-facts">—</div>
+                <div class="adv-note"><strong>What this is not:</strong> fundamental analysis means financials, user community, roadmap and real-world use, and this system has no feed for any of that — so none is shown. Inventing a score for it would look authoritative and mean nothing. These are facts Coinbase publishes about the market itself: whether it is open, and how deep it is.</div>
             </div>
         </div>
         <div id="adv-error" class="adv-error" hidden></div>
@@ -6756,14 +6787,76 @@ async function advFetchCandles(product, gran) {
     return candles;
 }
 
+
+// Market facts for the selected product. Kept in its own try so that an
+// unreachable stats endpoint costs the facts card and nothing else - the
+// charts are the thing on screen and must not go blank because a second
+// request failed.
+async function advDrawFacts(product) {
+    const el = document.getElementById('adv-facts');
+    if (!el) return;
+    const fmtUsd0 = n => n === null ? 'unreadable'
+        : n >= 1e9 ? '$' + (n / 1e9).toFixed(2) + 'B'
+        : n >= 1e6 ? '$' + (n / 1e6).toFixed(1) + 'M'
+        : '$' + Math.round(n).toLocaleString();
+    try {
+        const base = 'https://api.exchange.coinbase.com/products/' + encodeURIComponent(product);
+        const [pr, st] = await Promise.all([
+            fetch(base, { cache: 'no-store' }).then(r => r.ok ? r.json() : null),
+            fetch(base + '/stats', { cache: 'no-store' }).then(r => r.ok ? r.json() : null),
+        ]);
+        const f = ADV.marketFacts(pr, st);
+
+        // open === null means Coinbase did not say. That is reported as
+        // unknown, never as "open" - a reassuring default here would stop
+        // someone looking for the real cause of a refused order.
+        const openTxt = f.open === null ? 'unknown'
+                      : f.open ? 'open' : 'NOT OPEN';
+        const openCol = f.open === null ? 'var(--gold)'
+                      : f.open ? 'var(--green)' : 'var(--red)';
+        const bandSub = { thin: 'thin — a resting maker order can wait a long time here',
+                          moderate: 'moderate depth',
+                          deep: 'deep — fills come quickly',
+                          unknown: 'depth unreadable' }[f.band];
+        const vs = f.vs30 === null ? null : f.vs30;
+        const vsTxt = vs === null ? 'unreadable'
+            : (vs >= 1 ? (vs).toFixed(2) + '× busier' : (1 / vs).toFixed(2) + '× quieter');
+
+        el.innerHTML = `<div class="fact-grid">
+            <div class="fact"><div class="fact-k">Venue</div>
+                <div class="fact-v" style="color:${openCol}">${escText(openTxt)}</div>
+                <div class="fact-sub">status: ${escText(f.status || 'not reported')}</div></div>
+            <div class="fact"><div class="fact-k">Restrictions</div>
+                <div class="fact-v">${f.restrictions.length ? escText(String(f.restrictions.length)) : 'none'}</div>
+                <div class="fact-sub">${f.restrictions.length ? escText(f.restrictions.join('; ')) : 'no venue-side limits on new orders'}</div></div>
+            <div class="fact"><div class="fact-k">24h volume</div>
+                <div class="fact-v">${escText(fmtUsd0(f.usd24h))}</div>
+                <div class="fact-sub">${escText(bandSub)}</div></div>
+            <div class="fact"><div class="fact-k">Today vs 30-day average</div>
+                <div class="fact-v">${escText(vsTxt)}</div>
+                <div class="fact-sub">a market that is quiet today and one that is always thin need different answers</div></div>
+            <div class="fact"><div class="fact-k">30d volume</div>
+                <div class="fact-v">${escText(fmtUsd0(f.usd30d))}</div>
+                <div class="fact-sub">minimum order ${f.minFunds === null ? 'unreadable' : '$' + f.minFunds}</div></div>
+        </div>
+        <div class="fact-why ${f.open === false ? 'bad' : (f.open === null || f.restrictions.length) ? 'warn' : ''}">${escText(f.why)}</div>`;
+    } catch (e) {
+        el.innerHTML = `<div class="fact-why warn">Could not read Coinbase's facts for `
+            + `${escText(product)}: ${escText(e.message)}. That is this card only — `
+            + `the charts above are unaffected, and this says nothing about whether the market is open.</div>`;
+    }
+}
+
 async function advDraw() {
     if (!advProduct) return;
     try {
         const candles = await advFetchCandles(advProduct, advGran);
         advSetError(null);
         ADV.drawPrice(document.getElementById('adv-price'), candles);
+        ADV.drawVolume(document.getElementById('adv-volume'), candles);
         const r = ADV.drawRsi(document.getElementById('adv-rsi'), candles);
         ADV.drawMacd(document.getElementById('adv-macd'), candles);
+        advDrawFacts(advProduct);   // its own failure, so it cannot blank the charts
 
         const last = candles[candles.length - 1];
         const first = candles[0];

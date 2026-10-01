@@ -278,9 +278,124 @@ const ADV = (function () {
         line(c, m.signal, lo, hi, w, h, CSS('--gold'), 1.6);
     }
 
+
+    // ---- volume, and the honest slice of "fundamentals" ----
+    //
+    // Technical analysis is price AND volume. The candles already carry
+    // volume and it was being thrown away, which left the panel showing
+    // half of what it claimed to show.
+    //
+    // There is deliberately NO fundamentals score here. Fundamentals
+    // means financials, user community, roadmap and real-world use, and
+    // this system has no feed for any of it. Inventing a number for it
+    // would look authoritative and mean nothing - money decisions would
+    // get made on it. What Coinbase DOES publish about a product is
+    // real and verifiable, so that is what gets shown, labelled as what
+    // it is: whether the market is open, and how deep it is.
+
+    // Liquidity bands, in 24h quote volume. The threshold that matters
+    // for this fleet is thinness: a maker-only grid resting on a thin
+    // book sits unfilled, which reads from the outside as "the bot
+    // isn't trading" when the book simply never came to the order.
+    var THIN_USD = 2e6, DEEP_USD = 5e7;
+
+    function liquidityBand(usd24h) {
+        if (usd24h === null || usd24h === undefined || !isFinite(usd24h)) return 'unknown';
+        if (usd24h < THIN_USD) return 'thin';
+        if (usd24h < DEEP_USD) return 'moderate';
+        return 'deep';
+    }
+
+    // Rows for the market-facts card. Pure, so the wording that explains
+    // a refusal is testable rather than written once into a template.
+    //
+    // UNKNOWN IS A VERDICT. A field Coinbase did not send is reported as
+    // unreadable, never defaulted to the reassuring value - "trading is
+    // open" invented out of a missing field is exactly the kind of claim
+    // that stops someone looking for the real cause.
+    function marketFacts(product, stats) {
+        product = product || {};
+        stats = stats || {};
+        var num = function (v) {
+            var n = parseFloat(v);
+            return isFinite(n) ? n : null;
+        };
+        var last = num(stats.last), vol = num(stats.volume), v30 = num(stats.volume_30day);
+        var usd24 = (last !== null && vol !== null) ? last * vol : null;
+        var usd30 = (last !== null && v30 !== null) ? last * v30 : null;
+
+        var open = (product.status === 'online') && (product.trading_disabled === false);
+        var restrictions = [];
+        if (product.limit_only) restrictions.push('limit orders only');
+        if (product.cancel_only) restrictions.push('cancel only - no new orders');
+        if (product.post_only) restrictions.push('post-only (maker) enforced by the venue');
+        if (product.auction_mode) restrictions.push('in auction mode');
+
+        var knowable = product.status !== undefined && product.status !== null;
+
+        return {
+            open: knowable ? open : null,
+            status: product.status || null,
+            restrictions: restrictions,
+            usd24h: usd24,
+            usd30d: usd30,
+            band: liquidityBand(usd24),
+            // Today against the 30-day daily average. A market that is
+            // quiet TODAY and a market that is always thin need
+            // different responses, and one number cannot tell them apart.
+            vs30: (usd24 !== null && usd30 !== null && usd30 > 0)
+                ? usd24 / (usd30 / 30) : null,
+            minFunds: num(product.min_market_funds),
+            why: !knowable
+                ? 'Coinbase did not report this product\u2019s status, so whether it is open is UNKNOWN - not confirmed open.'
+                : !open
+                ? 'This market is not open for trading right now, which by itself explains refused orders.'
+                : restrictions.length
+                ? 'The market is open but restricted: ' + restrictions.join('; ') + '.'
+                : 'The venue is open and unrestricted, so a refused order here is NOT the exchange blocking it - look at size, price or balance instead.',
+        };
+    }
+
+    function drawVolume(cv, candles) {
+        var f = fit(cv); if (!f) return;
+        var c = f.c, w = f.w, h = f.h;
+        var vols = candles.map(function (d) { return d.vol; });
+        var ex = extent([vols]);
+        if (!ex) return;
+        var lo = 0, hi = ex.hi * 1.06;
+        // One unit for the WHOLE axis, chosen from the top of the scale.
+        // Formatting each label on its own magnitude produced an axis
+        // reading "2K / 1K / 704 / 0", where the reader has to notice
+        // mid-column that the unit changed.
+        var unit = hi >= 1e9 ? [1e9, 'B'] : hi >= 1e6 ? [1e6, 'M']
+                 : hi >= 1e3 ? [1e3, 'K'] : [1, ''];
+        grid(c, w, h, lo, hi, function (n) {
+            var v = n / unit[0];
+            return (v >= 100 || unit[0] === 1 ? v.toFixed(0) : v.toFixed(1)) + unit[1];
+        }, 3);
+        var step = (w - PAD.l - PAD.r) / Math.max(1, candles.length);
+        var bw = Math.max(1, Math.min(9, step - 2));
+        var zero = yOf(0, lo, hi, h);
+        var green = CSS('--green'), red = CSS('--red');
+        candles.forEach(function (d, i) {
+            if (!isFinite(d.vol)) return;
+            var x = PAD.l + step * i + step / 2;
+            var y = yOf(d.vol, lo, hi, h);
+            // Volume takes the colour of its own candle, so a spike
+            // reads as buying or selling rather than just "activity".
+            c.fillStyle = d.close >= d.open ? green : red;
+            c.globalAlpha = 0.75;
+            c.fillRect(x - bw / 2, y, bw, Math.max(1, zero - y));
+            c.globalAlpha = 1;
+        });
+    }
+
     return { sma: sma, ema: ema, rsi: rsi, macd: macd,
              parseCandles: parseCandles, money: money,
-             drawPrice: drawPrice, drawRsi: drawRsi, drawMacd: drawMacd };
+             liquidityBand: liquidityBand, marketFacts: marketFacts,
+             THIN_USD: THIN_USD, DEEP_USD: DEEP_USD,
+             drawPrice: drawPrice, drawRsi: drawRsi, drawMacd: drawMacd,
+             drawVolume: drawVolume };
 })();
 if (typeof window !== 'undefined') window.ADV = ADV;
 if (typeof module !== 'undefined' && module.exports) module.exports = ADV;

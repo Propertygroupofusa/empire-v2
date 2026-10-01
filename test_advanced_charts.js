@@ -136,8 +136,62 @@ ok('the file it loads is the one under test',
 ok('the math is NOT also inlined into the page (no second copy to drift)',
    !html.includes('function parseCandles(') && !html.includes("Wilder's RSI"));
 ok('the panel is initialised on load', html.includes('initAdvancedCharts();'));
+ok('the volume canvas exists on the page', html.includes('id="adv-volume"'));
+ok('the market-facts card exists on the page', html.includes('id="adv-facts"'));
+ok('the page does not ship a fabricated fundamentals score',
+   !/fundamental[^<]{0,40}score|score[^<]{0,20}:\s*\d/i.test(html));
 ok('the charts never call a trading endpoint',
    !/advFetchCandles[\s\S]{0,400}(close-branch|reconcile|spread-evenly|free-locked)/.test(html));
+
+console.log('\n[8] liquidity bands');
+ok('a thin book is called thin', A.liquidityBand(110559) === 'thin', A.liquidityBand(110559));
+ok('a deep book is called deep', A.liquidityBand(129510650) === 'deep');
+ok('the middle is moderate', A.liquidityBand(22763856) === 'moderate');
+// A missing number is not a quiet market.
+ok('null volume is unknown, NOT thin', A.liquidityBand(null) === 'unknown');
+ok('NaN volume is unknown, NOT thin', A.liquidityBand(NaN) === 'unknown');
+ok('undefined volume is unknown', A.liquidityBand(undefined) === 'unknown');
+
+console.log('\n[9] market facts - a missing field must never read as "open"');
+// THE BUG THIS EXISTS FOR. If Coinbase omits status and the code
+// defaults it to open, the card says the venue is fine and whoever is
+// chasing a refused order stops looking here - at the one card that
+// would have told them. Unknown is a verdict.
+const blind = A.marketFacts({}, {});
+ok('no status reported => open is null, not true', blind.open === null, String(blind.open));
+ok('and the explanation says UNKNOWN', /UNKNOWN/.test(blind.why), blind.why);
+ok('and it does not claim the venue is open', !/venue is open/.test(blind.why));
+ok('a null product does not throw', A.marketFacts(null, null).open === null);
+
+const halted = A.marketFacts({status: 'offline', trading_disabled: true}, {});
+ok('an offline product is NOT open', halted.open === false);
+ok('and says so explains refused orders', /not open/.test(halted.why), halted.why);
+
+const limited = A.marketFacts(
+    {status: 'online', trading_disabled: false, limit_only: true, cancel_only: true}, {});
+ok('restrictions are listed, not collapsed to a flag',
+   limited.restrictions.length === 2, JSON.stringify(limited.restrictions));
+ok('cancel-only is spelled out as blocking new orders',
+   limited.restrictions.some(r => /no new orders/.test(r)));
+
+// The real LINK-USD answer, verbatim from the API.
+const live = A.marketFacts(
+    {id:'LINK-USD', status:'online', trading_disabled:false, limit_only:false,
+     cancel_only:false, post_only:false, min_market_funds:'1'},
+    {last:'14.371', volume:'1582885.33', volume_30day:'60683944.98'});
+ok('open and unrestricted', live.open === true && live.restrictions.length === 0);
+ok('24h quote volume is price x base volume',
+   near(live.usd24h, 14.371 * 1582885.33, 1e-6), String(live.usd24h));
+ok('today is compared against the 30-day DAILY average, not the 30-day total',
+   near(live.vs30, live.usd24h / (live.usd30d / 30), 1e-9), String(live.vs30));
+// This is the sentence that stops a wrong hunt. An open venue means the
+// refusal came from somewhere else.
+ok('an open unrestricted venue says the exchange is NOT the blocker',
+   /NOT the exchange blocking it/.test(live.why), live.why);
+
+console.log('\n[10] volume is actually carried through parsing');
+const vc = A.parseCandles([[100, 1, 5, 2, 4, 1234.5]]);
+ok('volume survives parsing', vc[0].vol === 1234.5, JSON.stringify(vc[0]));
 
 console.log('\n' + (fails.length ? fails.length + ' FAILED: ' + fails.join('; ') : 'ALL PASS'));
 process.exit(fails.length ? 1 : 0);
