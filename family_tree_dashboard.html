@@ -1657,13 +1657,14 @@
     <div class="section-title">💰 What a round trip really costs</div>
     <div class="panel">
         <div class="panel-sub">The gate refuses a setup when the expected move does not beat
-            the cost of a round trip. That cost is part measured and part assumed, and the
-            assumed part is currently <strong>twice the measured one</strong> - which is why
-            1,614 scans produced zero qualified trades, with <code>expected_move</code> as
-            74% of the refusals.
-            <br><br>Swapping the measured figure in would halve the bar and turn most of
-            those refusals into trades. It is not swapped in, and this panel exists to show
-            exactly why and exactly what would change that.</div>
+            the cost of a round trip. Every part of that cost is now <strong>measured</strong> -
+            your real fee tier, plus adverse selection taken from falling markets, which is the
+            regime that decides whether the number is safe.
+            <br><br>The conservative assumption this panel was built to question has already been
+            retired, and the bar came down when it was. <strong>The two percentages below are not a
+            score and not a contest</strong> - the lower one is what the bar would be if it were
+            priced off rising markets only, which is the one thing this measurement exists to
+            prevent.</div>
         <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
             <button class="unlock-btn" style="margin-top:0;" onclick="loadCostTruth()">💰 Show the gap</button>
         </div>
@@ -9581,10 +9582,15 @@ async function loadCostTruth() {
              </div>`;
 
         wrap.innerHTML = `
-          <div style="font-size:1.05em;margin-bottom:12px">
-            priced at <strong style="color:var(--danger,#e05a4e)">${d.cost_in_force_pct}%</strong>
-            &nbsp;·&nbsp; would be <strong style="color:var(--success,#16a34a)">${d.cost_if_measured_were_swapped_pct}%</strong>
-            &nbsp;·&nbsp; gap <strong>${d.gap_pct}%</strong>
+          <div style="font-size:1.0em;margin-bottom:6px">
+            in force <strong>${d.cost_in_force_pct}%</strong>
+            <span style="color:var(--text-dim);font-size:0.86em">
+              &nbsp;·&nbsp; ${d.cost_if_measured_were_swapped_pct}% if priced off rising markets only
+              &nbsp;·&nbsp; margin ${d.gap_pct}%</span>
+          </div>
+          <div style="font-size:0.8em;line-height:1.6;margin-bottom:12px;
+                      border-left:3px solid var(--blue,#0052ff);padding:7px 11px;">
+            ${esc2(d.headline || '')}
           </div>
 
           <table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-bottom:12px">
@@ -9600,11 +9606,17 @@ async function loadCostTruth() {
             </tbody>
           </table>
 
-          <div style="font-size:0.82em;font-weight:600;margin-bottom:4px">Where the measurements came from</div>
-          ${bar('rising', c.RISING, 'var(--success,#16a34a)')}
-          ${bar('falling', c.FALLING, 'var(--danger,#e05a4e)')}
+          <div style="font-size:0.82em;font-weight:600;margin-bottom:2px">Where the measurements came from</div>
+          <div style="font-size:0.74em;color:var(--text-dim);line-height:1.5;margin-bottom:6px">
+            Counts of the market each sample was taken in. Not wins and losses \u2014 nothing here
+            is competing with anything.</div>
+          ${bar('rising', c.RISING, 'var(--text-dim)')}
+          ${bar('falling', c.FALLING, 'var(--blue,#0052ff)')}
           ${bar('flat', c.FLAT, 'var(--text-dim)')}
           ${bar('unknown', c.UNKNOWN, 'var(--border)')}
+          <div style="font-size:0.74em;color:var(--text-dim);line-height:1.5;margin-top:6px">
+            <strong style="color:var(--blue,#0052ff)">Falling is highlighted because it is the one
+            that counts.</strong> ${esc2(d.how_to_read_the_regime_counts || '')}</div>
 
           <div style="margin-top:12px;padding:10px 12px;border-left:3px solid ${ok?'var(--success,#16a34a)':'var(--danger,#e05a4e)'};
                       background:var(--panel2,#0000000a);font-size:0.84em;line-height:1.55">
@@ -9614,7 +9626,8 @@ async function loadCostTruth() {
           </div>
 
           <div style="margin-top:10px;font-size:0.78em;color:var(--text-dim);line-height:1.55">
-            ${esc2(a.why_not_a_blend || '')}<br><br>${esc2(d.what_would_change || '')}
+            ${esc2(a.why_not_a_blend || '')}<br><br>${esc2(d.what_the_gap_is || '')}
+            <br><br>${esc2(d.what_would_change || '')}
           </div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';
