@@ -258,6 +258,69 @@ No trade closed between **2026-09-09 and 2026-09-26**. 16 days, zero round
 trips, on a fleet that averages 5.2/day. Not yet explained; it is not a
 reporting gap, because trades resume on the 27th in the same table.
 
+### The 16 dead days, explained
+
+Not an outage, and not a reporting gap — the repo already diagnosed it on
+2026-09-25, in a commit whose first line is *"This is why it is not
+trading."*
+
+Two cost models decided whether a branch could trade, and nothing required
+them to agree:
+
+    fee_safe_floor_pct()   step must clear FEES plus a margin          1.70%
+    _net_edge_gate_ok()    step must clear fees + SPREAD + ADVERSE     2.16%
+
+The fleet was configured at a **2.00% step — between the two**. The floor was
+satisfied, so the branch kept its spacing; the gate refused every buy at that
+spacing; and nothing in the system could move the step. NEAR-USD hit its buy
+trigger constantly and was **refused 171 times**. No buys means no slices,
+and no slices means nothing to sell: 16 days of a counter going up.
+
+The timeline matches the trade table exactly. 82 trades on the old config to
+2026-09-09, then nothing, then the deadlock is fixed on 09-25 and 83 trades
+land from 09-26 on — `coin_league.trades_on_current_config` reads **83**, the
+other 82 being the pre-gap config.
+
+**It cannot recur in the same form.** Spacing is now derived by INVERTING the
+gate (`gate_clearing_floor_pct`) rather than from a second copy of the cost
+formula, and `auto_widen_enabled()` defaults ON. Verified live today: 21 of
+23 branches sit at a 3.00% step, and `order_refusals` shows **zero net-edge
+refusals** — the only two entries are benign dust cooldowns on QNT and PEPE.
+BTC (1.57%) and ETH (1.96%) run below the old 2.16% figure legitimately:
+that number was NEAR's, the bar is per-product, and those two have the
+tightest books in the fleet.
+
+A separate 502 (UnboundLocalError in `lifespan`) also happened on 09-25, but
+it was caught within minutes and is not the 16 days.
+
+### Alpaca: it has gated itself off, and it is probably right to
+
+| | |
+|---|---|
+| equity | **$980.32 — 100% cash, 0 positions open** |
+| round trips | **259** |
+| win rate | **33.6%** (87 winners, 172 losers) |
+| net realised | **−$1.90** (−$0.0073 per trade) |
+| not blocked | `trading_blocked` false, equity > $800 floor, buying power > $150 floor |
+
+259 trades produced no edge — a third of them win and the dollars cancel to
+roughly zero. The account is not broken, blocked or out of money. It is
+sitting in cash because **0 of its 16 tickers are eligible**:
+
+- **10 are permanently excluded by its own backtest** — SPY, DIA, IWM, GLD,
+  USO, SLV, AAPL, AMZN for "last 3 real backtest runs were all negative
+  ROI"; MSFT and GOOGL for being outside the top 5 by backtested ROI.
+- **6 are blocked by the RSI gate** (variant C needs RSI > 55 *and* rising):
+  QQQ 30.2, RWM 43.1, SH 52.5, NVDA 52.1, META 54.3, and DOG at 62.5 but
+  falling.
+
+So the filters did their job: a strategy with no demonstrated edge has been
+shut off by the evidence it generated. The open question is not "why is it
+not trading" — it is that **$980.32 is earning exactly zero**, indefinitely,
+while the crypto side's working coins return $1.90–$7.99 per $100 per month.
+Whether that money stays in a strategy its own backtests have disqualified
+is the owner's call.
+
 ### What would make it better, in order of measured size
 
 1. **Get capital out of ZEC and XRP.** This is the lever and it is the
