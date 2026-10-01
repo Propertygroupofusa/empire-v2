@@ -141,17 +141,75 @@ async def run_producer_periodically(get_watch, session_factory):
         await asyncio.sleep(PRODUCE_INTERVAL)
 
 
+async def drain_as_digest(session_factory) -> dict:
+    """Send every pending alert as ONE email, then mark them all sent.
+
+    The webhook path above sends one row per request because an HTTP
+    receiver wants discrete events. Email is the opposite: 76 messages
+    about one branch retrying one order gets the sender muted, and a
+    muted sender swallows the next real alert too. So the queue drains
+    into a single digest.
+
+    Rows are only marked sent when the send actually succeeded. A queue
+    that reports success with nothing delivered looks like coverage and
+    is worse than an empty one.
+    """
+    from models import NewsroomAlert
+    now = datetime.utcnow()
+    async with session_factory()() as db:
+        rows = (await db.execute(
+            select(NewsroomAlert)
+            .where(NewsroomAlert.status == "pending")
+            .where((NewsroomAlert.next_attempt_at == None) |     # noqa: E711
+                   (NewsroomAlert.next_attempt_at <= now))
+            .order_by(NewsroomAlert.id))).scalars().all()
+        if not rows:
+            return {"sent": 0, "failed": 0}
+
+        alerts = [{"kind": r.kind, "asset": r.asset, "severity": r.severity,
+                   "message": r.message, "detail": r.detail} for r in rows]
+        ok, err = await asyncio.to_thread(alert_sender.send_digest, alerts)
+
+        stamp = datetime.utcnow()
+        for r in rows:
+            if ok:
+                r.status = "sent"
+                r.sent_at = stamp
+                r.last_error = None
+            else:
+                r.attempts = (r.attempts or 0) + 1
+                r.last_error = err
+                if r.attempts >= alert_queue.MAX_ATTEMPTS:
+                    r.status = "failed"
+                else:
+                    r.next_attempt_at = stamp + timedelta(
+                        seconds=alert_queue.backoff_seconds(r.attempts))
+        await db.commit()
+        n = len(rows)
+        if ok:
+            log.info(f"[alerts] digest delivered - {n} row(s) marked sent")
+        return {"sent": n if ok else 0, "failed": 0 if ok else n, "error": err}
+
+
 async def run_sender_periodically(session_factory):
     while True:
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as http:
-                # Drain in a burst, then idle - a backlog should not take
-                # one row per DRAIN_INTERVAL to clear.
-                for _ in range(25):
-                    r = await drain_once(session_factory, http)
-                    if not r.get("sent") and not r.get("failed"):
-                        break
+            # A webhook takes discrete events; email takes a digest. The
+            # webhook wins when both are set, because a receiver that was
+            # deliberately pointed at this queue should get every row.
+            if alert_sender.channel_configured():
+                import aiohttp
+                async with aiohttp.ClientSession() as http:
+                    # Drain in a burst, then idle - a backlog should not take
+                    # one row per DRAIN_INTERVAL to clear.
+                    for _ in range(25):
+                        r = await drain_once(session_factory, http)
+                        if not r.get("sent") and not r.get("failed"):
+                            break
+            elif alert_sender.email_armed() and alert_sender.email_configured():
+                await drain_as_digest(session_factory)
+            # else: no route. drain_once already refuses to mark rows sent
+            # with no channel, and saying so every interval is noise.
         except Exception as e:
             log.warning(f"[alerts] sender error: {type(e).__name__}: {e}")
         await asyncio.sleep(DRAIN_INTERVAL)

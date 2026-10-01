@@ -1145,6 +1145,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"alert queue not started: {type(e).__name__}: {e}")
 
+        # TELL THE OWNER WHEN A TRADE CLOSES. crypto_grid_bot.py has no
+        # email code at all, so all 162 round trips closed in silence.
+        # Off unless TRADE_EMAIL_MODE=send; the loop itself is harmless
+        # either way, since check_once refuses before it reads anything.
+        try:
+            import trade_notify_worker
+            from database import get_session_factory as _trade_sf
+            asyncio.create_task(trade_notify_worker.run_periodically(_trade_sf))
+            log.info("📧 Trade notifier running (sends only when "
+                     "TRADE_EMAIL_MODE=send)")
+        except Exception as e:
+            log.warning(f"trade notifier not started: {type(e).__name__}: {e}")
+
         # THE EXPERIMENT GUARD. A budget nobody enforces is a wish.
         #
         # It can only ever move the profile in the SAFE direction - this
