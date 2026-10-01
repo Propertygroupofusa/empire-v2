@@ -6618,6 +6618,64 @@ async function loadTape() {
     }
 }
 
+// Money gets money colours; nothing else does.
+function _money(n) {
+    if (n === null || n === undefined || !isFinite(n)) return 'unreadable';
+    const sign = n < 0 ? '\u2212' : '+';
+    return sign + '$' + Math.abs(n).toFixed(2);
+}
+function _moneyHTML(n) {
+    if (n === null || n === undefined || !isFinite(n))
+        return `<span style="color:var(--text-dim);">unreadable</span>`;
+    const col = n < 0 ? 'var(--red)' : n > 0 ? 'var(--green)' : 'var(--text-dim)';
+    return `<span style="color:${col}; font-weight:700;">${escText(_money(n))}</span>`;
+}
+
+// The closed window versus what has happened since.
+//
+// measured_basis describes 2026-08-26..09-24 and realized -$86.83. It
+// exists to justify turning maker-only ON, and it was the only dollar
+// figure on the panel - so the page looked like a running loss when that
+// window has been closed for a week and the fee tier that caused 91% of
+// it no longer applies. Showing the two side by side is the whole fix:
+// the old number keeps its meaning and stops impersonating the present.
+function thenVsNow(d) {
+    const st = d.since_then || {};
+    const cell = (label, sub, inner) => `
+        <div style="border:1px solid var(--border); border-radius:10px; padding:10px 12px;
+                    background:var(--panel-2, transparent); min-width:0;">
+          <div style="font-size:0.62em; letter-spacing:0.08em; font-weight:700;
+                      text-transform:uppercase; color:var(--text-dim);">${label}</div>
+          <div style="font-size:1.15em; margin-top:4px;">${inner}</div>
+          <div style="font-size:0.68em; color:var(--text-dim); margin-top:3px;
+                      line-height:1.45;">${sub}</div>
+        </div>`;
+
+    const now = st.readable
+        ? cell('Since then \u2014 today\u2019s fees',
+               escText(`${st.trades} closed trades at ${st.fee_basis}`
+                       + (st.first_day ? `, ${st.first_day} to ${st.last_day}` : '')),
+               _moneyHTML(st.net_usd))
+        : cell('Since then',
+               escText(st.note || 'trade history could not be read'),
+               `<span style="color:var(--text-dim);">unreadable</span>`);
+
+    return `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+                        gap:10px; margin:4px 0 12px;">
+        ${cell('Closed window \u2014 old fees',
+               '2026-08-26 to 09-24 at 1.50% taker. This window is OVER. '
+               + 'It is kept because it is why maker-only was switched on.',
+               _moneyHTML(-86.83))}
+        ${now}
+      </div>
+      <div style="font-size:0.72em; color:var(--text-dim); line-height:1.55;
+                  margin-bottom:12px;">
+        The loss on the left is history, not the current state. At today\u2019s 0.70%
+        maker rate those same 104 closes would have read ${_money(-7.61)} \u2014
+        91% of it was the fee tier, not the strategy.
+      </div>`;
+}
+
 async function loadTradingProfile() {
     const wrap = document.getElementById('trading-profile-wrap');
     if (!wrap) return;
@@ -6664,14 +6722,37 @@ async function loadTradingProfile() {
             </div>`).join('');
 
         wrap.innerHTML = cashBanner
-            + `<div style="display:flex; align-items:baseline; gap:10px; margin-bottom:8px;">
-                 <div style="font-size:1.05em; font-weight:700;
-                             color:${guarded ? 'var(--green)' : 'var(--amber, #f0b429)'};">
-                   ${escText(String(d.profile).toUpperCase())}</div>
+            // THE WORD IS A SAFETY STATE, NOT A MONEY VERDICT.
+            //
+            // This rendered the profile name alone, 1.05em bold in
+            // var(--green), directly above a block whose only dollar
+            // figures were -$86.83 and -$7.61. Read as a whole it says
+            // "green, therefore good" over a column of minus signs, and
+            // "GUARDED" is one letter-shape from "GUARANTEED" at a
+            // glance. It was read exactly that way: as a guarantee, in
+            // green, of a loss.
+            //
+            // So the name now sits INSIDE a labelled chip that says what
+            // kind of fact it is, in a neutral accent. Green and red are
+            // given back to money alone, where a colour means something.
+            + `<div style="display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+                        margin-bottom:9px;">
+                 <div style="display:inline-flex; align-items:center; gap:7px;
+                             border:1px solid var(--blue, #0052ff); border-radius:999px;
+                             padding:5px 12px; background:rgba(0,82,255,0.08);">
+                   <span style="font-size:0.62em; letter-spacing:0.09em; font-weight:700;
+                                text-transform:uppercase; color:var(--text-dim);">
+                     Safety mode</span>
+                   <span style="font-size:0.9em; font-weight:700; color:var(--blue, #0052ff);">
+                     ${escText(String(d.profile).toUpperCase())}</span>
+                 </div>
                  <div style="font-size:0.72em; color:var(--text-dim);">
-                   ${d.is_default ? 'the default' : 'not the default'}</div></div>`
+                   ${d.is_default ? 'the default' : 'not the default'} \u00b7
+                   protection is ${guarded ? 'ON' : 'RELAXED'}, which is not a claim about profit
+                 </div></div>`
             + `<div style="font-size:0.78em; line-height:1.55; margin-bottom:10px;">
                  ${escText(d.summary || '')}</div>`
+            + thenVsNow(d)
             + (d.experiment && d.experiment.running
                 ? `<div style="border:1px solid var(--amber, #f0b429);
                         background:rgba(240,180,41,0.07); border-radius:8px;

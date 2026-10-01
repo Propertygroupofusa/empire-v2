@@ -2299,6 +2299,55 @@ async def get_trading_profile_status():
     out["how_to_switch"] = ("POST /api/trading-dashboard/trading-profile "
                             "?profile=aug2026&confirm=yes with the "
                             "x-dashboard-token header.")
+
+    # WHAT IT HAS DONE SINCE, so the historical loss is not the only
+    # number on the panel.
+    #
+    # measured_basis describes 2026-08-26..09-24: -$86.83 realized, on a
+    # fee tier that no longer applies. It is there to justify the switch,
+    # but it was the ONLY dollar figure rendered, under a green heading,
+    # and it reads as the account's current state. It is not - it is a
+    # closed window at 1.50% taker fees, and maker-only has been on since.
+    #
+    # Reported as UNREADABLE rather than zero when the history cannot be
+    # read: a missing record must not display as break-even.
+    out["since_then"] = {"readable": False,
+                         "note": "trade history could not be read - making no claim"}
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as _db:
+            _rows = (await _db.execute(
+                select(CryptoGridTradeHistory.pnl, CryptoGridTradeHistory.closed_at)
+                .where(CryptoGridTradeHistory.closed_at != None)  # noqa: E711
+                .order_by(CryptoGridTradeHistory.closed_at.asc()))).all()
+        _pnl = [float(r.pnl or 0) for r in _rows]
+        if _pnl:
+            _days = sorted({str(r.closed_at)[:10] for r in _rows if r.closed_at})
+            out["since_then"] = {
+                "readable": True,
+                "trades": len(_pnl),
+                "net_usd": round(sum(_pnl), 2),
+                "wins": sum(1 for v in _pnl if v > 0),
+                "first_day": _days[0] if _days else None,
+                "last_day": _days[-1] if _days else None,
+                "fee_basis": "0.70% maker round trip",
+                "note": ("What the fleet has actually realized on today's fee "
+                         "tier. The window in measured_basis is a CLOSED "
+                         "period at the old 1.50% taker rate, kept only to "
+                         "show why maker-only was turned on."),
+            }
+    except Exception as exc:
+        log.warning(f"[profile] since_then unreadable: {type(exc).__name__}: {exc}")
+
+    # The label is a SAFETY STATE, not a money verdict. Said here so the
+    # page does not have to infer it from a profile name.
+    out["label_means"] = {
+        "GUARDED": "protection is ON - every buy is checked before it is placed",
+        "is_a_money_claim": False,
+        "warning": ("This word names the gate set in force. It is not a "
+                    "statement about profit and must never be coloured as one."),
+    }
     return out
 
 
