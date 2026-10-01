@@ -1720,9 +1720,12 @@
         <div class="panel-sub">Every holding as a competitor, ranked by how well it is actually holding up rather
             than by how much it is worth. The score is three measured things and nothing else: headroom above its
             own level, inverse daily volatility, and whether it respects your 20% concentration rule. Movement is
-            real - the standing seven days ago is recomputed from candles, not remembered - so promotions,
-            relegations and Most Improved are earned. A coin that cannot be measured appears as UNRATED with the
-            reason, never quietly dropped, and on a quiet week nobody wins the medal.</div>
+            real - the standing seven days ago is recomputed from candles, not remembered - so tier moves and
+            Most Improved are earned. A coin that cannot be measured appears as UNRATED with the reason, never
+            quietly dropped, and on a quiet week nobody wins the medal.
+            <strong>This table is a scoreboard, not an instruction.</strong> Dropping a tier does not sell
+            anything, stop anything, or change how that coin is traded - it only says the coin scored worse
+            than it did last week.</div>
         <div style="margin:10px 0;">
             <button id="league-btn" class="unlock-btn" style="margin-top:0;" onclick="runLeague()">🏆 Run the standings</button>
         </div>
@@ -6263,8 +6266,8 @@ function renderLeague(L) {
             <div style="text-align:right; font-size:0.74em;">${chg(r.score_change)}</div>
             <div style="font-size:0.72em; color:var(--text-dim);">
                 ${escText(r.unrated_reason || r.trend || '')}
-                ${r.promoted ? ' <span style="color:var(--green); font-weight:700;">PROMOTED</span>' : ''}
-                ${r.relegated ? ' <span style="color:var(--red); font-weight:700;">RELEGATED</span>' : ''}</div>
+                ${r.promoted ? ' <span style="color:var(--green); font-weight:700;" title="This coin moved up a tier in the ranking. Informational only - nothing was bought or sold.">MOVED UP A TIER</span>' : ''}
+                ${r.relegated ? ' <span style="color:var(--red); font-weight:700;" title="This coin dropped a tier in the ranking. Informational only - nothing was sold and nothing stopped.">DROPPED A TIER</span>' : ''}</div>
             <div style="text-align:right; font-size:0.78em; font-variant-numeric:tabular-nums;">${_wUSD(r.usd)}</div>
         </div>`;
 
