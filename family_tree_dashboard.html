@@ -2187,8 +2187,26 @@ function renderNarrative(data) {
     const top = branches.slice().sort((a, b) => b.allocated_usd - a.allocated_usd)[0];
     const openCount = branches.filter(b => b.position).length;
     const coin = p => p.replace('-USD', '');
-    let sentence = `${data.branch_count} branch${data.branch_count === 1 ? '' : 'es'} tracking $${data.total_allocated_usd.toFixed(2)} total, ${openCount} currently holding a position.`;
-    sentence += ` ${coin(top.product_id)} is the largest at ${fmtUsd(top.allocated_usd)}.`;
+    // THIS SENTENCE IS ABOUT THE FAMILY TREE, NOT THE GRID.
+    //
+    // `data` here is /family-tree-status. The tree is retired and holds
+    // nothing, so this read "2 branches tracking $0.00 total, 0 currently
+    // holding a position" as the HEADLINE of a page whose profit card below
+    // it showed $7,821.10 of real grid coin. Two different bots on one
+    // screen, and the one with no money in it got the top line - which reads
+    // as "the system is holding nothing" when the system holds $7,821.
+    const treeAlloc = Number(data.total_allocated_usd) || 0;
+    const treeDormant = treeAlloc <= 0.01 && openCount === 0;
+    let sentence;
+    if (treeDormant) {
+        sentence = `The family tree is dormant - ${data.branch_count} branch`
+            + `${data.branch_count === 1 ? '' : 'es'}, nothing allocated, nothing held. `
+            + `The figures below are the GRID's, which is the system actually trading.`;
+    } else {
+        sentence = `Family tree: ${data.branch_count} branch${data.branch_count === 1 ? '' : 'es'} `
+            + `tracking $${treeAlloc.toFixed(2)} total, ${openCount} currently holding a position.`;
+        sentence += ` ${coin(top.product_id)} is the largest at ${fmtUsd(top.allocated_usd)}.`;
+    }
     if (data.locked_usd > 0.01) sentence += ` $${data.locked_usd.toFixed(2)} has been permanently skimmed into the locked-profit ledger, out of the compounding loop.`;
     el.textContent = sentence;
 }
@@ -8325,14 +8343,40 @@ async function refresh() {
         // belongs to - two systems on one page is exactly how the zeros went
         // unnoticed.
         let gridData = null;
-        try { gridData = await apiGet('/grid-status'); } catch (e) { gridData = null; }
+        let gridErr = null;
+        // A BARE DASH IS NOT A DIAGNOSIS. This used to swallow the error
+        // entirely, so a reader saw "—" on two tiles with no way to tell a
+        // timeout from a 502 from a bad payload - and /grid-status is 116KB
+        // and takes 4.8-8.8s, so it fails more than anything else on the
+        // page. The dash stays (a gap is still not a zero) but it now says
+        // which gap it is.
+        try {
+            gridData = await apiGet('/grid-status');
+        } catch (e) {
+            gridData = null;
+            gridErr = (e && e.message) ? e.message : String(e);
+        }
         // A failed fetch must not print 0 - a gap is not a zero, and a zero
         // here is the bug being fixed.
-        document.getElementById('stat-count').textContent =
+        const _gridNote = gridErr
+            ? `could not read /grid-status - ${gridErr}`
+            : 'the grid reported no figure for this';
+        const _cEl = document.getElementById('stat-count');
+        const _tEl = document.getElementById('stat-total');
+        _cEl.textContent =
             (gridData && gridData.branch_count != null) ? gridData.branch_count : '—';
-        document.getElementById('stat-total').textContent =
+        _tEl.textContent =
             (gridData && gridData.total_allocated_usd != null)
                 ? fmtUsd(gridData.total_allocated_usd) : '—';
+        // Say it on the tile, not only in a tooltip nobody can hover on a phone.
+        for (const el of [_cEl, _tEl]) {
+            const dash = el.textContent === '—';
+            el.title = dash ? _gridNote : '';
+            el.style.fontSize = dash ? '0.62em' : '';
+            el.style.color = dash ? 'var(--text-dim)' : '';
+            if (dash) el.textContent = gridErr ? 'unreadable' : 'not reported';
+        }
+        if (gridErr) console.warn('[dashboard] /grid-status failed:', gridErr);
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         lastLockedProfit = data.locked_usd || 0;
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
