@@ -215,13 +215,36 @@ of finishing a parallel one.
 
 ## Next, in the order I would do it
 
-1. Read the denial log after a day of observing, before arming the gate.
-   Expect `INVENTORY_UNRECONCILED` to dominate; enforcing stops buys on 11
-   branches, which is correct and is also less capital deployed.
-   **Now possible.** `GET /api/trading-dashboard/gate-observations` reads it.
-   Until 2026-10-01 nothing could — the gate was wired, the rows were being
-   written, and there was no reader, so the evidence observe mode exists to
-   collect could not inform the decision it exists to inform.
+1. ~~Read the denial log after a day of observing.~~ **Done, and it
+   corrected the prediction.** `GET /api/trading-dashboard/gate-observations`
+   reads it; until 2026-10-01 nothing could.
+
+   I predicted `INVENTORY_UNRECONCILED` would dominate and that enforcing
+   would stop buys on 11 branches. The first half is right and the second is
+   wrong. Measured over 24h to 2026-10-01 15:25Z:
+
+   - **5 denials, all `INVENTORY_UNRECONCILED`** at the
+     `inventory_truth_gate`, every one with `reconciliation_status=UNKNOWN`.
+   - **Across 2 branches, not 11**: `crypto_grid_2` (4) and
+     `crypto_grid_5` (1).
+   - **`control_state` holds 2 rows, not 23.** The gate seeds a row the
+     first time it runs on a branch, so 2 rows means the gate has only ever
+     been *called* for 2 branches. It sits in `run_grid_branch_cycle` after
+     the concentration ceiling and before `_net_edge_gate_ok` — a branch
+     only reaches it when it is actually about to buy, and 21 branches did
+     not get that far in a day. Enforcing today would bind on 2 branches,
+     and would bind on the others only as each one tries to buy.
+   - UNKNOWN here means *never reconciled*, not *found to mismatch*. Every
+     branch is seeded UNKNOWN deliberately (`9b41dd1`'s reasoning), so the
+     denial says "this was never checked", which is true of all 23.
+
+   What this does NOT yet show: `exchange_truth_failures` reads **0, and
+   readable** — so nothing has recorded a single book-vs-venue disagreement
+   through the audit path, while `backing` simultaneously reports 8 unbacked
+   branches and $1,168.59 of claimed-but-absent coin. The table for exactly
+   this condition exists and the measurement that finds it does not route
+   there. That is a gap in the audit layer, not a quiet fleet, and it should
+   be closed before the denial log is trusted as the whole picture.
 2. Settle the denominator.
 3. Rebuild the rotation to hand slices to the grid's sell path.
 4. Only then wire `capital_velocity`, in shadow first.
