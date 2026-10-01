@@ -16,3 +16,4 @@ empire.db
 
 # Collected market data - regenerable, can grow large, not source
 kalshi_polymarket_data.jsonl
+.money_truth_snapshot.json
