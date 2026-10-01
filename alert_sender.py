@@ -321,18 +321,53 @@ def send_email(subject: str, body: str) -> tuple:
         return False, ("email not configured: "
                        + (", ".join(missing) or "no recipient resolved")
                        + " (names only - no value is ever read out here)")
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        sender = os.getenv(GMAIL_USER_ENV, "").strip()
-        to = recipient()
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = sender
-        msg["To"] = to
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
-            server.login(sender, os.getenv(GMAIL_PASS_ENV, ""))
-            server.sendmail(sender, to, msg.as_string())
-        return True, None
-    except Exception as e:
-        return False, f"{type(e).__name__} sending the message"
+    import smtplib
+    from email.mime.text import MIMEText
+    sender = os.getenv(GMAIL_USER_ENV, "").strip()
+    to = recipient()
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = sender
+    msg["To"] = to
+    raw = msg.as_string()
+    secret = os.getenv(GMAIL_PASS_ENV, "")
+
+    # TWO PORTS, BECAUSE ONE OF THEM IS OFTEN BLOCKED.
+    #
+    # Measured live 2026-10-01 00:42Z: the first real digest attempt came
+    # back SMTPServerDisconnected against smtp.gmail.com:465, twice. That
+    # is the classic shape of a host that drops outbound SMTPS - the
+    # connection opens and is closed before the banner. 587 with STARTTLS
+    # is the usual survivor, and costs nothing to try second.
+    #
+    # Every error is collected and reported together. Reporting only the
+    # last one would say "587 failed" while hiding that 465 was blocked,
+    # which is the fact that actually tells you what to change.
+    attempts = []
+    for port, use_ssl in ((465, True), (587, False)):
+        try:
+            if use_ssl:
+                server = smtplib.SMTP_SSL("smtp.gmail.com", port, timeout=30)
+            else:
+                server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
+            try:
+                if not use_ssl:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                server.login(sender, secret)
+                server.sendmail(sender, to, raw)
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    pass
+            if attempts:
+                log.info(f"[alerts] port {port} delivered after "
+                         f"{len(attempts)} earlier failure(s)")
+            return True, None
+        except Exception as e:
+            # Type only. SMTP error text can echo the conversation,
+            # login line included.
+            attempts.append(f"{port}: {type(e).__name__}")
+    return False, "SMTP failed on every port (" + ", ".join(attempts) + ")"

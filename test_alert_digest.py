@@ -122,6 +122,33 @@ def test_a_missing_credential_is_named_never_valued():
         _restore(old)
 
 
+def test_it_tries_both_ports_before_giving_up():
+    """465 came back SMTPServerDisconnected twice on the first real send.
+
+    That is the shape of a host dropping outbound SMTPS. 587 with
+    STARTTLS is the usual survivor and costs nothing to try second.
+    """
+    src = open("alert_sender.py").read()
+    i = src.index("def send_email")
+    body = src[i:]
+    assert "((465, True), (587, False))" in body, "only one port is attempted"
+    assert "starttls()" in body, "587 needs STARTTLS, not implicit SSL"
+    # a success on the first port must not then try the second
+    assert body.index("return True, None") < body.index("attempts.append"), \
+        "it would keep connecting after a successful send"
+
+
+def test_every_port_failure_is_reported_not_just_the_last():
+    # Reporting only the last would say "587 failed" while hiding that
+    # 465 was blocked - and which port was blocked is the fact that tells
+    # you what to change.
+    src = open("alert_sender.py").read()
+    i = src.index("def send_email")
+    body = src[i:]
+    assert 'SMTP failed on every port' in body
+    assert '", ".join(attempts)' in body
+
+
 def test_a_send_failure_reports_the_type_only():
     # SMTP exception text can echo the conversation, including the login
     # line. Only the exception type is ever returned.
@@ -130,13 +157,14 @@ def test_a_send_failure_reports_the_type_only():
     # whichever function holds the smtplib call must return the TYPE only.
     src = open("alert_sender.py").read()
     assert src.count("smtplib.SMTP_SSL") == 1, "more than one place sends mail"
-    i = src.index("smtplib.SMTP_SSL")
-    tail = src[i:]
-    j = tail.index("except Exception as e:")
-    handler = tail[j:j + 200]
-    assert "{type(e).__name__}" in handler, "the type is not reported"
-    assert "{e}" not in handler.replace("{type(e).__name__}", ""), \
-        "the exception text itself must never be returned - SMTP errors echo the login"
+    i = src.index("def send_email")
+    body = src[i:]
+    # Every handler inside the sender reports the TYPE and never the text.
+    for h in body.split("except Exception as e:")[1:]:
+        seg = h[:200]
+        assert "{type(e).__name__}" in seg, f"a handler omits the type: {seg[:80]}"
+        assert "{e}" not in seg.replace("{type(e).__name__}", ""), \
+            "the exception text itself must never be returned - SMTP errors echo the login"
 
 
 def test_the_recipient_reuses_the_existing_convention():
