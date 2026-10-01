@@ -80,7 +80,13 @@ async def check_once(session_factory):
     # so history survives a branch being deleted and recreated. bot_name is
     # the durable identity; inventing an id from nothing would be worse than
     # leaving the nullable column null.
-    async with session_factory() as db:
+    # session_factory()() - TWO calls, which is the convention every other
+    # worker in this repo uses and which main.py's wiring requires. main.py
+    # passes `get_session_factory` ITSELF, so the first call returns the
+    # sessionmaker and the second opens a session. Written with one call it
+    # raised inside the loop's own except, got logged as a warning, and the
+    # recorder wrote nothing for ten minutes while looking perfectly alive.
+    async with session_factory()() as db:
         summary = await recorder.record(db, measurement, product_to_bot=p2b,
                                         boot_id=BOOT_ID)
         await db.commit()
