@@ -414,6 +414,72 @@ while the crypto side's working coins return $1.90–$7.99 per $100 per month.
 Whether that money stays in a strategy its own backtests have disqualified
 is the owner's call.
 
+### THE MECHANISM: adopted coin is not grid inventory
+
+This is the finding that ties every other number together, and it is not a
+bug. `coin_adoption.slice_units()` says so in its own docstring:
+
+> Equal entry prices on purpose: every slice is adopted at the same moment
+> at the same price, and pretending otherwise would put cost bases in the
+> ledger that nobody paid.
+
+That is the right call for honesty. The consequence is what nobody priced in.
+
+A grid earns by holding rungs at DIFFERENT prices and selling one on a
+bounce while keeping the rest. Adopted coin has no rungs. It is one lump,
+split into N equal pieces at ONE price, so every piece needs the same move
+to sell and they all move together. It is a position, not a ladder.
+
+The split in the live data is total:
+
+| coin | adopted | bought | realised per $100, 32 days |
+|---|---|---|---|
+| LINK | 0 | 3 | **$7.99** |
+| PRIME | 0 | 3 | **$7.79** |
+| NEAR | 0 | 2 | **$6.40** |
+| TIA | 0 | 3 | $2.85 |
+| XLM | 0 | 2 | $1.90 |
+| HBAR | 3 | 2 | $4.63 |
+| ETH | 3 | 0 | $0.93 |
+| LTC | 6 | 1 | $0.84 |
+| QNT | 2 | 0 | $0.79 |
+| **ZEC** | **6** | 1 | **$0.00** |
+| **XRP** | **9** | 0 | **$0.01** |
+
+**Every top earner has zero adopted slices. Every dead position is adopted.**
+HBAR is the one mixed case and it sits in the middle, as it should.
+
+Timestamps confirm the shape rather than the label alone: XRP's three
+slices at $1.5383 were written 38 MICROSECONDS apart, which is one event,
+not three orders. LINK's three are 0.01 @ 14.343, 2.99 @ 15.212 and
+3.10 @ 14.651, opened hours apart on different days - a real ladder from
+real buys.
+
+**So the grid did not lose this money. It inherited a position it cannot
+work, and that position is 53% of the capital.**
+
+### What this does to the ZEC number
+
+ZEC reads −$399.39 against an entry of ~$1,650-1,659. **Nobody paid that.**
+It is the adoption-day mark from 2026-09-27, written because the alternative
+was inventing a basis. What the owner actually paid for that ZEC is not in
+this system and the grid has never known it.
+
+So "realise −$399" is the loss *against the adoption mark*, not necessarily
+against cost. Before treating that number as the price of acting, it is
+worth checking what the coin actually cost - Coinbase has it, this fleet
+does not.
+
+### Open question, not a claim
+
+`coin_adoption_worker` sets `buys_paused=True` for a holding over the 20%
+rule - "sell-only ... the position walks DOWN through strength instead of
+being repurchased on the next dip." ZEC (26.63%) and XRP (26.25%) are both
+over that rule and both read `buys_paused: False` live. Either they were
+under 20% when adopted on 09-27 and grew past it, or it was cleared later.
+Worth establishing before anything is changed, because sell-only is the one
+mechanism already built for exactly this situation.
+
 ### What would make it better, in order of measured size
 
 1. **Get capital out of ZEC and XRP.** This is the lever and it is the
