@@ -177,6 +177,107 @@ other half is down $55.
 
 ---
 
+## Why it is still losing money (measured 2026-10-01, 32 days of closed trades)
+
+**The trading engine is profitable. The portfolio is not.** Those are two
+different facts and only the second one shows up in the account.
+
+From `/grid-status/trade-history?limit=1000` — all 165 closed trades, not a
+sample:
+
+| | |
+|---|---|
+| closed trades | 165 over 31.8 days (5.2/day) |
+| realised | **+$94.91**, win rate 86.1% |
+| average win | **$0.79** (largest ever: $6.35) |
+| average loss | −$0.76 (23 losses, −$17.45 total) |
+| last 5 days | 82 trades, +$75.30 → $15.06/day |
+| open unrealised | **−$562.05** |
+
+So the machine wins 86% of the time and books 79 cents a go, while sitting
+on a $562 hole. That is not a broken strategy. It is a strategy whose
+capital is in the wrong place.
+
+### Where the money actually is
+
+| | ZEC + XRP | the 5 best earners held |
+|---|---|---|
+| capital | **$4,513.46 (52.9%)** | $1,386.27 (16.2%) |
+| closed trades in 32 days | **1** | 43 |
+| realised | **+$0.30** | **+$53.68** (57% of all profit) |
+| unrealised | **−$470.47** | −$67.30 |
+
+ZEC has **never closed a single trade** and carries −$399.39 — **71% of the
+fleet's entire unrealised loss, in one coin.** XRP has closed one trade ever,
+for 30 cents.
+
+Neither even appears in the coin league, because ranking needs closed trades
+and they have almost none. The capital is not working. It is parked.
+
+**Why it cannot trade.** Grid spacing is 2.5% and a branch only sells a slice
+at a profit. ZEC is 17.49% down, so every slice is underwater, so nothing
+ever sells. The never-sell-at-a-loss rule and a position this far down
+combine into a position that is frozen by design. It is also how it got to
+26.63% in the first place: the 20% ceiling failed OPEN during the 429 storm
+(fixed in `9bd3acb`), and the fixed ceiling only stops NEW buys — it does not
+unwind what is already there.
+
+### Return per dollar, which is the number that matters
+
+Realised, over the same 32 days, as a percentage of what each branch holds:
+
+| coin | held | realised | per $100 |
+|---|---|---|---|
+| LINK | $137.87 | $11.01 | **$7.99** |
+| PRIME | $28.88 | $2.25 | $7.79 |
+| NEAR | $181.94 | $11.64 | $6.40 |
+| HBAR | $332.71 | $15.42 | $4.63 |
+| XLM | $704.87 | $13.36 | $1.90 |
+| **ZEC** | **$2,272.62** | **$0.00** | **$0.00** |
+| **XRP** | **$2,240.84** | **$0.30** | **$0.01** |
+
+The best earners are the smallest positions. The biggest positions earn
+nothing. That is the whole problem on one page.
+
+### Capital was moved off things that were working
+
+`/coin-league` says this itself, unprompted:
+
+> 4 coin(s) earned a positive edge and no branch holds any of them now:
+> DOGE, STX, ETC, WIF, worth $16.64 of realised profit between them.
+> Capital was moved off things that were working.
+
+**DOGE ranks #4 of 13 by edge per trade (2.28%), with 15 round trips and a
+73.3% win rate — the most-traded coin in the whole book — and the fleet
+holds none of it.** `retired_share` is **0.497**: half of all trading
+history is on coins no longer held.
+
+### The 16 dead days
+
+No trade closed between **2026-09-09 and 2026-09-26**. 16 days, zero round
+trips, on a fleet that averages 5.2/day. Not yet explained; it is not a
+reporting gap, because trades resume on the 27th in the same table.
+
+### What would make it better, in order of measured size
+
+1. **Get capital out of ZEC and XRP.** This is the lever and it is the
+   owner's call, because it means realising the loss that is already there —
+   about −$399 on ZEC. No projection is offered here on purpose: the honest
+   statement is the measured one, that 52.9% of the money produced 0.3% of
+   the profit over 32 days, and that every day it stays parked is a day it
+   earns nothing while the coins beside it earn.
+2. **Put DOGE back.** #4 by edge, the most-traded coin in the book, +$12.80
+   realised, currently zero allocation.
+3. **Stop retiring coins that are earning.** Half the trade history is on
+   coins the fleet no longer holds. Whatever moved capital off DOGE, STX,
+   ETC and WIF is the mechanism to look at.
+
+What is NOT the problem, each checked: fees (the 0.9% floor is correct under
+maker-only and the live spacing is 2.5%), the win rate (86.1%), the stop
+policy (2 stop-outs in 165 trades, −$10.18), or the engine itself.
+
+---
+
 ## Not shipped on purpose: `concentration_rotation_worker.py`
 
 A second attempt at the rotation worker was written, wired into
