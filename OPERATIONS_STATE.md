@@ -258,7 +258,56 @@ No trade closed between **2026-09-09 and 2026-09-26**. 16 days, zero round
 trips, on a fleet that averages 5.2/day. Not yet explained; it is not a
 reporting gap, because trades resume on the 27th in the same table.
 
-### The 16 dead days, explained
+### The 16 dead days, explained — CORRECTED
+
+**I reported the spacing deadlock as the cause. It was the last link in the
+chain, not the first.** Correcting it here because the root cause is a
+different kind of problem and a much more important one.
+
+The root was **one line**, fixed on 2026-09-25 in `3b11a36`: the Coinbase
+CDP JWT signed the URI claim as `"METHOD host/path"` **including the query
+string**, which Coinbase does not. So every parameterised request failed its
+own signature check and returned 401. The chain from there:
+
+    get_best_bid_ask()   "...product_book?product_id=X" -> 401
+                         -> returns (None, None), nothing logged
+    place_maker_buy()    "if bid is None: return None"
+    grid_buy()           falls through to place_market_buy()
+    every fill           TAKER at 1.50% round trip, never 0.70% maker
+    fee_safe_floor_pct() prices taker, so the floor sits at 1.70%
+    every branch         cannot go below 1.70%, so the step sits at 2.00%
+    _net_edge_gate_ok()  wants 2.16% -> refuses every buy
+    the fleet            16 days of a counter going up
+
+**Not one maker order had ever been placed.** The maker-first path was
+written, switched on, and dead on its first line. Three other readers failed
+the same way and just as quietly, including the fills lookup that decides
+whether an accepted order really filled.
+
+So the 2.00%-between-1.70%-and-2.16% deadlock I described is accurate, but
+every number in it was downstream of the 401. The deadlock was fixed three
+hours after the JWT the same day.
+
+**Both fixes are confirmed working on the live account today:**
+
+| | before | now |
+|---|---|---|
+| maker fill rate | 0% (never placed one) | **98.85%** (172 maker legs, 2 taker) |
+| round-trip fee | 1.50% taker | **0.709% blended** |
+| fee floor | 1.70% | 0.90% |
+| live step | 2.00% (deadlocked) | 3.00% on 21 of 23 branches |
+| net-edge refusals | 171 on NEAR alone | **zero** |
+
+The lesson worth keeping: a 401 that returns `(None, None)` instead of
+raising cost sixteen days of trading and months of taker fees, and the test
+that was supposed to catch it checked the SOURCE text for a literal `?`
+while the query string arrived at runtime in a variable.
+
+---
+
+### What follows is the earlier, incomplete account, kept because the
+### deadlock itself is real and the mechanism still matters
+### The spacing deadlock (the downstream half)
 
 Not an outage, and not a reporting gap — the repo already diagnosed it on
 2026-09-25, in a commit whose first line is *"This is why it is not
