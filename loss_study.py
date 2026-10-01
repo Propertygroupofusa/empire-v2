@@ -238,7 +238,17 @@ def stop_sweep(trades, *, candidates=CANDIDATE_STOPS, fee_rate_pct=0.70,
         for r in usable:
             # A slice whose worst excursion reached the stop would have
             # been sold there, at roughly -stop minus the round trip.
-            if r["mae_pct"] is not None and r["mae_pct"] <= -abs(stop) * 100:
+            # UNITS. mae_pct is stored as a FRACTION (-0.1269 is -12.69%),
+            # CANDIDATE_STOPS are fractions (0.03 is 3%), and r["pct"] is a
+            # PERCENT (pnl / risked * 100). This line compared the fraction
+            # against `-abs(stop) * 100` - that is -3.0 for a 3% stop - so
+            # it asked whether -0.1269 <= -3.0. It never can be.
+            #
+            # The result: EVERY candidate from 3% to 12% reported 0 stopped
+            # out and an identical net, and the panel published "3.0% is
+            # best" off a comparison that could not fire. A real -12.69%
+            # excursion sat in the data and no stop level saw it.
+            if r["mae_pct"] is not None and r["mae_pct"] <= -abs(stop):
                 cut += 1
                 pnl += -(abs(stop) * 100 + fee_rate_pct) / 100 * (r["risked"] or 0)
             else:
