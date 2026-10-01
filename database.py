@@ -80,6 +80,11 @@ async def init_db():
     """Initialize database - create tables if needed"""
     try:
         import models  # noqa: F401  (registers model classes on Base.metadata)
+        # The audit and control-state tables. Declared in their own module so
+        # models.py is untouched, but they must be IMPORTED here or they never
+        # register on Base.metadata and create_all silently makes nothing.
+        # Additive only: five new tables, no change to any existing one.
+        import audit_models  # noqa: F401
 
         print("[DB] Starting database initialization...")
         print("[DB] Calling Base.metadata.create_all()...")
