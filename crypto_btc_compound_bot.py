@@ -56,6 +56,7 @@ from models import BotPosition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 import execution_quantity as _eq
+import dust_cooldown as _dust
 log = logging.getLogger("crypto_btc_compound_bot")
 
 
@@ -1527,7 +1528,13 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
             "post_only": True,
         }},
     }
-    return await _place_maker_order(session, order, wait_seconds)
+    _buy_result = await _place_maker_order(session, order, wait_seconds)
+    if _buy_result:
+        # Inventory on this product just grew, so a dust verdict recorded
+        # against the old balance is stale. Drop it and let the next cycle
+        # ask the venue properly instead of serving the stale answer.
+        _dust.clear(product_id)
+    return _buy_result
 
 
 async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wait_seconds: int = 45):
@@ -1547,6 +1554,23 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     # reached it is 0.0, and recording that as the requested size would say
     # nothing at all.
     _asked_qty = qty
+    # DO NOT RE-ASK A QUESTION WHOSE ANSWER CANNOT HAVE CHANGED. The three
+    # calls below - balance, product rules, order book - are all spent
+    # BEFORE the dust verdict is even computed, and on a branch holding less
+    # than one tradeable unit that verdict is already known. The cooldown is
+    # armed only by a computed DUST decision, never by an unreadable read,
+    # and a buy on this product clears it the moment inventory could grow.
+    _dust_skip = _dust.skip_reason(product_id)
+    if _dust_skip:
+        log.debug(f"[GRID] {product_id}: no maker sell attempted - {_dust_skip}")
+        _last_order_error[product_id] = f"dust cooldown: {_dust_skip}"
+        _last_order_rested[product_id] = False
+        # available_units deliberately absent: nothing was read this pass, so
+        # there is no current figure. The last known one lives in the cooldown.
+        _last_order_block[product_id] = {"requested_qty": _asked_qty,
+                                         "decision": _dust.DUST,
+                                         "reason": "DUST_COOLDOWN"}
+        return None
     real_balance, _bal_err = await get_asset_balance(session, base_currency)
     if real_balance is None:
         # Same rule, no exception. This is the opportunistic maker path and
@@ -1605,6 +1629,11 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         price=ask, base_increment=rules["base_increment"],
         base_min_size=rules["base_min_size"],
         quote_min_size=rules["quote_min_size"])
+
+    # One call covers both directions: a DUST decision arms the cooldown,
+    # and anything else (EXECUTE included) clears it.
+    _dust.note_dust(product_id, plan.decision, available_units=real_balance,
+                    reason=plan.reason)
 
     if not plan.should_execute:
         # DUST IS NOT A FAILED SALE. The old message here was "nothing
