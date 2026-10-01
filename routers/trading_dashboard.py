@@ -8385,10 +8385,59 @@ async def capital_mobility():
     return out
 
 
+# THE HEAVIEST ENDPOINT ON THE PAGE, POLLED EVERY 15 SECONDS.
+#
+# Measured 2026-10-01 against production:
+#
+#     one request alone        4.98s   116,472 bytes
+#     four at once             9.6-9.7s each
+#
+# family_tree_dashboard.html runs setInterval(refresh, 15000) and
+# setInterval(loadActivityFeed, 5000) across 25 apiGet call sites, so this
+# 116KB response is asked for every 15s while it takes up to 9.7s to build.
+# On a phone the download pushes that past the point where the next poll has
+# already begun, requests stack, and the two GRID tiles fall back to a bare
+# dash with no reason attached.
+#
+# This is the failure /auto-trim already hit and already solved: "a poll every
+# 55s drove /auto-trim to accounts HTTP 429 AND starved the worker". Same
+# cure, same shape - a short read cache with ?fresh=1 to bypass.
+#
+# 25 SECONDS IS NOT ARBITRARY. crypto_grid_bot.CYCLE_SECONDS is 30, so the
+# fleet only changes once a cycle; serving a read fresher than the bot can
+# produce buys nothing and costs a full rebuild. Nothing that TRADES reads
+# this endpoint - every worker calls get_grid_status() in-process - so this
+# can only ever make a DASHBOARD number up to 25s old, never an order.
+_GRID_STATUS_CACHE = {"at": 0.0, "payload": None}
+_GRID_STATUS_TTL_SECONDS = float(os.getenv("GRID_STATUS_TTL_SECONDS", "25"))
+
+
 @router.get("/grid-status")
-async def get_grid_status_endpoint():
+async def get_grid_status_endpoint(fresh: int = 0):
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    _now = time.time()
+    if (not fresh and _GRID_STATUS_CACHE["payload"] is not None
+            and (_now - _GRID_STATUS_CACHE["at"]) < _GRID_STATUS_TTL_SECONDS):
+        _cached = dict(_GRID_STATUS_CACHE["payload"])
+        # Say it is cached and how old. A number with no age on it is how a
+        # stale reading gets argued about as though it were current.
+        _cached["served_from_cache"] = True
+        _cached["cache_age_seconds"] = round(_now - _GRID_STATUS_CACHE["at"], 1)
+        # Same no-store headers as the live path below. The BROWSER must still
+        # never cache this - that was a deliberate decision and it is untouched.
+        # What is new is a 25s cache on the SERVER, which is a different thing:
+        # the browser always asks, and sometimes the answer was built a few
+        # seconds ago. The two fields above make that visible rather than
+        # silent.
+        return JSONResponse(
+            content=_cached,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+        )
     data = await crypto_grid_bot_module.get_grid_status()
 
     # DOES THE COIN BEHIND THESE NUMBERS EXIST? Measured 2026-09-30
@@ -8463,6 +8512,14 @@ async def get_grid_status_endpoint():
         data["silence"] = {"verdict": "UNKNOWN", "alarm": False,
                            "reason": f"{type(_exc).__name__}: {_exc}",
                            "this_is_unknown_not_healthy": True}
+    # Cache the fully-built payload, including every check appended above, so
+    # a cached read is identical to a live one rather than a thinner version
+    # of it. Stored on the way OUT: a request that raised never populates it,
+    # so an error can never be served to the next caller as a status.
+    data["served_from_cache"] = False
+    data["cache_age_seconds"] = 0.0
+    _GRID_STATUS_CACHE["payload"] = data
+    _GRID_STATUS_CACHE["at"] = time.time()
     # Force fresh data on every request - prevent browser caching stale grid status
     return JSONResponse(
         content=data,
