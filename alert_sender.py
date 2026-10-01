@@ -107,12 +107,34 @@ def diagnose() -> dict:
         "a_delivery_path_already_exists": bool(_usable),
         "usable_without_a_new_secret": _usable,
         "what_that_means": (
-            f"credentials for {', '.join(_usable)} are already present in this "
-            f"process, so alerts could be delivered by email without anyone "
-            f"setting a new secret. Nothing is wired to them yet."
+            f"credentials for {', '.join(_usable)} are present in this "
+            f"process AND the email senders are wired to them (alert_worker "
+            f"and trade_notify_worker both call send_email). So a webhook is "
+            f"NOT required: if nothing is arriving, the blocker is the "
+            f"credential or the transport, not a missing webhook - read "
+            f"email_route below."
             if _usable else
             "no email credentials are present either, so a webhook really is "
             "the only route and ALERT_WEBHOOK_URL has to be set."),
+        # An earlier version of this block ended "Nothing is wired to them
+        # yet", which stopped being true the moment both workers were
+        # wired. A diagnosis that is stale is worse than no diagnosis: it
+        # sent the owner to set a variable that would not have helped.
+        "email_route": {
+            "senders_are_wired": True,
+            "armed": email_armed(),
+            "mode_variable": EMAIL_MODE_ENV,
+            "mode_value": email_mode(),
+            "recipient_resolves": bool(recipient()),
+            "a_webhook_is_required": not bool(_usable),
+            "note": ("When this is armed and a credential is present, the "
+                     "per-alert last_error carries the real transport "
+                     "diagnosis - including whether SMTP connected and was "
+                     "refused (a credential problem, fixed by a Gmail App "
+                     "Password) or never answered (a blocked port, fixed by "
+                     "SENDGRID_API_KEY). Those two look identical in a "
+                     "counts row and need opposite actions."),
+        },
         "why_not": why,
         "format_variable": FORMAT_ENV,
         "format_value": (os.getenv(FORMAT_ENV) or "generic (default)"),
@@ -332,28 +354,212 @@ def is_infrastructure_failure(err) -> bool:
     return bool(err) and NO_ROUTE_MARKER in str(err)
 
 
+# Failures that prove the port was OPEN. Each of these can only be raised
+# after the socket connected and the server answered, so seeing one of them
+# is positive evidence AGAINST "the host blocks SMTP".
+_REACHED_THE_SERVER = (
+    "SMTPAuthenticationError",   # login() was sent and refused
+    "SMTPSenderRefused",
+    "SMTPRecipientsRefused",
+    "SMTPDataError",
+    "SMTPNotSupportedError",
+)
+
+# Failures consistent with the port being closed or filtered.
+_NEVER_GOT_THROUGH = (
+    "SMTPServerDisconnected",
+    "SMTPConnectError",
+    "ConnectionRefusedError",
+    "TimeoutError",
+    "socket.timeout",
+    "OSError",
+    "gaierror",
+)
+
+
+def _smtp_outcomes(tried) -> dict:
+    """{port: ExceptionName} for the smtp legs recorded in `tried`.
+
+    `tried` entries look like "smtp:465: SMTPAuthenticationError" or
+    "smtp: no GMAIL_EMAIL/GMAIL_PASSWORD". Only the first shape carries a
+    port and an exception name; the credential-missing line is not an
+    outcome and is deliberately excluded.
+    """
+    out = {}
+    for entry in tried or ():
+        text = str(entry)
+        if not text.startswith("smtp:"):
+            continue
+        parts = text.split(":")
+        if len(parts) < 3:
+            continue              # "smtp: no GMAIL_EMAIL/..." - no port
+        port = parts[1].strip()
+        if not port.isdigit():
+            continue
+        out[port] = parts[2].strip()
+    return out
+
+
+def is_auth_refusal(exc) -> bool:
+    """True when the server answered and REFUSED THE CREDENTIAL.
+
+    isinstance, not a name match, for the same reason as
+    reached_the_server: every real Gmail refusal arrives as some subclass,
+    and this one verdict is the difference between "change GMAIL_PASSWORD
+    to an App Password" and "buy a different mail service".
+    """
+    import smtplib
+    return isinstance(exc, smtplib.SMTPAuthenticationError)
+
+
+def reached_the_server(exc) -> bool:
+    """True when this exception proves the socket connected and the server
+    answered.
+
+    Classified by isinstance on the live exception object, because the
+    alternative - matching type(e).__name__ against a list - silently
+    misreads any SUBCLASS of these, and smtplib, Gmail wrappers and test
+    doubles all produce subclasses. A name-match that misses means the leg
+    gets filed as "never connected", which is the wrong verdict with the
+    wrong remedy attached.
+    """
+    import smtplib
+    return isinstance(exc, (
+        smtplib.SMTPAuthenticationError,   # login() was sent and refused
+        smtplib.SMTPSenderRefused,
+        smtplib.SMTPRecipientsRefused,
+        smtplib.SMTPDataError,
+        smtplib.SMTPNotSupportedError,
+    ))
+
+
+def remedy_for(tried, legs=None) -> str:
+    """The one sentence that tells the owner what to actually change.
+
+    Derived from what the transports DID, never asserted. The three cases
+    lead to three different actions, and naming the wrong one costs the
+    owner a wasted afternoon:
+
+      authenticated-and-refused -> the credential is wrong. For Gmail with
+          2FA on, a normal account password is ALWAYS refused here; SMTP
+          needs a 16-character App Password. No new service required.
+      never-connected           -> the port really is filtered. An HTTPS
+          transport is the fix.
+      no credential at all      -> name the missing variable.
+
+    Mixed results are reported as mixed rather than collapsed, because a
+    port that authenticates and a port that never answers are different
+    facts and the owner may need both.
+    """
+    outcomes = _smtp_outcomes(tried)
+    if legs:
+        # Authoritative: the caller watched the exceptions happen.
+        reached = {str(p): n for p, n, got, _a in legs if got}
+        refused = {str(p): n for p, n, got, _a in legs if not got
+                   and n in _NEVER_GOT_THROUGH}
+        unknown = {str(p): n for p, n, got, _a in legs if not got
+                   and n not in _NEVER_GOT_THROUGH}
+        # Authoritative auth verdict, by isinstance, taken at the raise site.
+        auth = [str(p) for p, _n, _g, a in legs if a]
+        if not outcomes:
+            outcomes = {str(p): n for p, n, _g, _a in legs}
+    else:
+        # Re-diagnosing a STORED row: only the type names survived, so fall
+        # back to matching them - and anything unrecognised stays UNKNOWN.
+        reached = {p: e for p, e in outcomes.items()
+                   if e in _REACHED_THE_SERVER}
+        refused = {p: e for p, e in outcomes.items()
+                   if e in _NEVER_GOT_THROUGH}
+        unknown = {p: e for p, e in outcomes.items()
+                   if p not in reached and p not in refused}
+        # Stored row: the type NAME is all that survived the trip to the
+        # database, so this leg can only match on it.
+        auth = [p for p, e in reached.items()
+                if e == "SMTPAuthenticationError"]
+
+    if not outcomes:
+        if any("no GMAIL_EMAIL" in str(t) for t in (tried or ())):
+            return ("No mail credential is present: set GMAIL_EMAIL and "
+                    "GMAIL_PASSWORD, or SENDGRID_API_KEY for the HTTPS "
+                    "route.")
+        return ("No transport was attempted. Check which delivery "
+                "variables this process actually has.")
+
+    if reached:
+        ports = ", ".join(sorted(reached))
+        if auth:
+            return (f"SMTP is NOT blocked here - port(s) {ports} connected "
+                    f"and Gmail REFUSED the login, which can only happen "
+                    f"after the connection succeeded. The fix is the value "
+                    f"of GMAIL_PASSWORD: with 2-step verification on, Gmail "
+                    f"rejects a normal account password over SMTP and "
+                    f"requires a 16-character App Password "
+                    f"(myaccount.google.com -> Security -> App passwords). "
+                    f"Paste it with no spaces. No new service is needed."
+                    + (f" Port(s) {', '.join(sorted(refused))} separately "
+                       f"never answered." if refused else ""))
+        return (f"Port(s) {ports} reached the mail server and it rejected "
+                f"the message ({', '.join(sorted(set(reached.values())))}). "
+                f"This is a mail-account problem, not a network one.")
+
+    if refused:
+        ports = ", ".join(sorted(refused))
+        return (f"SMTP port(s) {ports} never answered "
+                f"({', '.join(sorted(set(refused.values())))}), so outbound "
+                f"SMTP looks filtered on this host. Set SENDGRID_API_KEY to "
+                f"deliver over HTTPS instead."
+                + (f" Port(s) {', '.join(sorted(unknown))} failed in a way "
+                   f"this cannot classify "
+                   f"({', '.join(sorted(set(unknown.values())))})."
+                   if unknown else ""))
+
+    # UNKNOWN IS A THIRD VERDICT. An earlier draft of this function fell
+    # through to "every port never answered ()" for any exception it did not
+    # recognise - asserting a blocked host, with an empty parenthesis where
+    # the evidence should have been, which is precisely the failure this
+    # whole function exists to stop. A gap is not a zero.
+    ports = ", ".join(sorted(unknown)) or "the SMTP leg"
+    kinds = ", ".join(sorted(set(unknown.values()))) or "no type recorded"
+    return (f"SMTP port(s) {ports} failed with {kinds}, which this cannot "
+            f"classify as either a refused login or a closed port - so "
+            f"whether SMTP is usable here is UNKNOWN, not blocked. Check "
+            f"the app log for that exception before changing any variable.")
+
+
 def send_email(subject: str, body: str) -> tuple:
     """(ok, error). Delivers by whatever route this host actually permits.
 
-    MEASURED ON THIS HOST 2026-10-01 00:5xZ, from the queue's own rows:
+    CORRECTION, MEASURED 2026-10-01 from the queue's own rows. An earlier
+    version of this docstring concluded "Railway blocks outbound SMTP",
+    on the evidence that both ports returned SMTPServerDisconnected.
+    That conclusion was WRONG, and the queue itself disproved it:
 
-        SMTP failed on every port
-        (465: SMTPServerDisconnected, 587: SMTPServerDisconnected)
+        smtp:465: SMTPAuthenticationError
+        smtp:587: SMTPAuthenticationError
 
-    Railway blocks outbound SMTP. Both the implicit-SSL port and the
-    STARTTLS port are dropped before the banner, so NO amount of port
-    juggling fixes it and adding a third port would be wasted work. The
-    same bare-465 pattern is used by daily_brief.py, prop_bot.py and
-    notary_bot.py, which means every one of those has been failing on
-    this host too - quietly, because each one logs a warning and returns.
+    SMTPAuthenticationError can only be raised AFTER the TCP connection
+    opened, TLS negotiated, the banner arrived, EHLO succeeded and
+    server.login() was actually sent. Reaching login proves the port is
+    open. So outbound SMTP is NOT blocked on this host - Gmail is
+    refusing the credential.
 
-    HTTPS works here; the app talks to Coinbase continuously. So HTTPS
-    transports are tried FIRST and SMTP is kept only as a last resort, so
-    this code still works unchanged on a host that permits it.
+    That distinction decides the remedy, which is why the message this
+    function returns is now DERIVED from the failures recorded in
+    `tried` instead of asserting one cause. A hardcoded "the host blocks
+    SMTP" sent the owner looking for a new mail provider when the actual
+    fix was one 16-character value.
 
-    Every transport's failure is reported together. "sendgrid: no key,
-    smtp: blocked" tells the owner which ONE variable would fix it;
-    reporting only the last failure hides that.
+    The earlier Disconnected readings were real but were a SYMPTOM:
+    Gmail drops connections from an IP that keeps failing to log in.
+    Repeated failed logins across a 79-row backlog produced them.
+
+    HTTPS is still tried FIRST: it is the route that needs no secret
+    stored as a password, and it is known to work here (the app talks to
+    Coinbase continuously). SMTP stays as fallback.
+
+    Every transport's failure is reported together, so the message names
+    which ONE variable would fix it; reporting only the last failure
+    hides that.
 
     Never raises, and never returns an exception's TEXT - an SMTP error
     can echo the conversation, login line included.
@@ -363,6 +569,7 @@ def send_email(subject: str, body: str) -> tuple:
         return False, "no recipient resolved (TRADE_ALERT_EMAIL / DAILY_BRIEF_EMAIL / GMAIL_EMAIL)"
 
     tried = []
+    legs = []
 
     # --- 1. SendGrid over HTTPS. Raw REST, deliberately NOT the sendgrid
     # package: it is in requirements.txt but importing it is one more way
@@ -402,6 +609,7 @@ def send_email(subject: str, body: str) -> tuple:
         msg["From"] = sender
         msg["To"] = to
         raw = msg.as_string()
+        legs = []   # (port, type name, reached_the_server, is_auth_refusal)
         for port, use_ssl in ((465, True), (587, False)):
             try:
                 if use_ssl:
@@ -426,9 +634,14 @@ def send_email(subject: str, body: str) -> tuple:
                 return True, None
             except Exception as e:
                 tried.append(f"smtp:{port}: {type(e).__name__}")
+                # The verdict is taken HERE, where the exception object is
+                # still in hand. Deriving it later from the name loses every
+                # subclass.
+                legs.append((port, type(e).__name__,
+                             reached_the_server(e), is_auth_refusal(e)))
     else:
+        legs = []
         tried.append("smtp: no GMAIL_EMAIL/GMAIL_PASSWORD")
 
-    return False, ("no transport delivered (" + ", ".join(tried) + "). "
-                   "SMTP is blocked outbound on this host; an HTTPS route "
-                   "is the one that can work here.")
+    return False, (NO_ROUTE_MARKER + " (" + ", ".join(tried) + "). "
+                   + remedy_for(tried, legs))

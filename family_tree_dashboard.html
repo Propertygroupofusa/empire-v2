@@ -6525,6 +6525,39 @@ async function loadTradingProfile() {
     }
 }
 
+// What the owner should actually change. This used to be one hardcoded
+// sentence - "Set ALERT_WEBHOOK_URL and the backlog flushes" - which stopped
+// being true once the email senders were wired: a webhook is no longer
+// required, and on this host the real blocker was a refused Gmail login. A
+// banner that names the wrong variable costs more than a banner that says
+// nothing, so this reads the live diagnosis and the queue's OWN last_error.
+function alertRemedy(d, g) {
+    const er = g && g.email_route;
+    // The per-alert error is the only thing that knows what the transport
+    // actually did. Prefer it over any summary.
+    const firstErr = ((d.alerts || []).find(a => a.last_error) || {}).last_error;
+    if (firstErr) {
+        return escText(firstErr);
+    }
+    if (er && er.senders_are_wired && !er.a_webhook_is_required) {
+        if (!er.armed) {
+            return `Email delivery is built and wired but not armed: set <code>`
+                 + escText(er.mode_variable || 'ALERT_EMAIL_MODE')
+                 + `=send</code> (it currently reads <code>`
+                 + escText(er.mode_value || '?') + `</code>). No webhook needed.`;
+        }
+        if (!er.recipient_resolves) {
+            return `Email is armed but no recipient resolves - set `
+                 + `<code>TRADE_ALERT_EMAIL</code>.`;
+        }
+        return `Email is armed and a credential is present; the next send `
+             + `attempt will record what the transport did. No webhook needed.`;
+    }
+    return escText((g && g.why_not) || d.channel_note || '')
+         + ` Set <code>` + escText(d.webhook_env || 'ALERT_WEBHOOK_URL')
+         + `</code> and the backlog flushes.`;
+}
+
 async function loadAlertQueue() {
     const wrap = document.getElementById('alert-queue-wrap');
     if (!wrap) return;
@@ -6541,10 +6574,10 @@ async function loadAlertQueue() {
                  ✓ A delivery channel is configured. Alerts are being sent.</div>`
             : `<div style="border:1px solid var(--amber, #f0b429); background:rgba(240,180,41,0.07);
                      border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.76em; line-height:1.55;">
-                 <strong>Nothing is being delivered.</strong> ${escText((g && g.why_not) || d.channel_note || '')}
+                 <strong>Nothing is being delivered.</strong>
+                 ${alertRemedy(d, g)}
                  <br>Alerts are still being generated and <strong>held</strong> - they are not marked sent,
                  because a queue that reports success with nowhere to send is worse than an empty one.
-                 Set <code>${escText(d.webhook_env || 'ALERT_WEBHOOK_URL')}</code> and the backlog flushes.
                  ${g && g.similar_variables_seen && g.similar_variables_seen.length
                      ? `<br>Similar variable names visible to this process:
                         ${escText(g.similar_variables_seen.join(', '))}` : ''}</div>`;

@@ -187,10 +187,33 @@ def test_smtp_still_tries_both_ports():
 def test_every_transport_failure_is_reported_not_just_the_last():
     # "sendgrid: no key, smtp: blocked" tells the owner which ONE
     # variable fixes it. Only the last failure hides that.
-    body = _send_email_src()
-    assert "no transport delivered" in body
-    assert '", ".join(tried)' in body
-    assert "sendgrid: no SENDGRID_API_KEY" in body
+    #
+    # This asserted the SOURCE TEXT of send_email and broke when the
+    # literal "no transport delivered" moved into NO_ROUTE_MARKER - while
+    # the behaviour was identical. A source-text test fails on a rename and
+    # passes on a behaviour change, which is backwards, so it now drives
+    # the real function and reads the real string.
+    import os
+    keep = {k: os.environ.get(k) for k in
+            ("SENDGRID_API_KEY", "GMAIL_EMAIL", "GMAIL_PASSWORD",
+             "TRADE_ALERT_EMAIL")}
+    os.environ.pop("SENDGRID_API_KEY", None)
+    os.environ.pop("GMAIL_EMAIL", None)
+    os.environ.pop("GMAIL_PASSWORD", None)
+    os.environ["TRADE_ALERT_EMAIL"] = "owner@example.com"
+    try:
+        sent, err = a.send_email("subject", "body")
+    finally:
+        for k, v in keep.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert sent is False
+    assert a.NO_ROUTE_MARKER in err
+    # BOTH transports named in the one message, not just the last.
+    assert "sendgrid: no SENDGRID_API_KEY" in err, err
+    assert "GMAIL_EMAIL" in err, err
 
 
 def test_a_missing_recipient_fails_before_any_transport():
