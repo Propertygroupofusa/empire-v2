@@ -184,6 +184,41 @@ async def check_once(session_factory):
     if census_note:
         notes.append(census_note)
 
+    # A TOTAL THAT SILENTLY DROPS ASSETS IS NOT A TOTAL.
+    #
+    # account_census excludes any asset it could not price, and says so in a
+    # warning nobody plots: "N of 60 assets could not be priced and are NOT in
+    # total_usd. The real total is higher." So when the price feed hiccups,
+    # the recorded total falls by whatever those assets were worth, with
+    # nothing having happened to the account.
+    #
+    # Every reading under $9,500 in the whole 490-point series - all five of
+    # them - had an elevated unpriced count, against a typical 4:
+    #
+    #     2026-09-28T03:54  $8,660.45  unpriced=6
+    #     2026-09-28T04:10  $8,660.45  unpriced=6
+    #     2026-09-28T04:25  $8,660.45  unpriced=6
+    #     2026-09-28T17:10  $8,527.62  unpriced=9
+    #     2026-10-01T01:47  $8,172.38  unpriced=6   <- overnight
+    #
+    # The median reading is $10,117.90. That last one read about $1,870 below
+    # reality and is what the account owner saw when they checked overnight.
+    # It was not a loss. It was six assets the feed could not price.
+    #
+    # Recorded as UNKNOWN now, exactly as the unreadable-ledger case above
+    # blanks its own figures. A gap stored as None reads as a gap. A gap
+    # stored as a number reads as a $1,870 loss, and a chart of it reads as a
+    # crash.
+    _unpriced_cap = float(os.getenv("GROWTH_UNPRICED_BASELINE", "5"))
+    _census_degraded = (unpriced is not None and unpriced > _unpriced_cap)
+    if _census_degraded:
+        notes.append(
+            f"account total NOT recorded: {unpriced:.0f} assets could not be "
+            f"priced (over the {_unpriced_cap:.0f} baseline), so total_usd "
+            f"excludes them and is lower than reality by whatever they are "
+            f"worth. A gap, not a loss.")
+        total = coin_usd = None
+
     k = capital_kpis.compute(trades or [], allocated_usd=allocated,
                              free_cash_usd=free or 0.0, account_total_usd=total)
     if ledger_unreadable:
