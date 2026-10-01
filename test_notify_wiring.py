@@ -101,6 +101,40 @@ def test_the_trade_loop_is_inert_until_armed():
         "it reads the book before checking whether it may send"
 
 
+def test_no_route_out_does_not_spend_the_retry_budget():
+    """MAX_ATTEMPTS exists to stop a poisoned MESSAGE retrying forever.
+
+    It must not time out the infrastructure. Measured 2026-10-01 01:0xZ:
+    79 rows sat at 4 of 6 attempts against a host that blocks outbound
+    SMTP. Two more passes and the whole backlog would have been marked
+    failed - permanently, before any working route existed - so it would
+    have been lost at the exact moment it became deliverable.
+    """
+    body = _fn(AW, "drain_as_digest")
+    assert "is_infrastructure_failure" in body, "no route and a rejection are the same here"
+    i = body.index("elif infra:")
+    j = body.index("r.attempts = (r.attempts or 0) + 1")
+    assert i < j, "the infra branch must come before the attempt is spent"
+    infra_branch = body[i:j]
+    assert "r.attempts" not in infra_branch, "an unroutable pass still burns an attempt"
+    assert 'r.status = "failed"' not in infra_branch, "it can still mark the backlog dead"
+    assert "NO_ROUTE_COOLOFF" in infra_branch, "it would hammer a dead route every 30s"
+
+
+def test_the_marker_is_what_the_sender_actually_returns():
+    # The check is a marker match, so the two halves must agree or it
+    # silently never fires.
+    import alert_sender
+    assert alert_sender.is_infrastructure_failure(
+        "no transport delivered (sendgrid: no key, smtp:465: X)") is True
+    assert alert_sender.is_infrastructure_failure("SMTPAuthenticationError") is False
+    assert alert_sender.is_infrastructure_failure(None) is False
+    src = open("alert_sender.py").read()
+    i = src.index("def send_email")
+    assert alert_sender.NO_ROUTE_MARKER in src[i:], \
+        "the sender no longer emits the marker the worker looks for"
+
+
 if __name__ == "__main__":
     import sys
     fails = 0

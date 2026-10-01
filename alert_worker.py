@@ -28,6 +28,11 @@ log = logging.getLogger("alert_worker")
 
 PRODUCE_INTERVAL = int(os.getenv("ALERT_PRODUCE_SECONDS", "900"))    # 15 min
 DRAIN_INTERVAL = int(os.getenv("ALERT_DRAIN_SECONDS", "30"))
+
+# How long to wait after "nothing could carry this", without spending an
+# attempt. Long enough not to hammer a dead route every 30s, short enough
+# that the backlog flushes soon after a working one is configured.
+NO_ROUTE_COOLOFF = int(os.getenv("ALERT_NO_ROUTE_COOLOFF_SECONDS", "600"))
 COVERAGE_KEY = "newsroom_last_coverage_pct"
 
 _last_coverage = None
@@ -171,11 +176,22 @@ async def drain_as_digest(session_factory) -> dict:
         ok, err = await asyncio.to_thread(alert_sender.send_digest, alerts)
 
         stamp = datetime.utcnow()
+        # NO ROUTE OUT IS NOT THE ALERT'S FAULT. Burning the retry budget
+        # against a host that blocks outbound mail marks the whole backlog
+        # failed just before a working route is added - losing it exactly
+        # when it becomes deliverable. So an infrastructure failure cools
+        # off and keeps its attempts; only a real per-message rejection
+        # spends one.
+        infra = (not ok) and alert_sender.is_infrastructure_failure(err)
         for r in rows:
             if ok:
                 r.status = "sent"
                 r.sent_at = stamp
                 r.last_error = None
+            elif infra:
+                r.last_error = err
+                r.next_attempt_at = stamp + timedelta(
+                    seconds=NO_ROUTE_COOLOFF)
             else:
                 r.attempts = (r.attempts or 0) + 1
                 r.last_error = err
@@ -188,7 +204,11 @@ async def drain_as_digest(session_factory) -> dict:
         n = len(rows)
         if ok:
             log.info(f"[alerts] digest delivered - {n} row(s) marked sent")
-        return {"sent": n if ok else 0, "failed": 0 if ok else n, "error": err}
+        elif infra:
+            log.warning(f"[alerts] no route out ({err}) - {n} row(s) HELD, "
+                        f"attempts not spent")
+        return {"sent": n if ok else 0, "failed": 0 if ok else n,
+                "held_for_no_route": n if infra else 0, "error": err}
 
 
 async def run_sender_periodically(session_factory):

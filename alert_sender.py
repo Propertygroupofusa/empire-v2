@@ -311,6 +311,27 @@ def send_digest(alerts: list, *, force: bool = False) -> tuple:
     return ok, err
 
 
+# A failure that means "there is no route out of this host" is not the
+# alert's fault, and must not spend the alert's retry budget. Measured
+# 2026-10-01 01:0xZ: 79 rows sat at 4 of 6 attempts against a host that
+# blocks outbound SMTP. Two more passes and every one of them would have
+# been marked failed - permanently, before any working route existed -
+# so the backlog would have been lost at the exact moment it became
+# deliverable. MAX_ATTEMPTS exists to stop a poisoned MESSAGE retrying
+# forever, not to time out the infrastructure.
+NO_ROUTE_MARKER = "no transport delivered"
+
+
+def is_infrastructure_failure(err) -> bool:
+    """True when nothing could carry the message, whatever it said.
+
+    Kept as a marker check rather than exception sniffing because the
+    sender already collapses every transport's exception to a type name;
+    there is no exception left to inspect by the time a caller sees this.
+    """
+    return bool(err) and NO_ROUTE_MARKER in str(err)
+
+
 def send_email(subject: str, body: str) -> tuple:
     """(ok, error). Delivers by whatever route this host actually permits.
 
