@@ -177,6 +177,50 @@ other half is down $55.
 
 ---
 
+## The audit layer now knows which branches are broken (2026-10-01, confirmed live)
+
+`exchange_truth_worker` is running and its first passes landed. Measured
+through `GET /api/trading-dashboard/gate-observations`:
+
+| | before | after |
+|---|---|---|
+| `branch_control_state` rows | 2 | **22** |
+| reconciliation verdicts | 2 × UNKNOWN | **14 MATCHED, 8 MISMATCH** |
+| `exchange_truth_failures` | 0 (readable) | **8**, all `INVENTORY_SHORT_AT_VENUE` / `KNOWN_INTERNAL` |
+| `execution_enabled` | False | **False on all 22** — rule 4 held |
+
+The 8 match the backing measurement exactly, and only 8 rows were written,
+not 8 per 5-minute pass — the only-a-change rule is working.
+
+### What this does to the enforce decision
+
+`ExecutionGate.check()` denies `ALLOCATE`/`ENTRY` when
+`reconciliation_status != "MATCHED"`, and denies outright when a branch has
+no control row at all. `EXIT` is deliberately **not** gated on
+reconciliation, so a broken branch can still sell its way out rather than
+having the mismatch frozen in.
+
+So the arithmetic has changed completely:
+
+- **Before today**: 23 branches, 2 control rows. `EXECUTION_GATE_MODE=enforce`
+  would have denied **21 of 23** on "no control row" and halted the fleet.
+  That is the hazard the module's own comment warns about.
+- **Now**: enforcing would block buys on the **8 MISMATCH** branches —
+  which is correct, those are the branches claiming coin they cannot sell —
+  plus **JASMY-USD**, which has 0 open slices so `slice_backing` skips it and
+  it has no control row. **14 branches would trade freely. Every branch could
+  still exit.**
+
+That is a defensible state to enforce from, where this morning's was not.
+Still the owner's switch, on Railway, and not flipped here.
+
+**The JASMY edge is real and worth naming**: a branch with no slices is never
+measured, so it never gets a row, so enforce denies it. For a branch holding
+nothing that is harmless, but the rule is "unmeasured is denied", not
+"unmeasured is fine", and a branch that empties itself will fall into it.
+
+---
+
 ## Why it is still losing money (measured 2026-10-01, 32 days of closed trades)
 
 **The trading engine is profitable. The portfolio is not.** Those are two
