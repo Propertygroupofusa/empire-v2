@@ -292,8 +292,46 @@ async def check_once(session_factory, *, place=True) -> dict:
                                "longer holds."),
                     "skipped_because": "grid_positions_unreadable"}
         protected = {p.split("-")[0].upper() for p in _units}
+
+        # WHAT EACH COIN COST, so the profit floor has something to judge.
+        #
+        # Without this the floor refuses everything as BASIS_UNKNOWN, which
+        # would silently disable the trimmer rather than make it safe. The
+        # basis is the quantity-weighted entry price across that asset's open
+        # grid slices - the only cost the system actually knows.
+        #
+        # An asset with NO slices gets no entry here and is therefore refused.
+        # That is correct and it is also a real narrowing: the tail positions
+        # this worker used to size have no recorded cost anywhere, so nothing
+        # can show that selling them books a gain. Refusing is the direction
+        # the owner's rule points.
+        basis = {}
+        try:
+            from models import CryptoGridSlice
+            from sqlalchemy import select
+            async with session_factory()() as _db:
+                _slices = (await _db.execute(select(CryptoGridSlice))).scalars().all()
+            _acc = {}
+            for s in _slices:
+                a = (s.product_id or "").split("-")[0].upper()
+                try:
+                    q, e = float(s.qty or 0), float(s.entry_price or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not a or q <= 0 or e <= 0:
+                    continue
+                qty, cost = _acc.get(a, (0.0, 0.0))
+                _acc[a] = (qty + q, cost + q * e)
+            basis = {a: (c / q) for a, (q, c) in _acc.items() if q > 0}
+        except Exception as exc:
+            # A basis that could not be read is NOT an empty basis that permits
+            # selling - it leaves `basis` empty, and an empty basis refuses.
+            # Failing this way round is deliberate.
+            log.warning(f"[trim] cost basis unreadable ({type(exc).__name__}: {exc}) "
+                        f"- the profit floor will refuse every trim this pass")
+
         plans = auto_trim.plan_trims(holdings, total, now=now, history=history,
-                                     actively_traded=protected)
+                                     actively_traded=protected, cost_basis=basis)
         summary = auto_trim.summarise(plans, mode)
 
         for p in plans:

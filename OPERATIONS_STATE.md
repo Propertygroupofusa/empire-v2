@@ -52,6 +52,36 @@ slices to sell and hand them to that machinery, not reimplement half of it.
 
 ---
 
+## auto_trim — found late, and it is armed
+
+`auto_trim` was running all day and I did not look at it until the account
+owner pushed back. It does what the 20% rule needs: `mode: arm`, every 900s,
+trims an over-limit holding back to 19.5%. It has done it to these coins
+before — ZEC $746.25 and XRP $136.43 on 2026-09-27, ZEC $139.18 and XRP
+$108.35 on 2026-09-28, $1,130.21 in total.
+
+It is not acting now because XRP (20.7%, $120.22 over) is refused as
+`ACTIVELY_TRADED` — the grid holds open slices on it — and ZEC reads 18.56%
+against the equity denominator rather than 26.63% against allocated.
+
+**It had no profit check at all.** No `entry_price`, no `net_pct`, no
+round trip anywhere in the file; its own docstring said "It does not know
+whether now is a good time to sell." The only thing between an armed trimmer
+and an automatic sale of XRP at −4.18% was a guard that exists for an
+unrelated reason.
+
+Fixed: `REQUIRE_PROFIT = True`, sharing
+`concentration_rotation.DEFAULT_ROUND_TRIP_COST_PCT` rather than restating
+it. A holding that would net ≤ 0 after the round trip is refused as
+`WOULD_REALISE_A_LOSS`. **An unknown basis is refused too** — `BASIS_UNKNOWN`
+— because nothing that cannot be shown to be a gain may be sold under a rule
+with no exceptions.
+
+That narrows the trimmer, and the narrowing is real: the tail positions it
+used to size have no recorded cost anywhere, so they are now refused. The
+worker supplies a quantity-weighted basis from open grid slices; assets with
+no slices have no basis and will not be trimmed until one exists.
+
 ## Open decision that is not mine
 
 **The concentration rule has two denominators and they disagree.**

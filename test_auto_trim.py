@@ -22,6 +22,23 @@ def H(asset, usd, **kw):
     return d
 
 
+def plan(*a, **kw):
+    """plan_trims with the PROFIT FLOOR OFF.
+
+    Everything in this file predates the floor and tests a different thing:
+    the share arithmetic, the caps, the cooldown, the ordering. With the
+    floor on, every one of these fixtures refuses with BASIS_UNKNOWN before
+    reaching the logic under test, which would prove only that the floor
+    exists - it would not test the sizing at all.
+
+    The floor has its own suite, test_auto_trim_profit_floor.py, where it is
+    the subject rather than an obstacle. Turning it off HERE is scoping, not
+    weakening: nothing in this file would otherwise execute.
+    """
+    kw.setdefault("require_profit", False)
+    return at.plan_trims(*a, **kw)
+
+
 # ---------------------------------------------------------------- mode
 
 @pytest.mark.parametrize("raw", ["arm", "ARM", " arm ", "Arm"])
@@ -113,7 +130,7 @@ def test_last_trim_at_picks_the_newest():
 def test_the_real_book_produces_the_two_expected_trims():
     holdings = [H("ZEC", 2864.01), H("XRP", 2367.44), H("BTC", 1466.29),
                 H("ETH", 1243.93), H("SHIB", 1065.88), H("XLM", 572.01)]
-    plans = at.plan_trims(holdings, 11243.82, now=NOW)
+    plans = plan(holdings, 11243.82, now=NOW)
     acting = {p["asset"]: p for p in plans if p["act"]}
     assert set(acting) == {"ZEC", "XRP"}
     # every holding is accounted for, acting or not
@@ -124,30 +141,30 @@ def test_the_real_book_produces_the_two_expected_trims():
 
 
 def test_worst_offender_is_planned_first():
-    plans = at.plan_trims([H("XRP", 2367.44), H("ZEC", 2864.01)], 11243.82, now=NOW)
+    plans = plan([H("XRP", 2367.44), H("ZEC", 2864.01)], 11243.82, now=NOW)
     assert [p["asset"] for p in plans][:2] == ["ZEC", "XRP"]
 
 
 def test_nothing_over_the_limit_acts():
-    plans = at.plan_trims([H("A", 1000), H("B", 900)], 10000, now=NOW)
+    plans = plan([H("A", 1000), H("B", 900)], 10000, now=NOW)
     assert not any(p["act"] for p in plans)
     assert all(p["reason"] == "WITHIN_LIMIT" for p in plans)
 
 
 def test_unpriced_holding_never_trims():
-    plans = at.plan_trims([H("GAL", None), H("ZEC", 2864.01)], 11243.82, now=NOW)
+    plans = plan([H("GAL", None), H("ZEC", 2864.01)], 11243.82, now=NOW)
     gal = next(p for p in plans if p["asset"] == "GAL")
     assert gal["act"] is False and gal["reason"] == "UNPRICED"
 
 
 def test_unreadable_total_stops_everything():
-    plans = at.plan_trims([H("ZEC", 9999)], None, now=NOW)
+    plans = plan([H("ZEC", 9999)], None, now=NOW)
     assert not any(p["act"] for p in plans)
     assert all(p["reason"] == "NO_TOTAL" for p in plans)
 
 
 def test_single_order_cap_applies():
-    plans = at.plan_trims([H("ZEC", 9000)], 10000, now=NOW, max_trim_usd=100)
+    plans = plan([H("ZEC", 9000)], 10000, now=NOW, max_trim_usd=100)
     p = plans[0]
     assert p["act"] and p["trim_usd"] == 100.0
     assert any("single-order cap" in c for c in p["capped_by"])
@@ -155,7 +172,7 @@ def test_single_order_cap_applies():
 
 def test_position_share_cap_applies():
     # 9000 of 10000 needs 7050 sold; 35% of the position is 3150.
-    plans = at.plan_trims([H("ZEC", 9000)], 10000, now=NOW, max_trim_usd=10_000,
+    plans = plan([H("ZEC", 9000)], 10000, now=NOW, max_trim_usd=10_000,
                           max_daily_usd=10_000)
     p = plans[0]
     assert p["trim_usd"] == pytest.approx(3150.0)
@@ -163,54 +180,54 @@ def test_position_share_cap_applies():
 
 
 def test_daily_budget_is_shared_across_assets():
-    plans = at.plan_trims([H("ZEC", 3000), H("XRP", 2900)], 10000, now=NOW,
+    plans = plan([H("ZEC", 3000), H("XRP", 2900)], 10000, now=NOW,
                           max_daily_usd=1100, max_trim_usd=10_000)
     assert sum(p["trim_usd"] for p in plans if p["act"]) <= 1100 + 1e-9
 
 
 def test_budget_already_spent_blocks_the_pass():
     hist = [{"asset": "OTHER", "usd": at.MAX_DAILY_TRIM_USD, "placed_at": NOW - timedelta(hours=1)}]
-    plans = at.plan_trims([H("ZEC", 2864.01)], 11243.82, now=NOW, history=hist)
+    plans = plan([H("ZEC", 2864.01)], 11243.82, now=NOW, history=hist)
     assert not any(p["act"] for p in plans)
 
 
 def test_cooldown_blocks_a_second_trim_same_day():
     hist = [{"asset": "ZEC", "usd": 50, "placed_at": NOW - timedelta(hours=2)}]
-    plans = at.plan_trims([H("ZEC", 2864.01)], 11243.82, now=NOW, history=hist)
+    plans = plan([H("ZEC", 2864.01)], 11243.82, now=NOW, history=hist)
     p = next(x for x in plans if x["asset"] == "ZEC")
     assert p["act"] is False and p["reason"] == "COOLDOWN"
 
 
 def test_cooldown_expires():
     hist = [{"asset": "ZEC", "usd": 50, "placed_at": NOW - timedelta(hours=25)}]
-    plans = at.plan_trims([H("ZEC", 2864.01)], 11243.82, now=NOW, history=hist)
+    plans = plan([H("ZEC", 2864.01)], 11243.82, now=NOW, history=hist)
     assert next(x for x in plans if x["asset"] == "ZEC")["act"] is True
 
 
 def test_tiny_excess_is_left_alone():
     # 2005 of 10000 = 20.05%; getting to 19.5% is only $55... raise the floor.
-    plans = at.plan_trims([H("ZEC", 2005)], 10000, now=NOW, min_trim_usd=100)
+    plans = plan([H("ZEC", 2005)], 10000, now=NOW, min_trim_usd=100)
     p = plans[0]
     assert p["act"] is False and p["reason"] == "TOO_SMALL"
 
 
 def test_every_holding_appears_in_the_output():
     holdings = [H(f"C{i}", 10) for i in range(30)] + [H("ZEC", 9000)]
-    plans = at.plan_trims(holdings, 10000, now=NOW)
+    plans = plan(holdings, 10000, now=NOW)
     assert len(plans) == len(holdings)
 
 
 # ------------------------------------------------------------ summary
 
 def test_observing_says_nothing_will_be_placed():
-    plans = at.plan_trims([H("ZEC", 2864.01)], 11243.82, now=NOW)
+    plans = plan([H("ZEC", 2864.01)], 11243.82, now=NOW)
     s = at.summarise(plans, "observe")
     assert s["armed"] is False
     assert "nothing will be placed" in s["headline"].lower()
 
 
 def test_armed_says_it_will_sell():
-    plans = at.plan_trims([H("ZEC", 2864.01)], 11243.82, now=NOW)
+    plans = plan([H("ZEC", 2864.01)], 11243.82, now=NOW)
     s = at.summarise(plans, "arm")
     assert s["armed"] is True and s["would_trim_usd"] > 0
     assert "will be sold" in s["headline"]
