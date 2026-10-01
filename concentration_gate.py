@@ -241,8 +241,36 @@ def concentration_verdict(product_id, book, spend_usd,
 
     held = _book(book)
     if held is None:
-        return True, ("account book unreadable - concentration not checked this "
-                      "cycle (allowed rather than halted; unknown is not a breach)")
+        # FAIL CLOSED. This used to return True with the reasoning "unknown is
+        # not a breach", and that reasoning is wrong for a BUY ceiling.
+        #
+        # The book goes unreadable exactly when Coinbase rate-limits, which is
+        # exactly when the bot is busiest. Measured 2026-10-01 05:21Z:
+        #   HTTP 429 fetching USD / HTTP 429 fetching USDC
+        #   [GRID] account book unreadable - concentration not checked this cycle
+        # Every buy in that window had NO ceiling at all. A 20% rule that
+        # switches itself off under load is not a 20% rule.
+        #
+        # The two errors are not symmetric. Refusing a buy costs one cycle of
+        # opportunity, and the grid buys dips - there is always another dip.
+        # Allowing an unmeasured buy is unbounded, and unbounded is how 20%
+        # became 26.6% on two coins carrying 89% of the account's losses.
+        #
+        # This also makes the gate agree with the rest of the repo, which
+        # already refuses on an unreadable read rather than guessing:
+        # coin_deploy refuses on unreadable cash, place_maker_sell refuses on
+        # an unreadable balance, risk_governor's trading_approved requires
+        # every field to be exactly True.
+        #
+        # Blast radius is bounded by the caller's cache: crypto_grid_bot holds
+        # the book for max_age_seconds, so a transient 429 is served from
+        # cache and only a SUSTAINED failure to read the account stops buying.
+        # If that happens, buying should stop.
+        return False, ("account book unreadable - REFUSING the buy. The "
+                       "concentration ceiling cannot be measured, and an "
+                       "unmeasured ceiling is not a ceiling. One missed buy "
+                       "costs a cycle; an unbounded one is how a 20% rule "
+                       "becomes 26%.")
 
     # Cash is the thing coin is bought WITH, not a position to hold a
     # share of. auto_trim refuses to trim it for the same reason.
@@ -260,8 +288,11 @@ def concentration_verdict(product_id, book, spend_usd,
     now = share_pct(held.get(asset, 0.0), total)
     after = share_pct(held.get(asset, 0.0) + max(0.0, _num(spend_usd) or 0.0), total)
     if now is None or after is None:
-        return True, ("share could not be computed from this book - not checked "
-                      "this cycle (unknown is not a breach)")
+        # Same rule, same reason as above: a share that cannot be computed is
+        # not a share within the ceiling.
+        return False, ("share could not be computed from this book - REFUSING "
+                       "the buy rather than spending against a number that "
+                       "could not be worked out")
 
     if after <= cap:
         return True, (f"{product_id} would be {after:.1f}% of the account after this "
