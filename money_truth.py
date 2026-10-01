@@ -117,15 +117,37 @@ def main():
         print(f"  total               {signed(d_total):>12}")
         print(f"  cash                {signed(d_cash):>12}")
         print(f"  deployed into coin  {signed(d_dep):>12}")
-        if d_cash is not None and d_dep is not None:
-            spent = min(-d_cash, d_dep) if d_cash < 0 and d_dep > 0 else 0.0
+        if d_cash is not None and d_dep is not None and abs(d_cash) > 0.01:
+            # CASH MOVES IN BOTH DIRECTIONS AND THEY MEAN OPPOSITE THINGS.
+            #
+            # The first version of this only handled cash FALLING, because it
+            # was written to explain a $385 drop. When cash rose $2.44 it
+            # printed "$-2.44 left the cash line some other way" - a negative
+            # amount leaving, which is meaningless, and which would send a
+            # reader hunting for a withdrawal that never happened.
             print()
-            print(f"  OF THE {money(abs(d_cash))} THE CASH LINE MOVED:")
-            print(f"    {money(spent)} became coin - the grid bought with it. NOT a loss.")
-            rest = (-d_cash) - spent
-            if abs(rest) > 0.01:
-                print(f"    {money(rest)} left the cash line some other way - look at "
-                      "withdrawals, a USD->USDC conversion, or another bot.")
+            if d_cash < 0:
+                spent = min(-d_cash, d_dep) if d_dep > 0 else 0.0
+                print(f"  CASH FELL {money(-d_cash)}:")
+                if spent > 0.01:
+                    print(f"    {money(spent)} became coin - the grid bought with "
+                          "it. NOT a loss.")
+                rest = (-d_cash) - spent
+                if rest > 0.01:
+                    print(f"    {money(rest)} is unaccounted for by grid buying - "
+                          "look at a withdrawal, a USD->USDC conversion, or "
+                          "another bot.")
+            else:
+                freed = min(d_cash, -d_dep) if d_dep < 0 else 0.0
+                print(f"  CASH ROSE {money(d_cash)}:")
+                if freed > 0.01:
+                    print(f"    {money(freed)} came back from coin - a position "
+                          "closed and released it.")
+                rest = d_cash - freed
+                if rest > 0.01:
+                    print(f"    {money(rest)} arrived without a matching fall in "
+                          "deployed capital - a deposit, or a sale whose slice "
+                          "was not closed in the book.")
         # New gaps are not losses.
         newly = unpriced - set(prev.get("unpriced") or [])
         if newly:
@@ -145,6 +167,60 @@ def main():
             print("  WHICH BRANCHES IT WENT INTO:")
             for k, v in moves[:10]:
                 print(f"    {k:12s} {signed(v):>10}")
+
+    # WINDOWS, NOT JUST THE LAST SNAPSHOT.
+    #
+    # The snapshot diff above compares against whenever this last ran, which
+    # may be minutes or hours ago and is not the question anyone asks. "I just
+    # lost $50" is a question about the last hour, and a snapshot taken
+    # mid-move answers it wrongly - measured live, a single diff showed -$9.31
+    # across an hour that had really moved -$61.73.
+    curve = get("/growth-curve")
+    pts = [r for r in ((curve or {}).get("series") or [])
+           if r.get("account_total_usd") and r.get("assets_unpriced") is not None]
+    if len(pts) > 2:
+        import statistics
+        from datetime import timezone
+        # Drop readings taken while the price feed was degraded. An asset the
+        # census cannot price is excluded from the total, so those points show
+        # a fall with nothing having happened - the same bug that printed an
+        # $8,172 overnight total against a $10,117 median.
+        # NOT `<= median`. The median splits the readings in half by
+        # definition, so that filter threw away half the series as "degraded"
+        # whatever the data looked like - it reported 226 of 486 ignored. The
+        # real signal is an OUTLIER: typical is 4 unpriced, the bad readings
+        # that produced the $8,172 phantom were 6 and 9. One above typical is
+        # ordinary feed noise and must be kept.
+        baseline = statistics.median(r["assets_unpriced"] for r in pts)
+        clean = [r for r in pts if r["assets_unpriced"] <= baseline + 1]
+        dropped = len(pts) - len(clean)
+
+        def when(r):
+            return datetime.fromisoformat(str(r["at"]).replace("Z", "+00:00"))
+
+        clean.sort(key=when)
+        if len(clean) > 2:
+            latest = when(clean[-1])
+            print()
+            print("-" * 72)
+            print("HOW THE ACCOUNT MOVED, BY WINDOW")
+            print("-" * 72)
+            if dropped:
+                print(f"  {dropped} reading(s) ignored - the price feed was degraded "
+                      "and the total excluded assets it could not price")
+            for mins, label in ((30, "30 min"), (60, "1 hour"), (180, "3 hours"),
+                                (360, "6 hours"), (1440, "24 hours")):
+                w = [r for r in clean
+                     if (latest - when(r)).total_seconds() <= mins * 60]
+                if len(w) < 2:
+                    continue
+                a, b = w[0]["account_total_usd"], w[-1]["account_total_usd"]
+                hi = max(r["account_total_usd"] for r in w)
+                lo = min(r["account_total_usd"] for r in w)
+                print(f"  {label:9s} {money(a, 11)} -> {money(b, 11)}  "
+                      f"{signed(b - a):>10}   swung {money(hi - lo)} within the window")
+            print("  a short window can show a loss the longer one does not - that "
+                  "is the market breathing, not money leaving.")
 
     # What is actually carrying the loss.
     conc = (cap.get("concentration") or {})
