@@ -8474,6 +8474,39 @@ async def get_grid_status_endpoint(fresh: int = 0):
         data["backing"] = {"readable": False,
                            "reason": f"{type(_exc).__name__}: {_exc}"}
 
+    # CAN EACH BRANCH WORK ITS POSITION, OR IS IT JUST HOLDING IT?
+    #
+    # A grid earns by holding rungs at DIFFERENT prices and selling one on a
+    # bounce. Some branches have that; some hold one lump split into equal
+    # pieces at ONE price, where every piece needs the same move and they all
+    # move together. On 2026-10-01 that was 51% of the fleet's measured
+    # capital, and the two biggest lumps - ZEC and XRP - held 52.9% of it
+    # while producing 0.3% of the profit.
+    #
+    # Fed the realised P&L so the label is checked against outcomes rather
+    # than asserted. It reports its own separation and refuses to call it a
+    # finding under its sample floor; today that reads is_a_finding False at
+    # 21 branches, which is the honest answer.
+    try:
+        import ladder_health
+        _realized = {}
+        try:
+            _hist = await crypto_grid_bot_module.get_grid_trade_history(limit_recent=1)
+            for _row in (_hist.get("coins") or []):
+                _pid = _row.get("product_id") or _row.get("coin")
+                _p = _row.get("total_pnl")
+                if _pid and _p is not None:
+                    _realized[_pid if "-" in str(_pid) else f"{_pid}-USD"] = float(_p)
+        except Exception:
+            _realized = {}          # unchecked is not the same as checked-and-fine
+        data["ladder_health"] = ladder_health.assess(
+            data.get("branches") or [], _realized or None)
+    except Exception as _exc:
+        data["ladder_health"] = {
+            "readable": False,
+            "reason": f"{type(_exc).__name__}: {_exc}",
+            "this_is_unknown_not_healthy": True}
+
     # IS THE QUIET BENIGN OR IS IT THE SEPTEMBER OUTAGE AGAIN? Between
     # 2026-09-10 and 09-25 this fleet closed ZERO round trips because a
     # mis-signed JWT meant "no maker order was ever placed" - and nobody
