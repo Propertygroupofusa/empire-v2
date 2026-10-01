@@ -40,10 +40,31 @@ from __future__ import annotations
 # could lower it.
 CONCENTRATION_LIMIT_PCT = 20.0
 
-# What one round trip costs, measured: 0.70% maker fees both legs plus
-# 0.5407% adverse selection taken from FALLING markets. Passed in by the
-# caller so it tracks the live measurement rather than going stale here.
-DEFAULT_ROUND_TRIP_COST_PCT = 1.2407
+# WHAT ONE ROUND TRIP COSTS - AND WHY THE SELL LEG IS THE EXPENSIVE ONE.
+#
+# This was wrong and it was wrong in the dangerous direction. The figure
+# used to be 1.2407 = 0.70% fees + 0.5407% adverse selection, where the
+# 0.70% is the MAKER rate on both legs. But the rotation worker exits with
+# a market IOC order, which is a TAKER fill, and live 2026-10-01 the
+# account's own rates are:
+#
+#     real_maker_fee_rate        0.0035   -> 0.350% per leg
+#     real_round_trip_fee_rate   0.0150   -> 0.750% per leg (taker x 2)
+#
+# So a slice bought as a maker rung and sold by this rotation pays
+# 0.350% + 0.750% = 1.100% in fees, not 0.700%. The old constant understated
+# the true cost by 0.400 percentage points.
+#
+# That is not a rounding quibble. MIN_NET_MARGIN_PCT is 0.25, so a slice
+# reading +0.26% net cleared the old bar while actually realising -0.14%.
+# The whole promise of this module is that it cannot return a loser, and at
+# the margin it was returning losers.
+ENTRY_FEE_PCT_DEFAULT = 0.35          # maker: how the grid's rungs are bought
+EXIT_FEE_PCT_DEFAULT = 0.75           # TAKER: how this rotation sells
+ADVERSE_SELECTION_PCT = 0.5407        # measured on FALLING markets
+
+DEFAULT_ROUND_TRIP_COST_PCT = (
+    ENTRY_FEE_PCT_DEFAULT + EXIT_FEE_PCT_DEFAULT + ADVERSE_SELECTION_PCT)   # 1.6407
 
 # A slice must beat the round trip by this much before it is worth doing.
 # Selling at +0.01% net is not a profit, it is churn that pays the venue
@@ -91,7 +112,20 @@ def sellable_slices(branch, cost_pct=DEFAULT_ROUND_TRIP_COST_PCT,
         entry, qty = _num(s.get("entry_price")), _num(s.get("qty"))
         if entry is None or qty is None or qty <= 0:
             continue
-        net = exit_net_pct(entry, price, cost_pct)
+        # USE WHAT THIS SLICE ACTUALLY PAID, when the ledger knows it.
+        # entry_fee_rate is stored as a FRACTION (0.0035 is 0.35%), the same
+        # unit trap that made the stop sweep compare a fraction to a percent.
+        # A slice with no recorded rate falls back to the default, never to
+        # zero - an unknown fee is not a free trade.
+        slice_cost = cost_pct
+        _efr = _num(s.get("entry_fee_rate"))
+        if _efr is not None and _efr >= 0:
+            slice_cost = (_efr * 100.0) + EXIT_FEE_PCT_DEFAULT + ADVERSE_SELECTION_PCT
+            # Never let a per-slice rate make the bar EASIER than the default.
+            # A suspiciously cheap recorded fee is a reason for caution, not
+            # for selling something the standing model would have refused.
+            slice_cost = max(slice_cost, cost_pct)
+        net = exit_net_pct(entry, price, slice_cost)
         if net is None or net <= min_margin_pct:
             continue
         stake = entry * qty

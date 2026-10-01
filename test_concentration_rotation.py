@@ -21,27 +21,71 @@ def branch(pid, alloc, price, entries):
     return {"product_id": pid, "allocated_usd": alloc, "current_price": price,
             "slices": [{"entry_price": e, "qty": q} for e, q in entries]}
 
-COST = 1.2407
+# THE COST THE MODULE ACTUALLY USES, not a copy of it. A hardcoded 1.2407
+# here is what let the taker-fee bug sit unnoticed: the test agreed with the
+# module because both held the same wrong number.
+COST = R.DEFAULT_ROUND_TRIP_COST_PCT
 
 print("\n[1] a losing slice is never sellable")
 # entry 100, price 99 -> clearly down
 b = branch("ZEC-USD", 5000, 99.0, [(100.0, 1.0)])
 ok("a slice at -1% is refused", R.sellable_slices(b) == [])
-# entry 100, price 101 -> +1% gross, but the round trip costs 1.2407%
+# entry 100, price 101 -> +1% gross, under the round trip
 b = branch("ZEC-USD", 5000, 101.0, [(100.0, 1.0)])
-ok("a +1.00% slice is refused - it does not clear the 1.2407% round trip",
+ok(f"a +1.00% slice is refused - it does not clear the {COST}% round trip",
    R.sellable_slices(b) == [], str(R.sellable_slices(b)))
-# +1.30% gross -> +0.06% net, inside the churn margin
-b = branch("ZEC-USD", 5000, 101.30, [(100.0, 1.0)])
-ok("a +1.30% slice is refused - clears the cost but not the margin",
-   R.sellable_slices(b) == [])
-# +2% gross -> +0.76% net, past the 0.25% margin
+# Just past the cost but inside the churn margin.
+b = branch("ZEC-USD", 5000, 100.0 * (1 + (COST + 0.05) / 100.0), [(100.0, 1.0)])
+ok("a slice clearing the cost but not the margin is refused",
+   R.sellable_slices(b) == [], str(R.sellable_slices(b)))
+# Comfortably past cost + margin.
 b = branch("ZEC-USD", 5000, 102.0, [(100.0, 1.0)])
 s = R.sellable_slices(b)
 ok("a +2.00% slice IS sellable", len(s) == 1, str(s))
 ok("...and its net is reported after the round trip",
    abs(s[0]["net_pct"] - (2.0 - COST)) < 1e-6, str(s[0]["net_pct"]))
 ok("...and the profit is positive", s[0]["profit_usd"] > 0)
+
+print("\n[1b] THE SELL LEG IS A TAKER LEG - the bug this cost real money on")
+ok("the exit fee is the TAKER rate, not the maker rate",
+   R.EXIT_FEE_PCT_DEFAULT == 0.75, R.EXIT_FEE_PCT_DEFAULT)
+ok("the entry fee is the maker rate the grid's rungs are bought at",
+   R.ENTRY_FEE_PCT_DEFAULT == 0.35, R.ENTRY_FEE_PCT_DEFAULT)
+ok("so the fee half of the round trip is 1.10%, not 0.70%",
+   abs((R.ENTRY_FEE_PCT_DEFAULT + R.EXIT_FEE_PCT_DEFAULT) - 1.10) < 1e-9)
+ok("and the whole round trip is 1.6407%, not the old 1.2407%",
+   abs(COST - 1.6407) < 1e-9, COST)
+# The exact slice the old model would have sold at a loss.
+_edge = 100.0 * (1 + (1.2407 + 0.26) / 100.0)      # +0.26% net under the OLD cost
+b = branch("ZEC-USD", 5000, _edge, [(100.0, 1.0)])
+ok("a slice the OLD model called a +0.26% winner is now refused",
+   R.sellable_slices(b) == [], str(R.sellable_slices(b)))
+ok("...because its real net is negative", R.exit_net_pct(100.0, _edge) < 0,
+   R.exit_net_pct(100.0, _edge))
+
+print("\n[1c] a slice's own recorded entry fee is used, and never to loosen the bar")
+# entry_fee_rate is a FRACTION. A pricier recorded buy raises the bar.
+# +3% gross, so BOTH the default and the dearer buy leg stay above the
+# 0.25% margin and the comparison is about the net, not about the cutoff.
+# At +2% the dearer leg correctly falls under the margin and returns [],
+# which is right behaviour and a useless fixture for this question.
+b = branch("ZEC-USD", 5000, 103.0, [(100.0, 1.0)])
+b["slices"][0]["entry_fee_rate"] = 0.0060          # 0.60% buy leg, dearer than default
+s_dear = R.sellable_slices(b)
+base = R.exit_net_pct(100.0, 103.0)
+ok("a dearer recorded buy leg lowers the reported net",
+   bool(s_dear) and s_dear[0]["net_pct"] < base, str(s_dear))
+ok("...by exactly the extra fee it recorded",
+   bool(s_dear) and abs((base - s_dear[0]["net_pct"]) - 0.25) < 1e-6,
+   str(base - s_dear[0]["net_pct"]) if s_dear else "[]")
+b["slices"][0]["entry_fee_rate"] = 0.0             # a free buy leg cannot help
+s_free = R.sellable_slices(b)
+ok("a zero recorded fee does NOT make the bar easier",
+   s_free and abs(s_free[0]["net_pct"] - base) < 1e-9, str(s_free))
+b["slices"][0]["entry_fee_rate"] = None            # unknown is not free
+s_unk = R.sellable_slices(b)
+ok("an unknown recorded fee falls back to the default, not to zero",
+   s_unk and abs(s_unk[0]["net_pct"] - base) < 1e-9, str(s_unk))
 
 print("\n[2] every sellable slice must be profitable, never just the basket")
 # A basket that is net positive overall but holds one loser.
