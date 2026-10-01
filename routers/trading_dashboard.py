@@ -10791,6 +10791,202 @@ async def schema_health_endpoint():
     }
 
 
+#: One read of the denial log is bounded. A day on 23 branches cannot
+#: plausibly exceed this, and a window that does is reported as capped
+#: rather than silently truncated into a smaller-looking number.
+GATE_OBSERVATION_ROW_CAP = 2000
+
+
+@router.get("/gate-observations")
+async def get_gate_observations(hours: float = 24.0, limit: int = 40):
+    """What the execution gate saw, and whether it was binding when it saw it.
+
+    THIS IS THE MISSING HALF OF OBSERVE MODE. branch_audit_service ships
+    EXECUTION_GATE_MODE=observe, and its own comment says what that buys:
+    "a day of evidence showing exactly which branches would have been
+    refused and why, before that refusal becomes real money not being
+    deployed." The gate was wired into the order path and the audit rows
+    were being written - and nothing could read them. An evidence log with
+    no reader cannot inform the decision it exists to inform, so the
+    enforce/observe call was being left to judgement after all.
+
+    Read-only. It places no order, moves no capital, and changes no mode.
+    Flipping EXECUTION_GATE_MODE is the owner's, from Railway.
+
+    A MISSING TABLE IS NOT A QUIET DAY. Every count here is None when the
+    table could not be read, never 0, and `readable` says which. "0 denials
+    observed" from an absent table reads exactly like "the gate found
+    nothing wrong" and would argue for enforce on the strength of evidence
+    that was never collected - the opposite of the truth. OBSERVED_ is also
+    reported apart from a bare denial, because in observe mode a denial did
+    not stop anything, and a reader who cannot tell those apart cannot tell
+    a refusal from a note.
+    """
+    import audit_models as _am
+    try:
+        import branch_audit_service as _bas
+        _mode = _bas.gate_mode()
+        _binding = _bas.is_enforcing()
+    except Exception as exc:
+        _mode, _binding = None, None
+        _mode_err = f"{type(exc).__name__}: {exc}"
+    else:
+        _mode_err = None
+
+    hours = max(0.0, min(float(hours), 24.0 * 30))
+    limit = max(1, min(int(limit), 200))
+    since = datetime.utcnow() - timedelta(hours=hours)
+    out = {
+        "gate_mode": _mode,
+        "gate_is_binding": _binding,
+        "gate_mode_unreadable": _mode_err,
+        "window_hours": hours,
+        "since_utc": since.isoformat() + "Z",
+        "row_cap": GATE_OBSERVATION_ROW_CAP,
+    }
+
+    async def _read(label, stmt):
+        """Run one narrow read. An error lands as UNKNOWN, never as empty."""
+        try:
+            async with get_session_factory()() as db:
+                return list((await db.execute(stmt)).all()), None
+        except Exception as exc:
+            log.warning(f"[gate-observations] {label} unreadable: "
+                        f"{type(exc).__name__}: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+
+    # ── denials, grouped by what actually refused ──────────────────────
+    D = _am.AllocatorDenial
+    rows, err = await _read("denial counts", (
+        select(D.reason_code, D.gate_failed, func.count().label("n"))
+        .where(D.created_at >= since)
+        .group_by(D.reason_code, D.gate_failed)
+        .order_by(func.count().desc())
+        .limit(GATE_OBSERVATION_ROW_CAP)))
+    if rows is None:
+        out["denials"] = {"readable": False, "unreadable": err,
+                          "total": None, "by_reason": None,
+                          "detail": "the denial log could not be read. That is "
+                                    "UNKNOWN, not zero denials."}
+    else:
+        total = sum(r.n for r in rows)
+        out["denials"] = {
+            "readable": True,
+            "total": total,
+            # OBSERVED_ means the gate said no and the worker proceeded
+            # anyway. Counting it with real refusals would overstate what
+            # the gate has actually prevented.
+            "observed_only": sum(r.n for r in rows
+                                 if str(r.reason_code).startswith("OBSERVED_")),
+            "by_reason": [{"reason_code": r.reason_code,
+                           "gate_failed": r.gate_failed, "count": r.n}
+                          for r in rows],
+        }
+
+    rows, err = await _read("denials by branch", (
+        select(D.bot_name, func.count().label("n"))
+        .where(D.created_at >= since)
+        .group_by(D.bot_name).order_by(func.count().desc())
+        .limit(GATE_OBSERVATION_ROW_CAP)))
+    out["denials_by_branch"] = (
+        {"readable": False, "unreadable": err, "branches": None} if rows is None
+        else {"readable": True,
+              "branches": [{"bot_name": r.bot_name, "count": r.n} for r in rows]})
+
+    rows, err = await _read("recent denials", (
+        select(D.created_at, D.bot_name, D.reason_code, D.gate_failed,
+               D.reason_detail, D.candidate_id)
+        .where(D.created_at >= since)
+        .order_by(D.created_at.desc()).limit(limit)))
+    out["recent_denials"] = (
+        {"readable": False, "unreadable": err, "rows": None} if rows is None
+        else {"readable": True,
+              "rows": [{"at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                        "bot_name": r.bot_name, "reason_code": r.reason_code,
+                        "gate_failed": r.gate_failed,
+                        "detail": r.reason_detail,
+                        "candidate_id": r.candidate_id} for r in rows]})
+
+    # ── authority changes: who gained or lost the right to trade ───────
+    A = _am.ExecutionAuthorityEvent
+    rows, err = await _read("authority events", (
+        select(A.created_at, A.bot_name, A.previous_authority, A.new_authority,
+               A.reason_code, A.reconciliation_status)
+        .where(A.created_at >= since)
+        .order_by(A.created_at.desc()).limit(limit)))
+    out["authority_events"] = (
+        {"readable": False, "unreadable": err, "rows": None} if rows is None
+        else {"readable": True,
+              "rows": [{"at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                        "bot_name": r.bot_name,
+                        "from": r.previous_authority, "to": r.new_authority,
+                        "reason_code": r.reason_code,
+                        "reconciliation_status": r.reconciliation_status}
+                       for r in rows]})
+
+    # ── exchange truth failures: the book disagreeing with the venue ───
+    T = _am.ExchangeTruthFailure
+    rows, err = await _read("truth failures", (
+        select(T.reason_code, T.classification, func.count().label("n"))
+        .where(T.created_at >= since)
+        .group_by(T.reason_code, T.classification)
+        .order_by(func.count().desc()).limit(GATE_OBSERVATION_ROW_CAP)))
+    out["truth_failures"] = (
+        {"readable": False, "unreadable": err, "total": None, "by_reason": None}
+        if rows is None else
+        {"readable": True, "total": sum(r.n for r in rows),
+         "by_reason": [{"reason_code": r.reason_code,
+                        "classification": r.classification, "count": r.n}
+                       for r in rows],
+         "note": "a disagreement between the book and the venue. NOT a loss."})
+
+    # ── control state: the materialised permission, as a census ────────
+    C = _am.BranchControlState
+    rows, err = await _read("control state", (
+        select(C.lifecycle_status, C.reconciliation_status, C.execution_enabled,
+               func.count().label("n"))
+        .group_by(C.lifecycle_status, C.reconciliation_status,
+                  C.execution_enabled)
+        .order_by(func.count().desc()).limit(GATE_OBSERVATION_ROW_CAP)))
+    out["control_state"] = (
+        {"readable": False, "unreadable": err, "rows_seeded": None, "census": None}
+        if rows is None else
+        {"readable": True, "rows_seeded": sum(r.n for r in rows),
+         "census": [{"lifecycle_status": r.lifecycle_status,
+                     "reconciliation_status": r.reconciliation_status,
+                     "execution_enabled": r.execution_enabled, "count": r.n}
+                    for r in rows],
+         "note": "execution_enabled is the last answer the gate CACHED, never "
+                 "the authority. The order path recomputes from exchange truth."})
+
+    # ── the one sentence a reader needs ───────────────────────────────
+    _d = out["denials"]
+    if not _d.get("readable"):
+        out["verdict"] = "UNREADABLE"
+        out["detail"] = ("The denial log could not be read, so there is no "
+                         "evidence either way. Do not read this as a quiet "
+                         "window - nothing was measured.")
+    elif _d["total"] == 0:
+        out["verdict"] = "NOTHING_OBSERVED"
+        out["detail"] = (
+            f"The gate recorded no denial in the last {hours:g}h. The tables "
+            f"are readable, so this is a real zero - but a real zero can mean "
+            f"the gate is passing everything OR that the path it is wired "
+            f"into has not run. Check the heartbeat before reading it as "
+            f"evidence that enforcing would cost nothing.")
+    else:
+        out["verdict"] = ("OBSERVED_ONLY" if _mode != "enforce" else "ENFORCING")
+        _obs = _d.get("observed_only") or 0
+        out["detail"] = (
+            f"{_d['total']} denial(s) in {hours:g}h"
+            + (f", {_obs} of them observe-only (the gate said no and the "
+               f"worker proceeded anyway)" if _obs else "")
+            + f". Gate mode is {_mode!r}"
+            + ("; it is binding." if _binding else
+               "; it is NOT binding - nothing here stopped a trade."))
+    return out
+
+
 #: How many rows one summary will count. A day of kill-condition
 #: heartbeats is ~96; this leaves room for a genuinely busy window while
 #: keeping a single narrow read bounded. Past it the summary reports

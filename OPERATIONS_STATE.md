@@ -155,6 +155,61 @@ other half is down $55.
   the grid's own working orders, and ALGO's is a resting *buy* holding cash.
 - `GRID_RECONCILE_MODE` does **not** need setting. Reconcile is armed by
   default.
+- Arming `GRID_ADOPTED_STOP_MODE` would **not** sell "$2,417.34 across three
+  branches, realising −$394.22". That number counted every branch whose
+  drawdown passes its policy stop, and three of the four do not hold the
+  coin they claim. Measured 2026-10-01 15:15Z against `backing.rows`:
+
+  | branch | fires | claimed | backed | really sellable |
+  |---|---|---|---|---|
+  | ZEC-USD | yes | $2,272.62 | 93.85% | **$2,132.94**, −$399.39 real |
+  | BCH-USD | yes (newly) | $171.75 | 44.83% | $0 — `can_be_sold: false` |
+  | ACH-USD | yes | $91.16 | 10.14% | $0 — `can_be_sold: false` |
+  | JASMY-USD | yes | $53.56 | no slices at all | $0 — nothing to sell |
+
+  So the real answer is **one branch**: ZEC, about $2,132.94 of coin,
+  realising roughly −$399.39 — which is 71% of the fleet's entire −$562.05
+  unrealised. The other three are allocation claims with no position behind
+  them. Both sell paths already clamp to the held balance and refuse on an
+  unreadable one (`place_market_sell`, `place_maker_sell`), so arming it
+  cannot send an oversized order — it would simply sell nothing on those
+  three. Still **not armed**: that decision is the owner's.
+
+---
+
+## Not shipped on purpose: `concentration_rotation_worker.py`
+
+A second attempt at the rotation worker was written, wired into
+`main.py`'s lifespan behind `CONCENTRATION_ROTATION_MODE`, and **reverted
+unshipped on 2026-10-01**. Both the module and the startup wiring are out
+of the tree; copies are kept outside the repo only.
+
+It repeats the defect the first one had. `_place_profit_sell()` calls
+`place_maker_sell`, records the order's attribution, and returns. On a
+successful fill the caller does `placed += 1` and writes a log line. It
+never:
+
+- retires or reduces the `CryptoGridSlice` row it just sold
+- decrements the branch's `allocated_usd`
+- invalidates the balance cache (`9d516db`), so the next read is stale
+- records the trade anywhere a P&L reader would find it
+
+Every successful rotation would therefore manufacture exactly the drift
+that already has **8 branches claiming $1,168.59 of coin the wallet does
+not hold**. The branch would keep claiming the sold units, keep trying to
+sell them, and keep failing. `grid_sell_residual`'s own comment names why
+that is self-reinforcing.
+
+It also logs `s['qty']` — what it *asked* to sell — rather than the
+`filled_qty` it got back, so a partial fill reads in the log as a whole one.
+
+The parts that ARE right and worth keeping: the double `is_armed()` check
+(once per pass, once immediately before each order), the final `net_pct
+<= 0` refusal, `MAX_SELLS_PER_PASS`, no buy path, and the decision to
+reuse `place_maker_sell` for its balance clamp rather than build an order
+path. The fix is still the one already written down: hand the slice to the
+grid's existing sell-and-settle path, which is the book of record, instead
+of finishing a parallel one.
 
 ---
 
@@ -163,6 +218,10 @@ other half is down $55.
 1. Read the denial log after a day of observing, before arming the gate.
    Expect `INVENTORY_UNRECONCILED` to dominate; enforcing stops buys on 11
    branches, which is correct and is also less capital deployed.
+   **Now possible.** `GET /api/trading-dashboard/gate-observations` reads it.
+   Until 2026-10-01 nothing could — the gate was wired, the rows were being
+   written, and there was no reader, so the evidence observe mode exists to
+   collect could not inform the decision it exists to inform.
 2. Settle the denominator.
 3. Rebuild the rotation to hand slices to the grid's sell path.
 4. Only then wire `capital_velocity`, in shadow first.
