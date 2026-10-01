@@ -120,6 +120,11 @@ def diagnose() -> dict:
         # yet", which stopped being true the moment both workers were
         # wired. A diagnosis that is stale is worse than no diagnosis: it
         # sent the owner to set a variable that would not have helped.
+        "why_not_email": (
+            None if (email_armed() and recipient()) else
+            (f"Email is not armed: set {EMAIL_MODE_ENV}=send."
+             if not email_armed() else
+             "Email is armed but no recipient resolves - set TRADE_ALERT_EMAIL.")),
         "email_route": {
             "senders_are_wired": True,
             "armed": email_armed(),

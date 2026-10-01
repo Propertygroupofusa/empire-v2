@@ -169,9 +169,29 @@ def price_holdings(coins):
     reasons = {}
     for cur, amt in coins.items():
         px, why = _spot_price(f"{cur}-USD")
+        # A retired ticker is not a worthless coin. Retry under the
+        # venue's current symbol before giving up on the holding.
+        traded_as = resolve_symbol(cur)
+        if px is None and traded_as != cur.upper():
+            px2, why2 = _spot_price(f"{traded_as}-USD")
+            if px2 is not None:
+                px, why = px2, None
+                priced[cur] = {"units": amt, "price": px,
+                               "usd": round(amt * px, 2),
+                               "traded_as": traded_as,
+                               "note": (f"{cur} is this wallet's name for it; the venue "
+                                        f"trades it as {traded_as} since the rename.")}
+                coin_usd += amt * px
+                continue
         if px is None:
             unpriced.append(cur)
-            priced[cur] = {"units": amt, "usd": None, "no_price_because": why}
+            priced[cur] = {"units": amt, "usd": None, "no_price_because": why,
+                           # Delisted and "the request failed" need opposite
+                           # responses: one is permanent and means no exit
+                           # exists on this venue at any price, the other
+                           # clears by itself. They were the same word.
+                           "permanently_unpriceable": bool(
+                               why and "delist" in str(why).lower())}
             reasons[why] = reasons.get(why, 0) + 1
         else:
             value = amt * px
@@ -211,6 +231,33 @@ def price_holdings(coins):
             "coin_usd_readable": readable,
             "unpriced_reasons": reasons,
             "note": note}
+
+
+# TICKERS THE VENUE RENAMED.
+#
+# Coinbase answers "Not allowed for delisted products" for a ticker it has
+# retired, which is indistinguishable from "this coin is worthless" to
+# anything reading only the price. For a RENAME it is actively wrong: the
+# holding is live and sellable under a new symbol.
+#
+# Measured 2026-10-01: the account holds 9.8790564 RNDR, which priced as
+# UNPRICED and displayed as $0.00 while RENDER-USD traded at $1.9173 -
+# $18.94 of real, sellable coin that no level watched and no
+# concentration rule counted, because the ticker changed and nothing told
+# the account.
+#
+# Only one-to-one symbol renames belong here. A merger, a redenomination
+# or any swap that changes the number of units is NOT a rename and must
+# not be aliased - the unit count would carry over wrong.
+TICKER_RENAMES = {
+    "RNDR": "RENDER",   # Render Network, renamed 2026
+}
+
+
+def resolve_symbol(asset: str) -> str:
+    """The symbol the venue trades today for a coin the wallet still calls
+    by its old name. Unknown symbols pass through unchanged."""
+    return TICKER_RENAMES.get((asset or "").upper(), (asset or "").upper())
 
 
 def _spot_price(product_id: str):

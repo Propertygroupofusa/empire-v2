@@ -6107,7 +6107,17 @@ function renderMoneyTrace(d) {
 // unset, which is exactly when an unwatched book most needs looking at.
 // ---------------------------------------------------------------------------
 
-const _wUSD = n => (Number(n) < 0 ? '-$' : '$') + Math.abs(Number(n) || 0)
+// A MISSING NUMBER IS NOT ZERO.
+//
+// This was `Math.abs(Number(n) || 0)`, so null, undefined and NaN all
+// became 0 and printed as "$0.00". On the holdings watch that put $0.00
+// beside 9.8790564 RNDR - a live, sellable holding worth $18.94 that the
+// venue had merely renamed - and the same $0.00 beside coins whose value
+// genuinely cannot be read. An unreadable figure now says so. A real
+// zero still prints as $0.00, because that is a fact and this is not.
+const _wUSD = n => (n === null || n === undefined || !isFinite(Number(n)))
+    ? 'unreadable'
+    : (Number(n) < 0 ? '-$' : '$') + Math.abs(Number(n) || 0)
     .toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const _wPCT = (n, d) => (n == null ? '—' : Number(n).toFixed(d == null ? 2 : d) + '%');
 
@@ -6819,9 +6829,24 @@ function alertRemedy(d, g) {
         return `Email is armed and a credential is present; the next send `
              + `attempt will record what the transport did. No webhook needed.`;
     }
-    return escText((g && g.why_not) || d.channel_note || '')
-         + ` Set <code>` + escText(d.webhook_env || 'ALERT_WEBHOOK_URL')
-         + `</code> and the backlog flushes.`;
+    // NO WEBHOOK IS MENTIONED HERE, EVER.
+    //
+    // This used to fall back to "Set ALERT_WEBHOOK_URL and the backlog
+    // flushes". The account owner read the word WEBHOOK on a trading
+    // dashboard and reasonably asked whether his money was being traded
+    // through something he had never heard of and did not want.
+    //
+    // It never was. ALERT_WEBHOOK_URL is an optional address for
+    // NOTIFICATIONS - alert_sender POSTs a sentence of text to it and
+    // the payload literally carries is_an_alert_not_an_order: true. It
+    // cannot place, size or cancel an order, it has never been set on
+    // this account, and nothing has ever been sent to it. Email is the
+    // delivery route now, so naming a webhook here offers a second way
+    // to do a job that is already done, at the cost of making a
+    // notification setting look like a trading venue.
+    return `Alerts are delivered by email. `
+         + escText((g && g.why_not_email)
+                   || 'The next send attempt will record what the transport did.');
 }
 
 // ---- Advanced charts controller ----
@@ -7019,9 +7044,7 @@ async function loadAlertQueue() {
                  ${alertRemedy(d, g)}
                  <br>Alerts are still being generated and <strong>held</strong> - they are not marked sent,
                  because a queue that reports success with nowhere to send is worse than an empty one.
-                 ${g && g.similar_variables_seen && g.similar_variables_seen.length
-                     ? `<br>Similar variable names visible to this process:
-                        ${escText(g.similar_variables_seen.join(', '))}` : ''}</div>`;
+                 </div>`;
 
         const SEV = { CRITICAL: 'var(--red)', HIGH: 'var(--amber, #f0b429)', INFO: 'var(--text-dim)' };
         const rows = (d.alerts || []).map(a => `
