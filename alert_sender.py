@@ -312,62 +312,102 @@ def send_digest(alerts: list, *, force: bool = False) -> tuple:
 
 
 def send_email(subject: str, body: str) -> tuple:
-    """(ok, error). One plain message through the account that already
-    exists. Never raises, and never returns the exception TEXT - an SMTP
-    error can echo the conversation, login line included."""
-    if not email_configured():
-        missing = [v for v in (GMAIL_USER_ENV, GMAIL_PASS_ENV)
-                   if not (os.getenv(v) or "").strip()]
-        return False, ("email not configured: "
-                       + (", ".join(missing) or "no recipient resolved")
-                       + " (names only - no value is ever read out here)")
-    import smtplib
-    from email.mime.text import MIMEText
-    sender = os.getenv(GMAIL_USER_ENV, "").strip()
-    to = recipient()
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = sender
-    msg["To"] = to
-    raw = msg.as_string()
-    secret = os.getenv(GMAIL_PASS_ENV, "")
+    """(ok, error). Delivers by whatever route this host actually permits.
 
-    # TWO PORTS, BECAUSE ONE OF THEM IS OFTEN BLOCKED.
-    #
-    # Measured live 2026-10-01 00:42Z: the first real digest attempt came
-    # back SMTPServerDisconnected against smtp.gmail.com:465, twice. That
-    # is the classic shape of a host that drops outbound SMTPS - the
-    # connection opens and is closed before the banner. 587 with STARTTLS
-    # is the usual survivor, and costs nothing to try second.
-    #
-    # Every error is collected and reported together. Reporting only the
-    # last one would say "587 failed" while hiding that 465 was blocked,
-    # which is the fact that actually tells you what to change.
-    attempts = []
-    for port, use_ssl in ((465, True), (587, False)):
+    MEASURED ON THIS HOST 2026-10-01 00:5xZ, from the queue's own rows:
+
+        SMTP failed on every port
+        (465: SMTPServerDisconnected, 587: SMTPServerDisconnected)
+
+    Railway blocks outbound SMTP. Both the implicit-SSL port and the
+    STARTTLS port are dropped before the banner, so NO amount of port
+    juggling fixes it and adding a third port would be wasted work. The
+    same bare-465 pattern is used by daily_brief.py, prop_bot.py and
+    notary_bot.py, which means every one of those has been failing on
+    this host too - quietly, because each one logs a warning and returns.
+
+    HTTPS works here; the app talks to Coinbase continuously. So HTTPS
+    transports are tried FIRST and SMTP is kept only as a last resort, so
+    this code still works unchanged on a host that permits it.
+
+    Every transport's failure is reported together. "sendgrid: no key,
+    smtp: blocked" tells the owner which ONE variable would fix it;
+    reporting only the last failure hides that.
+
+    Never raises, and never returns an exception's TEXT - an SMTP error
+    can echo the conversation, login line included.
+    """
+    to = recipient()
+    if not to:
+        return False, "no recipient resolved (TRADE_ALERT_EMAIL / DAILY_BRIEF_EMAIL / GMAIL_EMAIL)"
+
+    tried = []
+
+    # --- 1. SendGrid over HTTPS. Raw REST, deliberately NOT the sendgrid
+    # package: it is in requirements.txt but importing it is one more way
+    # to fail at runtime, and the v3 send endpoint is a single POST.
+    key = (os.getenv("SENDGRID_API_KEY") or "").strip()
+    sender = (os.getenv(GMAIL_USER_ENV) or "").strip() or to
+    if key:
         try:
-            if use_ssl:
-                server = smtplib.SMTP_SSL("smtp.gmail.com", port, timeout=30)
-            else:
-                server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
-            try:
-                if not use_ssl:
-                    server.ehlo()
-                    server.starttls()
-                    server.ehlo()
-                server.login(sender, secret)
-                server.sendmail(sender, to, raw)
-            finally:
-                try:
-                    server.quit()
-                except Exception:
-                    pass
-            if attempts:
-                log.info(f"[alerts] port {port} delivered after "
-                         f"{len(attempts)} earlier failure(s)")
-            return True, None
+            import urllib.request
+            payload = json.dumps({
+                "personalizations": [{"to": [{"email": to}]}],
+                "from": {"email": sender},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": body}],
+            }).encode()
+            req = urllib.request.Request(
+                "https://api.sendgrid.com/v3/mail/send", data=payload,
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=30) as r:
+                if 200 <= r.status < 300:
+                    return True, None
+                tried.append(f"sendgrid: HTTP {r.status}")
         except Exception as e:
-            # Type only. SMTP error text can echo the conversation,
-            # login line included.
-            attempts.append(f"{port}: {type(e).__name__}")
-    return False, "SMTP failed on every port (" + ", ".join(attempts) + ")"
+            tried.append(f"sendgrid: {type(e).__name__}")
+    else:
+        tried.append("sendgrid: no SENDGRID_API_KEY")
+
+    # --- 2. SMTP, last, because it is blocked here. Kept so this file
+    # still works on a host that allows it.
+    secret = os.getenv(GMAIL_PASS_ENV, "")
+    if sender and secret:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = subject
+        msg["From"] = sender
+        msg["To"] = to
+        raw = msg.as_string()
+        for port, use_ssl in ((465, True), (587, False)):
+            try:
+                if use_ssl:
+                    server = smtplib.SMTP_SSL("smtp.gmail.com", port, timeout=30)
+                else:
+                    server = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
+                try:
+                    if not use_ssl:
+                        server.ehlo()
+                        server.starttls()
+                        server.ehlo()
+                    server.login(sender, secret)
+                    server.sendmail(sender, to, raw)
+                finally:
+                    try:
+                        server.quit()
+                    except Exception:
+                        pass
+                if tried:
+                    log.info(f"[mail] smtp:{port} delivered after "
+                             f"{len(tried)} earlier failure(s)")
+                return True, None
+            except Exception as e:
+                tried.append(f"smtp:{port}: {type(e).__name__}")
+    else:
+        tried.append("smtp: no GMAIL_EMAIL/GMAIL_PASSWORD")
+
+    return False, ("no transport delivered (" + ", ".join(tried) + "). "
+                   "SMTP is blocked outbound on this host; an HTTPS route "
+                   "is the one that can work here.")

@@ -92,13 +92,23 @@ def test_off_by_default():
         _restore(old)
 
 
-def test_force_bypasses_the_mode_but_not_the_credentials():
-    old = _env(TRADE_EMAIL_MODE="off", GMAIL_EMAIL="", GMAIL_PASSWORD="")
+def test_force_bypasses_the_mode_but_not_the_transport():
+    """force skips the arming switch, never the need for a real route.
+
+    The wording of the failure is deliberately NOT asserted here: when
+    the transport chain gained an HTTPS leg, "not configured" became
+    "no recipient resolved" / "no transport delivered", and an assertion
+    pinned to the old sentence failed against correct code. What matters
+    is that force got PAST the mode gate and still could not invent a
+    delivery route.
+    """
+    old = _env(TRADE_EMAIL_MODE="off", GMAIL_EMAIL="", GMAIL_PASSWORD="",
+               SENDGRID_API_KEY="", TRADE_ALERT_EMAIL="", DAILY_BRIEF_EMAIL="")
     try:
         ok, err = tn.send([T(1.0)], force=True)
-        assert ok is False
-        assert "TRADE_EMAIL_MODE" not in err, "force must pass the mode gate"
-        assert "not configured" in err
+        assert ok is False, "it claimed success with no transport at all"
+        assert tn.MODE_ENV not in err, "force must pass the mode gate"
+        assert err, "a failure must say something"
     finally:
         _restore(old)
 

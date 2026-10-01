@@ -122,31 +122,80 @@ def test_a_missing_credential_is_named_never_valued():
         _restore(old)
 
 
-def test_it_tries_both_ports_before_giving_up():
-    """465 came back SMTPServerDisconnected twice on the first real send.
+def _send_email_src():
+    src = open("alert_sender.py").read()
+    return src[src.index("def send_email"):]
 
-    That is the shape of a host dropping outbound SMTPS. 587 with
-    STARTTLS is the usual survivor and costs nothing to try second.
+
+def test_https_is_actually_attempted_when_a_key_exists():
+    """Behavioural, not a source-text check.
+
+    The first version of this only asserted that "api.sendgrid.com"
+    appeared before "smtplib" in the file. Hardcoding the key to "" -
+    disabling the whole HTTPS leg - left that text in place and the test
+    passed. Reading the source is not the same as running it.
     """
-    src = open("alert_sender.py").read()
-    i = src.index("def send_email")
-    body = src[i:]
-    assert "((465, True), (587, False))" in body, "only one port is attempted"
+    import urllib.request
+    calls = []
+
+    class _Resp:
+        status = 202
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    real = urllib.request.urlopen
+    old = _env(SENDGRID_API_KEY="k-test", GMAIL_EMAIL="from@x.z",
+               TRADE_ALERT_EMAIL="to@x.z", GMAIL_PASSWORD="")
+    urllib.request.urlopen = lambda req, **kw: (calls.append(req.full_url), _Resp())[1]
+    try:
+        ok, err = a.send_email("subj", "body")
+        assert ok is True, f"HTTPS leg did not deliver: {err}"
+        assert calls and "api.sendgrid.com" in calls[0], calls
+    finally:
+        urllib.request.urlopen = real
+        _restore(old)
+
+
+def test_https_is_tried_before_smtp():
+    """MEASURED: this host blocks outbound SMTP on BOTH ports.
+
+        no transport delivered (465: SMTPServerDisconnected,
+                                587: SMTPServerDisconnected)
+
+    HTTPS demonstrably works here - the app talks to Coinbase all day -
+    so the order matters: the route that can work is attempted first.
+    """
+    body = _send_email_src()
+    assert body.index("api.sendgrid.com") < body.index("smtplib"), \
+        "SMTP is attempted before HTTPS on a host where SMTP is blocked"
+
+
+def test_sendgrid_does_not_depend_on_the_package():
+    # sendgrid is in requirements.txt and is NOT importable here. A raw
+    # POST to the v3 endpoint has one less way to fail at runtime.
+    body = _send_email_src()
+    assert "import urllib.request" in body and "v3/mail/send" in body
+    assert "from sendgrid" not in body and "import sendgrid" not in body
+
+
+def test_smtp_still_tries_both_ports():
+    body = _send_email_src()
+    assert "((465, True), (587, False))" in body
     assert "starttls()" in body, "587 needs STARTTLS, not implicit SSL"
-    # a success on the first port must not then try the second
-    assert body.index("return True, None") < body.index("attempts.append"), \
-        "it would keep connecting after a successful send"
 
 
-def test_every_port_failure_is_reported_not_just_the_last():
-    # Reporting only the last would say "587 failed" while hiding that
-    # 465 was blocked - and which port was blocked is the fact that tells
-    # you what to change.
-    src = open("alert_sender.py").read()
-    i = src.index("def send_email")
-    body = src[i:]
-    assert 'SMTP failed on every port' in body
-    assert '", ".join(attempts)' in body
+def test_every_transport_failure_is_reported_not_just_the_last():
+    # "sendgrid: no key, smtp: blocked" tells the owner which ONE
+    # variable fixes it. Only the last failure hides that.
+    body = _send_email_src()
+    assert "no transport delivered" in body
+    assert '", ".join(tried)' in body
+    assert "sendgrid: no SENDGRID_API_KEY" in body
+
+
+def test_a_missing_recipient_fails_before_any_transport():
+    body = _send_email_src()
+    assert body.index("no recipient resolved") < body.index("api.sendgrid.com")
 
 
 def test_a_send_failure_reports_the_type_only():

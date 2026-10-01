@@ -662,22 +662,24 @@ TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "delfarrell591@gmail.com")
 
 
 def send_trade_alert(subject: str, body: str):
-    sender_email = os.getenv("GMAIL_EMAIL", "")
-    sender_password = os.getenv("GMAIL_PASSWORD", "")
-    if not sender_email or not sender_password:
-        log.info(f"(trade alert email skipped - GMAIL_EMAIL/GMAIL_PASSWORD not set) {subject}")
-        return
+    """One shared transport, so this stops failing silently.
+
+    This used to open smtp.gmail.com:465 directly. Measured on this host
+    2026-10-01: Railway blocks outbound SMTP on BOTH 465 and 587, so
+    every send here has been failing and saying so only in a log line
+    nobody reads. alert_sender.send_email tries HTTPS first - which
+    demonstrably works, the app talks to Coinbase all day - and names
+    every transport it tried when none of them land.
+    """
     try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = sender_email
-        msg["To"] = TRADE_ALERT_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, TRADE_ALERT_EMAIL, msg.as_string())
-        log.info(f"📧 Trade alert emailed to {TRADE_ALERT_EMAIL}")
+        import alert_sender
+        ok, err = alert_sender.send_email(subject, body)
     except Exception as e:
-        log.warning(f"Trade alert email failed: {e}")
+        ok, err = False, f"{type(e).__name__}"
+    if ok:
+        log.info(f"📧 Trade alert emailed: {subject}")
+    else:
+        log.warning(f"Trade alert NOT delivered ({err}): {subject}")
 
 
 _price_rsi_last_failure = {}

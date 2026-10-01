@@ -157,24 +157,23 @@ def _generate_summary(trading: dict, notary: dict, support: dict) -> str:
 
 
 def _send_brief_email(subject: str, body: str):
-    """Same GMAIL_EMAIL/GMAIL_PASSWORD SMTP pattern as prop_bot.py and
-    notary_bot.py - no-ops quietly if creds aren't set."""
-    sender_email = os.getenv("GMAIL_EMAIL", "")
-    sender_password = os.getenv("GMAIL_PASSWORD", "")
-    if not sender_email or not sender_password:
-        log.info(f"(daily brief email skipped - GMAIL_EMAIL/GMAIL_PASSWORD not set) {subject}")
-        return
+    """One shared transport, so this stops failing silently.
+
+    This used to open smtp.gmail.com:465 directly. Measured on this host
+    2026-10-01: Railway blocks outbound SMTP on BOTH 465 and 587, so the
+    daily brief has not been arriving from this app at all - and the only
+    sign was a log warning. alert_sender.send_email tries HTTPS first and
+    names every transport it tried when none of them land.
+    """
     try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = sender_email
-        msg["To"] = BRIEF_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, BRIEF_EMAIL, msg.as_string())
-        log.info(f"📧 Daily brief emailed to {BRIEF_EMAIL}")
+        import alert_sender
+        ok, err = alert_sender.send_email(subject, body)
     except Exception as e:
-        log.warning(f"Daily brief email failed: {e}")
+        ok, err = False, f"{type(e).__name__}"
+    if ok:
+        log.info(f"📧 Daily brief emailed: {subject}")
+    else:
+        log.warning(f"Daily brief NOT delivered ({err}): {subject}")
 
 
 async def generate_and_send_brief():
