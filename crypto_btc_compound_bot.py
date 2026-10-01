@@ -1657,6 +1657,21 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
                                          "decision": _dust.DUST,
                                          "reason": "DUST_COOLDOWN"}
         return None
+    # NOTHING IS ARMED YET, AND THREE AWAITS ARE ABOUT TO HAPPEN. The check
+    # above passed, the real verdict is computed at the bottom of this
+    # function, and between here and there this coroutine awaits the balance,
+    # the product rules and the order book. A second attempt on the same
+    # product that starts inside that window passes the same check and spends
+    # its own three Coinbase calls.
+    #
+    # Live, over 15.2 hours on a 900s cooldown, the gaps between REAL venue
+    # attempts were: QNT median 310s shortest 8s, PEPE median 198s, TIA
+    # median 55s. An 8-second gap is not an expiry.
+    #
+    # The hold is provisional and is overwritten by the real verdict moments
+    # later. It asserts nothing about inventory - it only stops the SECOND
+    # caller inside the gap from paying for the same answer.
+    _dust.hold(product_id)
     real_balance, _bal_err = await get_asset_balance(session, base_currency)
     if real_balance is None:
         # Same rule, no exception. This is the opportunistic maker path and

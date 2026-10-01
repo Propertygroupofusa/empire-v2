@@ -79,22 +79,98 @@ def clear(product_id) -> bool:
     return _armed.pop(str(product_id), None) is not None
 
 
+# The planner's verdict for "the decision could not be made" - a gap, not a
+# fact. Imported by name rather than by value so this file states the one
+# constant it needs without importing the planner.
+REFUSED = "REFUSED"
+EXECUTE = "EXECUTE"
+
+
 def note_dust(product_id, decision, *, available_units=None, reason=None,
               now=None) -> bool:
-    """Arm the cooldown, but ONLY for a computed DUST decision.
+    """Arm, clear, or leave alone - one of three, chosen by the decision.
 
-    Returns True if a cooldown is now armed. Anything that is not exactly
-    DUST clears instead of arming: an EXECUTE obviously, and equally an
-    unreadable anything, which must never buy fifteen minutes of silence.
+    Returns True if a cooldown is now armed.
+
+        DUST      arm. The venue cannot express this holding as an order.
+        EXECUTE   clear. It IS sellable, so the dust verdict is wrong now.
+        anything  LEAVE IT ALONE. A REFUSED decision means the planner could
+        else      not decide - an unreadable balance, missing rules, no
+                  price. That is a GAP, and a gap is not a fact about
+                  inventory IN EITHER DIRECTION.
+
+    THE THIRD CASE IS THE FIX, 2026-10-01. This used to clear on anything
+    that was not DUST, REFUSED included. So one transient unreadable price
+    wiped a cooldown that had been armed on a STRUCTURAL fact - QNT holds
+    0.00097323 units against a venue minimum of 0.001 - and the next 30s
+    cycle spent three more Coinbase calls rediscovering it.
+
+    Measured over 15.2 hours on the live account, gaps between REAL venue
+    attempts on a 900s cooldown:
+
+        QNT   median 310s, shortest 8s, 73 of 120 gaps under 800s
+        PEPE  median 198s, shortest 12s
+        TIA   median  55s, shortest 16s
+
+    An 8-second gap is not an expiry. The docstring at the top of this file
+    already said a gap must never ARM a cooldown; it is just as true that a
+    gap must not DISARM one. The structural fact that armed it has not
+    changed just because a read failed.
     """
     pid = str(product_id)
-    if decision != DUST:
+    if decision == DUST:
+        _armed[pid] = {"at": float(now if now is not None else time.time()),
+                       "available_units": available_units,
+                       "reason": reason}
+        return True
+    if decision == EXECUTE:
         clear(pid)
         return False
+    # REFUSED, or any verdict this file does not recognise. Unknown is not
+    # news. Whatever was armed stays armed and expires on its own clock.
+    return pid in _armed
+
+
+# A HOLD IS NOT A COOLDOWN, AND MUST NOT LAST LIKE ONE.
+#
+# The provisional hold below exists to cover the few seconds between the
+# check and the verdict. If it inherited the full 900s window, a transient
+# unreadable balance - which returns early, before any verdict - would buy
+# fifteen minutes of deliberate blindness on a product that might be
+# perfectly sellable. That is precisely what this module's opening docstring
+# forbids, and writing it was a real step backwards caught before shipping.
+#
+# So a provisional record expires on its own short clock: long enough to
+# cover three awaits against a rate-limited venue, far too short to hide a
+# real holding.
+HOLD_SECONDS = float(os.getenv("GRID_DUST_HOLD_SECONDS", "45"))
+
+
+def hold(product_id, *, now=None) -> None:
+    """Mark an attempt as IN FLIGHT, before the venue calls are spent.
+
+    WHY THIS EXISTS. skip_reason() is checked at the top of the sell path and
+    note_dust() arms at the bottom, with three awaits in between - the
+    balance, the product rules, and the order book. Any second attempt on the
+    same product that starts inside that window passes the check, because
+    nothing has been armed yet, and spends its own three calls.
+
+    A hold is a provisional cooldown: it makes the window self-limiting
+    without asserting anything about inventory. The real verdict overwrites
+    it moments later - DUST re-arms with the true figures, EXECUTE clears it.
+    Its only job is that the SECOND caller inside the gap skips.
+
+    Deliberately not a lock. If the attempt dies between hold() and the
+    verdict, this expires on the ordinary cooldown clock rather than wedging
+    the product shut forever.
+    """
+    pid = str(product_id)
+    if pid in _armed:
+        return                      # a real verdict already stands; leave it
     _armed[pid] = {"at": float(now if now is not None else time.time()),
-                   "available_units": available_units,
-                   "reason": reason}
-    return True
+                   "available_units": None,
+                   "reason": "an attempt is already in flight for this product",
+                   "provisional": True}
 
 
 def skip_reason(product_id, *, now=None, cooldown=None):
@@ -108,7 +184,12 @@ def skip_reason(product_id, *, now=None, cooldown=None):
     rec = _armed.get(pid)
     if rec is None:
         return None
-    window = float(cooldown if cooldown is not None else COOLDOWN_SECONDS)
+    # A provisional hold gets the SHORT window. Only a real, computed DUST
+    # verdict earns the full cooldown.
+    if rec.get("provisional"):
+        window = HOLD_SECONDS
+    else:
+        window = float(cooldown if cooldown is not None else COOLDOWN_SECONDS)
     if window <= 0:                      # a zero or negative window disables it
         clear(pid)
         return None
