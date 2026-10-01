@@ -10,19 +10,42 @@
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    /* Coinbase Advanced Trading palette. True black ground, hairline
+       panel outlines, one blue accent. Every existing rule already reads
+       these tokens (658 var() uses against 22 hardcoded values), so the
+       whole page follows from this block. */
     :root {
-        --bg: #f3f5f9;
-        --panel: #ffffff;
-        --border: #e3e7ef;
-        --text: #16233f;
-        --text-dim: #6b7488;
-        --green: #009845;
-        --green-bg: #e8f6ee;
-        --red: #d6455a;
-        --red-bg: #fbe9ec;
-        --gold: #c9860a;
-        --gold-bg: #fbf1de;
-        --navy: #1f3864;
+        --bg: #000000;
+        --panel: #0a0b0d;
+        --panel-2: #121416;
+        --border: #2c2f36;
+        --border-bright: #3f444d;
+        --text: #ffffff;
+        --text-dim: #8a919e;
+        --blue: #0052ff;
+        --blue-dim: #1d4ed8;
+        --green: #00c276;
+        --green-bg: rgba(0,194,118,0.10);
+        --red: #ff5252;
+        --red-bg: rgba(255,82,82,0.10);
+        --gold: #f0b429;
+        --gold-bg: rgba(240,180,41,0.10);
+        --amber: #f0b429;
+        --navy: #0052ff;
+        --shadow: none;
+        --radius: 12px;
+    }
+    /* The light theme is kept reachable rather than deleted, so the
+       change is one attribute to undo if the dark read is worse on a
+       phone in daylight. */
+    :root[data-theme="light"] {
+        --bg: #f3f5f9;  --panel: #ffffff;  --panel-2: #f7f9fc;
+        --border: #e3e7ef;  --border-bright: #cbd2e0;
+        --text: #16233f;  --text-dim: #6b7488;
+        --green: #009845; --green-bg: #e8f6ee;
+        --red: #d6455a;   --red-bg: #fbe9ec;
+        --gold: #c9860a;  --gold-bg: #fbf1de;  --amber: #c9860a;
+        --navy: #1f3864;  --blue: #1f3864;
         --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
     }
 
@@ -257,6 +280,65 @@
         display: inline-block;
     }
 
+    /* ---- Advanced charts: hairline-outlined cards on a black ground ---- */
+    #adv-charts-panel { background: var(--bg); border-color: var(--border); }
+    .adv-controls {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+        margin: 14px 0 12px;
+    }
+    .adv-select {
+        background: var(--panel); color: var(--text);
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 7px 11px; font-size: 0.86em; font-weight: 600;
+        font-family: inherit; min-width: 9.5em;
+    }
+    .adv-gran { display: flex; gap: 0; border: 1px solid var(--border);
+                border-radius: 8px; overflow: hidden; }
+    .adv-gran button {
+        background: var(--panel); color: var(--text-dim); border: 0;
+        border-right: 1px solid var(--border);
+        padding: 7px 12px; font-size: 0.8em; font-weight: 600;
+        font-family: inherit; cursor: pointer;
+    }
+    .adv-gran button:last-child { border-right: 0; }
+    .adv-gran button[aria-pressed="true"] { background: var(--blue); color: #fff; }
+    .adv-gran button:focus-visible, .adv-select:focus-visible {
+        outline: 2px solid var(--blue); outline-offset: 1px;
+    }
+    .adv-last { margin-left: auto; font-size: 0.82em; color: var(--text-dim);
+                font-variant-numeric: tabular-nums; }
+    .adv-last .px { color: var(--text); font-weight: 700; font-size: 1.15em; }
+
+    /* One column on a phone; price spans both columns above the two
+       indicator cards on anything wider. */
+    .adv-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 860px) {
+        .adv-grid { grid-template-columns: 1fr 1fr; }
+        .adv-card-price { grid-column: 1 / -1; }
+    }
+    .adv-card {
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: var(--radius, 12px); padding: 12px 14px 10px;
+        min-width: 0;   /* so a canvas cannot push the grid wider than the page */
+    }
+    .adv-card-head {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; flex-wrap: wrap; margin-bottom: 8px;
+    }
+    .adv-card-title { font-size: 0.78em; font-weight: 700; color: var(--text);
+                      letter-spacing: 0.06em; text-transform: uppercase; }
+    .adv-legend { font-size: 0.72em; color: var(--text-dim);
+                  display: inline-flex; align-items: center; gap: 6px;
+                  flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+    .adv-legend .sw { width: 10px; height: 2.5px; border-radius: 2px;
+                      display: inline-block; margin-right: 1px; }
+    .adv-card canvas { width: 100%; display: block; }
+    .adv-note { font-size: 0.72em; color: var(--text-dim); line-height: 1.5;
+                margin-top: 8px; }
+    .adv-error { margin-top: 10px; font-size: 0.8em; color: var(--red);
+                 border: 1px solid var(--red); border-radius: 8px;
+                 padding: 9px 11px; background: var(--red-bg); }
+
     .panel {
         background: var(--panel);
         border: 1px solid var(--border);
@@ -288,7 +370,7 @@
     .combined-projection .years { font-weight: 700; color: var(--navy); }
     .combined-observations { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
     .obs-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; font-size: 0.83em; line-height: 1.4; }
-    .obs-row.warn { background: #fff4e8; border: 1px solid #f3d9b3; color: var(--text); }
+    .obs-row.warn { background: var(--gold-bg); border: 1px solid var(--gold); color: var(--text); }
     .obs-row.info { background: #eef2fa; border: 1px solid #cdd8ee; color: var(--text); }
     .obs-row.good { background: var(--green-bg); border: 1px solid #b7e4c7; color: var(--text); }
     .obs-row .obs-icon { flex-shrink: 0; }
@@ -414,7 +496,7 @@
     .node-position {
         margin-top: 10px;
         padding: 7px 9px;
-        background: #f7f9fc;
+        background: var(--panel-2);
         border-radius: 6px;
         border-left: 3px solid var(--green);
         font-size: 0.74em;
@@ -664,7 +746,7 @@
     .mode-toggle { display: flex; flex-direction: column; gap: 8px; }
     .mode-btn {
         font-family: inherit; text-align: left; padding: 10px 12px; border-radius: 8px;
-        border: 1.5px solid var(--border); background: #fff; color: var(--text);
+        border: 1.5px solid var(--border); background: var(--panel-2); color: var(--text);
         cursor: pointer; font-size: 0.88em; font-weight: 600;
         min-height: 40px;
         display: flex;
@@ -681,7 +763,7 @@
     .branch-pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
     .branch-pick-btn {
         font-family: inherit; text-align: left; padding: 9px 12px; border-radius: 8px;
-        border: 1.5px solid var(--border); background: #fff; color: var(--text);
+        border: 1.5px solid var(--border); background: var(--panel-2); color: var(--text);
         cursor: pointer; font-size: 0.85em;
         min-height: 40px;
         display: flex;
@@ -707,7 +789,7 @@
     }
     .modal-btn-secondary {
         font-family: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
-        background: #fff; color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
+        background: var(--panel-2); color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
         min-height: 40px;
         display: flex;
         align-items: center;
@@ -744,7 +826,7 @@
         font-weight: 600;
         text-align: center;
         color: var(--text-dim);
-        background: #f4f5f8;
+        background: var(--panel-2);
         border: 1px solid var(--border);
         box-sizing: border-box;
     }
@@ -1046,6 +1128,68 @@
             <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit()" disabled title="Loading...">🔓 Unlock</button>
         </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
+    </div>
+
+    <!-- ================= ADVANCED CHARTS =================
+         Candlesticks + SMA/EMA overlay, RSI and MACD, in the Coinbase
+         Advanced Trading layout.
+
+         Data comes STRAIGHT FROM COINBASE in the browser
+         (api.exchange.coinbase.com/products/{id}/candles, which answers
+         with access-control-allow-origin: *). Deliberately not routed
+         through this app: a chart is a read, and putting it on the
+         trading process would let a redraw loop add load to the same
+         event loop that places orders. No library is loaded either - the
+         drawing is ~200 lines of canvas against a CSP that only admits a
+         short list of CDNs.
+
+         These indicators DESCRIBE price. They do not feed the grid, and
+         nothing here places, sizes, or cancels an order. -->
+    <div class="panel" id="adv-charts-panel">
+        <div class="panel-title">📈 Advanced charts</div>
+        <div class="panel-sub">Candlesticks with a 50-period SMA and EMA, RSI(14), and MACD(12,26,9) — read straight from Coinbase's public candles. This panel is read-only: it describes price, it does not drive the grid and it places no orders.</div>
+
+        <div class="adv-controls">
+            <select id="adv-product" class="adv-select" aria-label="Trading pair"></select>
+            <div class="adv-gran" id="adv-gran" role="group" aria-label="Candle size"></div>
+            <div class="adv-last" id="adv-last"></div>
+        </div>
+
+        <div class="adv-grid">
+            <div class="adv-card adv-card-price">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">Price</span>
+                    <span class="adv-legend">
+                        <i class="sw" style="background:var(--text)"></i>Candles
+                        <i class="sw" style="background:var(--blue)"></i>SMA 50
+                        <i class="sw" style="background:var(--gold)"></i>EMA 50
+                    </span>
+                </div>
+                <canvas id="adv-price" height="300"></canvas>
+            </div>
+
+            <div class="adv-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">RSI 14</span>
+                    <span class="adv-legend" id="adv-rsi-read"></span>
+                </div>
+                <canvas id="adv-rsi" height="150"></canvas>
+                <div class="adv-note">Above 70 is often read as overbought, below 30 as oversold. Neither is an instruction — it says momentum may be slowing, not that it has turned.</div>
+            </div>
+
+            <div class="adv-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">MACD 12 / 26 / 9</span>
+                    <span class="adv-legend">
+                        <i class="sw" style="background:var(--blue)"></i>MACD
+                        <i class="sw" style="background:var(--gold)"></i>Signal
+                    </span>
+                </div>
+                <canvas id="adv-macd" height="150"></canvas>
+                <div class="adv-note">The histogram is the gap between the two lines. MACD crossing up through the signal is read as bullish, down as bearish; the wider the gap, the stronger the reading.</div>
+            </div>
+        </div>
+        <div id="adv-error" class="adv-error" hidden></div>
     </div>
 
     <div class="panel" id="combined-progress-panel">
@@ -1780,6 +1924,16 @@
         </div>
     </div>
 </div>
+
+<!-- Indicator math for the Advanced Charts panel. Served from
+
+     /static so the browser runs the exact file that
+
+     test_advanced_charts.js drives - an inlined second copy
+
+     would drift from the tested one without anything failing. -->
+
+<script src="/static/advanced_charts.js"></script>
 
 <script>
 const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
@@ -6558,6 +6712,119 @@ function alertRemedy(d, g) {
          + `</code> and the backlog flushes.`;
 }
 
+// ---- Advanced charts controller ----
+// The indicator math lives in /static/advanced_charts.js, loaded above,
+// so the browser runs the SAME file test_advanced_charts.js drives. A
+// second inlined copy would drift from the tested one silently.
+const ADV_DEFAULT_PRODUCTS = ['BTC-USD','ETH-USD','SOL-USD','LINK-USD',
+                              'HBAR-USD','BCH-USD','TON-USD','XRP-USD'];
+const ADV_GRANS = [['1H', 3600], ['6H', 21600], ['1D', 86400]];
+let advProduct = null, advGran = 3600, advTimer = null;
+
+function advSetError(msg) {
+    const el = document.getElementById('adv-error');
+    if (!el) return;
+    if (!msg) { el.hidden = true; el.textContent = ''; return; }
+    el.hidden = false;
+    el.textContent = msg;
+}
+
+// The coins the fleet actually holds come first, because those are the
+// ones he is deciding about. The fixed list is a fallback, not the
+// source of truth - if /grid-status is unreachable the panel still draws
+// rather than showing an empty selector.
+async function advProducts() {
+    try {
+        const d = await apiGet('/grid-status');
+        const live = [...new Set((d.branches || [])
+            .map(b => b.product_id).filter(Boolean))].sort();
+        if (live.length) return live;
+    } catch (e) { /* fall through to the fixed list */ }
+    return ADV_DEFAULT_PRODUCTS;
+}
+
+async function advFetchCandles(product, gran) {
+    const url = 'https://api.exchange.coinbase.com/products/'
+              + encodeURIComponent(product) + '/candles?granularity=' + gran;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('Coinbase answered HTTP ' + r.status);
+    const rows = await r.json();
+    const candles = ADV.parseCandles(rows);
+    // An empty answer is NOT a flat market. Say so rather than drawing a
+    // blank chart that reads as "nothing is happening".
+    if (!candles.length) throw new Error('no candles came back for ' + product);
+    return candles;
+}
+
+async function advDraw() {
+    if (!advProduct) return;
+    try {
+        const candles = await advFetchCandles(advProduct, advGran);
+        advSetError(null);
+        ADV.drawPrice(document.getElementById('adv-price'), candles);
+        const r = ADV.drawRsi(document.getElementById('adv-rsi'), candles);
+        ADV.drawMacd(document.getElementById('adv-macd'), candles);
+
+        const last = candles[candles.length - 1];
+        const first = candles[0];
+        const chg = first.close ? (last.close - first.close) / first.close * 100 : 0;
+        const col = chg >= 0 ? 'var(--green)' : 'var(--red)';
+        const el = document.getElementById('adv-last');
+        if (el) el.innerHTML = `<span class="px">${ADV.money(last.close)}</span>`
+            + ` <span style="color:${col}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`
+            + ` <span style="opacity:.7">over ${candles.length} candles</span>`;
+        const rr = document.getElementById('adv-rsi-read');
+        if (rr) {
+            // State the reading and what it is, never what to do with it.
+            const tag = (r === null || r === undefined || !isFinite(r)) ? ''
+                : (r >= 70 ? ' · overbought zone'
+                   : r <= 30 ? ' · oversold zone' : ' · mid-range');
+            rr.textContent = (r === null || r === undefined || !isFinite(r))
+                ? 'not enough candles yet' : r.toFixed(1) + tag;
+        }
+    } catch (e) {
+        // Say which coin and why. A blank panel with no message is the
+        // thing that got read as "flat" before.
+        advSetError('Could not draw ' + advProduct + ': ' + e.message
+                    + '. The charts read Coinbase directly from this browser, '
+                    + 'so this does not affect the bots.');
+    }
+}
+
+async function initAdvancedCharts() {
+    const sel = document.getElementById('adv-product');
+    const gw = document.getElementById('adv-gran');
+    if (!sel || !gw || typeof ADV === 'undefined') return;
+
+    const products = await advProducts();
+    advProduct = products.includes('BTC-USD') ? 'BTC-USD' : products[0];
+    sel.innerHTML = products.map(p =>
+        `<option value="${p}"${p === advProduct ? ' selected' : ''}>${p.replace('-USD','')}/USD</option>`).join('');
+    sel.addEventListener('change', () => { advProduct = sel.value; advDraw(); });
+
+    gw.innerHTML = ADV_GRANS.map(([label, secs]) =>
+        `<button type="button" data-g="${secs}" aria-pressed="${secs === advGran}">${label}</button>`).join('');
+    gw.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-g]');
+        if (!b) return;
+        advGran = parseInt(b.dataset.g, 10);
+        [...gw.querySelectorAll('button')].forEach(x =>
+            x.setAttribute('aria-pressed', String(parseInt(x.dataset.g, 10) === advGran)));
+        advDraw();
+    });
+
+    advDraw();
+    // Canvas does not reflow on its own, so a rotate or resize has to
+    // redraw or the chart stays at the old width, stretched.
+    let rt = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(rt);
+        rt = setTimeout(advDraw, 180);
+    });
+    if (advTimer) clearInterval(advTimer);
+    advTimer = setInterval(advDraw, 60000);
+}
+
 async function loadAlertQueue() {
     const wrap = document.getElementById('alert-queue-wrap');
     if (!wrap) return;
@@ -8029,7 +8296,7 @@ function renderTreeLoopBanner(data) {
     if (data.family_tree_loop_running !== false) { el.innerHTML = ''; return; }
     const mode = String(data.crypto_strategy_mode || '(unset)')
         .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-    el.innerHTML = `<div class="panel" style="background:#fff4e8; border:1px solid #f3d9b3;
+    el.innerHTML = `<div class="panel" style="background:var(--gold-bg); border:1px solid var(--gold);
         padding:14px 18px; margin-bottom:16px;">
         <strong>⚙️ Tree trading controls are inert right now.</strong>
         This deploy runs <code>${mode}</code>, so the family-tree loop is never started —
@@ -8855,6 +9122,11 @@ loadCombinedProgress();
 // the thing this whole section exists to replace.
 loadAlertQueue();
 loadTradingProfile();
+// The charts read Coinbase from this browser, not through the app, so a
+// slow or unreachable candles endpoint delays nothing else on the page
+// and adds no load to the process that places orders. It owns its own
+// 60s interval rather than joining refresh().
+initAdvancedCharts();
 setInterval(refresh, 15000);
 setInterval(loadTicker, 15000);
 setInterval(loadActivityFeed, 5000);
