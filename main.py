@@ -1194,6 +1194,38 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # CONCENTRATION ROTATION. Frees capital out of a branch that is over
+        # the 20% limit, at a PROFIT or not at all - and it does not own a
+        # sell path. It hands the chosen slices to close_all_grid_slices,
+        # the grid's own sell-and-settle code, which retires the slice row,
+        # writes allocated_usd back and records the trade. Two earlier
+        # versions of this worker were thrown away for doing none of that:
+        # they sold, incremented a counter, and left the books claiming coin
+        # the wallet no longer held.
+        #
+        # INERT UNTIL ARMED. Nothing happens unless
+        # CONCENTRATION_ROTATION_MODE is exactly "arm" - unset, misspelled,
+        # "true" and "yes" all observe. Checked before anything is fetched
+        # and again immediately before each settle. There is no buy path in
+        # the module and a test asserts it.
+        try:
+            import concentration_rotation_worker
+            asyncio.create_task(concentration_rotation_worker.run_periodically())
+            try:
+                log.info(f"🔁 Concentration rotation running, "
+                         f"mode={concentration_rotation_worker.current_mode()}, "
+                         f"every {concentration_rotation_worker.INTERVAL_SECONDS}s, "
+                         f"max {concentration_rotation_worker.MAX_SELLS_PER_PASS} "
+                         f"slice(s)/pass")
+            except Exception:
+                pass          # a failure to LOG must never unstart the task
+        except Exception as e:
+            try:
+                log.warning(f"concentration rotation not started: "
+                            f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # EXCHANGE TRUTH. Reads only - no orders, no money, no switch to
         # arm, because there is nothing here to arm. It compares the grid's
         # books against the venue's balances every 5 minutes and writes the

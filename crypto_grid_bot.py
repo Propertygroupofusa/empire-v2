@@ -9045,7 +9045,10 @@ def _funnel_bottleneck(sig, attempted, filled, completed) -> str:
 
 
 async def close_all_grid_slices(only_bot_name: str = None,
-                                only_product_id: str = None) -> dict:
+                                only_product_id: str = None,
+                                only_slice_ids=None,
+                                exit_reason: str = "close_all",
+                                allow_unverified_balance: bool = True) -> dict:
     """Real, one-way "close everything" - per the account owner's direct
     request for one button at the bottom of the Grid Bot section that
     takes all the real profit if the whole section is up, instead of
@@ -9071,6 +9074,35 @@ async def close_all_grid_slices(only_bot_name: str = None,
     real close in the same call - each branch's outcome is independent
     and reported separately.
 
+    THREE PARAMETERS MAKE THIS REUSABLE BY THE ROTATION, all defaulting to
+    exactly today's close-all behaviour so that path is byte-identical:
+
+      only_slice_ids   settle a SUBSET of a branch's slices instead of all
+                       of them. This is what the concentration rotation
+                       needs, and handing it this function rather than a
+                       parallel sell path is the whole point: the slice row
+                       is retired, allocated_usd is written back, the trade
+                       history row is written and the reference price moves,
+                       all by the code that already does it. The first
+                       rotation worker did none of that - it incremented a
+                       counter and logged a line, and every "successful"
+                       rotation would have widened the $1,168.59 gap between
+                       what the books claim and what the wallet holds.
+
+      exit_reason      so the ledger can tell a rotation from a close-all.
+                       Both are market exits at the taker rate, and a column
+                       that calls them the same thing cannot answer "did
+                       rotating actually pay?".
+
+      allow_unverified_balance
+                       close-all is a PROTECTION and fails OPEN: leaving a
+                       live position unsold is the worse outcome, so it is
+                       allowed to sell an unverified quantity. The rotation
+                       is OPPORTUNISTIC, not a protection - there is always
+                       a next pass - so it passes False and refuses rather
+                       than sending an order sized off a number the wallet
+                       could not confirm.
+
     `only_bot_name` / `only_product_id` narrow it to a single branch,
     which is what makes closing ONE position possible at all - there was
     no path to it before, and the only alternative was a raw Coinbase
@@ -9094,8 +9126,17 @@ async def close_all_grid_slices(only_bot_name: str = None,
     async with engine.aiohttp.ClientSession() as session:
         for b in branches:
             slices = await get_grid_slices(b.bot_name)
+            if only_slice_ids is not None:
+                # Settle only the named rows. An id that is not on this
+                # branch simply does not match - this never widens the set.
+                _want = {str(x) for x in only_slice_ids}
+                slices = [s for s in slices if str(s.id) in _want]
             if not slices:
                 continue
+            # Computed AFTER the filter, so a subset sells only its own
+            # quantity. Reading this before the filter would have sold the
+            # whole branch and settled a fraction of it - the exact books/
+            # wallet divergence this function is being reused to avoid.
             total_qty = sum(s.qty for s in slices)
             # close-all is a PROTECTION, and protections fail open: if the
             # balance cannot be read here, leaving a live position open is
@@ -9103,7 +9144,7 @@ async def close_all_grid_slices(only_bot_name: str = None,
             # an unverified quantity. Every other seller refuses.
             fill = await engine.place_market_sell(session, total_qty, b.product_id,
                                                   source="grid_close_branch",
-                                                  allow_unverified_balance=True)
+                                                  allow_unverified_balance=allow_unverified_balance)
             if not fill:
                 reason = engine._last_order_error.get(b.product_id, "real sell did not fill")
                 results.append({
@@ -9139,7 +9180,7 @@ async def close_all_grid_slices(only_bot_name: str = None,
                     await _log_grid_trade(
                         b.bot_name, b.product_id, s.entry_price, filled_price,
                         s.qty, pnl, s.opened_at,
-                        exit_reason="close_all",
+                        exit_reason=exit_reason,
                         mae_pct=getattr(s, "mae_pct", None),
                         mfe_pct=getattr(s, "mfe_pct", None),
                         entry_atr_pct=getattr(s, "entry_atr_pct", None),

@@ -156,9 +156,32 @@ for n in ast.walk(tree):
         for k in n.keywords:
             if k.arg == "exit_reason":
                 _reason_values.append(ast.dump(k.value))
+# 2026-10-01: close_all_grid_slices gained an `exit_reason` PARAMETER so the
+# concentration rotation can settle its slices through this same path and
+# have the ledger tell the two apart. The literal moved from the call site to
+# the signature's default, so checking the call site alone now proves
+# nothing. Checked at BOTH ends instead, which is strictly stronger than the
+# single literal was: the value must flow from the parameter, AND that
+# parameter must still default to "close_all", AND it must never be None.
 ok("a close-all trade records close_all, not nothing",
-   any("close_all" in v for v in _reason_values),
+   any("close_all" in v or "exit_reason" in v for v in _reason_values),
    f"exit_reason expressions at the log sites: {len(_reason_values)}")
+
+_close_fn = next((n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == "close_all_grid_slices"), None)
+ok("close_all_grid_slices exposes an exit_reason parameter", _close_fn is not None
+   and "exit_reason" in [a.arg for a in _close_fn.args.args
+                         + _close_fn.args.kwonlyargs])
+if _close_fn is not None:
+    _args = _close_fn.args.args + _close_fn.args.kwonlyargs
+    _defaults = ([None] * (len(_close_fn.args.args) - len(_close_fn.args.defaults))
+                 + list(_close_fn.args.defaults)) + list(_close_fn.args.kw_defaults)
+    _d = dict(zip([a.arg for a in _args], _defaults))
+    _er = _d.get("exit_reason")
+    ok("and it DEFAULTS to close_all - an owner-requested close is never UNKNOWN",
+       _er is not None and isinstance(_er, ast.Constant) and _er.value == "close_all",
+       ast.dump(_er) if _er is not None else "no default")
 
 # A PARKED SELL IS NOT A TARGET HIT.
 #
