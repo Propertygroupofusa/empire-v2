@@ -1194,6 +1194,34 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # EXCHANGE TRUTH. Reads only - no orders, no money, no switch to
+        # arm, because there is nothing here to arm. It compares the grid's
+        # books against the venue's balances every 5 minutes and writes the
+        # verdict into branch_control_state and exchange_truth_failures.
+        #
+        # It exists because those tables were empty while the fleet was in
+        # exactly the condition they were built for: on 2026-10-01 the
+        # failure table read 0 rows AND readable, beside 8 branches holding
+        # $1,168.59 of claimed coin that is not in the wallet. The execution
+        # gate therefore denied on UNKNOWN - "never checked" - when the check
+        # had been running every cycle inside the dashboard and had nowhere
+        # to go. An unreadable balance still records NOTHING here: a venue
+        # that will not answer is not evidence about the books.
+        try:
+            import exchange_truth_worker
+            from database import get_session_factory as _truth_sf
+            asyncio.create_task(exchange_truth_worker.run_periodically(_truth_sf))
+            try:
+                log.info(f"🔍 Exchange-truth recorder running, every "
+                         f"{exchange_truth_worker.CHECK_SECONDS}s (read-only)")
+            except Exception:
+                pass          # a failure to LOG must never unstart the task
+        except Exception as e:
+            try:
+                log.warning(f"exchange-truth recorder not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # RESTING STOPS. The other loop that reaches the venue, and the
         # only one that can place an order which then sits there holding
         # coins. Same switch shape as the trimmer: nothing happens unless
