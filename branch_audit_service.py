@@ -31,6 +31,7 @@ it, and a stale True is a trade nobody authorised.
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -233,3 +234,81 @@ class ExecutionGate:
                               f"reconciliation_status={state.reconciliation_status}")
 
         return Decision(True, "OK", f"{action} permitted", "all_gates")
+
+
+# ---------------------------------------------------------------------------
+# ARMING, AND THE TRAP THAT MAKES IT NECESSARY
+# ---------------------------------------------------------------------------
+#
+# ExecutionGate.check() refuses a branch with no BranchControlState row, on
+# purpose: a branch nobody has reconciled has not earned permission by never
+# having been looked at. That rule is correct and it is also a live hazard.
+# There are 23 branches and zero control rows. Wiring the gate in as binding
+# would deny every one of them on the next deploy and halt the whole fleet.
+#
+# So the gate ships the way every other money-touching worker in this repo
+# ships: OBSERVE by default. It is CALLED from the order path - so the wiring
+# exists and cannot be forgotten - and it records what it would have blocked,
+# but it does not block until EXECUTION_GATE_MODE is exactly "enforce".
+#
+# Observe mode is honestly a staging step, not the finished control. While it
+# is observing, a worker CAN still proceed past a denial. What it buys is the
+# denial log: a day of evidence showing exactly which branches would have been
+# refused and why, before that refusal becomes real money not being deployed.
+MODE_ENV = "EXECUTION_GATE_MODE"
+MODE_OBSERVE, MODE_ENFORCE = "observe", "enforce"
+
+
+def gate_mode() -> str:
+    v = (os.getenv(MODE_ENV) or "").strip().lower()
+    return MODE_ENFORCE if v == MODE_ENFORCE else MODE_OBSERVE
+
+
+def is_enforcing() -> bool:
+    return gate_mode() == MODE_ENFORCE
+
+
+async def ensure_control_state(session, *, bot_name, branch_id=None,
+                               lifecycle_status="ACTIVE",
+                               reconciliation_status="UNKNOWN"):
+    """Create a control row for a branch that has none. Never overwrites.
+
+    Seeded UNKNOWN, not MATCHED. A branch that has never been reconciled is
+    not a reconciled branch, and seeding it MATCHED would hand out the exact
+    permission this table exists to withhold - the row would say "checked and
+    fine" about a check that never happened.
+    """
+    row = (await session.execute(
+        select(am.BranchControlState).where(
+            am.BranchControlState.bot_name == bot_name))).scalar_one_or_none()
+    if row is not None:
+        return row
+    row = am.BranchControlState(
+        bot_name=bot_name, branch_id=branch_id,
+        lifecycle_status=lifecycle_status,
+        reconciliation_status=reconciliation_status,
+        execution_enabled=False)
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def check_or_observe(gate: "ExecutionGate", *, bot_name, action, truth,
+                           candidate_id=None, context=None) -> Decision:
+    """Evaluate the gate, and in observe mode report rather than block.
+
+    The audit is written either way - that is the whole point of observing.
+    Only the returned `allowed` differs, and the reason code is prefixed so
+    nobody reading the denial log can mistake an observation for a refusal
+    that actually stopped something.
+    """
+    decision = await gate.check(bot_name=bot_name, action=action, truth=truth,
+                                candidate_id=candidate_id, context=context)
+    if decision.allowed or is_enforcing():
+        return decision
+    log.info(f"[gate] OBSERVE-ONLY: would have blocked {action} on {bot_name} "
+             f"- {decision.reason_code} ({decision.gate}). "
+             f"Set {MODE_ENV}=enforce to make this binding.")
+    return Decision(True, f"OBSERVED_{decision.reason_code}",
+                    f"observe mode: would have blocked - {decision.detail}",
+                    decision.gate)

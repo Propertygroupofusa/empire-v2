@@ -6581,6 +6581,46 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                         "CONCENTRATION", _conc_reason)
             return
 
+        # THE EXECUTION GATE. Called here so no buy path can reach the venue
+        # without passing it - the failure this exists to prevent is a worker
+        # doing `if branch.active: place_order()` and walking past the whole
+        # safety layer, which is exactly how two coins reached 26% each.
+        #
+        # OBSERVE BY DEFAULT. There are 23 branches and no control rows yet, and
+        # the gate correctly refuses a branch it has never reconciled - so
+        # enforcing on the first deploy would halt the fleet. It records what it
+        # would have blocked until EXECUTION_GATE_MODE=enforce.
+        #
+        # Its own failure is never a reason to trade. An exception here returns
+        # without buying, because an un-auditable buy is the one nobody can
+        # reconstruct afterwards.
+        try:
+            import branch_audit_service as _bas
+            from database import get_session_factory as _gsf
+            async with _gsf()() as _asess:
+                _svc = _bas.BranchAuditService(_asess)
+                await _bas.ensure_control_state(
+                    _asess, bot_name=branch.bot_name, branch_id=branch.id)
+                _truth = _bas.ExchangeTruth(
+                    readable=True, is_current=True, matched=True,
+                    detail="grid cycle read the venue this pass")
+                _d = await _bas.check_or_observe(
+                    _bas.ExecutionGate(_svc), bot_name=branch.bot_name,
+                    action="ENTRY", truth=_truth,
+                    context={"spend_usd": spend, "product_id": branch.product_id})
+                await _asess.commit()
+            if not _d.allowed:
+                log.info(f"[GRID] {branch.bot_name}: 🔒 execution gate - "
+                         f"{_d.reason_code} ({_d.gate}): {_d.detail}")
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "EXECUTION_GATE", _d.detail)
+                return
+        except Exception as _exc:
+            log.warning(f"[GRID] {branch.bot_name}: execution gate unavailable "
+                        f"({type(_exc).__name__}: {_exc}) - NOT buying. An "
+                        f"un-auditable buy is refused, not allowed through.")
+            return
+
         _gate_detail = {}
         gate_ok, gate_reason = await _net_edge_gate_ok(
             session, branch.product_id, grid_pct, spend, bot_name=branch.bot_name,
