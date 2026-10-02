@@ -137,6 +137,78 @@ def assess_branch(branch):
     return out
 
 
+def headroom(branches):
+    """How much of the fleet can still ACT, and how much is just waiting.
+
+    WHY THIS IS THE LEADING INDICATOR, measured 2026-10-02.
+
+    Closed trades per day ran 35, 24, 7, 6 - a collapse, on a fleet whose
+    engine wins 86% of what it closes. Nothing broke. The branches FILLED
+    UP. A branch holding as many slices as it has levels is "parked": it
+    cannot buy another rung, and its only way out is selling a slice at a
+    profit, which needs the price to move.
+
+    On that date 9 of 23 branches were parked, holding $3,436.64 - 40.3% of
+    the fleet's capital - and the four best earners per dollar were ALL
+    among them: LINK ($7.99 per $100), PRIME ($7.79), HBAR ($4.63) and TIA
+    ($2.85). The parts of the fleet that work best filled up first, which is
+    exactly what you would expect and exactly what nothing was reporting.
+
+    This is not a fault and it is not a stall. A parked branch still sells
+    through the parked route the moment a slice clears its floor, and then
+    it has room again. It is the fleet breathing. But "40% of the capital
+    cannot buy today" is the number that explains a quiet week, and without
+    it a quiet week looks like something being broken.
+
+    Pure. Describes; predicts nothing; changes nothing.
+    """
+    rows, parked_usd, free_usd, unknown_usd = [], 0.0, 0.0, 0.0
+    for b in (branches or ()):
+        n = len((b or {}).get("slices") or [])
+        lv = (b or {}).get("num_levels")
+        a = _num((b or {}).get("allocated_usd")) or 0.0
+        try:
+            lv = int(lv)
+        except (TypeError, ValueError):
+            lv = None
+        if lv is None or lv <= 0:
+            # No level count is UNKNOWN, not room. Counting it as free would
+            # overstate what the fleet can do, which is the direction that
+            # misleads.
+            state, why = UNKNOWN, "num_levels unreadable - room is unknown, not free"
+            unknown_usd += a
+        elif n >= lv and n > 0:
+            state = "PARKED"
+            why = (f"{n} slice(s) against {lv} level(s) - full. It cannot buy "
+                   f"another rung; its way out is selling one at a profit.")
+            parked_usd += a
+        else:
+            state = "ROOM"
+            why = f"{n} of {lv} level(s) used - it can still buy."
+            free_usd += a
+        rows.append({"product_id": (b or {}).get("product_id"),
+                     "slices": n, "num_levels": lv, "state": state,
+                     "allocated_usd": a, "why": why})
+    total = parked_usd + free_usd + unknown_usd
+    rows.sort(key=lambda r: -(r.get("allocated_usd") or 0))
+    return {
+        "branches": len(rows),
+        "parked": sum(1 for r in rows if r["state"] == "PARKED"),
+        "with_room": sum(1 for r in rows if r["state"] == "ROOM"),
+        "unknown": sum(1 for r in rows if r["state"] == UNKNOWN),
+        "parked_usd": round(parked_usd, 2),
+        "with_room_usd": round(free_usd, 2),
+        "unknown_usd": round(unknown_usd, 2),
+        "parked_share_pct": (round(parked_usd / total * 100.0, 2)
+                             if total > 0 else None),
+        "rows": rows,
+        "note": ("PARKED is full, not broken: the branch sells through the "
+                 "parked route as soon as a slice clears its floor, and then "
+                 "has room again. This is the number that explains a quiet "
+                 "week without reaching for a fault that is not there."),
+    }
+
+
 def separation(rows, realized_usd_by_product):
     """How well does the shape label actually separate realised return?
 
@@ -208,6 +280,7 @@ def assess(branches, realized_usd_by_product=None):
         "lump_share_pct": (round(cap[LUMP] / known * 100.0, 2)
                            if known > 0 else None),
         "rows": rows,
+        "headroom": headroom(branches),
         "separation": (separation(rows, realized_usd_by_product)
                        if realized_usd_by_product else
                        {"measured": False,

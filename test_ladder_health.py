@@ -122,6 +122,33 @@ ok("the note says adoption is BY DESIGN, not a bug",
    "BY DESIGN" in a["note"])
 ok("and that it forecasts nothing", "does not forecast" in a["note"])
 
+section("[9] headroom: full is not broken, and unknown is not room")
+import ladder_health as _lh
+hb = [{"product_id": "FULL-USD", "num_levels": 3, "allocated_usd": 300.0,
+       "slices": [{"entry_price": 1.0}] * 3},
+      {"product_id": "ROOMY-USD", "num_levels": 3, "allocated_usd": 100.0,
+       "slices": [{"entry_price": 1.0}]},
+      {"product_id": "EMPTY-USD", "num_levels": 3, "allocated_usd": 50.0,
+       "slices": []},
+      {"product_id": "NOLEVELS-USD", "num_levels": None, "allocated_usd": 77.0,
+       "slices": [{"entry_price": 1.0}]}]
+h = _lh.headroom(hb)
+ok("a full branch is PARKED", h["parked"] == 1, str(h["parked"]))
+ok("its capital is counted parked", h["parked_usd"] == 300.0)
+ok("a part-filled branch has ROOM", h["with_room"] == 2, str(h["with_room"]))
+ok("an EMPTY branch has room, it is not parked",
+   any(r["product_id"] == "EMPTY-USD" and r["state"] == "ROOM" for r in h["rows"]))
+ok("no level count is UNKNOWN, NOT room", h["unknown"] == 1, str(h["unknown"]))
+ok("and that capital is NOT counted as free",
+   h["with_room_usd"] == 150.0, str(h["with_room_usd"]))
+ok("the share is of everything measured",
+   abs(h["parked_share_pct"] - 300.0 / 527.0 * 100) < 0.01,
+   str(h["parked_share_pct"]))
+ok("it says full is not broken", "full, not broken" in h["note"])
+ok("headroom rides along on assess()", "headroom" in _lh.assess(hb))
+ok("zero branches does not divide by zero",
+   _lh.headroom([])["parked_share_pct"] is None)
+
 section("[8] it changes nothing - no I/O, no writes, no orders")
 import ast, os                                  # noqa: E402
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
