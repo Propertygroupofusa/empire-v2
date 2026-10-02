@@ -228,6 +228,12 @@ def assess(branches, lessons=None, backing=None, *, now=None):
     counted = [r for r in rows if r["net_usd"] is not None]
 
     out = {
+        # A MONITOR READING .readable MUST NOT SEE None ON A WORKING BLOCK.
+        # The failure paths here and in the endpoint both set readable False,
+        # but the success path set no key at all, so .get("readable") returned
+        # None and a watcher checking "is it readable?" could report a healthy
+        # measurement as blind. A missing key is not a verdict.
+        "readable": True,
         "is_a_measurement_not_a_change": True,
         "branches_holding_coin": len(rows) + len(unknown),
         "ranked": ranked,

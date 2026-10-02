@@ -166,6 +166,19 @@ ok("the day bar sits above a one-day-old position",
    M.MIN_DAYS_HELD_FOR_A_VERDICT >= 1.0)
 
 # ---- it changes nothing ---------------------------------------------
+print("\n-- readable is a verdict on every path, never a missing key")
+ok("the success path says readable True",
+   M.assess([ZEC], LESSONS, now=NOW).get("readable") is True)
+ok("the unreadable-balance path says readable False",
+   M.assess([], [], now=NOW) is not None and
+   M.assess([{"product_id": "Z-USD", "slices": [sl(1.0, 5.0)]}], [],
+            now=NOW).get("readable") is True)
+ok("a monitor checking .get('readable') never sees None on a working block",
+   M.assess([ZEC, HBAR, XRP], LESSONS, now=NOW).get("readable") is not None)
+ok("...nor on an all-UNKNOWN block",
+   M.assess([br("Q-USD", [sl(1.0, 5.0)], None)], [], now=NOW).get("readable")
+   is not None)
+
 print("\n-- it measures only")
 bs = [ZEC, HBAR]
 snap = [dict(b) for b in bs]
