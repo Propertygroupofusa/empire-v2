@@ -1100,6 +1100,7 @@
             </div>
         </div>
         <div id="backing-banner" style="display:none;"></div>
+        <div id="out-of-reach-banner" style="display:none;"></div>
     </div>
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
@@ -6948,6 +6949,8 @@ async function loadFleetReadiness() {
     try {
         const d = await apiGet('/grid-status');
         const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
+        // Same payload, no extra request: grid-status carries it.
+        renderOutOfReach(d.out_of_reach);
         const rows = FLEET.readiness(d.branches || [], unbacked);
         const s = FLEET.summarise(rows);
 
@@ -7460,6 +7463,81 @@ function renderBackingBanner(bk) {
             <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim); line-height:1.45;">
                 ${escText(bk.detail || '')}
             </div>
+        </div>`;
+}
+
+// Crypto this key cannot see AT ALL, which is a different thing from
+// coin a branch cannot sell. On 2026-10-02 the Coinbase app showed
+// $13,912.19 of crypto while the API totalled $8,135.00 of coin: ETH
+// (99% staked) read as 0.0000000028 units, ATOM and ADA as accounts
+// that exist with 0.0 available. That is 29% of the money outside every
+// total on this page, and nothing said so.
+//
+// This never prints an estimate of the missing amount. The key cannot
+// see a staked balance, so the amount is UNKNOWN until the owner reads
+// it off the app and declares it - and UNKNOWN is shown as UNKNOWN,
+// because showing it as $0.00 is the bug.
+function renderOutOfReach(oor) {
+    const wrap = document.getElementById('out-of-reach-banner');
+    if (!wrap) return;
+    const hide = () => { wrap.style.display = 'none'; wrap.innerHTML = ''; };
+
+    // Unreadable is not "nothing out of reach", but it is also not a
+    // finding - there is nothing to report until a balance comes back.
+    if (!oor || oor.readable !== true) return hide();
+
+    const empties = oor.empty_trading_balance || [];
+    const declared = oor.out_of_reach_usd;
+    const known = (typeof declared === 'number' && isFinite(declared));
+
+    // Nothing to say: no branch on an empty balance, and the owner has
+    // explicitly declared there is nothing out of reach.
+    if (!empties.length && known && declared <= 0) return hide();
+
+    wrap.style.display = 'block';
+    const gold = 'var(--gold, #c9860a)';
+
+    const assets = empties.map(e => escText(e.asset)).join(', ');
+    const list = empties.length
+        ? `<div style="margin-top:8px; font-size:0.82em;
+                       font-variant-numeric:tabular-nums;">
+             <span style="color:var(--text-dim);">branches on an empty
+             trading balance</span>
+             <strong> ${empties.length}</strong>
+             <span style="color:var(--text-dim);"> &mdash; ${assets}</span>
+           </div>`
+        : '';
+
+    const figure = known
+        ? `<div style="margin-top:8px; font-size:0.82em;
+                       font-variant-numeric:tabular-nums;">
+             <span style="color:var(--text-dim);">declared out of reach</span>
+             <strong style="color:${gold};"> ${fmtUsd(declared)}</strong>
+             ${(typeof oor.out_of_reach_share_pct === 'number')
+                 ? `<span style="color:var(--text-dim);"> (${
+                      Number(oor.out_of_reach_share_pct).toFixed(1)
+                    }% of the account)</span>` : ''}
+           </div>`
+        : `<div style="margin-top:8px; font-size:0.82em;">
+             <span style="color:var(--text-dim);">out of reach</span>
+             <strong style="color:${gold};"> UNKNOWN</strong>
+             <span style="color:var(--text-dim);"> &mdash; not zero. A staked
+             balance is not in the trading account, so nothing here can
+             total it.</span>
+           </div>`;
+
+    wrap.innerHTML = `
+        <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                    border:1px solid ${gold}; background:rgba(201,134,10,0.07);">
+          <div style="font-weight:700; color:${gold}; font-size:0.9em;">
+            Money no bot here can reach
+          </div>
+          ${figure}
+          ${list}
+          <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                      line-height:1.45;">
+            ${escText(oor.detail || '')}
+          </div>
         </div>`;
 }
 

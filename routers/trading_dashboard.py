@@ -8458,6 +8458,7 @@ async def get_grid_status_endpoint(fresh: int = 0):
     try:
         import account_census
         import slice_backing
+        import out_of_reach
         async with aiohttp.ClientSession() as _s:
             _bal = await account_census.fetch_balances(_s)
         if _bal and _bal.get("available"):
@@ -8466,13 +8467,40 @@ async def get_grid_status_endpoint(fresh: int = 0):
                 _avail.setdefault(_cur, 0.0 if not _tot else _avail.get(_cur, 0.0))
             data["backing"] = slice_backing.assess(
                 data.get("branches") or [], _avail)
+
+            # AND THE MONEY THIS KEY CANNOT SEE AT ALL. Measured
+            # 2026-10-02: the Coinbase app showed $13,912.19 of crypto
+            # while this reading totalled $8,135.00 of coin. The
+            # difference was staked - ETH 99%, SOL 96%, ATOM 100%, ADA
+            # 100% - and a staked balance is not in the Advanced Trade
+            # account in any form. Queried per currency the venue
+            # answered 0.0000000028 ETH, and ATOM and ADA as accounts
+            # that exist with 0.0 available.
+            #
+            # That is 29% of the owner's crypto outside every total on
+            # this dashboard, including the one is-it-growing divides
+            # by. Reusing the SAME _bal read above - a second pass over
+            # the accounts endpoint is what got this rate-limited the
+            # last time, and blind is worse than under-reported.
+            data["out_of_reach"] = out_of_reach.assess(
+                data.get("branches") or [],
+                _bal.get("held_including_zero") or {},
+                _bal.get("available_units") or {})
         else:
             data["backing"] = {"readable": False,
                                "reason": "balances unreadable this pass - "
                                          "backing is UNKNOWN, not zero"}
+            data["out_of_reach"] = {"readable": False,
+                                    "reason": "balances unreadable this pass "
+                                              "- what is out of reach is "
+                                              "UNKNOWN, not zero",
+                                    "out_of_reach_usd": None}
     except Exception as _exc:
         data["backing"] = {"readable": False,
                            "reason": f"{type(_exc).__name__}: {_exc}"}
+        data["out_of_reach"] = {"readable": False,
+                                "reason": f"{type(_exc).__name__}: {_exc}",
+                                "out_of_reach_usd": None}
 
     # CAN EACH BRANCH WORK ITS POSITION, OR IS IT JUST HOLDING IT?
     #
