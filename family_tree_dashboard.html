@@ -1102,6 +1102,7 @@
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
         <div id="grid-reconcile-wrap" style="display:none;"></div>
+        <div id="grid-levels-wrap" style="display:none;"></div>
     </div>
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
@@ -6953,6 +6954,7 @@ async function loadFleetReadiness() {
         // Same payload, no extra request: grid-status carries it.
         renderOutOfReach(d.out_of_reach);
         renderGridReconcile(d.backing);
+        renderGridLevels(d.branches || []);
         const rows = FLEET.readiness(d.branches || [], unbacked);
         const s = FLEET.summarise(rows);
 
@@ -7693,6 +7695,293 @@ async function executeGridReconcile(productId) {
         if (planWrap) planWrap.innerHTML = '';
         if (typeof refresh === 'function') refresh();
         else if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
+    }
+}
+
+// ---- Levels: how many rungs a branch may hold -----------------------
+//
+// A branch at num_levels is PARKED - it cannot buy another rung at any
+// price, however far the coin falls and however much allocation it has.
+// Nothing in the codebase could change that: coin_adoption_worker writes
+// num_levels once, as the slice count at adoption, so an adopted branch
+// is born full by construction. This is the only control that moves it.
+//
+// WHAT IT CHANGES: num_levels, and nothing else. Not the spacing, not the
+// reference price, not the stop, not the allocation, not an open slice.
+// It places NO order - the grid still decides when to buy through every
+// gate it already passes.
+//
+// Preview sends NO dry_run flag: the server's own default is true, so
+// this path cannot apply anything even if the request were tampered with.
+// Apply is a separate call that only exists after a plan has been shown.
+const GRID_LEVELS_MIN = 1, GRID_LEVELS_MAX = 20, GRID_LEVELS_MIN_SLICE = 5.0;
+
+// The server's own arithmetic, so the row and the plan cannot disagree:
+// slice_after = alloc / want, affordable = floor(unspent / slice_after).
+// The smallest count that affords one rung is the first want where
+// unspent >= alloc / want. Returns {unknown:true} on an unpriced slice -
+// a gap is not a zero.
+function _gridLevelsSuggest(b) {
+    const slices = (b && b.slices) || [];
+    const open_n = slices.length;
+    const old_n = Math.trunc(Number(b && b.num_levels) || 0);
+    const alloc = Number(b && b.allocated_usd);
+    if (!isFinite(alloc) || alloc <= 0) {
+        return {unknown: false, want: null,
+                why: 'no allocation, so a level count changes nothing'};
+    }
+    let spent = 0;
+    for (const s of slices) {
+        // Number(null) is 0 and Number('') is 0, and isFinite(0) is true -
+        // so a missing price has to be rejected BEFORE the coercion, or an
+        // unpriced slice reads as $0.00 spent and inflates the unspent
+        // allocation this suggestion is computed from.
+        const qr = s ? s.qty : undefined, er = s ? s.entry_price : undefined;
+        const blank = v => v === null || v === undefined || v === ''
+                           || typeof v === 'boolean';
+        if (blank(qr) || blank(er)) {
+            return {unknown: true, want: null,
+                    why: 'a slice carries no price, so unspent allocation is UNKNOWN'};
+        }
+        const q = Number(qr), e = Number(er);
+        if (!isFinite(q) || !isFinite(e)) {
+            return {unknown: true, want: null,
+                    why: 'a slice carries no price, so unspent allocation is UNKNOWN'};
+        }
+        spent += q * e;
+    }
+    const free = Math.round((alloc - spent) * 100) / 100;
+    // Never below what is already open, and never a slice under the floor.
+    const lo = Math.max(GRID_LEVELS_MIN, open_n + 1, old_n + 1);
+    const hi = Math.min(GRID_LEVELS_MAX, Math.floor(alloc / GRID_LEVELS_MIN_SLICE));
+    for (let want = lo; want <= hi; want++) {
+        const slice_after = Math.round((alloc / want) * 100) / 100;
+        if (slice_after > 0 && Math.floor(free / slice_after) >= 1) {
+            return {unknown: false, want, free, slice_after,
+                    why: 'the smallest count that can actually open a rung'};
+        }
+    }
+    return {unknown: false, want: null, free,
+            why: (hi < lo
+                  ? 'no count in range keeps a slice above $' + GRID_LEVELS_MIN_SLICE.toFixed(2)
+                  : 'no count opens a rung on $' + free.toFixed(2)
+                    + ' unspent - the money is the constraint, not the rungs')};
+}
+
+function renderGridLevels(branches) {
+    const wrap = document.getElementById('grid-levels-wrap');
+    if (!wrap) return;
+    const rows = (branches || []).filter(b => {
+        const n = Math.trunc(Number(b && b.num_levels) || 0);
+        const open_n = ((b && b.slices) || []).length;
+        return n > 0 && open_n >= n;
+    });
+    if (!rows.length) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    let parkedUsd = 0, anyUsd = false;
+    for (const b of rows) {
+        const a = Number(b.allocated_usd);
+        if (isFinite(a)) { parkedUsd += a; anyUsd = true; }
+    }
+    const body = rows.map(b => {
+        const pid = String(b.product_id || '');
+        const n = Math.trunc(Number(b.num_levels) || 0);
+        const open_n = (b.slices || []).length;
+        const sug = _gridLevelsSuggest(b);
+        const val = sug.want === null ? '' : sug.want;
+        return `<tr>
+            <td>${escText(pid)}</td>
+            <td style="text-align:right;">${open_n} / ${n}</td>
+            <td style="text-align:right;">${isFinite(Number(b.allocated_usd))
+                ? fmtUsd(b.allocated_usd) : '<span style="color:var(--gold,#c9860a);">unreadable</span>'}</td>
+            <td style="text-align:right;">${sug.unknown
+                ? '<span style="color:var(--gold,#c9860a);">UNKNOWN</span>'
+                : (isFinite(Number(sug.free)) ? fmtUsd(sug.free) : '&mdash;')}</td>
+            <td style="text-align:right;">
+              <input class="grid-levels-in" type="number" inputmode="numeric"
+                     data-product="${escText(pid)}" data-current="${n}"
+                     min="${GRID_LEVELS_MIN}" max="${GRID_LEVELS_MAX}" step="1"
+                     value="${val}" placeholder="${n}"
+                     style="width:4.6em; text-align:right; font-variant-numeric:tabular-nums;">
+            </td>
+            <td style="font-size:0.92em; color:var(--text-dim);">${escText(sug.why)}</td>
+          </tr>`;
+    }).join('');
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                  border:1px solid var(--gold, #c9860a); background:rgba(201,134,10,0.07);">
+        <div style="font-weight:700; color:var(--gold, #c9860a); font-size:0.9em;">
+          ${rows.length} branch(es) are parked &mdash; they cannot buy at any price
+        </div>
+        <div style="margin-top:8px; font-size:0.82em; font-variant-numeric:tabular-nums;">
+          ${anyUsd ? `<span style="color:var(--text-dim);">allocation that cannot
+             open a rung</span><strong> ${fmtUsd(parkedUsd)}</strong>` : ''}
+        </div>
+        <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                    line-height:1.45;">
+          Each holds as many open slices as its own level count permits, so the
+          rung count is the binding constraint &mdash; not the price and not the
+          money. Raising it changes <strong>num_levels and nothing else</strong>:
+          no order is placed, no cash moves, and the spacing, reference price,
+          stop and open slices are untouched. Every future slice on the same
+          allocation gets smaller, which is the trade-off.
+        </div>
+        <div style="overflow-x:auto; margin-top:9px;">
+          <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+            <thead><tr>
+              <th>Branch</th><th>Slices / levels</th><th>Allocated</th>
+              <th>Unspent</th><th>Set levels</th><th>Suggested because</th>
+            </tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+        <button class="unlock-btn" style="margin-top:10px;"
+                onclick="previewGridLevels()">🔍 Preview the change (changes nothing)</button>
+        <div id="grid-levels-status" style="margin-top:8px; font-size:0.82em;
+             color:var(--text-dim);"></div>
+        <div id="grid-levels-plan"></div>
+      </div>`;
+}
+
+// Only rows the person actually changed are sent. A box left at its
+// current count is not a request, and the server would call it NO_CHANGE
+// anyway - sending it only pads the plan.
+function _gridLevelsWanted() {
+    const out = {};
+    document.querySelectorAll('.grid-levels-in').forEach(el => {
+        const pid = el.getAttribute('data-product');
+        const cur = Math.trunc(Number(el.getAttribute('data-current')) || 0);
+        const raw = String(el.value || '').trim();
+        if (!pid || raw === '') return;
+        const n = Number(raw);
+        if (!isFinite(n) || Math.trunc(n) !== n) return;
+        if (n === cur) return;
+        out[pid] = Math.trunc(n);
+    });
+    return out;
+}
+
+async function previewGridLevels() {
+    const st = document.getElementById('grid-levels-status');
+    const planWrap = document.getElementById('grid-levels-plan');
+    if (!st || !planWrap) return;
+    planWrap.innerHTML = '';
+    const levels = _gridLevelsWanted();
+    const keys = Object.keys(levels);
+    if (!keys.length) {
+        st.textContent = 'Nothing to preview - no box differs from its current '
+                       + 'level count. Type a new count on a row first.';
+        return;
+    }
+    st.textContent = 'Computing the plan for ' + keys.join(', ')
+                   + '… nothing is being changed.';
+    try {
+        // No dry_run is sent: the server defaults it to true.
+        const d = await postGuarded(API_BASE + '/grid-status/set-levels', {levels});
+        _gridLevelsShowPlan(d, st, planWrap, levels);
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message;
+    }
+}
+
+// The map the displayed plan was computed from. Set ONLY by the preview
+// path, so apply cannot send a count no plan was ever shown for, and the
+// ids never pass through an onclick attribute.
+let _gridLevelsPending = null;
+
+function _gridLevelsShowPlan(d, st, planWrap, levels) {
+    const plans = d.plans || [];
+    _gridLevelsPending = null;
+    st.innerHTML = escText(d.detail || '');
+    const body = plans.map(p => {
+        const good = p.ok === true;
+        const hollow = good && p.buys_nothing_without_more_allocation === true;
+        const colour = hollow ? 'var(--gold, #c9860a)'
+                     : good ? 'var(--green)' : 'var(--red)';
+        return `<tr>
+            <td>${escText(p.product_id || '')}</td>
+            <td style="text-align:right;">${Number(p.levels_before)} &rarr; ${Number(p.levels_after)}</td>
+            <td style="text-align:right;">${p.slice_usd_before == null ? '&mdash;'
+                : fmtUsd(p.slice_usd_before)} &rarr; ${p.slice_usd_after == null
+                ? '&mdash;' : fmtUsd(p.slice_usd_after)}</td>
+            <td style="text-align:right;">${p.rungs_it_could_actually_open == null
+                ? '&mdash;' : Number(p.rungs_it_could_actually_open)}</td>
+            <td style="color:${colour}; font-weight:600;">${escText(
+                hollow ? 'READY (buys nothing yet)' : String(p.status || ''))}</td>
+          </tr>`;
+    }).join('');
+    const notes = plans.filter(p => p.detail).map(p =>
+        `<div style="margin-top:5px;">&middot; ${escText(p.detail)}</div>`).join('');
+    const ready = (d.ready || []);
+    if (ready.length) _gridLevelsPending = levels;
+    planWrap.innerHTML = `
+      <div style="overflow-x:auto; margin-top:8px;">
+        <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+          <thead><tr>
+            <th>Branch</th><th>Levels</th><th>Slice size</th>
+            <th>Rungs it could open</th><th>Verdict</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+      ${(d.missing && d.missing.length)
+        ? `<div style="margin-top:6px; font-size:0.76em; color:var(--gold, #c9860a);">
+             not a live branch, so left alone: ${d.missing.map(escText).join(', ')}
+           </div>` : ''}
+      <div style="margin-top:6px; font-size:0.78em; color:var(--text-dim);
+                  line-height:1.45;">${notes}</div>
+      ${ready.length
+        ? `<div style="margin-top:6px; font-size:0.76em; color:var(--text-dim);
+                       line-height:1.45;">
+             Applying changes num_levels on ${ready.length} branch(es) and nothing
+             else. It takes effect on the next grid cycle - no restart - and places
+             no order.
+           </div>
+           <button class="unlock-btn" style="margin-top:10px;"
+                   onclick="executeGridLevels()">
+             ✅ Confirm and set the levels</button>`
+        : `<div style="margin-top:8px; font-size:0.8em; color:var(--red);">
+             No plan came back READY, so there is nothing to confirm. Nothing was
+             changed.
+           </div>`}`;
+}
+
+// Takes the SAME map the plan was computed from, passed in from the
+// preview's own button - so this cannot apply a count the person never
+// saw a plan for.
+async function executeGridLevels() {
+    const st = document.getElementById('grid-levels-status');
+    const planWrap = document.getElementById('grid-levels-plan');
+    if (!st) return;
+    const levels = _gridLevelsPending;
+    if (!levels || !Object.keys(levels).length) {
+        st.textContent = 'Nothing was sent - no previewed plan to apply. '
+                       + 'Preview the change first.';
+        return;
+    }
+    st.textContent = 'Applying…';
+    try {
+        const d = await postGuarded(API_BASE + '/grid-status/set-levels',
+                                    {levels, dry_run: false});
+        const applied = d.applied || [];
+        if (!applied.length) {
+            st.innerHTML = '⚠️ ' + escText(d.detail || 'nothing was changed');
+            return;
+        }
+        st.innerHTML = `✅ ${applied.length} branch(es) changed: `
+            + applied.map(a => escText(a.product_id) + ' '
+                + Number(a.levels_before) + '&rarr;' + Number(a.levels_after)).join(', ')
+            + `. <span style="color:var(--text-dim);">Takes effect on the next grid
+               cycle - no restart, and no order was placed.</span>`;
+        // A plan that has been applied is spent: clear it so a second
+        // click cannot re-send a change that already happened.
+        _gridLevelsPending = null;
+        if (planWrap) planWrap.innerHTML = '';
+        if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
     } catch (e) {
         st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
     }
