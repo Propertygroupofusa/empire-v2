@@ -10950,21 +10950,48 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
                     f"{len(branches)} branch(es) and is not reversible. Re-send with "
                     f"accept_writeoff=true if that is intended."))
 
-    applied = []
+    # A BRANCH IS ONLY "APPLIED" IF A ROW ACTUALLY CHANGED.
+    #
+    # applied.append used to sit outside the inner loop, so a branch whose
+    # every slice lookup missed was still reported as corrected. Combined
+    # with the unserved slice id above, that made this endpoint answer
+    # "8 branch(es), $1,157.41 of cost basis cleared" while writing
+    # nothing at all - three times, to an owner who reasonably believed
+    # it. A report of a write that did not happen is worse than an error,
+    # because nobody retries it.
+    applied, not_applied = [], []
     async with g.get_session_factory()() as db:
         for br in branches:
+            changed, unfound = 0, 0
             for a in br["actions"]:
+                sid = a.get("slice_id")
+                if sid is None:
+                    # No primary key means this plan cannot be executed. It
+                    # is not a slice that is already gone.
+                    unfound += 1
+                    continue
                 row = (await db.execute(select(CryptoGridSlice).where(
-                    CryptoGridSlice.id == a["slice_id"]))).scalars().first()
+                    CryptoGridSlice.id == sid))).scalars().first()
                 if row is None:
+                    unfound += 1
                     continue
                 if a["action"] == "REMOVE":
                     await db.delete(row)
                 else:
                     row.qty = a["qty_after"]
-            applied.append({"product_id": br["product_id"],
-                            "units_removed": br["units_removed"],
-                            "cost_basis_removed_usd": br["cost_basis_removed_usd"]})
+                changed += 1
+            if changed:
+                applied.append({"product_id": br["product_id"],
+                                "units_removed": br["units_removed"],
+                                "cost_basis_removed_usd": br["cost_basis_removed_usd"],
+                                "slice_rows_changed": changed,
+                                "slice_rows_not_found": unfound or None})
+            else:
+                not_applied.append({
+                    "product_id": br["product_id"],
+                    "slice_rows_not_found": unfound,
+                    "reason": ("not one of this branch's planned slice rows could be "
+                               "found to write, so nothing was changed for it")})
         await db.commit()
 
     for a in applied:
@@ -10976,7 +11003,25 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     log.warning(f"[reconcile] {len(applied)} branch(es), ${total_basis:,.2f} of tracked "
                 f"cost basis written off")
     out["applied"] = applied
+    out["not_applied"] = not_applied or None
     out["dry_run"] = False
+    # The headline figure must describe what was WRITTEN, not what was
+    # planned. total_basis is the plan's number and stays available as
+    # cost_basis_planned_usd; the top-level field now sums only branches
+    # that really changed.
+    out["cost_basis_planned_usd"] = total_basis
+    out["cost_basis_removed_usd"] = round(
+        sum(a["cost_basis_removed_usd"] or 0.0 for a in applied), 2)
+    if not applied:
+        out["detail"] = (
+            f"NOTHING WAS CHANGED. {len(branches)} branch(es) had a plan, but no "
+            f"slice row could be found to write. The books are unchanged.")
+    else:
+        out["detail"] = (
+            f"{len(applied)} branch(es) corrected, ${out['cost_basis_removed_usd']:,.2f} "
+            f"of tracked cost basis cleared."
+            + (f" {len(not_applied)} branch(es) could not be written and were left "
+               f"alone." if not_applied else ""))
     return out
 
 

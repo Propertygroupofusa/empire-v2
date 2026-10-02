@@ -8314,6 +8314,18 @@ async def get_grid_status() -> dict:
                 total_net_usd += net_usd
                 total_cost_basis += cost_basis
             slices_out.append({
+                # THE PRIMARY KEY, WITHOUT WHICH RECONCILE CANNOT WRITE.
+                #
+                # slice_reconcile builds its actions as {"slice_id": r.get("id"),
+                # ...} and the reconcile endpoint then looks the row up by it.
+                # This serialiser never served the id, so every action carried
+                # slice_id=None, every lookup matched nothing, and the whole
+                # apply path deleted and reduced exactly zero rows while
+                # reporting each branch as corrected. A field that is stored
+                # but not served is indistinguishable from one that was never
+                # written - the comment three lines down says so about
+                # order_side, and the same trap caught this.
+                "id": getattr(s, "id", None),
                 "entry_price": s.entry_price, "qty": s.qty,
                 "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None,
                 "unrealized_net_usd": round(net_usd, 2) if net_usd is not None else None,
