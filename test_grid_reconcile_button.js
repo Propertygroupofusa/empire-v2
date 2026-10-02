@@ -128,6 +128,93 @@ ok('the call rides the grid-status fetch the page already makes',
    && (body.match(/apiGet\('\/grid-status'\)/g) || []).length === 1);
 ok('the panel adds no fetch of its own', !/apiGet|XMLHttpRequest/.test(fnRender));
 
-console.log();
-if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
-console.log('all checks passed');
+// NO VERDICT HERE. The async blocks below are part of this suite, and an
+// early "all checks passed" printed before they run is a pass count that
+// can contradict the real outcome further down the same output. One
+// suite, one verdict, at the end.
+
+// ====================================================================
+// A CHECKMARK IS A CLAIM AND HAS TO BE EARNED.
+//
+// Added after the apply path printed "Corrected 0 branch(es), clearing
+// $0.00" behind a green tick. The account owner reported the reconcile
+// done three times while the backing report never moved, because the
+// button said it had worked. These tests run the real functions against
+// a fake server and assert on what reaches the screen.
+// ====================================================================
+console.log('\n[9] zero applied is NOT reported as success');
+
+const grab2 = (name) => {
+  const m = src.match(new RegExp('(?:async )?function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}'));
+  if (!m) { console.log('FAIL: ' + name + ' not found'); process.exit(1); }
+  return m[0];
+};
+const esc2 = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const runExec = (serverPayload) => {
+  let out = '';
+  const st = { set textContent(v) { out = v; }, get textContent() { return out; },
+               set innerHTML(v) { out = v; }, get innerHTML() { return out; } };
+  const plan = { set innerHTML(v) {}, get innerHTML() { return ''; } };
+  const doc = { getElementById: id => (id === 'grid-reconcile-status' ? st
+                                     : id === 'grid-reconcile-plan' ? plan : null) };
+  const fn = new Function('document', 'postGuarded', '_gridReconcileUrl', 'escText',
+    'fmtUsd', 'loadFleetReadiness', 'refresh',
+    grab2('executeGridReconcile') + '; return executeGridReconcile;')(
+    doc, async () => serverPayload, () => 'u', esc2,
+    n => '$' + Number(n || 0).toFixed(2), () => {}, undefined);
+  return fn().then(() => out);
+};
+
+runExec({ applied: [], cost_basis_removed_usd: 0,
+          detail: 'no branch claims more coin than the wallet holds' }).then(out => {
+  ok('an empty apply does NOT print a green tick', !out.includes('✅'), out.slice(0, 120));
+  ok('it warns instead', out.includes('⚠'), out.slice(0, 120));
+  ok('it says plainly that nothing changed', /Nothing was changed/.test(out), out.slice(0, 120));
+  ok('it surfaces the server reason', /no branch claims more coin/.test(out), out.slice(0, 160));
+  ok('it does not claim a corrected count', !/Corrected 0/.test(out), out.slice(0, 120));
+  return runExec({ applied: [{ product_id: 'LINK-USD', units_removed: 0.1,
+                               cost_basis_removed_usd: 12.5 }],
+                   cost_basis_removed_usd: 12.5 });
+}).then(out => {
+  ok('a REAL apply still reports success', out.includes('✅'), out.slice(0, 120));
+  ok('and names the branch count', /Corrected 1 branch/.test(out), out.slice(0, 120));
+
+  // ---- the preview must not paper over a contradiction -------------
+  console.log('\n[10] a preview that disagrees with the banner says so');
+  const runPrev = (seenUnbacked, payload) => {
+    let out = '';
+    const st = { set textContent(v) { out = v; }, get textContent() { return out; },
+                 set innerHTML(v) { out = v; }, get innerHTML() { return out; } };
+    const plan = { set innerHTML(v) {}, get innerHTML() { return ''; } };
+    const doc = { getElementById: id => (id === 'grid-reconcile-status' ? st
+                                       : id === 'grid-reconcile-plan' ? plan : null) };
+    const fn = new Function('document', 'postGuarded', '_gridReconcileUrl', 'escText',
+      'fmtUsd', '_gridReconcileSeenUnbacked',
+      grab2('previewGridReconcile') + '; return previewGridReconcile;')(
+      doc, async () => payload, () => 'u', esc2,
+      n => '$' + Number(n || 0).toFixed(2), seenUnbacked);
+    return fn().then(() => out);
+  };
+  const noRows = { branches: [], detail: 'nothing to reconcile' };
+  return runPrev(8, noRows).then(out => {
+    ok('banner says 8 short, endpoint says none -> NOT a checkmark',
+       !out.includes('✅'), out.slice(0, 140));
+    ok('it names the disagreement', /disagree/i.test(out), out.slice(0, 140));
+    ok('it quotes the count it saw', /8 short branch/.test(out), out.slice(0, 160));
+    ok('it refuses to call the book clean', /UNRECONCILED/.test(out), out.slice(0, 200));
+    return runPrev(0, noRows);
+  }).then(out => {
+    ok('banner agrees there is nothing short -> a tick is honest',
+       out.includes('✅'), out.slice(0, 140));
+    return runPrev(null, noRows);
+  }).then(out => {
+    ok('an unreadable banner does not manufacture a disagreement',
+       out.includes('✅'), out.slice(0, 140));
+  });
+}).then(() => {
+  console.log();
+  if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
+  console.log('all checks passed');
+}).catch(e => { console.log('THREW: ' + e.stack); process.exit(1); });

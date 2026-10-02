@@ -7671,9 +7671,20 @@ function renderOutOfReach(oor) {
 // It is NOT a loss and the panel says so: the coin was sold by another
 // subsystem and the proceeds are already in the wallet as cash. What is
 // corrected is bookkeeping that never learned about the sale.
+// What the backing report said this pass. The reconcile ENDPOINT and the
+// backing banner read the wallet by different routes, so they can
+// disagree - and when they do, that disagreement is the finding. Without
+// this the preview prints a green "nothing to fix" directly underneath a
+// red banner naming eight short branches, and the contradiction reads as
+// success.
+let _gridReconcileSeenUnbacked = null;
+
 function renderGridReconcile(bk) {
     const wrap = document.getElementById('grid-reconcile-wrap');
     if (!wrap) return;
+    _gridReconcileSeenUnbacked = (bk && bk.readable === true
+        && isFinite(Number(bk.unbacked_branches)))
+        ? Number(bk.unbacked_branches) : null;
     // Unreadable is not "nothing to fix". Say nothing rather than imply
     // the book is clean on a pass where the wallet could not be read.
     if (!bk || bk.readable !== true) {
@@ -7738,7 +7749,23 @@ async function previewGridReconcile(productId) {
         const d = await postGuarded(_gridReconcileUrl(productId, false));
         const rows = d.branches || [];
         if (!rows.length) {
-            st.textContent = '✅ ' + escText(d.detail
+            // A CHECKMARK HERE WAS WRONG. When the banner above counted
+            // short branches and this says there are none, the two
+            // readings disagree and nothing has been established - least
+            // of all that the book is clean.
+            if (_gridReconcileSeenUnbacked > 0) {
+                st.innerHTML = `\u26a0\ufe0f <strong>These two readings disagree.</strong>
+                    The backing report counts
+                    ${_gridReconcileSeenUnbacked} short branch(es), and reconcile reports
+                    none - so nothing was established and nothing was changed.
+                    <div style="margin-top:4px; color:var(--text-dim);">
+                    ${escText(d.detail || '')}</div>
+                    <div style="margin-top:4px; color:var(--text-dim);">They read the
+                    wallet by different routes. Until they agree, treat the book as
+                    UNRECONCILED rather than clean.</div>`;
+                return;
+            }
+            st.textContent = '\u2705 ' + escText(d.detail
                 || 'No branch claims more coin than the wallet holds. Nothing to fix.');
             return;
         }
@@ -7794,7 +7821,23 @@ async function executeGridReconcile(productId) {
         const d = await postGuarded(_gridReconcileUrl(productId, true));
         const applied = d.applied || [];
         const total = Number(d.cost_basis_removed_usd);
-        st.innerHTML = `✅ Corrected ${applied.length} branch(es), clearing
+        // NOTHING APPLIED IS NOT SUCCESS.
+        //
+        // This printed "Corrected 0 branch(es), clearing $0.00" behind a
+        // green checkmark, which is indistinguishable from a real fix at a
+        // glance. The account owner reported the reconcile as done three
+        // times while the backing report never moved, because the button
+        // told him it had worked. A checkmark is a claim; it has to be
+        // earned by a row actually changing.
+        if (!applied.length) {
+            st.innerHTML = `\u26a0\ufe0f <strong>Nothing was changed.</strong>
+                The server applied no correction.
+                <div style="margin-top:4px; color:var(--text-dim);">
+                ${escText(d.detail || 'It reported no branch to reconcile.')}</div>`;
+            if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
+            return;
+        }
+        st.innerHTML = `\u2705 Corrected ${applied.length} branch(es), clearing
             ${escText(fmtUsd(total))} of tracked cost basis.
             <span style="color:var(--text-dim);">Not a loss - that coin was already
             sold and the cash is already in the wallet.</span>`;
