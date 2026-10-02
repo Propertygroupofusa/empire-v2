@@ -8994,6 +8994,101 @@ async def set_grid_auto_rotate_endpoint(payload: SetGridAutoRotateRequest):
     return {"status": "updated", "auto_rotate_active": payload.enabled}
 
 
+class SetGridBranchLevelsRequest(BaseModel):
+    #: product_id -> new level count, e.g. {"LINK-USD": 6, "NEAR-USD": 6}
+    levels: dict[str, int]
+    dry_run: bool = True
+
+
+@router.post("/grid-status/set-levels")
+async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
+    """How many rungs a branch may hold at once. Dry run by default.
+
+    THE CONSTRAINT THIS RELIEVES. A branch at num_levels is PARKED: it
+    cannot buy another rung at any price, however far the coin falls and
+    however much allocation it has. Measured 2026-10-02, ELEVEN of
+    twenty-three branches were parked, including the two best earners per
+    dollar on the account - LINK (3 slices / 3 levels, $11.01 earned on
+    $137.87) and NEAR (3/3, $13.00 on $183.30). Both fill their three
+    rungs and wait.
+
+    Nothing in this codebase could change it. coin_adoption_worker writes
+    num_levels once, as `len(open_now) + len(t["slices"])` - the slice
+    count at adoption - so an adopted branch is born full by construction,
+    and create-branch does not take a level count at all.
+
+    WHAT IT CHANGES: num_levels, and nothing else. Not the spacing, not
+    the reference price, not the stop, not the allocation, not an open
+    slice. It places NO order. The grid still decides WHEN to buy through
+    every gate it already passes; this only decides how many rungs it may
+    hold.
+
+    WHAT IT WILL NOT DO: set a count below the branch's own open slices
+    (that is the parked condition, not a cure for it), make a slice
+    smaller than the venue minimum, or report success for a change that
+    buys nothing - a branch with no spare allocation gains room it cannot
+    use, and the plan says so in `buys_nothing_without_more_allocation`
+    rather than stopping at READY.
+
+    Write-guarded like every POST here. dry_run=true (the default)
+    returns the plan and changes nothing.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400,
+                            detail="STOP_TRADING is set - configuration changes are paused")
+    import branch_levels
+    from models import CryptoGridBranch
+
+    status = await crypto_grid_bot_module.get_grid_status()
+    report = branch_levels.plan_many(status.get("branches") or [], payload.levels or {})
+
+    if payload.dry_run:
+        report["dry_run"] = True
+        report["detail"] = ("PREVIEW ONLY - nothing was changed. Re-send with "
+                            "dry_run=false to apply the plans marked READY.")
+        return report
+
+    ready = [r for r in report["plans"] if r.get("ok")]
+    if not ready:
+        report["dry_run"] = False
+        report["applied"] = []
+        report["detail"] = "no plan was applicable - nothing was changed"
+        return report
+
+    applied = []
+    async with crypto_grid_bot_module.get_session_factory()() as db:
+        for r in ready:
+            row = (await db.execute(select(CryptoGridBranch).where(
+                CryptoGridBranch.bot_name == r["bot_name"]))).scalars().first()
+            if row is None:
+                continue
+            # Re-check against the row we are about to write, not the
+            # snapshot the plan was built from: a slice may have opened in
+            # between, and a count below the open slices is the one thing
+            # this must never write.
+            if r["levels_after"] < (r["open_slices"] or 0):
+                continue
+            row.num_levels = r["levels_after"]
+            applied.append({"product_id": r["product_id"],
+                            "bot_name": r["bot_name"],
+                            "levels_before": r["levels_before"],
+                            "levels_after": r["levels_after"],
+                            "rungs_it_could_actually_open":
+                                r.get("rungs_it_could_actually_open")})
+        await db.commit()
+
+    for a in applied:
+        log.warning(f"[levels] {a['product_id']} {a['levels_before']} -> "
+                    f"{a['levels_after']} level(s)")
+    report["dry_run"] = False
+    report["applied"] = applied
+    report["detail"] = (f"{len(applied)} branch(es) changed. Takes effect on the bot's "
+                        f"next grid cycle - no restart. No order was placed.")
+    return report
+
+
 class CreateGridBranchRequest(BaseModel):
     product_id: str
     allocated_usd: float
