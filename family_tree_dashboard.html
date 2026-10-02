@@ -1099,6 +1099,7 @@
                 <div class="tv-sub" id="strip-branches-sub"></div>
             </div>
         </div>
+        <div id="alarm-top-wrap" style="display:none;"></div>
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
         <div id="grid-reconcile-wrap" style="display:none;"></div>
@@ -7219,9 +7220,13 @@ async function loadAlertQueue() {
     const wrap = document.getElementById('alert-queue-wrap');
     if (!wrap) return;
     try {
-        const r = await fetch('/api/trading-dashboard/alert-queue?limit=12', { cache: 'no-store' });
+        const r = await fetch('/api/trading-dashboard/alert-queue?limit=100', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const d = await r.json();
+        // Same payload, no second request: the top-of-page banner is the
+        // delivery route while no transport works, so it must not be able
+        // to disagree with the panel below it.
+        renderTopAlarm(d);
         const c = d.counts || {};
         const g = d.channel_diagnosis;
 
@@ -7261,10 +7266,111 @@ async function loadAlertQueue() {
                  marked failed <em>with its error</em> and stays visible. Nothing under
                  ${_wUSD(d.min_alert_usd)} fires at all.</div>`;
     } catch (e) {
+        // UNREADABLE IS NOT CALM. Leaving the banner as it was would show a
+        // count from an earlier pass as though it were current; clearing it
+        // silently would read as "no alerts". Say which it is.
+        const top = document.getElementById('alarm-top-wrap');
+        if (top) {
+            top.style.display = 'block';
+            top.innerHTML = `<div style="margin-bottom:14px; padding:12px 15px;
+                border-radius:8px; border:2px solid var(--amber, #f0b429);
+                background:rgba(240,180,41,0.07); font-size:0.82em; line-height:1.5;">
+                <strong style="color:var(--amber, #f0b429);">The alarm could not be
+                read</strong> (${escText(e.message)}). Whether anything has fired is
+                UNKNOWN, which is not the same as nothing having fired.</div>`;
+        }
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
             Could not read the queue: ${escText(e.message)}. The alarm's own health is unknown,
             which is not the same as healthy.</div>`;
     }
+}
+
+
+// ---- The alarm, where it cannot be scrolled past --------------------
+//
+// WHY THIS EXISTS. Every alert this system has ever raised was generated
+// correctly, stored durably, and never delivered: measured 2026-10-02,
+// 85 rows pending, 0 sent, 0 failed - 36 CRITICAL breaches, 33 coverage
+// losses, 16 recoveries. Both mail transports are refused by the host
+// (smtp:465 and smtp:587 answer with SMTPServerDisconnected) and no
+// HTTPS mail credential is set, so there is no route off the box.
+//
+// The full queue panel already existed, but it sits near the bottom of a
+// long page and asked for 12 rows, so it was showing 12 of 85 to someone
+// who had to scroll past everything else to find it. The account owner
+// learned about three tripped breakers by pasting Railway logs.
+//
+// So this is the delivery route while transport is down: the top of the
+// page the owner already opens. It reads NOTHING of its own - the queue
+// fetch loadAlertQueue already makes feeds both panels.
+//
+// IT DOES NOT MARK ANYTHING SENT. Displaying a row is not delivering it;
+// a queue that reported success because a browser rendered it would be
+// the exact "looks like coverage" failure the worker refuses to commit.
+function renderTopAlarm(d) {
+    const wrap = document.getElementById('alarm-top-wrap');
+    if (!wrap) return;
+    const hide = () => { wrap.style.display = 'none'; wrap.innerHTML = ''; };
+    if (!d || typeof d !== 'object') return hide();
+    const all = (d.alerts || []).filter(a => a && a.status === 'pending');
+    if (!all.length) return hide();
+
+    const c = d.counts || {};
+    const pending = Number(c.pending);
+    // The counts are over the WHOLE table; the rows are only the page that
+    // was asked for. Say which number is which rather than implying the
+    // listed rows are all of them.
+    const shown = all.length;
+    const crit = all.filter(a => a.severity === 'CRITICAL');
+    const high = all.filter(a => a.severity === 'HIGH');
+    const lead = crit.length ? crit : (high.length ? high : all);
+    const colour = crit.length ? 'var(--red)'
+                 : high.length ? 'var(--amber, #f0b429)' : 'var(--text-dim)';
+
+    const top = lead.slice(0, 6).map(a => `
+        <div style="padding:5px 0; border-bottom:1px solid var(--border);
+                    font-size:0.8em; line-height:1.45;">
+          <span style="font-weight:700; color:${a.severity === 'CRITICAL'
+            ? 'var(--red)' : a.severity === 'HIGH'
+            ? 'var(--amber, #f0b429)' : 'var(--text-dim)'};">${escText(a.kind || '')}</span>
+          &nbsp;${escText(a.message || '')}
+        </div>`).join('');
+    const more = Math.max(0, lead.length - 6);
+
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-bottom:14px; padding:13px 15px; border-radius:8px;
+                  border:2px solid ${colour}; background:rgba(180,35,24,0.07);">
+        <div style="font-weight:700; color:${colour}; font-size:0.95em;">
+          🔔 ${isFinite(pending) ? pending : shown} alert(s) have fired and
+          <span style="text-decoration:underline;">none were delivered</span>
+        </div>
+        <div style="margin-top:7px; font-size:0.8em; font-variant-numeric:tabular-nums;">
+          ${crit.length ? `<strong style="color:var(--red);">${crit.length} critical</strong>` : ''}
+          ${crit.length && high.length ? ' &middot; ' : ''}
+          ${high.length ? `<strong style="color:var(--amber, #f0b429);">${high.length} high</strong>` : ''}
+          <span style="color:var(--text-dim);">
+            ${isFinite(pending) && pending > shown
+              ? ` &middot; ${shown} of ${pending} shown here`
+              : ''}</span>
+        </div>
+        <div style="margin-top:9px;">${top}</div>
+        ${more ? `<div style="margin-top:6px; font-size:0.76em; color:var(--text-dim);">
+            and ${more} more &mdash; the full queue is under
+            <strong>🔔 The alarm</strong> further down this page.</div>` : ''}
+        <div style="margin-top:10px; font-size:0.76em; color:var(--text-dim);
+                    line-height:1.5;">
+          <strong>Why you did not hear about these:</strong>
+          ${alertRemedy(d, d.channel_diagnosis)}
+        </div>
+        <div style="margin-top:7px; font-size:0.74em; color:var(--text-dim);
+                    line-height:1.5;">
+          Nothing is marked sent &mdash; showing a row here is not delivering
+          it, so the backlog is intact and flushes the moment a route exists.
+          No alert can place, size or cancel an order; the only thing the
+          alarm can do is tell someone something.
+        </div>
+      </div>`;
 }
 
 async function runMoneyTrace() {

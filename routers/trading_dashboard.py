@@ -2715,6 +2715,22 @@ async def get_holdings_watch(window_days: int = 30, fresh: int = 0):
     out["window_days"] = window_days
     out["stop_policy"] = adaptive_stop.policy()
     out["as_of"] = census.get("as_of")
+    # THE DRAWDOWN BREAKERS, SO THE ALARM CAN SEE THEM.
+    #
+    # alert_queue.plan reads watch["breakers"] and had no source for it,
+    # which is why QNT (-29.99%), JASMY (-28.28%) and ONDO (-27.98%) all
+    # tripped without producing a single alert.
+    #
+    # CACHE ONLY, NEVER A FETCH. This is read off the grid-status cache
+    # that the dashboard already fills; if the cache is cold the key is
+    # OMITTED, not set to an empty list - an absent key is UNKNOWN to
+    # plan() and produces no rows, whereas [] would assert that no
+    # breaker is tripped on a pass where none could be seen. Adding a
+    # real grid-status rebuild here would put a heavy call on the alarm
+    # loop, which is the one loop that must not be able to stall.
+    out["breakers"] = _breakers_from_cache()
+    if out["breakers"] is None:
+        out.pop("breakers")
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0.0
     out["cache_seconds"] = WATCH_CACHE_SECONDS
@@ -8410,6 +8426,44 @@ async def capital_mobility():
 # can only ever make a DASHBOARD number up to 25s old, never an order.
 _GRID_STATUS_CACHE = {"at": 0.0, "payload": None}
 _GRID_STATUS_TTL_SECONDS = float(os.getenv("GRID_STATUS_TTL_SECONDS", "25"))
+
+
+def _breakers_from_cache():
+    """Breaker verdicts off the grid-status cache. None when cold.
+
+    None means UNKNOWN and callers must omit the key rather than send an
+    empty list: "nothing could be read" and "nothing is tripped" are
+    different answers and only one of them is safe to act on.
+
+    Reads the cache without regard to its TTL on purpose. A breaker that
+    tripped 40 seconds ago is still tripped, and the alternative to a
+    slightly stale verdict here is no verdict at all - which is the state
+    that let three of them trip in silence.
+    """
+    payload = _GRID_STATUS_CACHE.get("payload")
+    if not payload:
+        return None
+    rows = payload.get("branches")
+    if not rows:
+        return None
+    out = []
+    for b in rows:
+        if not isinstance(b, dict):
+            continue
+        pid = b.get("product_id")
+        if not pid:
+            continue
+        br = b.get("drawdown_breached")
+        out.append({
+            "asset": str(pid),
+            # Pass the verdict through as-is: plan() refuses anything that
+            # is not a real bool, so a missing field stays UNKNOWN here
+            # instead of being flattened to False one layer early.
+            "breached": br if isinstance(br, bool) else None,
+            "drawdown_pct": b.get("drawdown_pct"),
+            "usd": b.get("allocated_usd"),
+        })
+    return out or None
 
 
 @router.get("/grid-status")
