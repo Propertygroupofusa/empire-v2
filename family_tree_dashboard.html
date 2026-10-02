@@ -6988,6 +6988,20 @@ async function loadFleetReadiness() {
                       : r.state === 'UNREADABLE' ? 'var(--gold)' : 'var(--text-dim)';
             const gap = r.gapPct === null ? 'unreadable'
                       : (r.gapPct >= 0 ? '+' : '') + r.gapPct.toFixed(2) + '%';
+            // THE NUMBER IS COLOURED BY ITS OWN SIGN, NOT BY THE ROW'S STATE.
+            //
+            // It used to take `col`, the STATE colour - so every LOCKED row
+            // printed its percentage in red whatever the number said, and
+            // QNT's +41.39% looked identical to PRIME's -12.97%. They are
+            // opposite facts: + means the price is already PAST the sell
+            // trigger (the move happened), - means it still has that far to
+            // climb. The state is already named in its own colour beside it,
+            // so the number is free to say what it is.
+            //
+            // null stays UNREADABLE-coloured, never green: a gap that could
+            // not be measured must not read as a figure in your favour.
+            const gapCol = r.gapPct === null ? 'var(--gold)'
+                         : r.gapPct >= 0 ? 'var(--green)' : 'var(--red)';
             const note = r.state === 'LOCKED'
                   ? (r.gapPct !== null && r.gapPct >= 0
                      ? 'PAST its trigger and cannot sell \u2014 the move was missed'
@@ -7004,8 +7018,8 @@ async function loadFleetReadiness() {
                 <span style="color:${col}; font-weight:700;">${escText(r.state)}</span>
                 \u00b7 ${escText(note)}
                 ${r.gridPct !== null ? ` \u00b7 step ${(r.gridPct*100).toFixed(2)}%` : ''}</div>
-              <div style="text-align:right; font-size:0.76em; color:${col};
-                   font-variant-numeric:tabular-nums;">${escText(gap)}</div>
+              <div style="text-align:right; font-size:0.76em; color:${gapCol};
+                   font-weight:600; font-variant-numeric:tabular-nums;">${escText(gap)}</div>
               <div style="text-align:right; font-size:0.76em;
                    font-variant-numeric:tabular-nums;">${_wUSD(r.allocated)}</div>
             </div>`;
