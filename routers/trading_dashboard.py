@@ -9425,7 +9425,42 @@ async def grid_lessons_endpoint():
             fleet = [b.product_id for b in branches if b.active]
     except Exception as exc:
         log.warning(f"[dashboard] fleet unreadable for lesson tagging: {exc}")
-    return JSONResponse(content=await grid_learning.get_all_lessons(fleet), headers={
+    payload = await grid_learning.get_all_lessons(fleet)
+
+    # AND WHAT THE CLOSED-TRADE MEMORY CANNOT SEE. Measured 2026-10-02:
+    # 29 lessons, 187 trades, $128.95 recorded - reconciling exactly to
+    # the live book - and every verdict it had ever produced was "earning"
+    # or "watch". Never one negative word, because the grid sells only
+    # ABOVE entry, so closed-trade P&L is positive by construction.
+    #
+    # ZEC-USD held 7 slices and $2,341 of cost basis at -$388 and had NO
+    # LESSON AT ALL, having never completed a round trip. The largest
+    # drain in the account was the one position the learning system had
+    # never heard of.
+    #
+    # holding_cost sets each coin's sale proceeds against the cost of
+    # still holding it, so a coin that earns $15 while bleeding $29 stops
+    # reading as a winner. It reports and nothing more - no enforcement
+    # switch, by design: the last mechanism that retired branches on thin
+    # evidence left 64% of the account idle.
+    try:
+        import holding_cost
+        _status = await crypto_grid_bot_module.get_grid_status() \
+            if crypto_grid_bot_module is not None else {}
+        payload["holding_cost"] = holding_cost.assess(
+            _status.get("branches") or [],
+            payload.get("lessons") or [],
+            # The backing report keeps a phantom mark-to-market from being
+            # counted as the cost of holding coin that is not there.
+            backing=_status.get("backing"))
+    except Exception as exc:
+        log.warning(f"[dashboard] holding cost unreadable: {exc}")
+        payload["holding_cost"] = {
+            "readable": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "this_is_unknown_not_zero_cost": True}
+
+    return JSONResponse(content=payload, headers={
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache", "Expires": "0"})
 
