@@ -1101,6 +1101,7 @@
         </div>
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
+        <div id="grid-reconcile-wrap" style="display:none;"></div>
     </div>
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
@@ -6951,6 +6952,7 @@ async function loadFleetReadiness() {
         const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
         // Same payload, no extra request: grid-status carries it.
         renderOutOfReach(d.out_of_reach);
+        renderGridReconcile(d.backing);
         const rows = FLEET.readiness(d.branches || [], unbacked);
         const s = FLEET.summarise(rows);
 
@@ -7539,6 +7541,161 @@ function renderOutOfReach(oor) {
             ${escText(oor.detail || '')}
           </div>
         </div>`;
+}
+
+// THE ONE REMEDY THAT HAD NO BUTTON.
+//
+// slice_backing reports branches claiming coin the wallet does not hold
+// ($1,190.75 across 10 branches on 2026-10-02), and the fix for it is
+// POST /grid-status/reconcile-slices. That endpoint appeared NOWHERE on
+// this page: the only Reconcile control here is the family tree's
+// reconcile-asset, which is a different subsystem and does not touch a
+// grid slice. So the single action that puts QNT, ACH and PEPE back in
+// service - all three refusing every sell with BELOW_BASE_INCREMENT
+// because their books claim units that are not there - could only be run
+// from a command line, which is not where this account is operated from.
+//
+// Preview first, always. Clearing tracked cost basis is not reversible,
+// so the server defaults to dry_run and additionally demands
+// accept_writeoff on the real call; this UI never sends either flag
+// until the plan has been displayed and explicitly confirmed.
+//
+// It is NOT a loss and the panel says so: the coin was sold by another
+// subsystem and the proceeds are already in the wallet as cash. What is
+// corrected is bookkeeping that never learned about the sale.
+function renderGridReconcile(bk) {
+    const wrap = document.getElementById('grid-reconcile-wrap');
+    if (!wrap) return;
+    // Unreadable is not "nothing to fix". Say nothing rather than imply
+    // the book is clean on a pass where the wallet could not be read.
+    if (!bk || bk.readable !== true) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    const short = Number(bk.not_in_wallet_usd);
+    const n = Number(bk.unbacked_branches);
+    if (!isFinite(short) || short <= 0 || !isFinite(n) || n <= 0) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    const phantom = Number(bk.phantom_unrealized_usd);
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                  border:1px solid var(--red); background:rgba(180,35,24,0.07);">
+        <div style="font-weight:700; color:var(--red); font-size:0.9em;">
+          ${n} branch(es) claim coin the wallet does not hold
+        </div>
+        <div style="margin-top:8px; font-size:0.82em;
+                    font-variant-numeric:tabular-nums;">
+          <span style="color:var(--text-dim);">not in wallet</span>
+          <strong> ${fmtUsd(short)}</strong>
+          ${isFinite(phantom) && phantom !== 0
+            ? `<span style="color:var(--text-dim);"> &middot; of the reported
+               unrealized, </span><strong>${fmtUsd(phantom)}</strong>
+               <span style="color:var(--text-dim);">cannot be sold at any
+               price</span>` : ''}
+        </div>
+        <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                    line-height:1.45;">
+          A branch cannot sell what it does not hold, so these sit refusing
+          every sell order. Correcting the books is not a loss: the coin was
+          already sold and the cash is already in the wallet.
+        </div>
+        <button class="unlock-btn" style="margin-top:10px;"
+                onclick="previewGridReconcile()">🔍 Preview the fix (changes nothing)</button>
+        <div id="grid-reconcile-status" style="margin-top:8px; font-size:0.82em;
+             color:var(--text-dim);"></div>
+        <div id="grid-reconcile-plan"></div>
+      </div>`;
+}
+
+function _gridReconcileUrl(productId, apply) {
+    const q = [];
+    if (productId) q.push('product_id=' + encodeURIComponent(productId));
+    if (apply) q.push('dry_run=false', 'accept_writeoff=true');
+    return API_BASE + '/grid-status/reconcile-slices'
+         + (q.length ? '?' + q.join('&') : '');
+}
+
+async function previewGridReconcile(productId) {
+    const st = document.getElementById('grid-reconcile-status');
+    const planWrap = document.getElementById('grid-reconcile-plan');
+    if (!st || !planWrap) return;
+    st.textContent = 'Computing the plan' + (productId ? ' for ' + productId : '')
+                   + '… nothing is being changed.';
+    planWrap.innerHTML = '';
+    try {
+        // No dry_run flag is sent: the server's own default is true, and
+        // relying on it means this path cannot apply anything even if the
+        // query string were tampered with.
+        const d = await postGuarded(_gridReconcileUrl(productId, false));
+        const rows = d.branches || [];
+        if (!rows.length) {
+            st.textContent = '✅ ' + escText(d.detail
+                || 'No branch claims more coin than the wallet holds. Nothing to fix.');
+            return;
+        }
+        st.innerHTML = escText(d.detail || '');
+        const body = rows.map(b => `<tr>
+            <td>${escText(b.product_id)}</td>
+            <td style="text-align:right;">${Number(b.tracked_units).toFixed(8)}</td>
+            <td style="text-align:right;">${Number(b.held_units).toFixed(8)}</td>
+            <td style="text-align:right; color:var(--red);">${fmtUsd(b.cost_basis_removed_usd)}</td>
+            <td style="text-align:right;">${Number(b.slices_removed) || 0} / ${Number(b.slices_reduced) || 0}</td>
+          </tr>`).join('');
+        planWrap.innerHTML = `
+          <div style="overflow-x:auto; margin-top:8px;">
+            <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+              <thead><tr>
+                <th>Branch</th><th>Claims</th><th>Wallet has</th>
+                <th>Cost basis cleared</th><th>Slices cut / trimmed</th>
+              </tr></thead>
+              <tbody>${body}</tbody>
+            </table>
+          </div>
+          <div style="margin-top:6px; font-size:0.78em;
+                      font-variant-numeric:tabular-nums;">
+            <span style="color:var(--text-dim);">total tracked cost basis cleared</span>
+            <strong> ${fmtUsd(d.cost_basis_removed_usd)}</strong>
+            <span style="color:var(--text-dim);"> across ${Number(d.branch_count)} branch(es)</span>
+          </div>
+          ${(d.skipped && d.skipped.length)
+            ? `<div style="margin-top:6px; font-size:0.76em; color:var(--gold, #c9860a);">
+                 ${d.skipped.length} branch(es) skipped - their wallet balance could not be
+                 read this pass, so they are UNKNOWN and were left alone:
+                 ${d.skipped.map(x => escText(x.product_id)).join(', ')}
+               </div>` : ''}
+          <div style="margin-top:6px; font-size:0.76em; color:var(--text-dim);
+                      line-height:1.45;">
+            Only tracked quantity changes. Allocation, entry price, target and stop are
+            untouched, and no Coinbase order is placed. This is not reversible.
+          </div>
+          <button class="unlock-btn" style="margin-top:10px;"
+                  onclick="executeGridReconcile(${productId ? "'" + productId + "'" : ''})">
+            ✅ Confirm and correct for real</button>`;
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function executeGridReconcile(productId) {
+    const st = document.getElementById('grid-reconcile-status');
+    const planWrap = document.getElementById('grid-reconcile-plan');
+    if (!st) return;
+    st.textContent = 'Applying…';
+    try {
+        const d = await postGuarded(_gridReconcileUrl(productId, true));
+        const applied = d.applied || [];
+        const total = Number(d.cost_basis_removed_usd);
+        st.innerHTML = `✅ Corrected ${applied.length} branch(es), clearing
+            ${escText(fmtUsd(total))} of tracked cost basis.
+            <span style="color:var(--text-dim);">Not a loss - that coin was already
+            sold and the cash is already in the wallet.</span>`;
+        if (planWrap) planWrap.innerHTML = '';
+        if (typeof refresh === 'function') refresh();
+        else if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
+    }
 }
 
 // The running total of closed grid profit, trade by trade. Drawn from
