@@ -121,10 +121,40 @@ const ADV = (function () {
     function fit(cv) {
         const dpr = window.devicePixelRatio || 1;
         const w = Math.max(1, cv.clientWidth);
-        const h = Math.max(1, parseInt(cv.getAttribute('height'), 10) || 150);
+        // THE INTENDED HEIGHT IS READ ONCE AND REMEMBERED.
+        //
+        // This used to read cv.getAttribute('height') on every call. But
+        // canvas.height is a REFLECTED attribute: the `cv.height = h * dpr`
+        // two lines down WRITES that same attribute. So the next redraw read
+        // back h*dpr and multiplied again, and the canvas grew by a factor of
+        // dpr every single time.
+        //
+        // Measured in a real browser at the device ratio of the owner's phone
+        // (dpr 3), starting from height="300":
+        //
+        //     redraw 1      900px
+        //     redraw 2    2,700px
+        //     redraw 3    8,100px
+        //     redraw 4   24,300px   <- past Chrome's 16,384px per-side limit
+        //     redraw 5   72,900px
+        //
+        // advDraw() runs on a 60s interval, so the chart passed the limit
+        // about three minutes after the page opened, and a canvas over that
+        // limit renders as a BROKEN IMAGE - the white box with the torn-page
+        // icon the owner kept seeing. At dpr 1 it never grows at all, which
+        // is why every desktop and headless check looked fine.
+        if (!cv.dataset.baseHeight) {
+            cv.dataset.baseHeight = String(
+                Math.max(1, parseInt(cv.getAttribute('height'), 10) || 150));
+        }
+        const h = Math.max(1, parseInt(cv.dataset.baseHeight, 10) || 150);
         cv.style.height = h + 'px';
-        cv.width = Math.round(w * dpr);
-        cv.height = Math.round(h * dpr);
+        // Clamped, because a device ratio and a wide viewport can still reach
+        // the venue of last resort: a canvas the browser refuses to paint. A
+        // slightly soft chart beats a broken-image icon.
+        const MAX_SIDE = 16384;
+        cv.width = Math.min(MAX_SIDE, Math.round(w * dpr));
+        cv.height = Math.min(MAX_SIDE, Math.round(h * dpr));
         const c = cv.getContext('2d');
         c.setTransform(dpr, 0, 0, dpr, 0, 0);
         c.clearRect(0, 0, w, h);
