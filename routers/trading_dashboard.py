@@ -8671,6 +8671,51 @@ async def write_attempts_endpoint():
     }
 
 
+@router.get("/startup-fix")
+async def startup_fix_report_endpoint():
+    """What the one-shot boot task did, in this process, in its own words.
+
+    READ-ONLY. It exists because the owner has no terminal and because
+    every browser-side instrument built for this came back empty: the
+    buttons for these two writes recorded no write attempt and not even a
+    GET beacon, across a cleared cache, an incognito window and three
+    deploys. This is the server saying what it did without being asked
+    through a page.
+
+    `ran: false` with a reason is the normal answer - startup_fix is
+    shipped inert and does nothing until STARTUP_FIX_TICKET is set in the
+    environment, which only the account owner can do.
+
+    `report: null` means this process has not reached the startup task at
+    all - UNKNOWN, not a failure, and not a success either.
+    """
+    try:
+        import startup_fix
+    except Exception as e:
+        return {"readable": False, "report": None,
+                "detail": f"the startup task module could not be imported: "
+                          f"{type(e).__name__}: {e}"}
+    rep = startup_fix.last_report()
+    return {
+        "readable": True,
+        "is_a_measurement_not_a_change": True,
+        "armed": bool(startup_fix.ticket()),
+        "ticket_env": startup_fix.TICKET_ENV,
+        "levels_it_would_write": startup_fix.LEVELS,
+        "max_attempts": startup_fix.MAX_ATTEMPTS,
+        "writeoff_ceiling_usd": startup_fix.MAX_WRITEOFF_USD,
+        "report": rep,
+        "rows_written_total": (rep or {}).get("rows_written_total"),
+        "detail": (
+            "this process has not run the startup task yet, so there is nothing "
+            "to report - UNKNOWN, not a success and not a failure"
+            if rep is None else (rep.get("detail") or "")),
+        "note": ("in-memory and per-process: a redeploy clears it, and the task "
+                 "itself will not run twice on the same ticket, so an empty "
+                 "report after a restart is expected"),
+    }
+
+
 @router.get("/grid-status")
 async def get_grid_status_endpoint(fresh: int = 0):
     if crypto_grid_bot_module is None:

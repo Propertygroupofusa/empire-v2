@@ -1315,6 +1315,29 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # One-shot boot task: two bookkeeping writes that have never
+        # reached the database through the dashboard. SHIPPED INERT - it
+        # does nothing at all unless STARTUP_FIX_TICKET is set in the
+        # environment, which only the account owner can do, and it will
+        # not run twice on the same ticket. It places no order, moves no
+        # cash and touches no threshold; see startup_fix.py's docstring
+        # for every way it fails closed. Run as a task, not awaited, so a
+        # slow wallet read cannot hold up the health check.
+        try:
+            import startup_fix
+            import crypto_grid_bot as _sfg
+            if startup_fix.ticket():
+                _sfx_task = asyncio.create_task(startup_fix.run_at_boot(_sfg))
+                log.warning("[startup-fix] armed by environment - running once")
+            else:
+                log.info("[startup-fix] not armed (STARTUP_FIX_TICKET unset) - "
+                         "nothing will be written")
+        except Exception as e:
+            try:
+                log.warning(f"startup fix not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # Claim reconciliation: when the fleet's UNSPENT claims exceed the
         # cash that really exists, lower the claims until they fit. Writes
         # one number - allocated_usd - and never an order, a slice or a coin.
