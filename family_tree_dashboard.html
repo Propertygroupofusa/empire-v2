@@ -7820,10 +7820,10 @@ function _gridReconcileUrl(productId, apply) {
 }
 
 async function previewGridReconcile(productId) {
+    uiTrace('rec_preview_enter');
     const st = document.getElementById('grid-reconcile-status');
     const planWrap = document.getElementById('grid-reconcile-plan');
-    if (!st || !planWrap) return;
-    uiTrace('rec_preview_enter');
+    if (!st || !planWrap) { uiTrace('rec_no_nodes', (st?1:0)+(planWrap?2:0)); return; }
     st.textContent = 'Computing the plan' + (productId ? ' for ' + productId : '')
                    + '… nothing is being changed.';
     planWrap.innerHTML = '';
@@ -7900,10 +7900,10 @@ async function previewGridReconcile(productId) {
 }
 
 async function executeGridReconcile(productId) {
+    uiTrace('rec_apply_enter');
     const st = document.getElementById('grid-reconcile-status');
     const planWrap = document.getElementById('grid-reconcile-plan');
-    if (!st) return;
-    uiTrace('rec_apply_enter');
+    if (!st) { uiTrace('rec_no_nodes', 0); return; }
     st.textContent = 'Applying…';
     try {
         uiTrace('rec_apply_sending');
@@ -8051,6 +8051,10 @@ function renderGridLevels(branches) {
         return n > 0 && open_n >= n;
     });
     if (!rows.length) {
+        // No parked branches -> no panel -> no button to press. Say so,
+        // because "nothing happened when I tapped" and "there was nothing
+        // to tap" are different findings.
+        uiTrace('levels_panel_empty', 0);
         wrap.style.display = 'none'; wrap.innerHTML = ''; return;
     }
     // THE LOCK STATE, SHOWN BEFORE THE TAP RATHER THAN AFTER.
@@ -8162,11 +8166,17 @@ function _gridLevelsWanted() {
 }
 
 async function previewGridLevels() {
+    uiTrace('preview_enter');
     const st = document.getElementById('grid-levels-status');
     const planWrap = document.getElementById('grid-levels-plan');
-    if (!st || !planWrap) return;
+    if (!st || !planWrap) {
+        // THE CASE THE BEACON WAS BLIND TO. It sat after this guard, so a
+        // missing panel element returned silently and looked identical to
+        // the handler never running at all.
+        uiTrace('preview_no_nodes', (st ? 1 : 0) + (planWrap ? 2 : 0));
+        return;
+    }
     planWrap.innerHTML = '';
-    uiTrace('preview_enter');
     const levels = _gridLevelsWanted();
     const keys = Object.keys(levels);
     uiTrace('render_levels', document.querySelectorAll('.grid-levels-in').length);
@@ -8271,10 +8281,10 @@ function _gridLevelsShowPlan(d, st, planWrap, levels) {
 // preview's own button - so this cannot apply a count the person never
 // saw a plan for.
 async function executeGridLevels() {
+    uiTrace('apply_enter');
     const st = document.getElementById('grid-levels-status');
     const planWrap = document.getElementById('grid-levels-plan');
-    if (!st) return;
-    uiTrace('apply_enter');
+    if (!st) { uiTrace('apply_no_nodes', 0); return; }
     const levels = _gridLevelsPending;
     if (!levels || !Object.keys(levels).length) {
         uiTrace('apply_no_pending', 0);

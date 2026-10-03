@@ -8503,6 +8503,11 @@ _UI_TRACE_OK = {
     "rec_preview_enter", "rec_preview_sending", "rec_preview_ok", "rec_preview_threw",
     "rec_apply_enter", "rec_apply_sending", "rec_apply_ok", "rec_apply_threw",
     "locked_banner_shown", "render_levels",
+    # The guard-return paths. The beacon used to sit AFTER these, so a
+    # missing panel element returned silently and read identically to the
+    # handler never running - the one case the trace most needed to tell
+    # apart.
+    "preview_no_nodes", "apply_no_nodes", "rec_no_nodes", "levels_panel_empty",
 }
 
 
