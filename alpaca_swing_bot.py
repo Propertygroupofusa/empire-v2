@@ -1114,8 +1114,12 @@ def run():
     log.info("=" * 70)
     log.info("ALPACA DUAL STRATEGY BOT v2 — Swing + Day Trading (MICRO ACCOUNT SAFE MODE)")
     log.info(f"Mode: {'🔴 LIVE' if LIVE_TRADE else '📄 PAPER'}")
-    log.info(f"Account: ${ACCOUNT_SIZE:,.0f} | Risk/Trade: {RISK_PER_TRADE_PCT*100:.1f}% (${RISK_PER_TRADE:.0f})")
-    log.info(f"Daily Target: ${DAILY_PROFIT_TARGET:.0f}")
+    # ACCOUNT_SIZE is a fixed sizing basis, not the balance - the old line
+    # "Account: $980" read as the live equity, which the pre-flight check
+    # below reports for real. "Daily Target: $225" (~23%/day) drove nothing
+    # and promised a return no strategy here has ever produced.
+    log.info(f"Risk/Trade: {RISK_PER_TRADE_PCT*100:.1f}% of a fixed ${ACCOUNT_SIZE:,.0f} sizing basis "
+             f"(${RISK_PER_TRADE:.0f}) - not the live balance; live equity is in the pre-flight check")
     log.info(f"API Key: {'✓ Configured' if os.getenv('ALPACA_API_KEY') else '✗ NOT SET'}")
     log.info(f"Base URL: {get_base_url()}")
     log.info(f"Stops: HARD STOP-LOSS ENABLED ({STOP_LOSS_PCT*100:.1f}%)")
