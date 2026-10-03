@@ -53,6 +53,11 @@ CRITICAL, HIGH, INFO = "CRITICAL", "HIGH", "INFO"
 # stop-level transition and silently overwrite it.
 BREAKER_STATE_PREFIX = "breaker:"
 
+# Same reasoning: "is this branch stuck both ways" is a different fact
+# about a coin than "has its holding breached a level", and the two must
+# not overwrite each other in last_state.
+FROZEN_STATE_PREFIX = "frozen:"
+
 
 def _f(x, default=None):
     try:
@@ -188,6 +193,58 @@ def plan(watch: dict, last_state: dict, last_coverage=None) -> list:
                 "dedupe_key": dedupe_key("BREAKER", asset, marker),
             })
 
+    # --- a branch stuck in BOTH directions ------------------------------
+    #
+    # Parked is normal: a full branch waits, then sells, then buys again.
+    # FROZEN is not - it is full AND its cheapest trigger is so far above
+    # the market that no sale is coming, so the allocation does nothing in
+    # either direction while every surface still reports a healthy funded
+    # branch. Ten branches holding 72.8% of the fleet's allocation sat that
+    # way through nine consecutive silent watch checks, because nothing
+    # ever asked "can this branch still trade?".
+    #
+    # Transition-only, like every other kind here: becoming frozen is news,
+    # staying frozen is not, and thawing is news again because silence
+    # after an alarm reads the same as a broken sender.
+    for fr in (watch.get("frozen") or []):
+        asset = fr.get("asset") or fr.get("product_id")
+        if not asset:
+            continue
+        verdict = fr.get("verdict")
+        # Only a real verdict is news. UNKNOWN means the branch could not be
+        # judged this pass, which is not evidence that it is fine.
+        if verdict not in ("FROZEN", "OK", "PARKED"):
+            continue
+        usd = _f(fr.get("allocated_usd"), 0.0) or 0.0
+        key = f"{FROZEN_STATE_PREFIX}{asset}"
+        was = (last_state or {}).get(key)
+        now = "FROZEN" if verdict == "FROZEN" else "MOVING"
+        if now == was:
+            continue
+        if usd < MIN_ALERT_USD:
+            continue
+        marker = f"{was or 'NEW'}->{now}"
+        gap = _f(fr.get("pct_to_nearest_trigger"))
+        gap_s = f"{gap:.2f}%" if gap is not None else "an unreadable amount"
+        if now == "FROZEN":
+            out.append({
+                "kind": "FROZEN", "asset": asset, "severity": HIGH,
+                "message": (f"{asset} can neither buy nor sell - ${usd:,.2f} idle"),
+                "detail": (f"It is full, so it cannot buy, and its cheapest slice is "
+                           f"{gap_s} above the market, so no sale is coming either. "
+                           f"Nothing is wrong with it and nothing has been lost - the "
+                           f"money is simply doing nothing in both directions."),
+                "dedupe_key": dedupe_key("FROZEN", asset, marker),
+            })
+        elif was == "FROZEN":
+            out.append({
+                "kind": "FROZEN", "asset": asset, "severity": INFO,
+                "message": f"{asset} is trading again",
+                "detail": (f"It can buy or sell once more; its cheapest trigger is now "
+                           f"{gap_s} away."),
+                "dedupe_key": dedupe_key("FROZEN", asset, marker),
+            })
+
     # --- the desk going blind as a whole -------------------------------
     cov = _f(watch.get("covered_share_pct"))
     prev = _f(last_coverage)
@@ -218,4 +275,11 @@ def next_state(watch: dict) -> dict:
         asset, br = b.get("asset"), b.get("breached")
         if asset and isinstance(br, bool):
             out[f"{BREAKER_STATE_PREFIX}{asset}"] = "BREACHED" if br else "OK"
+    for fr in (watch.get("frozen") or []):
+        asset = fr.get("asset") or fr.get("product_id")
+        v = fr.get("verdict")
+        # UNKNOWN records NOTHING, so a pass that could not judge a branch
+        # cannot be mistaken later for a pass that found it healthy.
+        if asset and v in ("FROZEN", "OK", "PARKED"):
+            out[f"{FROZEN_STATE_PREFIX}{asset}"] = "FROZEN" if v == "FROZEN" else "MOVING"
     return out

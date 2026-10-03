@@ -2731,6 +2731,11 @@ async def get_holdings_watch(window_days: int = 30, fresh: int = 0):
     out["breakers"] = _breakers_from_cache()
     if out["breakers"] is None:
         out.pop("breakers")
+    # Same cache, same rule: absent rather than empty when it cannot be
+    # read, so "nothing is frozen" is never asserted from a blind pass.
+    out["frozen"] = _frozen_from_cache()
+    if out["frozen"] is None:
+        out.pop("frozen")
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0.0
     out["cache_seconds"] = WATCH_CACHE_SECONDS
@@ -8426,6 +8431,25 @@ async def capital_mobility():
 # can only ever make a DASHBOARD number up to 25s old, never an order.
 _GRID_STATUS_CACHE = {"at": 0.0, "payload": None}
 _GRID_STATUS_TTL_SECONDS = float(os.getenv("GRID_STATUS_TTL_SECONDS", "25"))
+
+
+def _frozen_from_cache():
+    """Per-branch can-buy / can-sell verdicts off the grid-status cache.
+
+    None when cold - UNKNOWN, never an empty list, because an empty list
+    asserts that nothing is stuck on a pass where nothing could be seen.
+    Cache-only like _breakers_from_cache: the alarm loop must not be able
+    to stall behind a rebuild.
+    """
+    payload = _GRID_STATUS_CACHE.get("payload")
+    if not payload:
+        return None
+    rows = payload.get("branches")
+    if not rows:
+        return None
+    import frozen_branches
+    out = [frozen_branches.assess_branch(b) for b in rows if isinstance(b, dict)]
+    return out or None
 
 
 def _breakers_from_cache():
