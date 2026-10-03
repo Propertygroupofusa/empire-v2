@@ -9095,8 +9095,29 @@ async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
     import branch_levels
     from models import CryptoGridBranch
 
+    # LOG WHAT ARRIVED, NOT ONLY WHAT SUCCEEDED.
+    #
+    # Until now the only log line in this endpoint sat inside `for a in
+    # applied`, so a request that arrived with an empty map, or whose
+    # every plan was refused, produced SILENCE - indistinguishable in the
+    # logs from a request that never arrived at all. Three rounds were
+    # spent guessing between those two cases. A check that cannot see the
+    # failure is not a check.
+    _want = payload.levels or {}
+    log.warning(f"[levels] REQUEST dry_run={payload.dry_run} n={len(_want)} {dict(_want)}")
+    if not _want:
+        log.warning("[levels] REFUSED: the request carried no levels at all")
+        return {"plans": [], "ready": [], "refused": [], "applied": [],
+                "dry_run": payload.dry_run,
+                "is_a_plan_not_a_change": True,
+                "detail": ("The request carried no level changes at all, so nothing "
+                           "was planned and nothing was changed. The page sends only "
+                           "boxes whose value differs from the branch's current count.")}
+
     status = await crypto_grid_bot_module.get_grid_status()
     report = branch_levels.plan_many(status.get("branches") or [], payload.levels or {})
+    log.warning(f"[levels] PLANNED ready={report.get('ready')} "
+                f"refused={report.get('refused')} missing={report.get('missing')}")
 
     if payload.dry_run:
         report["dry_run"] = True
@@ -9106,9 +9127,14 @@ async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
 
     ready = [r for r in report["plans"] if r.get("ok")]
     if not ready:
+        for r in report["plans"]:
+            log.warning(f"[levels] NOT APPLICABLE {r.get('product_id')}: "
+                        f"{r.get('status')} - {r.get('detail')}")
         report["dry_run"] = False
         report["applied"] = []
-        report["detail"] = "no plan was applicable - nothing was changed"
+        report["detail"] = ("no plan was applicable - nothing was changed. "
+                            + "; ".join(f"{r.get('product_id')}: {r.get('detail')}"
+                                        for r in report["plans"] if r.get("detail")))
         return report
 
     applied = []
@@ -9117,12 +9143,17 @@ async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
             row = (await db.execute(select(CryptoGridBranch).where(
                 CryptoGridBranch.bot_name == r["bot_name"]))).scalars().first()
             if row is None:
+                log.warning(f"[levels] NO ROW for bot_name={r.get('bot_name')!r} "
+                            f"({r.get('product_id')}) - nothing written for it")
                 continue
             # Re-check against the row we are about to write, not the
             # snapshot the plan was built from: a slice may have opened in
             # between, and a count below the open slices is the one thing
             # this must never write.
             if r["levels_after"] < (r["open_slices"] or 0):
+                log.warning(f"[levels] RE-CHECK SKIPPED {r.get('product_id')}: "
+                            f"{r['levels_after']} levels is below its "
+                            f"{r['open_slices']} open slice(s)")
                 continue
             row.num_levels = r["levels_after"]
             applied.append({"product_id": r["product_id"],
@@ -9134,8 +9165,9 @@ async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
         await db.commit()
 
     for a in applied:
-        log.warning(f"[levels] {a['product_id']} {a['levels_before']} -> "
+        log.warning(f"[levels] WROTE {a['product_id']} {a['levels_before']} -> "
                     f"{a['levels_after']} level(s)")
+    log.warning(f"[levels] COMMITTED {len(applied)} row(s)")
     report["dry_run"] = False
     report["applied"] = applied
     report["detail"] = (f"{len(applied)} branch(es) changed. Takes effect on the bot's "
@@ -10895,6 +10927,8 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     from sqlalchemy import select
 
     g = crypto_grid_bot_module
+    log.warning(f"[reconcile] REQUEST product_id={product_id!r} dry_run={dry_run} "
+                f"accept_writeoff={accept_writeoff}")
     status = await g.get_grid_status()
     async with _aiohttp.ClientSession() as _s:
         census = await account_census.census(_s, tracked_usd=0.0)
@@ -10974,6 +11008,9 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
            "locked_or_staked_coin_is_not_written_off": True}
 
     if not branches:
+        log.warning(f"[reconcile] NOTHING TO DO - wallet_source={wallet_source}, "
+                    f"{len(skipped)} branch(es) skipped as unreadable: "
+                    f"{[x['product_id'] for x in skipped]}")
         out["detail"] = ("no branch claims more coin than the wallet holds - nothing to "
                          "reconcile")
         return out
@@ -11042,8 +11079,16 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
             f"Wrote off {a['units_removed']:.8f} units another subsystem had already sold "
             f"- ${a['cost_basis_removed_usd']:,.2f} of tracked cost basis. Not a loss: the "
             f"proceeds were already in the wallet.")
-    log.warning(f"[reconcile] {len(applied)} branch(es), ${total_basis:,.2f} of tracked "
-                f"cost basis written off")
+    # Compute the written figure HERE rather than reading out[...]: at this
+    # point out["cost_basis_removed_usd"] still holds the PLAN's total, which
+    # is recomputed from `applied` a few lines below. Reading it would have
+    # logged the planned amount as the amount cleared - the exact class of
+    # claim this endpoint was just fixed for making.
+    _cleared = round(sum(a["cost_basis_removed_usd"] or 0.0 for a in applied), 2)
+    log.warning(f"[reconcile] COMMITTED {len(applied)} branch(es) written, "
+                f"{len(not_applied)} could not be written "
+                f"({[x['product_id'] for x in not_applied]}), "
+                f"${_cleared:,.2f} actually cleared")
     out["applied"] = applied
     out["not_applied"] = not_applied or None
     out["dry_run"] = False
