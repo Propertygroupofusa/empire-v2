@@ -8695,11 +8695,27 @@ async def rotation_task_report_endpoint():
         wired = "rotation_task" in open(_main.__file__).read()
     except Exception:
         wired = None            # UNKNOWN, never a confident False
+    # WHICH NAMES ARE ACTUALLY SET, so a typo is visible instead of guessed.
+    #
+    # Three deploy cycles were spent on this: the variables were reported
+    # set, the process restarted with other env vars reading fine, and
+    # these two still read absent. Nothing in the app could say WHY,
+    # because "not set" and "set under a slightly different name" look
+    # identical from inside. This lists NAMES ONLY, never a value, and
+    # only those containing "ROTATION" - it is a spelling check, not an
+    # environment dump. /health already does the same thing for
+    # strategy_env_keys.
+    import os as _os
+    similar = sorted(k for k in _os.environ if "ROTATION" in k.upper())
     rep = rotation_task.last_report()
     return {
         "readable": True,
         "is_a_measurement_not_a_change": True,
         "armed": bool(rotation_task.ticket()),
+        "names_it_looks_for": [rotation_task.TICKET_ENV, rotation_task.RELEASE_ENV],
+        "rotation_names_actually_set": similar,
+        "values_are_never_reported_here": True,
+        "env_var_count": len(_os.environ),
         "deployed_idle_release_armed": rotation_task.release_armed(),
         "wired_into_startup": wired,
         "ticket_env": rotation_task.TICKET_ENV,
