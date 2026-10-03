@@ -8490,6 +8490,43 @@ def _breakers_from_cache():
     return out or None
 
 
+@router.get("/write-attempts")
+async def write_attempts_endpoint():
+    """Every state-changing request the guard has seen, newest first.
+
+    READ-ONLY, and it exists so nobody has to filter a log viewer on a
+    phone at one in the morning. Four rounds of this session were spent
+    guessing between three cases that this answers outright:
+
+      empty list        the request never reached the server at all -
+                        a browser problem, not a server one
+      guard_status 401  it arrived with no token
+      guard_status 403  it arrived with a token that did not match
+      guard_status 503  this deployment has no token configured
+      guard_status null the guard PASSED it to the endpoint, so any
+                        failure after that is the endpoint's, not the door's
+
+    It carries no credential material of any kind - not the token, not a
+    prefix, not a length, not a hash. Only whether one was present.
+    """
+    import write_guard
+    rows = write_guard.recent_attempts()
+    return {
+        "readable": True,
+        "is_a_measurement_not_a_change": True,
+        "count": len(rows),
+        "attempts": rows,
+        "carries_no_token_material": True,
+        "detail": ("no state-changing request has reached this process since it "
+                   "started - if a button was pressed, it never left the browser"
+                   if not rows else
+                   f"{len(rows)} write attempt(s) reached the guard; newest first"),
+        "note": ("in-memory and per-process: a restart empties it, and an empty "
+                 "list after a restart means only that nothing has been tried "
+                 "since - UNKNOWN, not proof of a browser fault"),
+    }
+
+
 @router.get("/grid-status")
 async def get_grid_status_endpoint(fresh: int = 0):
     if crypto_grid_bot_module is None:
