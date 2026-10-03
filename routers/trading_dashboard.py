@@ -20,6 +20,7 @@ import logging
 import asyncio
 import random
 import uuid
+from types import SimpleNamespace
 from datetime import datetime, timezone, timedelta
 
 import json as json_module
@@ -10635,6 +10636,214 @@ async def close_one_grid_branch_endpoint(product_id: str, dry_run: bool = True,
     log.warning(
         f"[dashboard] 🔻 Closed {product_id}: {result.get('slices_closed')} slice(s), "
         f"${result.get('total_realized_pnl', 0):.2f} realised (previewed ${realized:.2f})")
+    result["preview"] = preview
+    return result
+
+
+@router.post("/grid-status/close-slices")
+async def close_some_grid_slices_endpoint(product_id: str, slice_ids: str = "",
+                                          dry_run: bool = True,
+                                          accept_loss: bool = False):
+    """Close NAMED slices on one branch, leaving the rest open.
+
+    close-branch above is all-or-nothing, and that gap had a real cost: a
+    branch parks at `open_slices >= num_levels`, so on a 6-slice branch
+    against 3 levels, selling "half" leaves 3 and the branch is STILL
+    parked - the loss is realised and nothing is unlocked. Choosing which
+    slices go, and how many remain, is the whole decision; an endpoint
+    that cannot express it forces the owner to close everything or
+    nothing.
+
+    SLICES ARE NAMED BY ID, NEVER BY A COUNT. "Sell 4" has to pick which
+    4, and any rule this endpoint invented for that (oldest, largest,
+    deepest underwater) would be a guess about intent executed against
+    real money and not reversible. So a dry run with no `slice_ids` is a
+    MENU: every open slice with its id, entry, value and exact net if
+    sold. The caller reads it and names the ones they mean. Two round
+    trips, deliberately.
+
+    AN UNKNOWN ID IS A REFUSAL, NOT A SKIP. If any requested id is not
+    open on this branch, nothing is sold and the response names it.
+    Silently selling the subset that did match would book a loss the
+    caller never approved, on a position they thought they were only
+    partly exiting.
+
+    WHAT THE BRANCH BECOMES IS REPORTED BEFORE IT HAPPENS. The preview
+    states the remaining slice count against num_levels and whether the
+    branch ends up parked, able to buy again, or flat - the fact that
+    makes a partial close worth doing or pointless.
+
+    The selling itself is NOT new code. close_all_grid_slices already
+    accepts only_slice_ids ("settle a SUBSET of a branch's slices instead
+    of all"); this endpoint scopes it to one product and hands it the
+    chosen ids, so the fee formula, per-slice P&L, trade-history rows,
+    allocated_usd write-back and activity feed are the same machinery
+    every other close uses.
+
+    DRY RUN BY DEFAULT, and a negative total additionally needs
+    accept_loss=true - the same two deliberate flags close-branch uses,
+    for the same reason: realising a loss cannot be undone.
+
+    The exit is a MARKET sell, so it pays the taker leg. Maker-only does
+    not apply: a close that does not fill is not a close.
+
+    Write-guarded like every POST on this router.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+
+    g = crypto_grid_bot_module
+    status = await g.get_grid_status()
+    branch = next((b for b in (status.get("branches") or [])
+                   if b.get("product_id") == product_id), None)
+    if branch is None:
+        raise HTTPException(status_code=404, detail=f"no grid branch holds {product_id}")
+    slices = branch.get("slices") or []
+    if not slices:
+        raise HTTPException(status_code=400, detail=f"{product_id} has no open slices to close")
+
+    price = branch.get("current_price")
+    if price is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{product_id} could not be priced right now, so the realised figure "
+                    f"would be a guess - refusing to close blind. A gap is not a zero."))
+
+    # EXACTLY what close_all_grid_slices will use when it executes, so the
+    # preview cannot disagree with what gets booked. It resolves the rate
+    # per slice (an ADOPTED slice pays the exit leg only - its basis never
+    # cost a commission) and then runs the one shared formula. Deriving a
+    # second fee expression here is the "dashboard says +$4.21 while the
+    # sale produces something different" bug _grid_slice_net_pnl exists to
+    # prevent; on ZEC's own mixed book it is worth $2.11.
+    round_trip = await g.get_effective_round_trip_fee_rate()
+    exit_leg = ((round_trip or 0.0) / 2) if await g.is_maker_orders_active() else None
+    exit_fee_rate = exit_leg if exit_leg is not None else (round_trip or 0.0) / 2
+    num_levels = int(branch.get("num_levels") or 0) or 1
+
+    def _priced(sl):
+        qty = float(sl.get("qty") or 0.0)
+        entry = float(sl.get("entry_price") or 0.0)
+        cost = qty * entry
+        value = qty * price
+        # get_grid_status hands back dicts; _slice_rate reads attributes.
+        shim = SimpleNamespace(adopted=sl.get("adopted"),
+                               entry_fee_rate=sl.get("entry_fee_rate"))
+        rate = g._slice_rate(shim, round_trip, exit_leg)
+        net = g._grid_slice_net_pnl(qty, entry, price, rate)
+        return {"slice_id": sl.get("id"), "qty": qty, "entry_price": round(entry, 8),
+                "adopted": bool(sl.get("adopted")),
+                "round_trip_fee_rate": rate,
+                "cost_usd": round(cost, 2), "value_usd": round(value, 2),
+                "net_pnl_usd": round(net, 2),
+                "net_pct": round(net / cost * 100, 2) if cost else None,
+                "_cost": cost, "_value": value, "_net": net}
+
+    priced = [_priced(s) for s in slices]
+    by_id = {str(p["slice_id"]): p for p in priced}
+
+    wanted = [x.strip() for x in (slice_ids or "").split(",") if x.strip()]
+    if not wanted:
+        if not dry_run:
+            raise HTTPException(
+                status_code=400,
+                detail=("slice_ids is required to execute. This endpoint never picks "
+                        "which slices to sell on your behalf. Call it with dry_run=true "
+                        "to list every open slice with its id and exact net if sold, "
+                        "then name the ones you mean."))
+        menu = [{k: v for k, v in p.items() if not k.startswith("_")} for p in priced]
+        return {
+            "product_id": product_id, "bot_name": branch.get("bot_name"),
+            "price": price, "dry_run": True, "menu": True,
+            "open_slices": len(priced), "num_levels": num_levels,
+            "parked_now": len(priced) >= num_levels,
+            "exit_leg_fee_rate": exit_fee_rate,
+            "maker_orders_active": exit_leg is not None,
+            "slices": menu,
+            "detail": (f"MENU ONLY - nothing was sold and no slices were chosen. "
+                       f"{product_id} holds {len(priced)} open slice(s) against "
+                       f"{num_levels} level(s). Re-send with "
+                       f"slice_ids=<comma separated ids from this list> to price a "
+                       f"specific partial close. A branch stops being parked only "
+                       f"once fewer than {num_levels} slice(s) remain."),
+        }
+
+    missing = sorted({w for w in wanted if w not in by_id})
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{product_id} has no open slice with id "
+                    f"{', '.join(missing)}. Nothing was sold. Open ids are "
+                    f"{', '.join(str(p['slice_id']) for p in priced)}. Selling only "
+                    f"the ids that did match would book a loss you did not approve."))
+
+    chosen_ids = sorted({w for w in wanted}, key=lambda x: wanted.index(x))
+    chosen = [by_id[w] for w in chosen_ids]
+
+    cost_total = sum(c["_cost"] for c in chosen)
+    value_total = sum(c["_value"] for c in chosen)
+    realized = sum(c["_net"] for c in chosen)
+    fees = value_total - cost_total - realized
+    remaining = len(priced) - len(chosen)
+
+    if remaining >= num_levels:
+        after = (f"STILL PARKED - {remaining} slice(s) against {num_levels} level(s), "
+                 f"so it still cannot buy and its idle cash still cannot be withdrawn")
+    elif remaining == 0:
+        after = ("FLAT - no open slices, so the branch can buy again and its cash "
+                 "becomes withdrawable")
+    else:
+        after = (f"can buy again - {remaining} slice(s) against {num_levels} level(s), "
+                 f"though withdrawal still needs a completely flat branch")
+
+    preview = {
+        "product_id": product_id,
+        "bot_name": branch.get("bot_name"),
+        "price": price,
+        "selling": [{k: v for k, v in c.items() if not k.startswith("_")} for c in chosen],
+        "selling_count": len(chosen),
+        "open_slices_now": len(priced),
+        "slices_remaining": remaining,
+        "num_levels": num_levels,
+        "parked_now": len(priced) >= num_levels,
+        "parked_after": remaining >= num_levels,
+        "branch_after": after,
+        "cost_basis_usd": round(cost_total, 2),
+        "market_value_usd": round(value_total, 2),
+        "total_fee_usd": round(fees, 2),
+        "exit_leg_fee_rate": exit_fee_rate,
+        "maker_orders_active": exit_leg is not None,
+        "realized_pnl_usd": round(realized, 2),
+        "cash_returned_usd": round(value_total - value_total * exit_fee_rate, 2),
+        "allocated_usd": branch.get("allocated_usd"),
+    }
+
+    if dry_run:
+        preview["dry_run"] = True
+        preview["detail"] = (
+            f"PREVIEW ONLY - nothing was sold. Selling {len(chosen)} of "
+            f"{len(priced)} slice(s) of {product_id} at ${price:,.2f} would return "
+            f"${preview['cash_returned_usd']:,.2f} to the branch and book "
+            f"${realized:,.2f}. Afterwards: {after}. Re-send with dry_run=false"
+            + (" and accept_loss=true" if realized < 0 else "") + " to execute.")
+        return preview
+
+    if realized < 0 and not accept_loss:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Selling these {len(chosen)} slice(s) of {product_id} would realise "
+                    f"${realized:,.2f} - a LOSS. This is not reversible. Re-send with "
+                    f"accept_loss=true if that is intended."))
+
+    result = await g.close_all_grid_slices(
+        only_product_id=product_id,
+        only_slice_ids=[c["slice_id"] for c in chosen],
+        exit_reason="partial_close")
+    log.warning(
+        f"[dashboard] 🔻 Partial close {product_id}: "
+        f"{result.get('slices_closed')} of {len(priced)} slice(s), "
+        f"${result.get('total_realized_pnl', 0):.2f} realised "
+        f"(previewed ${realized:.2f}); {remaining} left against {num_levels} level(s)")
     result["preview"] = preview
     return result
 
