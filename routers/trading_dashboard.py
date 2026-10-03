@@ -8671,6 +8671,56 @@ async def write_attempts_endpoint():
     }
 
 
+@router.get("/rotation-task")
+async def rotation_task_report_endpoint():
+    """What the one-shot idle rotation did, in its own words. READ-ONLY.
+
+    `armed: false` is the normal answer - rotation_task is shipped inert
+    and does nothing until ROTATION_TASK_TICKET is set. `report: null`
+    means this process has not reached the task at all, which is UNKNOWN
+    rather than a success or a failure - and that is also what it reads
+    when the task is not wired into the lifespan, so `wired` is reported
+    separately. This endpoint was promised once before it existed, which
+    sent the owner to a 404 and cost a deploy cycle to notice.
+    """
+    try:
+        import rotation_task
+    except Exception as e:
+        return {"readable": False, "report": None,
+                "detail": f"the rotation task could not be imported: "
+                          f"{type(e).__name__}: {e}"}
+    wired = False
+    try:
+        import main as _main
+        wired = "rotation_task" in open(_main.__file__).read()
+    except Exception:
+        wired = None            # UNKNOWN, never a confident False
+    rep = rotation_task.last_report()
+    return {
+        "readable": True,
+        "is_a_measurement_not_a_change": True,
+        "armed": bool(rotation_task.ticket()),
+        "deployed_idle_release_armed": rotation_task.release_armed(),
+        "wired_into_startup": wired,
+        "ticket_env": rotation_task.TICKET_ENV,
+        "release_env": rotation_task.RELEASE_ENV,
+        "rotates_into_top_n": rotation_task.TOP_N,
+        "concentration_ceiling_pct": rotation_task.MAX_COIN_SHARE_PCT,
+        "keeps_branch_alive_usd": rotation_task.KEEP_BRANCH_ALIVE_USD,
+        "report": rep,
+        "rows_written_total": (rep or {}).get("rows_written_total"),
+        "detail": (
+            ("the task is ARMED but NOT WIRED into startup, so it cannot run - "
+             "the call in main.py's lifespan is missing"
+             if wired is False and rotation_task.ticket() else
+             "this process has not run the rotation task yet - UNKNOWN, not a "
+             "success and not a failure")
+            if rep is None else (rep.get("detail") or "")),
+        "note": ("in-memory and per-process: a redeploy clears it, and the "
+                 "task will not run twice on the same ticket"),
+    }
+
+
 @router.get("/startup-fix")
 async def startup_fix_report_endpoint():
     """What the one-shot boot task did, in this process, in its own words.
