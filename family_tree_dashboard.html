@@ -1137,6 +1137,7 @@
         <div id="out-of-reach-banner" style="display:none;"></div>
         <div id="grid-reconcile-wrap" style="display:none;"></div>
         <div id="grid-rotation-wrap" style="display:none;"></div>
+        <div id="grid-harvest-wrap" style="display:none;"></div>
         <div id="grid-levels-wrap" style="display:none;"></div>
     </div>
 
@@ -7055,6 +7056,7 @@ async function loadFleetReadiness() {
         renderOutOfReach(d.out_of_reach);
         renderGridReconcile(d.backing);
         renderGridRotation(d.branches || []);
+        renderGridHarvest();
         renderGridLevels(d.branches || []);
         const rows = FLEET.readiness(d.branches || [], unbacked);
         const s = FLEET.summarise(rows);
@@ -7924,6 +7926,123 @@ function renderGridReconcile(bk) {
 
 let _rotTicket = null;      // minted by preview, spent by run
 let _rotPreviewed = null;   // the figure the person actually saw
+
+// THE PROFIT HARVEST, READ-ONLY.
+//
+// This card exists because the harvest was shipped as an hourly loop plus an
+// API endpoint and nothing on the page the owner actually uses. He went
+// looking for it, found nothing, and said "won't work" - correctly.
+//
+// It reads GET /grid-status/harvest-preview, so unlike the rotation card it
+// needs NO write token and works in a locked tab. Pressing nothing here can
+// move a dollar; the harvest runs itself every hour.
+//
+// It leads with the thing that will otherwise frighten him: when the harvest
+// takes profit, TOTAL ALLOCATED (GRID) goes DOWN. That is the profit being
+// banked, not lost, and this card has to say so before he reads the number
+// somewhere else and panics.
+async function renderGridHarvest() {
+    const wrap = document.getElementById('grid-harvest-wrap');
+    if (!wrap) return;
+    let d;
+    try {
+        const r = await fetch(API_BASE + '/grid-status/harvest-preview',
+                              {cache: 'no-store'});
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        d = await r.json();
+    } catch (e) {
+        // A card that cannot read its own source says so, rather than
+        // rendering an empty box that looks like "nothing to harvest".
+        wrap.style.display = 'block';
+        wrap.innerHTML = `
+          <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                      border:1px solid var(--text-dim);
+                      background:rgba(90,90,90,0.06);">
+            <div style="font-weight:700; font-size:0.9em;">
+              \u{1F33E} Profit harvest - status unavailable
+            </div>
+            <div style="margin-top:6px; font-size:0.82em; color:var(--text-dim);">
+              Could not read the harvest status (${escText(String(e.message || e))}).
+              This is a display problem only. Nothing here moves money, and the
+              hourly harvest is unaffected by whether this card loads.
+            </div>
+          </div>`;
+        return;
+    }
+
+    const rows = Array.isArray(d.branches) ? d.branches : [];
+    const ready = Number(d.total_harvest_usd || 0);
+    const watched = rows.length - Number(d.unwatched_branches || 0);
+    const alive = !!d.loop_has_run;
+
+    // Branches that are flat and marked, i.e. the ones a harvest could
+    // actually reach on its next pass. Everything else is holding coin.
+    const flatMarked = rows.filter(
+        r => r.baseline !== null && r.baseline !== undefined
+             && !/open slice/.test(String(r.why_not || '')));
+
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                  border:1px solid var(--text-dim); background:rgba(90,90,90,0.06);">
+        <div style="font-weight:700; font-size:0.9em;">
+          \u{1F33E} Profit harvest
+          ${alive
+            ? `<span style="color:var(--text-dim); font-weight:400;">
+                 \u00b7 watching ${watched} of ${rows.length} branches</span>`
+            : `<span style="color:#d9534f; font-weight:400;">
+                 \u00b7 has not completed a pass yet</span>`}
+        </div>
+
+        <div style="margin-top:8px; font-size:1.1em; font-weight:700;
+                    color:${ready > 0 ? '#2e8b57' : 'var(--text-dim)'};">
+          ${fmtUsd(ready)} ready to come off the table
+        </div>
+
+        <div style="margin-top:8px; font-size:0.82em; color:var(--text-dim);
+                    line-height:1.45;">
+          Every hour this takes realised profit out of any branch that is
+          holding no coin, and leaves the capital working. It places no order
+          and sells nothing.
+          ${alive
+            ? `It last completed a pass, so it is running.`
+            : `It has not finished a pass yet - normal for the first five
+               minutes after a deploy.`}
+        </div>
+
+        <div style="margin-top:8px; padding:8px 10px; border-radius:6px;
+                    background:rgba(46,139,87,0.10); font-size:0.82em;
+                    line-height:1.45;">
+          <strong>When this fires, TOTAL ALLOCATED (GRID) goes DOWN.</strong>
+          That is your profit being banked, not lost - it leaves the branch and
+          sits as cash. Your banked/realised total is never reduced by a
+          harvest.
+        </div>
+
+        <div style="margin-top:8px; font-size:0.82em; color:var(--text-dim);">
+          ${flatMarked.length
+            ? `${flatMarked.length} branch(es) hold no coin right now:`
+            : `Every branch is holding coin, so there is nothing to harvest
+               until one empties out.`}
+        </div>
+        ${flatMarked.length ? `
+        <div style="margin-top:6px; font-size:0.8em;">
+          ${flatMarked.map(r => `
+            <div style="display:flex; gap:8px; padding:3px 0;
+                        border-bottom:1px solid rgba(128,128,128,0.15);">
+              <span style="min-width:0; flex:1;">${escText(r.product_id || r.bot_name)}</span>
+              <span style="font-variant-numeric:tabular-nums;">${fmtUsd(r.allocated_usd)}</span>
+              <span style="min-width:0; flex:2; color:var(--text-dim);">${
+                Number(r.harvest_usd) > 0
+                  ? '\u2192 take ' + fmtUsd(r.harvest_usd)
+                  : escText(String(r.why_not || ''))}</span>
+            </div>`).join('')}
+        </div>` : ''}
+
+        <button class="unlock-btn" style="margin-top:10px;"
+                onclick="renderGridHarvest()">\u{1F504} Refresh (reads only)</button>
+      </div>`;
+}
 
 function renderGridRotation(branches) {
     const wrap = document.getElementById('grid-rotation-wrap');
