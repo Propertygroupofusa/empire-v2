@@ -665,3 +665,115 @@ async def build_plan(grid, ranker=None, release_deployed_idle=None):
     p["release_deployed_idle"] = released
     p["ranking"] = [{"product_id": q, "dip_depth": round(d, 6)} for q, d in ranked[:10]]
     return p
+
+
+# ---------------------------------------------------------------------------
+# THE DAILY IDLE SWEEP
+#
+# run_at_boot() needs an environment variable and the API endpoints need a
+# browser with an unlocked tab. Both failed the same person on the same day:
+# the variable could not be changed on this Railway account at all, and the
+# tab lock caught him on a phone, in a car, with nothing to do about it.
+#
+# This path needs neither. It runs inside the grid loop, like every other
+# thing the bot does with money, on a tight leash the owner set:
+#
+#   at most once per 24 hours
+#   flat branches only (withdraw refuses any branch holding a slice anyway)
+#   only when at least $50 is actually movable
+#
+# It is NOT GRID_AUTO_ROTATE. That sweep fires every 5 minutes, re-points
+# branches onto different coins, and can withdraw a branch's entire
+# allocation when nothing clears the ROI floor. This moves idle cash between
+# existing branches once a day and does nothing else. The owner has twice
+# asked that auto-rotate stay off and it stays off; this does not turn it on
+# and does not read its flag.
+#
+# THE CLOCK IS IN THE DATABASE, NOT IN MEMORY. An in-process timestamp would
+# reset on every restart, and a crash-looping container would rotate on each
+# boot. The stamp is written BEFORE the run, so a failure costs a day rather
+# than risking a second attempt - the same fail-closed direction as the
+# one-shot ticket.
+# ---------------------------------------------------------------------------
+
+DAILY_SWEEP_KEY = "rotation_daily_sweep_at"
+DAILY_SWEEP_INTERVAL_SECONDS = 24 * 60 * 60
+DAILY_SWEEP_MIN_MOVABLE_USD = 50.0
+
+
+def movable_from_flat(branches):
+    """What a rotation could actually take right now, in dollars.
+
+    Only COMPLETELY FLAT branches count. withdraw_from_grid_branch refuses a
+    branch holding any open slice, so cash inside one is not movable however
+    idle it looks - counting it would arm this sweep for a run that then
+    releases nothing.
+    """
+    total = 0.0
+    for b in (branches or []):
+        if _slices(b):
+            continue
+        free = float(b.get("allocated_usd") or 0.0) - KEEP_BRANCH_ALIVE_USD
+        if free >= MIN_TRANSFER_USD:
+            total += free
+    return round(total, 2)
+
+
+async def _sweep_due(session_factory, now_ts):
+    """True when 24h have passed, and claims the slot by stamping it NOW.
+
+    The stamp is written before the caller runs anything. A run that then
+    fails waits a full day rather than retrying, which is the safe direction
+    for something that moves money without being asked.
+    """
+    from sqlalchemy import select
+
+    from models import TradingBotState
+    async with session_factory()() as db:
+        row = (await db.execute(select(TradingBotState).where(
+            TradingBotState.bot_name == DAILY_SWEEP_KEY))).scalars().first()
+        if row is None:
+            # First ever boot: stamp it and DO NOT run. A fresh database
+            # should not trigger a money move on its first cycle.
+            db.add(TradingBotState(bot_name=DAILY_SWEEP_KEY, base_capital=now_ts))
+            await db.commit()
+            return False
+        last = float(row.base_capital or 0.0)
+        if now_ts - last < DAILY_SWEEP_INTERVAL_SECONDS:
+            return False
+        row.base_capital = now_ts
+        await db.commit()
+        return True
+
+
+async def run_daily_idle_sweep(grid, now_ts=None, ranker=None):
+    """One bounded idle rotation a day. Returns a dict describing what happened."""
+    import time as _time
+    now_ts = _time.time() if now_ts is None else now_ts
+
+    if (os.getenv("STOP_TRADING", "false") or "").strip().lower() == "true":
+        return {"ran": False, "reason": "STOP_TRADING"}
+
+    status = await grid.get_grid_status()
+    branches = status.get("branches") or []
+    movable = movable_from_flat(branches)
+    if movable < DAILY_SWEEP_MIN_MOVABLE_USD:
+        # Checked BEFORE the clock is claimed, so a quiet day does not burn
+        # the slot and the sweep can still fire later the same day once
+        # enough has actually freed up.
+        return {"ran": False, "reason": "BELOW_MINIMUM", "movable_usd": movable,
+                "minimum_usd": DAILY_SWEEP_MIN_MOVABLE_USD}
+
+    if not await _sweep_due(grid.get_session_factory, now_ts):
+        return {"ran": False, "reason": "NOT_DUE", "movable_usd": movable}
+
+    p = await build_plan(grid, ranker=ranker, release_deployed_idle=False)
+    if not p.get("ok"):
+        log.warning(f"[rotation] daily sweep: plan not ready - {p.get('why')}")
+        return {"ran": False, "reason": "NOT_READY", "detail": p.get("why")}
+
+    out = await apply(grid, p)
+    log.warning(f"[rotation] DAILY SWEEP {out.get('status')}: "
+                f"${out.get('added_usd', 0):,.2f} moved, "
+                f"{out.get('rows_written', 0)} row(s) written")
+    return dict(out, ran=bool(out.get("rows_written")), movable_usd=movable)
