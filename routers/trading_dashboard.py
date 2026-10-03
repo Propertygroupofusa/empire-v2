@@ -4937,6 +4937,21 @@ async def run_red_bar_takeout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
+@router.post("/crypto-selection-backtest/fib-gold-zone")
+async def run_fib_gold_zone_backtest_endpoint():
+    """SHADOW-MODE ONLY - places no orders, changes no live setting.
+    Replays a YouTube "Fibonacci gold zone" pullback strategy (break of
+    structure in an uptrend of higher lows, buy the .5-.618 retracement,
+    stop at the higher low, target the prior swing high) on 1m/15m/1h/4h
+    real Coinbase candles across the grid working set, charging the real
+    maker/taker fees, and compares it with Grid Bot's live spacing on the
+    same 1h history. See fib_gold_zone.py for the exact rules.
+    Many paginated candle pulls - expect 1-3 minutes."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_fib_gold_zone_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab")
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
