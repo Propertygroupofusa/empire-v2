@@ -8705,8 +8705,23 @@ async def rotation_task_report_endpoint():
     # only those containing "ROTATION" - it is a spelling check, not an
     # environment dump. /health already does the same thing for
     # strategy_env_keys.
+    import difflib as _dl
     import os as _os
-    similar = sorted(k for k in _os.environ if "ROTATION" in k.upper())
+    _keys = list(_os.environ)
+    similar = sorted(k for k in _keys if "ROTATION" in k.upper())
+    # A TYPO NEED NOT CONTAIN THE WORD IT MISSPELLS.
+    #
+    # The first version of this filtered on "ROTATION", which would miss
+    # ROTAION_TASK_TICKET or ROTATON_TASK_TICKET entirely - exactly the
+    # slips most likely to have happened. So the closest NAMES by fuzzy
+    # match are reported too, against both targets, at a deliberately loose
+    # cutoff. Names only, capped, and still never a value.
+    _close = set()
+    for _target in (rotation_task.TICKET_ENV, rotation_task.RELEASE_ENV):
+        _close.update(_dl.get_close_matches(_target, _keys, n=4, cutoff=0.45))
+    # Anything carrying a token from either name, for the same reason.
+    _tokens = ("ROTAT", "ROTA", "TICKET", "TICK", "DEPLOYED_IDLE", "TASK_TICKET")
+    _tokened = {k for k in _keys if any(t in k.upper() for t in _tokens)}
     rep = rotation_task.last_report()
     return {
         "readable": True,
@@ -8714,6 +8729,7 @@ async def rotation_task_report_endpoint():
         "armed": bool(rotation_task.ticket()),
         "names_it_looks_for": [rotation_task.TICKET_ENV, rotation_task.RELEASE_ENV],
         "rotation_names_actually_set": similar,
+        "closest_names_that_are_set": sorted(_close | _tokened)[:12],
         "values_are_never_reported_here": True,
         "env_var_count": len(_os.environ),
         "deployed_idle_release_armed": rotation_task.release_armed(),
