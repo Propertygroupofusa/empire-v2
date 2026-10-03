@@ -126,6 +126,44 @@ ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_S
 ALPACA_AUTO_CLOSE_PROFIT_PCT = float(os.getenv("ALPACA_AUTO_CLOSE_PROFIT_PCT", "0.08"))
 ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS = float(os.getenv("ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS", "10"))
 ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS = int(os.getenv("ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS", "900"))
+# The max-hold rule closes a position for being OLD, not for being good. As
+# first built it closed at any P&L, so a position down 6% on day 10 was sold
+# for its age alone - realizing a loss the position's own stop had not
+# called for. On by default: an aged position is closed only once it is at
+# or above breakeven, and otherwise left to its own exits (the bot's stop,
+# or the profit target here). Set to "false" to restore close-at-any-P&L.
+ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN = (
+    os.getenv("ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN", "true").strip().lower() != "false")
+
+
+def auto_close_decision(unrealized_plpc, age_days, *,
+                        profit_pct=None, max_hold_days=None, aged_require_breakeven=None):
+    """(close?, reason) for one position. Pure, so the rule can be tested.
+
+    reason is "profit target", "max hold", "aged, waiting for breakeven",
+    or None.
+    """
+    profit_pct = ALPACA_AUTO_CLOSE_PROFIT_PCT if profit_pct is None else profit_pct
+    max_hold_days = ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS if max_hold_days is None else max_hold_days
+    req = (ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN
+           if aged_require_breakeven is None else aged_require_breakeven)
+    if unrealized_plpc >= profit_pct:
+        return True, "profit target"
+    if age_days is not None and age_days >= max_hold_days:
+        if req and unrealized_plpc < 0:
+            return False, "aged, waiting for breakeven"
+        return True, "max hold"
+    return False, None
+
+
+def auto_close_summary():
+    """One accurate description of the rules, for the startup log."""
+    return (f"profit target {ALPACA_AUTO_CLOSE_PROFIT_PCT*100:.0f}%, "
+            f"max hold {ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS:.0f}d"
+            + (" (only at or above breakeven)" if ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN else "")
+            + (f", {ALPACA_PROFIT_SKIM_PCT*100:.0f}% of profit locked" if ALPACA_PROFIT_SKIM_PCT > 0
+               else ", no profit skim")
+            + f", checking every {ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS}s while the market is open")
 # Defaulted to 0.0 (no skim at all), matching crypto_family_tree_bot.py's
 # own PROFIT_SKIM_PCT change, per the account owner's explicit request:
 # "take away the lock profit, I don't want that anymore for any of my
@@ -7018,11 +7056,13 @@ async def check_and_auto_close_positions():
                 except ValueError:
                     age_days = None
 
-            hit_profit_target = unrealized_plpc >= ALPACA_AUTO_CLOSE_PROFIT_PCT
-            hit_max_hold = age_days is not None and age_days >= ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS
-            if not (hit_profit_target or hit_max_hold):
+            should_close, reason = auto_close_decision(unrealized_plpc, age_days)
+            if not should_close:
+                if reason:
+                    log.info(f"[AUTO-CLOSE] {symbol} is {age_days:.1f}d old but "
+                             f"{unrealized_plpc*100:+.1f}% - held until it is back to breakeven "
+                             f"(its own stop still applies)")
                 continue
-            reason = "profit target" if hit_profit_target else "max hold"
 
             # cancel_orders=true - see close_alpaca_position's comment above;
             # this is the exact real failure this feature hit on its first
@@ -7062,7 +7102,8 @@ async def check_and_auto_close_positions():
                             row.base_capital += skim
                         else:
                             db.add(TradingBotState(bot_name=ALPACA_LOCKED_PROFIT_KEY, base_capital=skim, starting_capital=0.0))
-                        log.info(f"[AUTO-CLOSE] 🔒 Locked ${skim:.2f} (10% of {symbol}'s ${pnl:.2f} profit)")
+                        log.info(f"[AUTO-CLOSE] 🔒 Locked ${skim:.2f} "
+                                 f"({ALPACA_PROFIT_SKIM_PCT*100:.0f}% of {symbol}'s ${pnl:.2f} profit)")
 
                     await db.commit()
             except Exception as e:
@@ -7070,8 +7111,7 @@ async def check_and_auto_close_positions():
 
 
 async def run_auto_close_periodically():
-    log.info(f"Alpaca auto-close loop started: profit target {ALPACA_AUTO_CLOSE_PROFIT_PCT*100:.0f}%, "
-             f"max hold {ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS:.0f}d, checking every {ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS}s")
+    log.info(f"Alpaca auto-close loop started: {auto_close_summary()}")
     while True:
         try:
             await check_and_auto_close_positions()
