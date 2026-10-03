@@ -331,6 +331,34 @@ ok('it reports each box value and the current count',
    /data-product/.test(fnPrev) && /data-current/.test(fnPrev));
 ok('the reported values are escaped', /escText\(seen/.test(fnPrev));
 
+console.log('\n[12] a locked tab says so BEFORE the tap');
+// postGuarded refuses without a token and never sends, so the server log
+// stays empty - indistinguishable from a dead button. The panel has to
+// state the lock up front.
+const runRenderTok = (hasToken) => {
+  const wrap = mkWrap();
+  const doc = { getElementById: id => (id === 'grid-levels-wrap' ? wrap : null),
+                querySelectorAll: () => [] };
+  new Function('document', 'escText', 'fmtUsd', 'getWriteToken',
+    CONSTS + fnSuggest + fnInUseEarly + grab('renderGridLevels') + '; return renderGridLevels;')(
+    doc, esc, n => '$' + Number(n).toFixed(2), () => (hasToken ? 'x' : ''))(
+    [{ product_id: 'LINK-USD', num_levels: 3, allocated_usd: 137.87,
+       slices: [slice(2, 11), slice(2, 10.5), slice(2, 10)] }]);
+  return wrap.innerHTML;
+};
+let h = runRenderTok(false);
+ok('a locked tab shows the lock notice', /This tab is locked/.test(h));
+ok('it says the buttons cannot send', /cannot send anything/.test(h), h.slice(0, 80));
+ok('it explains the per-tab storage', /per browser tab/.test(h));
+ok('it points at the lock bar', /lock bar at the top/.test(h));
+ok('the button itself says locked', /Locked - unlock at the top/.test(h));
+ok('it does NOT offer the normal preview label while locked',
+   !/Preview the change/.test(h));
+h = runRenderTok(true);
+ok('an unlocked tab shows no lock notice', !/This tab is locked/.test(h));
+ok('and offers the normal preview', /Preview the change/.test(h));
+ok('the panel still renders its rows either way', /grid-levels-in/.test(h));
+
 console.log();
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
 console.log('all checks passed');

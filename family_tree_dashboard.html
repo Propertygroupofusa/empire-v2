@@ -7963,6 +7963,15 @@ function renderGridLevels(branches) {
     if (!rows.length) {
         wrap.style.display = 'none'; wrap.innerHTML = ''; return;
     }
+    // THE LOCK STATE, SHOWN BEFORE THE TAP RATHER THAN AFTER.
+    //
+    // The token lives in sessionStorage, which is per-tab and is cleared
+    // when the tab is closed OR discarded - which phones do routinely when
+    // you switch apps. postGuarded then refuses before sending, so the
+    // request never reaches the server and the server log stays empty,
+    // which is indistinguishable from a broken button. Saying so up front
+    // costs one line and removes a whole class of wasted round trip.
+    const _lvlLocked = (typeof getWriteToken === 'function') ? !getWriteToken() : false;
     let parkedUsd = 0, anyUsd = false;
     for (const b of rows) {
         const a = Number(b.allocated_usd);
@@ -8021,8 +8030,23 @@ function renderGridLevels(branches) {
             <tbody>${body}</tbody>
           </table>
         </div>
+        ${_lvlLocked ? `
+          <div style="margin-top:10px; padding:10px 12px; border-radius:6px;
+                      border:1px solid var(--red); background:rgba(180,35,24,0.10);
+                      font-size:0.8em; line-height:1.5;">
+            <strong style="color:var(--red);">\u{1F512} This tab is locked - the buttons
+            below cannot send anything.</strong>
+            <div style="margin-top:4px; color:var(--text-dim);">
+              The dashboard token is kept per browser tab and is cleared whenever the
+              tab is closed or dropped from memory - which phones do routinely when you
+              switch apps. Paste it into the \u{1F512} lock bar at the top of this page,
+              then come back. Nothing you type here is lost.
+            </div>
+          </div>` : ''}
         <button class="unlock-btn" style="margin-top:10px;"
-                onclick="previewGridLevels()">🔍 Preview the change (changes nothing)</button>
+                onclick="previewGridLevels()">${_lvlLocked
+                  ? '\u{1F512} Locked - unlock at the top of the page first'
+                  : '\u{1F50D} Preview the change (changes nothing)'}</button>
         <div id="grid-levels-status" style="margin-top:8px; font-size:0.82em;
              color:var(--text-dim);"></div>
         <div id="grid-levels-plan"></div>
