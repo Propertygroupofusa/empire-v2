@@ -1590,26 +1590,60 @@ async def get_effective_excluded_symbols() -> set:
     universe. Neither layer force-closes an existing position - both only
     ever stop NEW entries, same "never one-way, never touches what's
     already open" philosophy as every exclusion layer on the crypto side."""
-    excluded = set()
-    async with AsyncSessionLocal() as db:
-        for symbol in {config["symbol"] for config in FUTURES.values()}:
-            result = await db.execute(
-                select(AlpacaBacktestRun.roi_pct_of_spend)
-                .where(AlpacaBacktestRun.product_id == symbol)
-                .order_by(desc(AlpacaBacktestRun.run_at))
-                .limit(AUTO_EXCLUDE_RUN_WINDOW)
-            )
-            recent = result.scalars().all()
-            if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
-                excluded.add(symbol)
+    negative, outside_top = await _exclusion_layers()
+    return negative | outside_top
 
+
+async def _recent_daily_rois(db, symbol):
+    """The latest backtest ROI from each of the most recent
+    AUTO_EXCLUDE_RUN_WINDOW calendar days (UTC) this symbol was scored.
+
+    WHY PER DAY. "Excluded after its last 3 runs were all negative" was
+    meant as three DAYS of evidence. The throttle that spaced runs a day
+    apart lived in memory, so every restart re-ran the backtest at once:
+    ~700 runs went into the table where a daily schedule makes ~40, and
+    three deploys in an afternoon - three replays of nearly the same 30
+    days - excluded a symbol as surely as three bad days. Collapsing to
+    one run per day makes back-to-back reruns count once, so the rule
+    means what it says even for the rows already in the table.
+    """
+    result = await db.execute(
+        select(AlpacaBacktestRun.run_at, AlpacaBacktestRun.roi_pct_of_spend)
+        .where(AlpacaBacktestRun.product_id == symbol)
+        .order_by(desc(AlpacaBacktestRun.run_at))
+        .limit(AUTO_EXCLUDE_RUN_WINDOW * 40)
+    )
+    per_day = []
+    seen = set()
+    for run_at, roi in result.all():
+        day = run_at.date() if run_at is not None else None
+        if day in seen:
+            continue
+        seen.add(day)
+        per_day.append(roi)
+        if len(per_day) >= AUTO_EXCLUDE_RUN_WINDOW:
+            break
+    return per_day
+
+
+async def _exclusion_layers():
+    """(negative_streak, outside_top_n) as two separate sets, so the log
+    can say which rule blocked what instead of filing both under one
+    label."""
+    symbols = {config["symbol"] for config in FUTURES.values()}
+    negative = set()
+    async with AsyncSessionLocal() as db:
+        for symbol in symbols:
+            recent = await _recent_daily_rois(db, symbol)
+            if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(
+                    roi is not None and roi < 0 for roi in recent):
+                negative.add(symbol)
+    outside_top = set()
     top_ranked = await _compute_top_ranked_symbols()
     if top_ranked is not None:
-        for symbol in {config["symbol"] for config in FUTURES.values()}:
-            if symbol not in top_ranked and symbol not in INDEX_HEDGE_SYMBOLS:
-                excluded.add(symbol)
-
-    return excluded
+        outside_top = {s for s in symbols
+                       if s not in top_ranked and s not in INDEX_HEDGE_SYMBOLS} - negative
+    return negative, outside_top
 
 
 async def describe_symbol_exclusion_reason(symbol: str) -> str:
@@ -1621,15 +1655,9 @@ async def describe_symbol_exclusion_reason(symbol: str) -> str:
     meaningful to call on a symbol already confirmed excluded; returns a
     generic fallback otherwise."""
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
-            select(AlpacaBacktestRun.roi_pct_of_spend)
-            .where(AlpacaBacktestRun.product_id == symbol)
-            .order_by(desc(AlpacaBacktestRun.run_at))
-            .limit(AUTO_EXCLUDE_RUN_WINDOW)
-        )
-        recent = result.scalars().all()
-    if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi < 0 for roi in recent):
-        return f"last {AUTO_EXCLUDE_RUN_WINDOW} real backtest runs were all negative ROI"
+        recent = await _recent_daily_rois(db, symbol)
+    if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi is not None and roi < 0 for roi in recent):
+        return f"backtest ROI negative on each of its last {AUTO_EXCLUDE_RUN_WINDOW} scored days"
     top_ranked = await _compute_top_ranked_symbols()
     if top_ranked is not None and symbol not in top_ranked and symbol not in INDEX_HEDGE_SYMBOLS:
         return f"outside the current top {TOP_N_ELIGIBLE_SYMBOLS} symbols by real backtested ROI"
@@ -1664,12 +1692,31 @@ async def _run_scheduled_backtest_and_update_exclusions():
                 win_rate=r["win_rate"], roi_pct_of_spend=r["roi_pct_of_spend"],
             ))
         await db.commit()
-    auto_excluded = await get_effective_excluded_symbols()
+    negative, outside_top = await _exclusion_layers()
+    all_symbols = {config["symbol"] for config in FUTURES.values()}
+    tradable = sorted(all_symbols - negative - outside_top)
     log.info(
         f"[APEX_589296] 🔄 scheduled backtest done - {output['coins_with_results']} symbols scored. "
-        f"Auto-excluded (last {AUTO_EXCLUDE_RUN_WINDOW} runs all negative): "
-        f"{sorted(auto_excluded) if auto_excluded else 'none'}"
+        f"Blocked, negative {AUTO_EXCLUDE_RUN_WINDOW} scored days running: "
+        f"{sorted(negative) if negative else 'none'} | "
+        f"Blocked, outside top {TOP_N_ELIGIBLE_SYMBOLS} by ROI: "
+        f"{sorted(outside_top) if outside_top else 'none'} | "
+        f"Still eligible: {tradable if tradable else 'NONE'}"
     )
+
+
+async def _seconds_since_last_backtest():
+    """Age of the newest stored backtest run, or None if there is none.
+
+    The schedule is read from the table, not from memory, so a restart
+    does not count as "a day has passed"."""
+    async with AsyncSessionLocal() as db:
+        latest = (await db.execute(
+            select(AlpacaBacktestRun.run_at).order_by(desc(AlpacaBacktestRun.run_at)).limit(1)
+        )).scalar_one_or_none()
+    if latest is None:
+        return None
+    return (datetime.utcnow() - latest).total_seconds()
 
 
 # ── WHO OWNS A BROKER POSITION ────────────────────────────────────────────
@@ -2472,7 +2519,15 @@ async def run_prop_cycle():
         if now_ts - _last_auto_backtest_at >= AUTO_BACKTEST_INTERVAL_SECONDS:
             _last_auto_backtest_at = now_ts
             try:
-                await _run_scheduled_backtest_and_update_exclusions()
+                # The in-memory stamp is 0 after every restart. Ask the
+                # table when the last run really was, and if it is inside
+                # the interval, wait out the remainder instead of
+                # re-running - otherwise each deploy adds a run.
+                age = await _seconds_since_last_backtest()
+                if age is not None and age < AUTO_BACKTEST_INTERVAL_SECONDS:
+                    _last_auto_backtest_at = now_ts - age
+                else:
+                    await _run_scheduled_backtest_and_update_exclusions()
             except Exception as e:
                 log.warning(f"[APEX_589296] scheduled backtest/exclusion update failed: {e}")
 
