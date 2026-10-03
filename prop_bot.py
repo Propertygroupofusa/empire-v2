@@ -3009,16 +3009,7 @@ async def run_prop_cycle():
         # the account owner actually reads to make real money decisions.
         # Must stay after get_live_strategy_family() above, which is what
         # re-syncs APEX_MANDATE["entry"] to the live family.
-        rsi_threshold = APEX_MANDATE["entry"]["rsi_threshold"]
-        if strategy_family == "mean_reversion":
-            entry_desc = f"RSI < {rsi_threshold} (oversold) entry"
-            exit_desc = (
-                f"{MEAN_REVERSION_PROFIT_TARGET_PCT * 100:.1f}% profit target, "
-                f"-{MEAN_REVERSION_STOP_LOSS_PCT * 100:.1f}% stop"
-            )
-        else:
-            entry_desc = f"RSI > {rsi_threshold} + price > SMA20 entry"
-            exit_desc = f"{MOMENTUM_TRAIL_PCT * 100:.1f}% trailing stop off peak"
+        entry_desc, exit_desc = describe_live_rules(strategy_family)
         # Name the account's real shorting permission explicitly, so "LONG-ONLY"
         # is never mistaken for "the account can't short anyway" once it can.
         shorting_note = (
@@ -4598,12 +4589,38 @@ def check_credentials():
     return True
 
 
+def describe_live_rules(strategy_family):
+    """(entry, exit) in plain words for the strategy family actually live.
+
+    The one place both the per-cycle LONG-ONLY line and the startup banner
+    read from, so the two can never describe different rules. Reads
+    APEX_MANDATE["entry"], which get_live_strategy_family() re-syncs - call
+    it after that, never before.
+    """
+    rsi_threshold = APEX_MANDATE["entry"]["rsi_threshold"]
+    if strategy_family == "mean_reversion":
+        return (
+            f"RSI < {rsi_threshold} (oversold) entry",
+            f"{MEAN_REVERSION_PROFIT_TARGET_PCT * 100:.1f}% profit target, "
+            f"-{MEAN_REVERSION_STOP_LOSS_PCT * 100:.1f}% stop",
+        )
+    return (
+        f"RSI > {rsi_threshold} + price > SMA20 entry",
+        f"{MOMENTUM_TRAIL_PCT * 100:.1f}% trailing stop off peak",
+    )
+
+
 def run():
     log.info("=" * 60)
     log.info("DEL'S TRADING EMPIRE — PROP BOT v3")
     log.info(f"Account: APEX_589296 | Mode: {'LIVE' if LIVE_TRADE else 'PAPER'}")
-    log.info(f"RSI thresholds: long entry < {RSI_BUY_BELOW} | short entry > {RSI_SELL_ABOVE} (trades both directions)")
-    log.info(f"Profitable days: {len(profitable_days)}/7 needed")
+    # This line used to print PROP_RSI_BUY_BELOW / PROP_RSI_SELL_ABOVE as
+    # "long entry < 30 | short entry > 70 (trades both directions)". Neither
+    # constant drives any entry, and the bot never shorts - the real rule is
+    # read from the database (get_live_strategy_family) and logged below
+    # once it is known. "Profitable days 0/7" went too: that counter lives in
+    # memory, so it read 0 after every restart whatever had happened.
+    log.info("Long only. Entry and exit rules come from the live strategy setting - logged below.")
     log.info("=" * 60)
 
     # Verify credentials before starting
@@ -4630,6 +4647,14 @@ def run():
         asyncio.run(load_alpaca_branch_positions())
     except Exception as e:
         log.error(f"[APEX_589296] Startup Alpaca branch position reload failed: {e}")
+
+    try:
+        family = asyncio.run(get_live_strategy_family())
+        entry_desc, exit_desc = describe_live_rules(family)
+        log.info(f"[APEX_589296] Live strategy: {family} | {entry_desc} | {exit_desc}")
+    except Exception as e:
+        log.warning(f"[APEX_589296] Live strategy not readable at startup ({e}) - "
+                    f"each cycle's LONG-ONLY line reports it once the database answers")
 
     # One persistent event loop for this thread's entire life, not a fresh
     # asyncio.run() per cycle - the same repeated create/destroy pattern
