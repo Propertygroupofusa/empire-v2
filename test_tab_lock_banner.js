@@ -51,8 +51,16 @@ const makePG = (token) => new Function('getWriteToken','fetch','TOKEN_KEY',
   ok('it warns the server log will be empty', /nothing appears in the logs/.test(r.html));
   ok('it says this is not a broken button', /is not\./.test(r.html), r.html.slice(0,120));
   ok('it explains the per-tab storage', /this browser tab only/.test(r.html));
-  ok('it names the phone dropping the tab', /drops the tab/.test(r.html));
-  ok('it points at the lock bar', /lock bar at the top/.test(r.html));
+  // The claim has to be ACCURATE, not just present. sessionStorage survives a
+  // reload; it ends when the tab is closed. An earlier wording said phones
+  // clear it whenever you switch apps, which overstates it.
+  ok('it says the token SURVIVES a refresh', /survives a\s+refresh/.test(r.html), r.html);
+  ok('it ties loss to the tab being CLOSED', /tab is closed/.test(r.html), r.html);
+  ok('it does NOT claim switching apps clears it',
+     !/every time you\s+switch apps/.test(r.html), 'overstated claim is back');
+  // Match the control by NAME, not by a positional phrase that changes
+  // every time the copy is reworded.
+  ok('it points at the lock bar', /lock bar/.test(r.html), r.html.slice(0,160));
   ok('it covers EVERY button, not one panel',
      /Levels, Reconcile, all of them/.test(r.html));
 

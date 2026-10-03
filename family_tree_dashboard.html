@@ -7305,9 +7305,19 @@ async function loadAlertQueue() {
 // button. Confirmed live: write-attempts count 0 on a single replica with
 // 17 minutes of uptime.
 //
-// sessionStorage is PER TAB and is emptied when the tab is closed or
-// DISCARDED, which phones do routinely when you switch apps. The owner
-// had been switching between this page and a log viewer all night.
+// sessionStorage is PER TAB AND ORIGIN. It SURVIVES a reload and survives
+// switching away from the tab; it ends when the tab is CLOSED. A mobile
+// browser discarding a backgrounded tab can produce a new page session,
+// but that is a restoration edge case, not routine. An earlier version of
+// this comment claimed phones clear it whenever you switch apps, which
+// overstates it.
+//
+// AND THE ZERO DOES NOT NAME THIS CAUSE BY ITSELF. count 0 proves only
+// that nothing was sent. The refusal above is one way that happens;
+// previewGridLevels bailing on an empty map, executeGridLevels bailing
+// with no previewed plan, and any script error before the fetch are
+// others. This banner distinguishes the locked case from the rest - it
+// does not prove it.
 //
 // A lock notice was added to the Levels panel, but not to Reconcile, and
 // a per-panel notice was the wrong shape anyway: the lock disables every
@@ -7339,10 +7349,10 @@ function renderTabLock() {
         </div>
         <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
                     line-height:1.5;">
-          The dashboard token is kept for this browser tab only, and your phone clears
-          it whenever it drops the tab from memory &mdash; which happens every time you
-          switch apps for a while. Paste it into the \u{1F512} lock bar at the top of
-          this page and this message disappears.
+          The dashboard token is kept for this browser tab only. It survives a
+          refresh, but it is gone once the tab is closed &mdash; and a phone that
+          drops a background tab from memory can end the session the same way.
+          Paste it into the \u{1F512} lock bar above and this message disappears.
         </div>
       </div>`;
 }
