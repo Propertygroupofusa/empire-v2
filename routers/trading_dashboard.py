@@ -8490,6 +8490,54 @@ def _breakers_from_cache():
     return out or None
 
 
+# The browser's own account of where a button stopped. A GET, because
+# every POST is write-guarded and the thing being diagnosed is a request
+# that never gets far enough to carry a token. Bounded, in memory, and it
+# records only short codes the page chooses - never a token, never a URL
+# with one in it, never free user text.
+_UI_TRACE: list = []
+_UI_TRACE_MAX = 60
+_UI_TRACE_OK = {
+    "preview_enter", "preview_empty", "preview_sending", "preview_ok", "preview_threw",
+    "apply_enter", "apply_no_pending", "apply_sending", "apply_ok", "apply_threw",
+    "rec_preview_enter", "rec_preview_sending", "rec_preview_ok", "rec_preview_threw",
+    "rec_apply_enter", "rec_apply_sending", "rec_apply_ok", "rec_apply_threw",
+    "locked_banner_shown", "render_levels",
+}
+
+
+@router.get("/ui-trace")
+async def ui_trace_endpoint(e: str = None, n: int = None, read: int = 0):
+    """Where a dashboard button stopped, as the page itself reports it.
+
+    `count: 0` on write-attempts proves only that NOTHING WAS SENT. It does
+    not say which of several browser-side paths stopped it: the locked-tab
+    refusal in postGuarded, an empty collected map, an apply with no
+    previewed plan, or a script error before the fetch. This is how the
+    page says which.
+
+    Only codes on a fixed allowlist are recorded, so the page cannot write
+    arbitrary text here and no token can arrive by accident.
+    """
+    import time as _t
+    if read or not e:
+        return {"readable": True, "count": len(_UI_TRACE),
+                "events": list(reversed(_UI_TRACE)),
+                "known_codes": sorted(_UI_TRACE_OK),
+                "detail": ("the page has reported nothing since this process started"
+                           if not _UI_TRACE else
+                           f"{len(_UI_TRACE)} event(s), newest first"),
+                "note": "in memory and per-process: a restart empties it"}
+    code = str(e)[:40]
+    if code not in _UI_TRACE_OK:
+        return {"recorded": False, "reason": "code not on the allowlist"}
+    _UI_TRACE.append({"at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                      "event": code,
+                      "n": (int(n) if n is not None else None)})
+    del _UI_TRACE[:-_UI_TRACE_MAX]
+    return {"recorded": True}
+
+
 @router.get("/write-attempts")
 async def write_attempts_endpoint():
     """Every state-changing request the guard has seen, newest first.

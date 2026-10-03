@@ -1,3 +1,4 @@
+const TRACE_STUB = 'var uiTrace=function(){};';
 // The page-level lock banner, and the test gap that let the real bug live.
 //
 // Every write of one session failed with an EMPTY server log because
@@ -40,7 +41,7 @@ const makePG = (token) => new Function('getWriteToken','fetch','TOKEN_KEY',
     let html='', disp='';
     const wrap = { set innerHTML(v){html=v;}, get innerHTML(){return html;},
                    style:{ set display(v){disp=v;}, get display(){return disp;} } };
-    new Function('document','getWriteToken', fn + '; return renderTabLock;')(
+    new Function('document','getWriteToken', TRACE_STUB + fn + '; return renderTabLock;')(
       { getElementById: id => (id === 'tab-lock-banner' ? wrap : null) },
       () => { if (throws) throw new Error('blocked'); return tok; })();
     return { html, disp };

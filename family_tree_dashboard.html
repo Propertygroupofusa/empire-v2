@@ -7323,6 +7323,18 @@ async function loadAlertQueue() {
 // a per-panel notice was the wrong shape anyway: the lock disables every
 // write on the page. So it is stated once, at the top, where no button
 // can be reached without passing it.
+// Tell the server where a button stopped. A GET, because every POST is
+// write-guarded and the thing being diagnosed is a request that never
+// gets far enough to carry a token. Fire-and-forget: it must never be
+// able to break the button it is observing.
+function uiTrace(code, n) {
+    try {
+        const q = '?e=' + encodeURIComponent(code)
+                + (n === undefined || n === null ? '' : '&n=' + encodeURIComponent(n));
+        fetch(API_BASE + '/ui-trace' + q, { cache: 'no-store' }).catch(() => {});
+    } catch (e) { /* a diagnostic must not throw into the path it measures */ }
+}
+
 function renderTabLock() {
     const wrap = document.getElementById('tab-lock-banner');
     if (!wrap) return;
@@ -7335,6 +7347,7 @@ function renderTabLock() {
     }
     if (!locked) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
     wrap.style.display = 'block';
+    uiTrace('locked_banner_shown');
     wrap.innerHTML = `
       <div style="margin-bottom:14px; padding:13px 15px; border-radius:8px;
                   border:2px solid var(--red); background:rgba(180,35,24,0.09);">
@@ -7810,6 +7823,7 @@ async function previewGridReconcile(productId) {
     const st = document.getElementById('grid-reconcile-status');
     const planWrap = document.getElementById('grid-reconcile-plan');
     if (!st || !planWrap) return;
+    uiTrace('rec_preview_enter');
     st.textContent = 'Computing the plan' + (productId ? ' for ' + productId : '')
                    + '… nothing is being changed.';
     planWrap.innerHTML = '';
@@ -7817,7 +7831,9 @@ async function previewGridReconcile(productId) {
         // No dry_run flag is sent: the server's own default is true, and
         // relying on it means this path cannot apply anything even if the
         // query string were tampered with.
+        uiTrace('rec_preview_sending');
         const d = await postGuarded(_gridReconcileUrl(productId, false));
+        uiTrace('rec_preview_ok', (d.branches || []).length);
         const rows = d.branches || [];
         if (!rows.length) {
             // A CHECKMARK HERE WAS WRONG. When the banner above counted
@@ -7887,8 +7903,10 @@ async function executeGridReconcile(productId) {
     const st = document.getElementById('grid-reconcile-status');
     const planWrap = document.getElementById('grid-reconcile-plan');
     if (!st) return;
+    uiTrace('rec_apply_enter');
     st.textContent = 'Applying…';
     try {
+        uiTrace('rec_apply_sending');
         const d = await postGuarded(_gridReconcileUrl(productId, true));
         const applied = d.applied || [];
         const total = Number(d.cost_basis_removed_usd);
@@ -7916,6 +7934,7 @@ async function executeGridReconcile(productId) {
         if (typeof refresh === 'function') refresh();
         else if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
     } catch (e) {
+        uiTrace('rec_apply_threw');
         st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
     }
 }
@@ -8147,9 +8166,12 @@ async function previewGridLevels() {
     const planWrap = document.getElementById('grid-levels-plan');
     if (!st || !planWrap) return;
     planWrap.innerHTML = '';
+    uiTrace('preview_enter');
     const levels = _gridLevelsWanted();
     const keys = Object.keys(levels);
+    uiTrace('render_levels', document.querySelectorAll('.grid-levels-in').length);
     if (!keys.length) {
+        uiTrace('preview_empty', 0);
         // DIAGNOSE, DO NOT JUST DECLINE. A bare "nothing to preview" sent
         // the last three rounds of this hunt looking at the server for a
         // request the browser had never sent. Say what was actually on the
@@ -8173,9 +8195,12 @@ async function previewGridLevels() {
                    + '… nothing is being changed.';
     try {
         // No dry_run is sent: the server defaults it to true.
+        uiTrace('preview_sending', keys.length);
         const d = await postGuarded(API_BASE + '/grid-status/set-levels', {levels});
+        uiTrace('preview_ok', (d.ready || []).length);
         _gridLevelsShowPlan(d, st, planWrap, levels);
     } catch (e) {
+        uiTrace('preview_threw');
         st.textContent = 'Error: ' + e.message;
     }
 }
@@ -8249,16 +8274,20 @@ async function executeGridLevels() {
     const st = document.getElementById('grid-levels-status');
     const planWrap = document.getElementById('grid-levels-plan');
     if (!st) return;
+    uiTrace('apply_enter');
     const levels = _gridLevelsPending;
     if (!levels || !Object.keys(levels).length) {
+        uiTrace('apply_no_pending', 0);
         st.textContent = 'Nothing was sent - no previewed plan to apply. '
                        + 'Preview the change first.';
         return;
     }
     st.textContent = 'Applying…';
     try {
+        uiTrace('apply_sending', Object.keys(levels).length);
         const d = await postGuarded(API_BASE + '/grid-status/set-levels',
                                     {levels, dry_run: false});
+        uiTrace('apply_ok', (d.applied || []).length);
         const applied = d.applied || [];
         if (!applied.length) {
             st.innerHTML = '⚠️ ' + escText(d.detail || 'nothing was changed');

@@ -1,3 +1,4 @@
+const TRACE_STUB = 'var uiTrace=function(){};';
 // The Levels control. The owner cannot authenticate from PowerShell, so
 // this button is the only way the parked branches get unparked - and it
 // writes num_levels on a live trading row. Two failures matter: a preview
@@ -131,7 +132,7 @@ const els = [
   mkEl('HBAR-USD', 3, 'abc'),  // junk     -> dropped
   mkEl('BCH-USD', 3, ' 8 '),   // padded   -> sent
 ];
-const wanted = new Function('document', fnWanted + '; return _gridLevelsWanted;')({
+const wanted = new Function('document', TRACE_STUB + fnWanted + '; return _gridLevelsWanted;')({
   querySelectorAll: () => ({ forEach: cb => els.forEach(cb) }),
 })();
 ok('a changed count is sent', wanted['LINK-USD'] === 6, JSON.stringify(wanted));
@@ -180,7 +181,7 @@ let sentCount = 0, statusText = '';
 const stEl = { set textContent(v) { statusText = v; }, get textContent() { return statusText; },
                set innerHTML(v) { statusText = v; } };
 new Function('document', 'postGuarded', 'API_BASE', '_gridLevelsPending',
-  fnExec + '; return executeGridLevels;')(
+  TRACE_STUB + fnExec + '; return executeGridLevels;')(
   { getElementById: id => (id === 'grid-levels-status' ? stEl : null) },
   async () => { sentCount++; return {}; },
   'https://x/api/trading-dashboard',
@@ -221,7 +222,7 @@ const runRender = branches => {
     querySelectorAll: () => [],
   };
   new Function('document', 'escText', 'fmtUsd',
-    CONSTS + fnSuggest + fnInUseEarly + fnRender + '; return renderGridLevels;')(
+    TRACE_STUB + CONSTS + fnSuggest + fnInUseEarly + fnRender + '; return renderGridLevels;')(
     doc, esc, n => '$' + Number(n).toFixed(2))(branches);
   return wrap;
 };
@@ -295,7 +296,7 @@ const mkPanel = ({planHtml = '', statusText = '', inputs = []}) => {
     querySelectorAll: () => els,
   };
 };
-const inUse = (doc) => new Function('document', fnInUse + '; return _gridLevelsInUse;')(doc)();
+const inUse = (doc) => new Function('document', TRACE_STUB + fnInUse + '; return _gridLevelsInUse;')(doc)();
 
 ok('a clean panel is not in use',
    inUse(mkPanel({inputs: [{product: 'XRP-USD', current: 3, rendered: 8, value: '8'}]})) === null);
@@ -340,7 +341,7 @@ const runRenderTok = (hasToken) => {
   const doc = { getElementById: id => (id === 'grid-levels-wrap' ? wrap : null),
                 querySelectorAll: () => [] };
   new Function('document', 'escText', 'fmtUsd', 'getWriteToken',
-    CONSTS + fnSuggest + fnInUseEarly + grab('renderGridLevels') + '; return renderGridLevels;')(
+    TRACE_STUB + CONSTS + fnSuggest + fnInUseEarly + grab('renderGridLevels') + '; return renderGridLevels;')(
     doc, esc, n => '$' + Number(n).toFixed(2), () => (hasToken ? 'x' : ''))(
     [{ product_id: 'LINK-USD', num_levels: 3, allocated_usd: 137.87,
        slices: [slice(2, 11), slice(2, 10.5), slice(2, 10)] }]);
