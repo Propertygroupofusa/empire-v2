@@ -10868,6 +10868,156 @@ async def close_some_grid_slices_endpoint(product_id: str, slice_ids: str = "",
     return result
 
 
+@router.post("/grid-status/rotation/preview")
+async def rotation_preview_endpoint(release_deployed_idle: bool = False):
+    """The proposed idle rotation, priced. MOVES NOTHING, writes nothing.
+
+    Pairs with /grid-status/rotation/execute below. Preview takes no ticket
+    and claims nothing, so it can be called as often as you like.
+
+    What the rotation does: takes idle cash out of branches that cannot use
+    it and places it in the best-ranked branches that have a free rung. It
+    places NO order and sells NO coin - allocation moves, nothing is bought
+    or sold, and nothing is realised.
+
+    Withdrawal requires a COMPLETELY FLAT branch, so a branch holding any
+    open slice is not a source - crypto_grid_bot.withdraw_from_grid_branch
+    refuses it outright. That is why the movable figure is the idle sitting
+    in flat branches and not the fleet's whole idle balance.
+
+    Write-guarded like every POST on this router, though it writes nothing:
+    it reads live allocations, and this router's guard is uniform.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import rotation_task
+
+    g = crypto_grid_bot_module
+    p = await rotation_task.build_plan(g, release_deployed_idle=release_deployed_idle)
+    took = round(sum(s["release_usd"] for s in (p.get("sources") or [])), 2)
+    gave = round(sum(a["add_usd"] for a in (p.get("targets") or [])), 2)
+    return {
+        "moves_nothing": True,
+        "ready": bool(p.get("ok")),
+        "why_not": None if p.get("ok") else p.get("why"),
+        "would_withdraw_usd": took,
+        "would_place_usd": gave,
+        "balances": abs(took - gave) <= rotation_task.CENT,
+        "sources": p.get("sources"),
+        "targets": p.get("targets"),
+        "skipped": p.get("skipped"),
+        "ranking": p.get("ranking"),
+        "unreadable_coins": p.get("unreadable_coins"),
+        "release_deployed_idle": p.get("release_deployed_idle"),
+        "detail": (
+            f"PREVIEW ONLY - nothing was moved. This plan would take "
+            f"${took:,.2f} from {len(p.get('sources') or [])} branch(es) and "
+            f"place it in {len(p.get('targets') or [])}. No order is placed "
+            f"and no coin is sold. To run it, POST /grid-status/rotation/"
+            f"execute with a ticket you choose and confirm=true."
+            if p.get("ok") else
+            f"NOT READY: {p.get('why')}. Nothing would be moved."),
+    }
+
+
+@router.post("/grid-status/rotation/execute")
+async def rotation_execute_endpoint(ticket: str, confirm: bool = False,
+                                    release_deployed_idle: bool = False):
+    """Run the idle rotation ONCE, under a ticket you name.
+
+    Exists because arming by environment variable proved impossible on this
+    account on 2026-10-03: the Railway Deploy button, Restart, `railway
+    variables --set` and `railway redeploy` all failed to restart the
+    service across an evening, while every GitHub push restarted it first
+    time. run_at_boot() still reads ROTATION_TASK_TICKET and is unchanged;
+    this is a second trigger that needs no deploy.
+
+    TWO GATES, both explicit:
+      ticket   a name you choose. One rotation per ticket, ever.
+      confirm  must be true. Without it this returns the plan and moves
+               nothing, so a mistyped call cannot move money.
+
+    THE TICKET IS RESERVED BY AN INSERT, NOT A CHECK. trading_bot_state.
+    bot_name is UNIQUE, so of two simultaneous calls on one ticket exactly
+    one INSERT commits and the other is refused by the database. There is no
+    read-then-write window to race. See rotation_task.claim_once.
+
+    THE PLAN IS RECOMPUTED HERE, never accepted from the caller. A plan is
+    only honest about the moment it was built; prices and slices move.
+
+    Conservation is checked before any write: rotation_task.apply refuses
+    outright if the money out does not equal the money in, because a
+    rotation that does not balance mints or deletes capital.
+
+    A run that writes nothing RELEASES its ticket, so an honest no-op can be
+    retried under the same name. A run that writes anything spends it
+    permanently. A crash mid-run leaves the ticket held and unusable - the
+    safe direction; use a new name.
+
+    Nothing is bought and nothing is sold. Allocation moves between
+    branches; no order reaches the venue.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import rotation_task
+
+    g = crypto_grid_bot_module
+    tkt = (ticket or "").strip()
+    if not tkt:
+        raise HTTPException(status_code=400, detail="ticket is required and must not be blank")
+    if (os.getenv("STOP_TRADING", "false") or "").strip().lower() == "true":
+        raise HTTPException(status_code=409,
+                            detail="STOP_TRADING is set - allocation writes are paused")
+
+    key = rotation_task.API_MARKER_PREFIX + tkt
+
+    if not confirm:
+        p = await rotation_task.build_plan(g, release_deployed_idle=release_deployed_idle)
+        took = round(sum(s["release_usd"] for s in (p.get("sources") or [])), 2)
+        return {"ran": False, "ticket": tkt, "reason": "NOT_CONFIRMED",
+                "moves_nothing": True, "ready": bool(p.get("ok")),
+                "would_withdraw_usd": took,
+                "sources": p.get("sources"), "targets": p.get("targets"),
+                "detail": ("confirm=false, so nothing was moved and the ticket "
+                           "was NOT claimed. Re-send with confirm=true to run it.")}
+
+    ok, state = await rotation_task.claim_once(g.get_session_factory, key)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"ticket {tkt!r} is {state}. "
+                    + ("It has already run - one rotation per ticket, ever. "
+                       "Use a new name." if state == "ALREADY_DONE" else
+                       "Another call holds it, or a previous run did not finish. "
+                       "Use a new name.")))
+
+    wrote = 0
+    try:
+        p = await rotation_task.build_plan(g, release_deployed_idle=release_deployed_idle)
+        if not p.get("ok"):
+            out = {"ran": False, "ticket": tkt, "reason": "NOT_READY",
+                   "rows_written": 0, "detail": p.get("why")}
+        else:
+            out = await rotation_task.apply(g, p)
+            wrote = int(out.get("rows_written") or 0)
+            out = dict(out, ran=wrote > 0, ticket=tkt, plan=p)
+    except Exception as e:
+        # The ticket is released below only because wrote is still 0 - no
+        # write was reported, so nothing was spent.
+        await rotation_task.finish_claim(g.get_session_factory, key, 0)
+        log.warning(f"[rotation-api] ticket {tkt!r} failed before writing: "
+                    f"{type(e).__name__}: {e}")
+        raise HTTPException(status_code=500,
+                            detail=(f"the rotation failed before writing anything "
+                                    f"({type(e).__name__}: {e}). The ticket was "
+                                    f"released and can be reused."))
+
+    out["ticket_state"] = await rotation_task.finish_claim(g.get_session_factory, key, wrote)
+    log.warning(f"[rotation-api] ticket {tkt!r} {out.get('status')}: "
+                f"{wrote} row(s), ticket now {out['ticket_state']}")
+    return out
+
+
 @router.post("/grid-status/redeploy-freed-cash")
 async def redeploy_freed_cash_endpoint(dry_run: bool = True,
                                        source: str = None, targets: str = None):

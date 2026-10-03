@@ -554,3 +554,114 @@ async def run_at_boot(grid, tkt=None, ranker=None):
                 f"{out['detail']}")
     _LAST = out
     return out
+
+
+# ---------------------------------------------------------------------------
+# API-TRIGGERED ROTATION
+#
+# run_at_boot() above arms from ROTATION_TASK_TICKET, an environment
+# variable. On 2026-10-03 that proved unusable: four separate mechanisms -
+# the Railway Deploy button, Restart, `railway variables --set` and
+# `railway redeploy` - all failed to restart the service, while every
+# GitHub push restarted it first time. A rotation that can only be armed by
+# a deploy is a rotation that cannot be armed at all on that account.
+#
+# These helpers let the dashboard arm it directly instead. Same planner,
+# same conservation check, same one-shot guarantee - a different trigger.
+# The environment path is left exactly as it is; nothing here changes it.
+# ---------------------------------------------------------------------------
+
+API_MARKER_PREFIX = "rotation_api:"
+INFLIGHT = 1.0
+
+
+async def claim_once(session_factory, key):
+    """Atomically reserve a one-shot ticket. Returns (ok, state).
+
+    THE RESERVATION IS THE INSERT, not a read followed by a write.
+    _claim_attempt above reads the row, decides, then writes - three
+    statements with a gap between them, so two simultaneous requests can
+    both read "unused" and both proceed. That is survivable at boot, where
+    exactly one process runs the task once, and not survivable on an HTTP
+    endpoint anyone can call twice.
+
+    trading_bot_state.bot_name carries a UNIQUE constraint, so the database
+    itself arbitrates: of two concurrent INSERTs for the same key exactly
+    one commits and the other raises. The winner holds the ticket. No
+    application-level check can be raced because no application-level check
+    is what decides.
+
+    A ticket left INFLIGHT by a crash stays unusable, and that is
+    deliberate - the safe direction is refusing a possible double-spend
+    rather than risking one. Use a new ticket name. A run that wrote
+    NOTHING releases its own ticket (see finish_claim) so an honest
+    no-op can be retried under the same name.
+    """
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy import insert, select
+
+    from models import TradingBotState
+    async with session_factory()() as db:
+        try:
+            await db.execute(insert(TradingBotState).values(
+                bot_name=key, base_capital=INFLIGHT))
+            await db.commit()
+            return True, "CLAIMED"
+        except IntegrityError:
+            await db.rollback()
+        row = (await db.execute(select(TradingBotState).where(
+            TradingBotState.bot_name == key))).scalars().first()
+        if row is None:
+            # Deleted between the failed insert and this read. Refuse rather
+            # than loop: UNKNOWN is a third verdict and a retry is free.
+            return False, "RACED"
+        state = float(row.base_capital or 0.0)
+        if state == DONE:
+            return False, "ALREADY_DONE"
+        return False, "IN_FLIGHT"
+
+
+async def finish_claim(session_factory, key, wrote_rows: int):
+    """Settle a claimed ticket: spent if it moved anything, freed if not.
+
+    A ticket that moved money is spent forever - that is the whole point of
+    the one-shot. A ticket whose run wrote zero rows moved nothing, so
+    holding it would burn a name for a no-op; it is deleted and can be used
+    again. The distinction is the row count the writer actually reported,
+    never an assumption about why it was zero.
+    """
+    from sqlalchemy import delete, select
+
+    from models import TradingBotState
+    async with session_factory()() as db:
+        if wrote_rows > 0:
+            row = (await db.execute(select(TradingBotState).where(
+                TradingBotState.bot_name == key))).scalars().first()
+            if row is not None:
+                row.base_capital = DONE
+                await db.commit()
+            return "DONE"
+        await db.execute(delete(TradingBotState).where(
+            TradingBotState.bot_name == key))
+        await db.commit()
+        return "RELEASED"
+
+
+async def build_plan(grid, ranker=None, release_deployed_idle=None):
+    """The proposed rotation, computed from live state. Writes nothing.
+
+    Shared by the preview and the execute endpoints so the thing previewed
+    and the thing executed are produced by one function. Execute recomputes
+    rather than trusting a plan posted back to it - prices and slices move,
+    and a plan is only honest about the moment it was built.
+    """
+    status = await grid.get_grid_status()
+    branches = status.get("branches") or []
+    pids = [str(b.get("product_id")) for b in branches if b.get("product_id")]
+    ranked, unreadable = await ((ranker or rank_by_dip)(pids))
+    released = release_armed() if release_deployed_idle is None else bool(release_deployed_idle)
+    p = plan(branches, ranked, release_deployed_idle=released)
+    p["unreadable_coins"] = unreadable or None
+    p["release_deployed_idle"] = released
+    p["ranking"] = [{"product_id": q, "dip_depth": round(d, 6)} for q, d in ranked[:10]]
+    return p
