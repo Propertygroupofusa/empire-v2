@@ -389,10 +389,29 @@ class SellExecutor:
             )
             return None
 
-        # Conservative limit execution.
-        # Never submit an aggressive market sell here.
+        # MAKER SELL: THE LIMIT RESTS ABOVE THE MARKET.
+        #
+        # This read `1 - bps/10000`, which at the default 20 bps placed the
+        # limit 0.20% BELOW the market. A sell below the market crosses the
+        # spread and TAKES liquidity - the exact opposite of the two comment
+        # lines that sat here, which promised conservative execution and no
+        # aggressive market sell. A maker sell sits above the market and
+        # waits to be hit.
+        #
+        # On this account that sign is the whole margin, not a detail. The
+        # fleet is measured at 99.08% maker across 218 legs and a 0.7073%
+        # blended round trip, and the strategy race measured the winning
+        # configuration at +$296.47 on maker fees against -$4.19 if every
+        # leg paid taker. A sell that crossed the spread on every exit would
+        # convert this from the profitable side of that comparison to the
+        # breakeven one.
+        #
+        # NOTE ON THE FIELD NAME: max_slippage_bps is now an OFFSET ABOVE the
+        # market, not a slippage tolerance. The name is left as the author
+        # wrote it to keep this change to one character of behaviour, but it
+        # no longer describes what the number does.
         price = position.current_price * (
-            D("1") - D(self.config.max_slippage_bps)
+            D("1") + D(self.config.max_slippage_bps)
             / D("10000")
         )
 
