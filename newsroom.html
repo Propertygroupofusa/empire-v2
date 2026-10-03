@@ -445,8 +445,8 @@ function renderLeague(L){
         <td style="width:64px">${chg(r.score_change)}</td>
         <td>${esc(r.unrated_reason || r.trend)}</td>
         <td class="n">${usd(r.usd)}</td>
-        <td style="width:90px">${r.promoted ? '<span class="pill c-low">PROMOTED</span>' :
-                                  r.relegated ? '<span class="pill c-crit">RELEGATED</span>' : ""}</td>
+        <td style="width:90px">${r.promoted ? '<span class="pill c-low">MOVED UP A TIER</span>' :
+                                  r.relegated ? '<span class="pill c-crit" title="Dropped a tier in the ranking. Informational only - nothing was sold.">DROPPED A TIER</span>' : ""}</td>
       </tr>`;
     });
     h += `</tbody></table>`;

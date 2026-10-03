@@ -28,6 +28,11 @@ log = logging.getLogger("alert_worker")
 
 PRODUCE_INTERVAL = int(os.getenv("ALERT_PRODUCE_SECONDS", "900"))    # 15 min
 DRAIN_INTERVAL = int(os.getenv("ALERT_DRAIN_SECONDS", "30"))
+
+# How long to wait after "nothing could carry this", without spending an
+# attempt. Long enough not to hammer a dead route every 30s, short enough
+# that the backlog flushes soon after a working one is configured.
+NO_ROUTE_COOLOFF = int(os.getenv("ALERT_NO_ROUTE_COOLOFF_SECONDS", "600"))
 COVERAGE_KEY = "newsroom_last_coverage_pct"
 
 _last_coverage = None
@@ -141,17 +146,90 @@ async def run_producer_periodically(get_watch, session_factory):
         await asyncio.sleep(PRODUCE_INTERVAL)
 
 
+async def drain_as_digest(session_factory) -> dict:
+    """Send every pending alert as ONE email, then mark them all sent.
+
+    The webhook path above sends one row per request because an HTTP
+    receiver wants discrete events. Email is the opposite: 76 messages
+    about one branch retrying one order gets the sender muted, and a
+    muted sender swallows the next real alert too. So the queue drains
+    into a single digest.
+
+    Rows are only marked sent when the send actually succeeded. A queue
+    that reports success with nothing delivered looks like coverage and
+    is worse than an empty one.
+    """
+    from models import NewsroomAlert
+    now = datetime.utcnow()
+    async with session_factory()() as db:
+        rows = (await db.execute(
+            select(NewsroomAlert)
+            .where(NewsroomAlert.status == "pending")
+            .where((NewsroomAlert.next_attempt_at == None) |     # noqa: E711
+                   (NewsroomAlert.next_attempt_at <= now))
+            .order_by(NewsroomAlert.id))).scalars().all()
+        if not rows:
+            return {"sent": 0, "failed": 0}
+
+        alerts = [{"kind": r.kind, "asset": r.asset, "severity": r.severity,
+                   "message": r.message, "detail": r.detail} for r in rows]
+        ok, err = await asyncio.to_thread(alert_sender.send_digest, alerts)
+
+        stamp = datetime.utcnow()
+        # NO ROUTE OUT IS NOT THE ALERT'S FAULT. Burning the retry budget
+        # against a host that blocks outbound mail marks the whole backlog
+        # failed just before a working route is added - losing it exactly
+        # when it becomes deliverable. So an infrastructure failure cools
+        # off and keeps its attempts; only a real per-message rejection
+        # spends one.
+        infra = (not ok) and alert_sender.is_infrastructure_failure(err)
+        for r in rows:
+            if ok:
+                r.status = "sent"
+                r.sent_at = stamp
+                r.last_error = None
+            elif infra:
+                r.last_error = err
+                r.next_attempt_at = stamp + timedelta(
+                    seconds=NO_ROUTE_COOLOFF)
+            else:
+                r.attempts = (r.attempts or 0) + 1
+                r.last_error = err
+                if r.attempts >= alert_queue.MAX_ATTEMPTS:
+                    r.status = "failed"
+                else:
+                    r.next_attempt_at = stamp + timedelta(
+                        seconds=alert_queue.backoff_seconds(r.attempts))
+        await db.commit()
+        n = len(rows)
+        if ok:
+            log.info(f"[alerts] digest delivered - {n} row(s) marked sent")
+        elif infra:
+            log.warning(f"[alerts] no route out ({err}) - {n} row(s) HELD, "
+                        f"attempts not spent")
+        return {"sent": n if ok else 0, "failed": 0 if ok else n,
+                "held_for_no_route": n if infra else 0, "error": err}
+
+
 async def run_sender_periodically(session_factory):
     while True:
         try:
-            import aiohttp
-            async with aiohttp.ClientSession() as http:
-                # Drain in a burst, then idle - a backlog should not take
-                # one row per DRAIN_INTERVAL to clear.
-                for _ in range(25):
-                    r = await drain_once(session_factory, http)
-                    if not r.get("sent") and not r.get("failed"):
-                        break
+            # A webhook takes discrete events; email takes a digest. The
+            # webhook wins when both are set, because a receiver that was
+            # deliberately pointed at this queue should get every row.
+            if alert_sender.channel_configured():
+                import aiohttp
+                async with aiohttp.ClientSession() as http:
+                    # Drain in a burst, then idle - a backlog should not take
+                    # one row per DRAIN_INTERVAL to clear.
+                    for _ in range(25):
+                        r = await drain_once(session_factory, http)
+                        if not r.get("sent") and not r.get("failed"):
+                            break
+            elif alert_sender.email_armed() and alert_sender.email_configured():
+                await drain_as_digest(session_factory)
+            # else: no route. drain_once already refuses to mark rows sent
+            # with no channel, and saying so every interval is noise.
         except Exception as e:
             log.warning(f"[alerts] sender error: {type(e).__name__}: {e}")
         await asyncio.sleep(DRAIN_INTERVAL)

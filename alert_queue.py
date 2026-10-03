@@ -47,6 +47,12 @@ COVERAGE_DROP_POINTS = 5.0
 
 CRITICAL, HIGH, INFO = "CRITICAL", "HIGH", "INFO"
 
+# A branch's last_state key has to live in its own namespace. The holdings
+# rows are keyed by bare asset, and a breaker is a DIFFERENT fact about the
+# same coin - keying both on "QNT" would make a breaker trip look like a
+# stop-level transition and silently overwrite it.
+BREAKER_STATE_PREFIX = "breaker:"
+
 
 def _f(x, default=None):
     try:
@@ -126,6 +132,62 @@ def plan(watch: dict, last_state: dict, last_coverage=None) -> list:
                 "dedupe_key": dedupe_key("BLIND", asset, marker),
             })
 
+    # --- a branch's drawdown breaker tripping --------------------------
+    #
+    # THIS IS THE GAP THAT LET THREE BREAKERS TRIP IN SILENCE. Measured
+    # 2026-10-02: QNT -29.99%, JASMY -28.28% and ONDO -27.98% had all
+    # breached the 25% drawdown breaker and paused their own buying, and
+    # the account owner found out by pasting Railway logs. BREACH above is
+    # about a holding crossing an alert LEVEL; it knows nothing about a
+    # branch's breaker, so no kind of alert existed for this at all.
+    #
+    # A breached breaker pauses BUYS only - existing slices still sell
+    # normally - and the message says so, because "breaker tripped" reads
+    # like a liquidation to anyone who has not read the code.
+    #
+    # An ABSENT breakers key means the grid status could not be read this
+    # pass. That is UNKNOWN, and it produces no rows: claiming no breaker
+    # tripped because nothing could be seen is the failure this file keeps
+    # being rewritten to avoid.
+    for b in (watch.get("breakers") or []):
+        asset = b.get("asset")
+        if not asset:
+            continue
+        now_breached = b.get("breached")
+        # Not a bool is not a False. Only a real verdict is news.
+        if not isinstance(now_breached, bool):
+            continue
+        usd = _f(b.get("usd"), 0.0) or 0.0
+        key = f"{BREAKER_STATE_PREFIX}{asset}"
+        was = (last_state or {}).get(key)
+        now = "BREACHED" if now_breached else "OK"
+        if now == was:
+            continue                      # still tripped is not news
+        if usd < MIN_ALERT_USD:
+            continue
+        marker = f"{was or 'NEW'}->{now}"
+        dd = _f(b.get("drawdown_pct"))
+        pct = f"{dd * 100:.1f}%" if dd is not None else "an unreadable amount"
+        if now_breached:
+            out.append({
+                "kind": "BREAKER", "asset": asset, "severity": CRITICAL,
+                "message": (f"{asset} tripped its drawdown breaker - "
+                            f"down {pct}, ${usd:,.2f} allocated"),
+                "detail": ("The breaker pauses NEW BUYS on this branch only. "
+                           "Existing slices still sell normally, nothing has "
+                           "been sold, and no other branch is affected. The "
+                           "branch stops averaging down and waits."),
+                "dedupe_key": dedupe_key("BREAKER", asset, marker),
+            })
+        elif was == "BREACHED":
+            out.append({
+                "kind": "BREAKER", "asset": asset, "severity": INFO,
+                "message": f"{asset} came back under its drawdown breaker",
+                "detail": (f"Now down {pct}. The branch may buy again on its "
+                           f"own dips."),
+                "dedupe_key": dedupe_key("BREAKER", asset, marker),
+            })
+
     # --- the desk going blind as a whole -------------------------------
     cov = _f(watch.get("covered_share_pct"))
     prev = _f(last_coverage)
@@ -143,6 +205,17 @@ def plan(watch: dict, last_state: dict, last_coverage=None) -> list:
 
 
 def next_state(watch: dict) -> dict:
-    """The status of every asset in this watch, for the next comparison."""
-    return {r.get("asset"): r.get("status")
-            for r in (watch.get("rows") or []) if r.get("asset")}
+    """The status of every asset in this watch, for the next comparison.
+
+    Breaker verdicts live under their own prefix, and a breaker whose
+    state could not be read is LEFT OUT rather than recorded as OK - so a
+    pass that saw nothing cannot be mistaken for a pass that saw calm, and
+    the trip still reads as news when the reading comes back.
+    """
+    out = {r.get("asset"): r.get("status")
+           for r in (watch.get("rows") or []) if r.get("asset")}
+    for b in (watch.get("breakers") or []):
+        asset, br = b.get("asset"), b.get("breached")
+        if asset and isinstance(br, bool):
+            out[f"{BREAKER_STATE_PREFIX}{asset}"] = "BREACHED" if br else "OK"
+    return out

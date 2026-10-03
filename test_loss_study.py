@@ -14,8 +14,18 @@ import loss_study as ls
 
 
 def tr(pnl, qty=1.0, entry=100.0, reason="profit_target", mae=None, coin="A-USD"):
+    """`mae` is given here in PERCENT because that is how a human reads it,
+    and stored as the FRACTION the database actually holds.
+
+    These fixtures passed mae straight through as -4.0, which the schema
+    reads as -400%. That matched the old comparison (which multiplied the
+    stop by 100) so the suite stayed green while the live sweep could
+    never fire a single stop. Confirmed against the real book: ONDO
+    returned -14.87% and carries mae_pct = -0.142308, so the column is a
+    fraction and -4.0 was four hundred percent.
+    """
     return {"pnl": pnl, "qty": qty, "entry_price": entry, "exit_reason": reason,
-            "mae_pct": mae, "product_id": coin}
+            "mae_pct": (None if mae is None else mae / 100.0), "product_id": coin}
 
 
 LIVE = ([tr(0.4267) for _ in range(63)]

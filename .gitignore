@@ -1,4 +1,11 @@
 .env
+# `.env` alone is an EXACT filename match - it never covered
+# .env.workaround or .env.railway.workaround, both of which a prior
+# session committed in Aug 2026 while building a Railway egress
+# workaround. This pattern covers every .env* variant. Example files
+# are named *.env.example (e.g. .railway.env.example) and do not
+# start with `.env`, so they stay tracked.
+.env*
 __pycache__/
 *.pyc
 *.log
@@ -16,3 +23,4 @@ empire.db
 
 # Collected market data - regenerable, can grow large, not source
 kalshi_polymarket_data.jsonl
+.money_truth_snapshot.json

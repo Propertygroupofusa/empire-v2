@@ -10,19 +10,42 @@
 <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
+    /* Coinbase Advanced Trading palette. True black ground, hairline
+       panel outlines, one blue accent. Every existing rule already reads
+       these tokens (658 var() uses against 22 hardcoded values), so the
+       whole page follows from this block. */
     :root {
-        --bg: #f3f5f9;
-        --panel: #ffffff;
-        --border: #e3e7ef;
-        --text: #16233f;
-        --text-dim: #6b7488;
-        --green: #009845;
-        --green-bg: #e8f6ee;
-        --red: #d6455a;
-        --red-bg: #fbe9ec;
-        --gold: #c9860a;
-        --gold-bg: #fbf1de;
-        --navy: #1f3864;
+        --bg: #000000;
+        --panel: #0a0b0d;
+        --panel-2: #121416;
+        --border: #2c2f36;
+        --border-bright: #3f444d;
+        --text: #ffffff;
+        --text-dim: #8a919e;
+        --blue: #0052ff;
+        --blue-dim: #1d4ed8;
+        --green: #00c276;
+        --green-bg: rgba(0,194,118,0.10);
+        --red: #ff5252;
+        --red-bg: rgba(255,82,82,0.10);
+        --gold: #f0b429;
+        --gold-bg: rgba(240,180,41,0.10);
+        --amber: #f0b429;
+        --navy: #0052ff;
+        --shadow: none;
+        --radius: 12px;
+    }
+    /* The light theme is kept reachable rather than deleted, so the
+       change is one attribute to undo if the dark read is worse on a
+       phone in daylight. */
+    :root[data-theme="light"] {
+        --bg: #f3f5f9;  --panel: #ffffff;  --panel-2: #f7f9fc;
+        --border: #e3e7ef;  --border-bright: #cbd2e0;
+        --text: #16233f;  --text-dim: #6b7488;
+        --green: #009845; --green-bg: #e8f6ee;
+        --red: #d6455a;   --red-bg: #fbe9ec;
+        --gold: #c9860a;  --gold-bg: #fbf1de;  --amber: #c9860a;
+        --navy: #1f3864;  --blue: #1f3864;
         --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
     }
 
@@ -257,6 +280,78 @@
         display: inline-block;
     }
 
+    /* ---- Advanced charts: hairline-outlined cards on a black ground ---- */
+    #adv-charts-panel { background: var(--bg); border-color: var(--border); }
+    .adv-controls {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+        margin: 14px 0 12px;
+    }
+    .adv-select {
+        background: var(--panel); color: var(--text);
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 7px 11px; font-size: 0.86em; font-weight: 600;
+        font-family: inherit; min-width: 9.5em;
+    }
+    .adv-gran { display: flex; gap: 0; border: 1px solid var(--border);
+                border-radius: 8px; overflow: hidden; }
+    .adv-gran button {
+        background: var(--panel); color: var(--text-dim); border: 0;
+        border-right: 1px solid var(--border);
+        padding: 7px 12px; font-size: 0.8em; font-weight: 600;
+        font-family: inherit; cursor: pointer;
+    }
+    .adv-gran button:last-child { border-right: 0; }
+    .adv-gran button[aria-pressed="true"] { background: var(--blue); color: #fff; }
+    .adv-gran button:focus-visible, .adv-select:focus-visible {
+        outline: 2px solid var(--blue); outline-offset: 1px;
+    }
+    .adv-last { margin-left: auto; font-size: 0.82em; color: var(--text-dim);
+                font-variant-numeric: tabular-nums; }
+    .adv-last .px { color: var(--text); font-weight: 700; font-size: 1.15em; }
+
+    /* One column on a phone; price spans both columns above the two
+       indicator cards on anything wider. */
+    .adv-grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    @media (min-width: 860px) {
+        .adv-grid { grid-template-columns: 1fr 1fr; }
+        .adv-card-price { grid-column: 1 / -1; }
+    }
+    .adv-card {
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: var(--radius, 12px); padding: 12px 14px 10px;
+        min-width: 0;   /* so a canvas cannot push the grid wider than the page */
+    }
+    .adv-card-head {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; flex-wrap: wrap; margin-bottom: 8px;
+    }
+    .adv-card-title { font-size: 0.78em; font-weight: 700; color: var(--text);
+                      letter-spacing: 0.06em; text-transform: uppercase; }
+    .adv-legend { font-size: 0.72em; color: var(--text-dim);
+                  display: inline-flex; align-items: center; gap: 6px;
+                  flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+    .adv-legend .sw { width: 10px; height: 2.5px; border-radius: 2px;
+                      display: inline-block; margin-right: 1px; }
+    .adv-card canvas { width: 100%; display: block; }
+    .adv-note { font-size: 0.72em; color: var(--text-dim); line-height: 1.5;
+                margin-top: 8px; }
+    .fact-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                 gap: 10px; }
+    .fact { border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+            background: var(--panel-2); min-width: 0; }
+    .fact-k { font-size: 0.66em; text-transform: uppercase; letter-spacing: 0.06em;
+              color: var(--text-dim); font-weight: 700; }
+    .fact-v { font-size: 0.95em; font-weight: 700; color: var(--text); margin-top: 3px;
+              font-variant-numeric: tabular-nums; word-break: break-word; }
+    .fact-sub { font-size: 0.68em; color: var(--text-dim); margin-top: 2px; line-height: 1.45; }
+    .fact-why { font-size: 0.76em; line-height: 1.55; margin-top: 10px;
+                border-left: 3px solid var(--blue); padding-left: 10px; color: var(--text-dim); }
+    .fact-why.bad { border-left-color: var(--red); color: var(--red); }
+    .fact-why.warn { border-left-color: var(--gold); }
+    .adv-error { margin-top: 10px; font-size: 0.8em; color: var(--red);
+                 border: 1px solid var(--red); border-radius: 8px;
+                 padding: 9px 11px; background: var(--red-bg); }
+
     .panel {
         background: var(--panel);
         border: 1px solid var(--border);
@@ -288,7 +383,7 @@
     .combined-projection .years { font-weight: 700; color: var(--navy); }
     .combined-observations { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
     .obs-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; font-size: 0.83em; line-height: 1.4; }
-    .obs-row.warn { background: #fff4e8; border: 1px solid #f3d9b3; color: var(--text); }
+    .obs-row.warn { background: var(--gold-bg); border: 1px solid var(--gold); color: var(--text); }
     .obs-row.info { background: #eef2fa; border: 1px solid #cdd8ee; color: var(--text); }
     .obs-row.good { background: var(--green-bg); border: 1px solid #b7e4c7; color: var(--text); }
     .obs-row .obs-icon { flex-shrink: 0; }
@@ -414,7 +509,7 @@
     .node-position {
         margin-top: 10px;
         padding: 7px 9px;
-        background: #f7f9fc;
+        background: var(--panel-2);
         border-radius: 6px;
         border-left: 3px solid var(--green);
         font-size: 0.74em;
@@ -664,7 +759,7 @@
     .mode-toggle { display: flex; flex-direction: column; gap: 8px; }
     .mode-btn {
         font-family: inherit; text-align: left; padding: 10px 12px; border-radius: 8px;
-        border: 1.5px solid var(--border); background: #fff; color: var(--text);
+        border: 1.5px solid var(--border); background: var(--panel-2); color: var(--text);
         cursor: pointer; font-size: 0.88em; font-weight: 600;
         min-height: 40px;
         display: flex;
@@ -681,7 +776,7 @@
     .branch-pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
     .branch-pick-btn {
         font-family: inherit; text-align: left; padding: 9px 12px; border-radius: 8px;
-        border: 1.5px solid var(--border); background: #fff; color: var(--text);
+        border: 1.5px solid var(--border); background: var(--panel-2); color: var(--text);
         cursor: pointer; font-size: 0.85em;
         min-height: 40px;
         display: flex;
@@ -707,7 +802,7 @@
     }
     .modal-btn-secondary {
         font-family: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--border);
-        background: #fff; color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
+        background: var(--panel-2); color: var(--text-dim); cursor: pointer; font-weight: 600; font-size: 0.9em;
         min-height: 40px;
         display: flex;
         align-items: center;
@@ -744,7 +839,7 @@
         font-weight: 600;
         text-align: center;
         color: var(--text-dim);
-        background: #f4f5f8;
+        background: var(--panel-2);
         border: 1px solid var(--border);
         box-sizing: border-box;
     }
@@ -1036,7 +1131,11 @@
                 <div class="tv-sub" id="strip-branches-sub"></div>
             </div>
         </div>
+        <div id="alarm-top-wrap" style="display:none;"></div>
         <div id="backing-banner" style="display:none;"></div>
+        <div id="out-of-reach-banner" style="display:none;"></div>
+        <div id="grid-reconcile-wrap" style="display:none;"></div>
+        <div id="grid-levels-wrap" style="display:none;"></div>
     </div>
 
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
@@ -1078,6 +1177,97 @@
             <button id="unlock-profit-btn" class="unlock-btn" onclick="unlockProfit()" disabled title="Loading...">🔓 Unlock</button>
         </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
+    </div>
+
+    <!-- ================= ADVANCED CHARTS =================
+         Candlesticks + SMA/EMA overlay, RSI and MACD, in the Coinbase
+         Advanced Trading layout.
+
+         Data comes STRAIGHT FROM COINBASE in the browser
+         (api.exchange.coinbase.com/products/{id}/candles, which answers
+         with access-control-allow-origin: *). Deliberately not routed
+         through this app: a chart is a read, and putting it on the
+         trading process would let a redraw loop add load to the same
+         event loop that places orders. No library is loaded either - the
+         drawing is ~200 lines of canvas against a CSP that only admits a
+         short list of CDNs.
+
+         These indicators DESCRIBE price. They do not feed the grid, and
+         nothing here places, sizes, or cancels an order. -->
+    <!-- ============ WHY THE FLEET DID OR DID NOT TRADE ============
+         A branch sells when price >= reference_price * (1 + grid_pct).
+         This reports the distance to that line for every branch, using
+         the branch's OWN grid_pct, and separates the branches that are
+         waiting on price from the ones that cannot act at all. -->
+    <div class="panel" id="fleet-readiness-panel">
+        <div class="panel-title">⏱️ Why the fleet did or did not trade</div>
+        <div class="panel-sub">A branch sells when price reaches its reference × (1 + its grid step). This is how far each one is from that line right now — and which ones cannot act even when it is reached. Read-only; it places nothing.</div>
+        <div id="fleet-readiness-wrap"><div class="coin-history-empty">Loading…</div></div>
+    </div>
+
+    <div class="panel" id="adv-charts-panel">
+        <div class="panel-title">📈 Advanced charts</div>
+        <div class="panel-sub">Candlesticks with a 50-period SMA and EMA, RSI(14), and MACD(12,26,9) — read straight from Coinbase's public candles. This panel is read-only: it describes price, it does not drive the grid and it places no orders.</div>
+
+        <div class="adv-controls">
+            <select id="adv-product" class="adv-select" aria-label="Trading pair"></select>
+            <div class="adv-gran" id="adv-gran" role="group" aria-label="Candle size"></div>
+            <div class="adv-last" id="adv-last"></div>
+        </div>
+
+        <div class="adv-grid">
+            <div class="adv-card adv-card-price">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">Price</span>
+                    <span class="adv-legend">
+                        <i class="sw" style="background:var(--text)"></i>Candles
+                        <i class="sw" style="background:var(--blue)"></i>SMA 50
+                        <i class="sw" style="background:var(--gold)"></i>EMA 50
+                    </span>
+                </div>
+                <canvas id="adv-price" height="300"></canvas>
+            </div>
+
+            <div class="adv-card adv-card-price">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">Volume</span>
+                    <span class="adv-legend">coloured by the candle it belongs to — green bars are volume on an up candle</span>
+                </div>
+                <canvas id="adv-volume" height="110"></canvas>
+                <div class="adv-note">Technical analysis is price <em>and</em> volume. A move on heavy volume carries more conviction than the same move on thin volume.</div>
+            </div>
+
+            <div class="adv-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">RSI 14</span>
+                    <span class="adv-legend" id="adv-rsi-read"></span>
+                </div>
+                <canvas id="adv-rsi" height="150"></canvas>
+                <div class="adv-note">Above 70 is often read as overbought, below 30 as oversold. Neither is an instruction — it says momentum may be slowing, not that it has turned.</div>
+            </div>
+
+            <div class="adv-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">MACD 12 / 26 / 9</span>
+                    <span class="adv-legend">
+                        <i class="sw" style="background:var(--blue)"></i>MACD
+                        <i class="sw" style="background:var(--gold)"></i>Signal
+                    </span>
+                </div>
+                <canvas id="adv-macd" height="150"></canvas>
+                <div class="adv-note">The histogram is the gap between the two lines. MACD crossing up through the signal is read as bullish, down as bearish; the wider the gap, the stronger the reading.</div>
+            </div>
+
+            <div class="adv-card adv-card-price" id="adv-facts-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">Market facts</span>
+                    <span class="adv-legend">from Coinbase, about this product</span>
+                </div>
+                <div id="adv-facts">—</div>
+                <div class="adv-note"><strong>What this is not:</strong> fundamental analysis means financials, user community, roadmap and real-world use, and this system has no feed for any of that — so none is shown. Inventing a score for it would look authoritative and mean nothing. These are facts Coinbase publishes about the market itself: whether it is open, and how deep it is.</div>
+            </div>
+        </div>
+        <div id="adv-error" class="adv-error" hidden></div>
     </div>
 
     <div class="panel" id="combined-progress-panel">
@@ -1509,13 +1699,14 @@
     <div class="section-title">💰 What a round trip really costs</div>
     <div class="panel">
         <div class="panel-sub">The gate refuses a setup when the expected move does not beat
-            the cost of a round trip. That cost is part measured and part assumed, and the
-            assumed part is currently <strong>twice the measured one</strong> - which is why
-            1,614 scans produced zero qualified trades, with <code>expected_move</code> as
-            74% of the refusals.
-            <br><br>Swapping the measured figure in would halve the bar and turn most of
-            those refusals into trades. It is not swapped in, and this panel exists to show
-            exactly why and exactly what would change that.</div>
+            the cost of a round trip. Every part of that cost is now <strong>measured</strong> -
+            your real fee tier, plus adverse selection taken from falling markets, which is the
+            regime that decides whether the number is safe.
+            <br><br>The conservative assumption this panel was built to question has already been
+            retired, and the bar came down when it was. <strong>The two percentages below are not a
+            score and not a contest</strong> - the lower one is what the bar would be if it were
+            priced off rising markets only, which is the one thing this measurement exists to
+            prevent.</div>
         <div style="margin:10px 0; display:flex; gap:8px; flex-wrap:wrap;">
             <button class="unlock-btn" style="margin-top:0;" onclick="loadCostTruth()">💰 Show the gap</button>
         </div>
@@ -1572,9 +1763,12 @@
         <div class="panel-sub">Every holding as a competitor, ranked by how well it is actually holding up rather
             than by how much it is worth. The score is three measured things and nothing else: headroom above its
             own level, inverse daily volatility, and whether it respects your 20% concentration rule. Movement is
-            real - the standing seven days ago is recomputed from candles, not remembered - so promotions,
-            relegations and Most Improved are earned. A coin that cannot be measured appears as UNRATED with the
-            reason, never quietly dropped, and on a quiet week nobody wins the medal.</div>
+            real - the standing seven days ago is recomputed from candles, not remembered - so tier moves and
+            Most Improved are earned. A coin that cannot be measured appears as UNRATED with the reason, never
+            quietly dropped, and on a quiet week nobody wins the medal.
+            <strong>This table is a scoreboard, not an instruction.</strong> Dropping a tier does not sell
+            anything, stop anything, or change how that coin is traded - it only says the coin scored worse
+            than it did last week.</div>
         <div style="margin:10px 0;">
             <button id="league-btn" class="unlock-btn" style="margin-top:0;" onclick="runLeague()">🏆 Run the standings</button>
         </div>
@@ -1819,6 +2013,18 @@
     </div>
 </div>
 
+<!-- Indicator math for the Advanced Charts panel. Served from
+
+     /static so the browser runs the exact file that
+
+     test_advanced_charts.js drives - an inlined second copy
+
+     would drift from the tested one without anything failing. -->
+
+<script src="/static/advanced_charts.js"></script>
+    <!-- Fleet readiness: the same file test_fleet_readiness.js drives. -->
+    <script src="/static/fleet_readiness.js"></script>
+
 <script>
 // WRITE TOKEN - shared by every dashboard page (keep the copies identical).
 //
@@ -1882,7 +2088,60 @@ const TRANSIENT_STATUSES = [502, 503, 504];
 
 function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// ────────────────── ONE HEAVY READ, NOT TWENTY-ONE ──────────────────
+// /grid-status is 132 KB and twenty different places on this page ask for
+// it. Measured over 60 seconds in a real browser: 21 calls, 2.65 MB - 65%
+// of everything this dashboard downloads.
+//
+// Two things fix that without changing a single caller:
+//
+//   single-flight  callers that ask while a request is already in the air
+//                  share THAT request instead of starting another. This is
+//                  pure win - it cannot serve anything stale, because it
+//                  hands back a response that had not arrived yet.
+//
+//   8s floor       a second ask within 8s reuses the last response.
+//
+// WHY 8s IS NOT NEW STALENESS. The SERVER already caches this endpoint for
+// 25s (_GRID_STATUS_TTL_SECONDS) and says so in cache_age_seconds, so a
+// caller could always be handed a 25s-old reading. An 8s client floor sits
+// inside that envelope - it cannot produce a number the server would not
+// have produced anyway - and the page polls every 15s regardless.
+//
+// Deliberately ONLY the giant read-only status payload. Anything that acts
+// on a button press, and every write, goes straight through untouched.
+const _HEAVY_CACHE_MS = 8000;
+const _HEAVY = { '/grid-status': 1 };
+const _heavyCache = new Map();     // path -> {at, data}
+const _heavyFlight = new Map();    // path -> Promise
+
+function _heavyKey(path) {
+    return _HEAVY[String(path).split('?')[0]] ? String(path) : null;
+}
+
 async function apiGet(path, timeoutMs) {
+    const key = _heavyKey(path);
+    if (key) {
+        const hit = _heavyCache.get(key);
+        if (hit && (Date.now() - hit.at) < _HEAVY_CACHE_MS) return hit.data;
+        const inFlight = _heavyFlight.get(key);
+        if (inFlight) return await inFlight;
+        const promise = (async () => {
+            try {
+                const data = await _apiGetWithRetry(path, timeoutMs);
+                _heavyCache.set(key, { at: Date.now(), data });
+                return data;
+            } finally {
+                _heavyFlight.delete(key);
+            }
+        })();
+        _heavyFlight.set(key, promise);
+        return await promise;
+    }
+    return await _apiGetWithRetry(path, timeoutMs);
+}
+
+async function _apiGetWithRetry(path, timeoutMs) {
     try {
         return await _apiGetOnce(path, timeoutMs);
     } catch (e) {
@@ -2064,8 +2323,26 @@ function renderNarrative(data) {
     const top = branches.slice().sort((a, b) => b.allocated_usd - a.allocated_usd)[0];
     const openCount = branches.filter(b => b.position).length;
     const coin = p => p.replace('-USD', '');
-    let sentence = `${data.branch_count} branch${data.branch_count === 1 ? '' : 'es'} tracking $${data.total_allocated_usd.toFixed(2)} total, ${openCount} currently holding a position.`;
-    sentence += ` ${coin(top.product_id)} is the largest at ${fmtUsd(top.allocated_usd)}.`;
+    // THIS SENTENCE IS ABOUT THE FAMILY TREE, NOT THE GRID.
+    //
+    // `data` here is /family-tree-status. The tree is retired and holds
+    // nothing, so this read "2 branches tracking $0.00 total, 0 currently
+    // holding a position" as the HEADLINE of a page whose profit card below
+    // it showed $7,821.10 of real grid coin. Two different bots on one
+    // screen, and the one with no money in it got the top line - which reads
+    // as "the system is holding nothing" when the system holds $7,821.
+    const treeAlloc = Number(data.total_allocated_usd) || 0;
+    const treeDormant = treeAlloc <= 0.01 && openCount === 0;
+    let sentence;
+    if (treeDormant) {
+        sentence = `The family tree is dormant - ${data.branch_count} branch`
+            + `${data.branch_count === 1 ? '' : 'es'}, nothing allocated, nothing held. `
+            + `The figures below are the GRID's, which is the system actually trading.`;
+    } else {
+        sentence = `Family tree: ${data.branch_count} branch${data.branch_count === 1 ? '' : 'es'} `
+            + `tracking $${treeAlloc.toFixed(2)} total, ${openCount} currently holding a position.`;
+        sentence += ` ${coin(top.product_id)} is the largest at ${fmtUsd(top.allocated_usd)}.`;
+    }
     if (data.locked_usd > 0.01) sentence += ` $${data.locked_usd.toFixed(2)} has been permanently skimmed into the locked-profit ledger, out of the compounding loop.`;
     el.textContent = sentence;
 }
@@ -6001,7 +6278,17 @@ function renderMoneyTrace(d) {
 // unset, which is exactly when an unwatched book most needs looking at.
 // ---------------------------------------------------------------------------
 
-const _wUSD = n => (Number(n) < 0 ? '-$' : '$') + Math.abs(Number(n) || 0)
+// A MISSING NUMBER IS NOT ZERO.
+//
+// This was `Math.abs(Number(n) || 0)`, so null, undefined and NaN all
+// became 0 and printed as "$0.00". On the holdings watch that put $0.00
+// beside 9.8790564 RNDR - a live, sellable holding worth $18.94 that the
+// venue had merely renamed - and the same $0.00 beside coins whose value
+// genuinely cannot be read. An unreadable figure now says so. A real
+// zero still prints as $0.00, because that is a fact and this is not.
+const _wUSD = n => (n === null || n === undefined || !isFinite(Number(n)))
+    ? 'unreadable'
+    : (Number(n) < 0 ? '-$' : '$') + Math.abs(Number(n) || 0)
     .toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const _wPCT = (n, d) => (n == null ? '—' : Number(n).toFixed(d == null ? 2 : d) + '%');
 
@@ -6134,8 +6421,8 @@ function renderLeague(L) {
             <div style="text-align:right; font-size:0.74em;">${chg(r.score_change)}</div>
             <div style="font-size:0.72em; color:var(--text-dim);">
                 ${escText(r.unrated_reason || r.trend || '')}
-                ${r.promoted ? ' <span style="color:var(--green); font-weight:700;">PROMOTED</span>' : ''}
-                ${r.relegated ? ' <span style="color:var(--red); font-weight:700;">RELEGATED</span>' : ''}</div>
+                ${r.promoted ? ' <span style="color:var(--green); font-weight:700;" title="This coin moved up a tier in the ranking. Informational only - nothing was bought or sold.">MOVED UP A TIER</span>' : ''}
+                ${r.relegated ? ' <span style="color:var(--red); font-weight:700;" title="This coin dropped a tier in the ranking. Informational only - nothing was sold and nothing stopped.">DROPPED A TIER</span>' : ''}</div>
             <div style="text-align:right; font-size:0.78em; font-variant-numeric:tabular-nums;">${_wUSD(r.usd)}</div>
         </div>`;
 
@@ -6512,6 +6799,64 @@ async function loadTape() {
     }
 }
 
+// Money gets money colours; nothing else does.
+function _money(n) {
+    if (n === null || n === undefined || !isFinite(n)) return 'unreadable';
+    const sign = n < 0 ? '\u2212' : '+';
+    return sign + '$' + Math.abs(n).toFixed(2);
+}
+function _moneyHTML(n) {
+    if (n === null || n === undefined || !isFinite(n))
+        return `<span style="color:var(--text-dim);">unreadable</span>`;
+    const col = n < 0 ? 'var(--red)' : n > 0 ? 'var(--green)' : 'var(--text-dim)';
+    return `<span style="color:${col}; font-weight:700;">${escText(_money(n))}</span>`;
+}
+
+// The closed window versus what has happened since.
+//
+// measured_basis describes 2026-08-26..09-24 and realized -$86.83. It
+// exists to justify turning maker-only ON, and it was the only dollar
+// figure on the panel - so the page looked like a running loss when that
+// window has been closed for a week and the fee tier that caused 91% of
+// it no longer applies. Showing the two side by side is the whole fix:
+// the old number keeps its meaning and stops impersonating the present.
+function thenVsNow(d) {
+    const st = d.since_then || {};
+    const cell = (label, sub, inner) => `
+        <div style="border:1px solid var(--border); border-radius:10px; padding:10px 12px;
+                    background:var(--panel-2, transparent); min-width:0;">
+          <div style="font-size:0.62em; letter-spacing:0.08em; font-weight:700;
+                      text-transform:uppercase; color:var(--text-dim);">${label}</div>
+          <div style="font-size:1.15em; margin-top:4px;">${inner}</div>
+          <div style="font-size:0.68em; color:var(--text-dim); margin-top:3px;
+                      line-height:1.45;">${sub}</div>
+        </div>`;
+
+    const now = st.readable
+        ? cell('Since then \u2014 today\u2019s fees',
+               escText(`${st.trades} closed trades at ${st.fee_basis}`
+                       + (st.first_day ? `, ${st.first_day} to ${st.last_day}` : '')),
+               _moneyHTML(st.net_usd))
+        : cell('Since then',
+               escText(st.note || 'trade history could not be read'),
+               `<span style="color:var(--text-dim);">unreadable</span>`);
+
+    return `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+                        gap:10px; margin:4px 0 12px;">
+        ${cell('Closed window \u2014 old fees',
+               '2026-08-26 to 09-24 at 1.50% taker. This window is OVER. '
+               + 'It is kept because it is why maker-only was switched on.',
+               _moneyHTML(-86.83))}
+        ${now}
+      </div>
+      <div style="font-size:0.72em; color:var(--text-dim); line-height:1.55;
+                  margin-bottom:12px;">
+        The loss on the left is history, not the current state. At today\u2019s 0.70%
+        maker rate those same 104 closes would have read ${_money(-7.61)} \u2014
+        91% of it was the fee tier, not the strategy.
+      </div>`;
+}
+
 async function loadTradingProfile() {
     const wrap = document.getElementById('trading-profile-wrap');
     if (!wrap) return;
@@ -6558,14 +6903,37 @@ async function loadTradingProfile() {
             </div>`).join('');
 
         wrap.innerHTML = cashBanner
-            + `<div style="display:flex; align-items:baseline; gap:10px; margin-bottom:8px;">
-                 <div style="font-size:1.05em; font-weight:700;
-                             color:${guarded ? 'var(--green)' : 'var(--amber, #f0b429)'};">
-                   ${escText(String(d.profile).toUpperCase())}</div>
+            // THE WORD IS A SAFETY STATE, NOT A MONEY VERDICT.
+            //
+            // This rendered the profile name alone, 1.05em bold in
+            // var(--green), directly above a block whose only dollar
+            // figures were -$86.83 and -$7.61. Read as a whole it says
+            // "green, therefore good" over a column of minus signs, and
+            // "GUARDED" is one letter-shape from "GUARANTEED" at a
+            // glance. It was read exactly that way: as a guarantee, in
+            // green, of a loss.
+            //
+            // So the name now sits INSIDE a labelled chip that says what
+            // kind of fact it is, in a neutral accent. Green and red are
+            // given back to money alone, where a colour means something.
+            + `<div style="display:flex; align-items:center; gap:9px; flex-wrap:wrap;
+                        margin-bottom:9px;">
+                 <div style="display:inline-flex; align-items:center; gap:7px;
+                             border:1px solid var(--blue, #0052ff); border-radius:999px;
+                             padding:5px 12px; background:rgba(0,82,255,0.08);">
+                   <span style="font-size:0.62em; letter-spacing:0.09em; font-weight:700;
+                                text-transform:uppercase; color:var(--text-dim);">
+                     Safety mode</span>
+                   <span style="font-size:0.9em; font-weight:700; color:var(--blue, #0052ff);">
+                     ${escText(String(d.profile).toUpperCase())}</span>
+                 </div>
                  <div style="font-size:0.72em; color:var(--text-dim);">
-                   ${d.is_default ? 'the default' : 'not the default'}</div></div>`
+                   ${d.is_default ? 'the default' : 'not the default'} \u00b7
+                   protection is ${guarded ? 'ON' : 'RELAXED'}, which is not a claim about profit
+                 </div></div>`
             + `<div style="font-size:0.78em; line-height:1.55; margin-bottom:10px;">
                  ${escText(d.summary || '')}</div>`
+            + thenVsNow(d)
             + (d.experiment && d.experiment.running
                 ? `<div style="border:1px solid var(--amber, #f0b429);
                         background:rgba(240,180,41,0.07); border-radius:8px;
@@ -6604,13 +6972,340 @@ async function loadTradingProfile() {
     }
 }
 
+// What the owner should actually change. This used to be one hardcoded
+// sentence - "Set ALERT_WEBHOOK_URL and the backlog flushes" - which stopped
+// being true once the email senders were wired: a webhook is no longer
+// required, and on this host the real blocker was a refused Gmail login. A
+// banner that names the wrong variable costs more than a banner that says
+// nothing, so this reads the live diagnosis and the queue's OWN last_error.
+function alertRemedy(d, g) {
+    const er = g && g.email_route;
+    // The per-alert error is the only thing that knows what the transport
+    // actually did. Prefer it over any summary.
+    const firstErr = ((d.alerts || []).find(a => a.last_error) || {}).last_error;
+    if (firstErr) {
+        return escText(firstErr);
+    }
+    if (er && er.senders_are_wired && !er.a_webhook_is_required) {
+        if (!er.armed) {
+            return `Email delivery is built and wired but not armed: set <code>`
+                 + escText(er.mode_variable || 'ALERT_EMAIL_MODE')
+                 + `=send</code> (it currently reads <code>`
+                 + escText(er.mode_value || '?') + `</code>). No webhook needed.`;
+        }
+        if (!er.recipient_resolves) {
+            return `Email is armed but no recipient resolves - set `
+                 + `<code>TRADE_ALERT_EMAIL</code>.`;
+        }
+        return `Email is armed and a credential is present; the next send `
+             + `attempt will record what the transport did. No webhook needed.`;
+    }
+    // NO WEBHOOK IS MENTIONED HERE, EVER.
+    //
+    // This used to fall back to "Set ALERT_WEBHOOK_URL and the backlog
+    // flushes". The account owner read the word WEBHOOK on a trading
+    // dashboard and reasonably asked whether his money was being traded
+    // through something he had never heard of and did not want.
+    //
+    // It never was. ALERT_WEBHOOK_URL is an optional address for
+    // NOTIFICATIONS - alert_sender POSTs a sentence of text to it and
+    // the payload literally carries is_an_alert_not_an_order: true. It
+    // cannot place, size or cancel an order, it has never been set on
+    // this account, and nothing has ever been sent to it. Email is the
+    // delivery route now, so naming a webhook here offers a second way
+    // to do a job that is already done, at the cost of making a
+    // notification setting look like a trading venue.
+    return `Alerts are delivered by email. `
+         + escText((g && g.why_not_email)
+                   || 'The next send attempt will record what the transport did.');
+}
+
+
+// ---- Fleet readiness ----
+// Reads /grid-status, which already carries reference_price,
+// current_price, grid_pct and the backing report - so this costs one
+// request the page already makes and adds nothing to the trading loop.
+async function loadFleetReadiness() {
+    const wrap = document.getElementById('fleet-readiness-wrap');
+    if (!wrap || typeof FLEET === 'undefined') return;
+    try {
+        const d = await apiGet('/grid-status');
+        const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
+        // Same payload, no extra request: grid-status carries it.
+        renderOutOfReach(d.out_of_reach);
+        renderGridReconcile(d.backing);
+        renderGridLevels(d.branches || []);
+        const rows = FLEET.readiness(d.branches || [], unbacked);
+        const s = FLEET.summarise(rows);
+
+        const pill = (n, label, colour) => `
+            <div style="border:1px solid ${colour}; border-radius:8px; padding:8px 11px;
+                        min-width:0; background:var(--panel-2, transparent);">
+              <div style="font-size:1.25em; font-weight:700; color:${colour};
+                          font-variant-numeric:tabular-nums;">${n}</div>
+              <div style="font-size:0.66em; color:var(--text-dim); margin-top:2px;
+                          line-height:1.4;">${label}</div></div>`;
+
+        const bar = `<div style="display:grid;
+              grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:9px;
+              margin-bottom:11px;">
+            ${pill(s.ready, 'at or past trigger', 'var(--green)')}
+            ${pill(s.waiting, 'waiting on price', 'var(--text-dim)')}
+            ${pill(s.locked, `locked out \u2014 ${_wUSD(s.lockedUsd)}`, 'var(--red)')}
+            ${pill(s.noSlices, 'holding nothing to sell', 'var(--text-dim)')}
+            ${s.unreadable ? pill(s.unreadable, 'unreadable', 'var(--gold)') : ''}
+          </div>`;
+
+        const verdictCol = s.lockedPastTrigger > 0 ? 'var(--red)'
+                         : s.ready > 0 ? 'var(--green)' : 'var(--text-dim)';
+        const verdict = `<div style="border-left:3px solid ${verdictCol};
+              padding:8px 11px; font-size:0.8em; line-height:1.6;
+              margin-bottom:12px; color:var(--text);">
+              ${escText(FLEET.verdict(s))}</div>`;
+
+        // Locked first: those are the only rows anything can be done about
+        // today. Then nearest-to-trigger, because that is what fires next.
+        const order = { LOCKED: 0, READY: 1, WAITING: 2, NO_SLICES: 3, UNREADABLE: 4 };
+        rows.sort((a, b) => (order[a.state] - order[b.state])
+                            || ((b.gapPct ?? -999) - (a.gapPct ?? -999)));
+
+        const body = rows.map(r => {
+            const col = r.state === 'LOCKED' ? 'var(--red)'
+                      : r.state === 'READY' ? 'var(--green)'
+                      : r.state === 'UNREADABLE' ? 'var(--gold)' : 'var(--text-dim)';
+            const gap = r.gapPct === null ? 'unreadable'
+                      : (r.gapPct >= 0 ? '+' : '') + r.gapPct.toFixed(2) + '%';
+            // THE NUMBER IS COLOURED BY ITS OWN SIGN, NOT BY THE ROW'S STATE.
+            //
+            // It used to take `col`, the STATE colour - so every LOCKED row
+            // printed its percentage in red whatever the number said, and
+            // QNT's +41.39% looked identical to PRIME's -12.97%. They are
+            // opposite facts: + means the price is already PAST the sell
+            // trigger (the move happened), - means it still has that far to
+            // climb. The state is already named in its own colour beside it,
+            // so the number is free to say what it is.
+            //
+            // null stays UNREADABLE-coloured, never green: a gap that could
+            // not be measured must not read as a figure in your favour.
+            const gapCol = r.gapPct === null ? 'var(--gold)'
+                         : r.gapPct >= 0 ? 'var(--green)' : 'var(--red)';
+            const note = r.state === 'LOCKED'
+                  ? (r.gapPct !== null && r.gapPct >= 0
+                     ? 'PAST its trigger and cannot sell \u2014 the move was missed'
+                     : 'cannot sell: the ledger claims coin the wallet does not hold')
+                  : r.state === 'NO_SLICES' ? 'holds no slices'
+                  : r.state === 'READY' ? 'should sell on the next cycle'
+                  : r.state === 'UNREADABLE' ? 'price or step could not be read'
+                  : `needs ${Math.abs(r.gapPct).toFixed(2)}% more to reach its trigger`;
+            return `<div style="display:grid; grid-template-columns:5.6em 1fr 5.4em 5.6em;
+                        gap:9px; padding:6px 0; border-bottom:1px solid var(--border);
+                        align-items:center;">
+              <div style="font-weight:700; font-size:0.8em;">${escText(r.asset)}</div>
+              <div style="font-size:0.72em; color:var(--text-dim); line-height:1.45;">
+                <span style="color:${col}; font-weight:700;">${escText(r.state)}</span>
+                \u00b7 ${escText(note)}
+                ${r.gridPct !== null ? ` \u00b7 step ${(r.gridPct*100).toFixed(2)}%` : ''}</div>
+              <div style="text-align:right; font-size:0.76em; color:${gapCol};
+                   font-weight:600; font-variant-numeric:tabular-nums;">${escText(gap)}</div>
+              <div style="text-align:right; font-size:0.76em;
+                   font-variant-numeric:tabular-nums;">${_wUSD(r.allocated)}</div>
+            </div>`;
+        }).join('');
+
+        wrap.innerHTML = bar + verdict + body;
+    } catch (e) {
+        wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
+            Could not read fleet readiness: ${escText(e.message)}. That is UNKNOWN,
+            which is not the same as idle.</div>`;
+    }
+}
+
+// ---- Advanced charts controller ----
+// The indicator math lives in /static/advanced_charts.js, loaded above,
+// so the browser runs the SAME file test_advanced_charts.js drives. A
+// second inlined copy would drift from the tested one silently.
+const ADV_DEFAULT_PRODUCTS = ['BTC-USD','ETH-USD','SOL-USD','LINK-USD',
+                              'HBAR-USD','BCH-USD','TON-USD','XRP-USD'];
+const ADV_GRANS = [['1H', 3600], ['6H', 21600], ['1D', 86400]];
+let advProduct = null, advGran = 3600, advTimer = null;
+
+function advSetError(msg) {
+    const el = document.getElementById('adv-error');
+    if (!el) return;
+    if (!msg) { el.hidden = true; el.textContent = ''; return; }
+    el.hidden = false;
+    el.textContent = msg;
+}
+
+// The coins the fleet actually holds come first, because those are the
+// ones he is deciding about. The fixed list is a fallback, not the
+// source of truth - if /grid-status is unreachable the panel still draws
+// rather than showing an empty selector.
+async function advProducts() {
+    try {
+        const d = await apiGet('/grid-status');
+        const live = [...new Set((d.branches || [])
+            .map(b => b.product_id).filter(Boolean))].sort();
+        if (live.length) return live;
+    } catch (e) { /* fall through to the fixed list */ }
+    return ADV_DEFAULT_PRODUCTS;
+}
+
+async function advFetchCandles(product, gran) {
+    const url = 'https://api.exchange.coinbase.com/products/'
+              + encodeURIComponent(product) + '/candles?granularity=' + gran;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error('Coinbase answered HTTP ' + r.status);
+    const rows = await r.json();
+    const candles = ADV.parseCandles(rows);
+    // An empty answer is NOT a flat market. Say so rather than drawing a
+    // blank chart that reads as "nothing is happening".
+    if (!candles.length) throw new Error('no candles came back for ' + product);
+    return candles;
+}
+
+
+// Market facts for the selected product. Kept in its own try so that an
+// unreachable stats endpoint costs the facts card and nothing else - the
+// charts are the thing on screen and must not go blank because a second
+// request failed.
+async function advDrawFacts(product) {
+    const el = document.getElementById('adv-facts');
+    if (!el) return;
+    const fmtUsd0 = n => n === null ? 'unreadable'
+        : n >= 1e9 ? '$' + (n / 1e9).toFixed(2) + 'B'
+        : n >= 1e6 ? '$' + (n / 1e6).toFixed(1) + 'M'
+        : '$' + Math.round(n).toLocaleString();
+    try {
+        const base = 'https://api.exchange.coinbase.com/products/' + encodeURIComponent(product);
+        const [pr, st] = await Promise.all([
+            fetch(base, { cache: 'no-store' }).then(r => r.ok ? r.json() : null),
+            fetch(base + '/stats', { cache: 'no-store' }).then(r => r.ok ? r.json() : null),
+        ]);
+        const f = ADV.marketFacts(pr, st);
+
+        // open === null means Coinbase did not say. That is reported as
+        // unknown, never as "open" - a reassuring default here would stop
+        // someone looking for the real cause of a refused order.
+        const openTxt = f.open === null ? 'unknown'
+                      : f.open ? 'open' : 'NOT OPEN';
+        const openCol = f.open === null ? 'var(--gold)'
+                      : f.open ? 'var(--green)' : 'var(--red)';
+        const bandSub = { thin: 'thin — a resting maker order can wait a long time here',
+                          moderate: 'moderate depth',
+                          deep: 'deep — fills come quickly',
+                          unknown: 'depth unreadable' }[f.band];
+        const vs = f.vs30 === null ? null : f.vs30;
+        const vsTxt = vs === null ? 'unreadable'
+            : (vs >= 1 ? (vs).toFixed(2) + '× busier' : (1 / vs).toFixed(2) + '× quieter');
+
+        el.innerHTML = `<div class="fact-grid">
+            <div class="fact"><div class="fact-k">Venue</div>
+                <div class="fact-v" style="color:${openCol}">${escText(openTxt)}</div>
+                <div class="fact-sub">status: ${escText(f.status || 'not reported')}</div></div>
+            <div class="fact"><div class="fact-k">Restrictions</div>
+                <div class="fact-v">${f.restrictions.length ? escText(String(f.restrictions.length)) : 'none'}</div>
+                <div class="fact-sub">${f.restrictions.length ? escText(f.restrictions.join('; ')) : 'no venue-side limits on new orders'}</div></div>
+            <div class="fact"><div class="fact-k">24h volume</div>
+                <div class="fact-v">${escText(fmtUsd0(f.usd24h))}</div>
+                <div class="fact-sub">${escText(bandSub)}</div></div>
+            <div class="fact"><div class="fact-k">Today vs 30-day average</div>
+                <div class="fact-v">${escText(vsTxt)}</div>
+                <div class="fact-sub">a market that is quiet today and one that is always thin need different answers</div></div>
+            <div class="fact"><div class="fact-k">30d volume</div>
+                <div class="fact-v">${escText(fmtUsd0(f.usd30d))}</div>
+                <div class="fact-sub">minimum order ${f.minFunds === null ? 'unreadable' : '$' + f.minFunds}</div></div>
+        </div>
+        <div class="fact-why ${f.open === false ? 'bad' : (f.open === null || f.restrictions.length) ? 'warn' : ''}">${escText(f.why)}</div>`;
+    } catch (e) {
+        el.innerHTML = `<div class="fact-why warn">Could not read Coinbase's facts for `
+            + `${escText(product)}: ${escText(e.message)}. That is this card only — `
+            + `the charts above are unaffected, and this says nothing about whether the market is open.</div>`;
+    }
+}
+
+async function advDraw() {
+    if (!advProduct) return;
+    try {
+        const candles = await advFetchCandles(advProduct, advGran);
+        advSetError(null);
+        ADV.drawPrice(document.getElementById('adv-price'), candles);
+        ADV.drawVolume(document.getElementById('adv-volume'), candles);
+        const r = ADV.drawRsi(document.getElementById('adv-rsi'), candles);
+        ADV.drawMacd(document.getElementById('adv-macd'), candles);
+        advDrawFacts(advProduct);   // its own failure, so it cannot blank the charts
+
+        const last = candles[candles.length - 1];
+        const first = candles[0];
+        const chg = first.close ? (last.close - first.close) / first.close * 100 : 0;
+        const col = chg >= 0 ? 'var(--green)' : 'var(--red)';
+        const el = document.getElementById('adv-last');
+        if (el) el.innerHTML = `<span class="px">${ADV.money(last.close)}</span>`
+            + ` <span style="color:${col}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`
+            + ` <span style="opacity:.7">over ${candles.length} candles</span>`;
+        const rr = document.getElementById('adv-rsi-read');
+        if (rr) {
+            // State the reading and what it is, never what to do with it.
+            const tag = (r === null || r === undefined || !isFinite(r)) ? ''
+                : (r >= 70 ? ' · overbought zone'
+                   : r <= 30 ? ' · oversold zone' : ' · mid-range');
+            rr.textContent = (r === null || r === undefined || !isFinite(r))
+                ? 'not enough candles yet' : r.toFixed(1) + tag;
+        }
+    } catch (e) {
+        // Say which coin and why. A blank panel with no message is the
+        // thing that got read as "flat" before.
+        advSetError('Could not draw ' + advProduct + ': ' + e.message
+                    + '. The charts read Coinbase directly from this browser, '
+                    + 'so this does not affect the bots.');
+    }
+}
+
+async function initAdvancedCharts() {
+    const sel = document.getElementById('adv-product');
+    const gw = document.getElementById('adv-gran');
+    if (!sel || !gw || typeof ADV === 'undefined') return;
+
+    const products = await advProducts();
+    advProduct = products.includes('BTC-USD') ? 'BTC-USD' : products[0];
+    sel.innerHTML = products.map(p =>
+        `<option value="${p}"${p === advProduct ? ' selected' : ''}>${p.replace('-USD','')}/USD</option>`).join('');
+    sel.addEventListener('change', () => { advProduct = sel.value; advDraw(); });
+
+    gw.innerHTML = ADV_GRANS.map(([label, secs]) =>
+        `<button type="button" data-g="${secs}" aria-pressed="${secs === advGran}">${label}</button>`).join('');
+    gw.addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-g]');
+        if (!b) return;
+        advGran = parseInt(b.dataset.g, 10);
+        [...gw.querySelectorAll('button')].forEach(x =>
+            x.setAttribute('aria-pressed', String(parseInt(x.dataset.g, 10) === advGran)));
+        advDraw();
+    });
+
+    advDraw();
+    // Canvas does not reflow on its own, so a rotate or resize has to
+    // redraw or the chart stays at the old width, stretched.
+    let rt = null;
+    window.addEventListener('resize', () => {
+        clearTimeout(rt);
+        rt = setTimeout(advDraw, 180);
+    });
+    if (advTimer) clearInterval(advTimer);
+    advTimer = setInterval(advDraw, 60000);
+}
+
 async function loadAlertQueue() {
     const wrap = document.getElementById('alert-queue-wrap');
     if (!wrap) return;
     try {
-        const r = await fetch('/api/trading-dashboard/alert-queue?limit=12', { cache: 'no-store' });
+        const r = await fetch('/api/trading-dashboard/alert-queue?limit=100', { cache: 'no-store' });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const d = await r.json();
+        // Same payload, no second request: the top-of-page banner is the
+        // delivery route while no transport works, so it must not be able
+        // to disagree with the panel below it.
+        renderTopAlarm(d);
         const c = d.counts || {};
         const g = d.channel_diagnosis;
 
@@ -6620,13 +7315,11 @@ async function loadAlertQueue() {
                  ✓ A delivery channel is configured. Alerts are being sent.</div>`
             : `<div style="border:1px solid var(--amber, #f0b429); background:rgba(240,180,41,0.07);
                      border-radius:8px; padding:9px 11px; margin-bottom:10px; font-size:0.76em; line-height:1.55;">
-                 <strong>Nothing is being delivered.</strong> ${escText((g && g.why_not) || d.channel_note || '')}
+                 <strong>Nothing is being delivered.</strong>
+                 ${alertRemedy(d, g)}
                  <br>Alerts are still being generated and <strong>held</strong> - they are not marked sent,
                  because a queue that reports success with nowhere to send is worse than an empty one.
-                 Set <code>${escText(d.webhook_env || 'ALERT_WEBHOOK_URL')}</code> and the backlog flushes.
-                 ${g && g.similar_variables_seen && g.similar_variables_seen.length
-                     ? `<br>Similar variable names visible to this process:
-                        ${escText(g.similar_variables_seen.join(', '))}` : ''}</div>`;
+                 </div>`;
 
         const SEV = { CRITICAL: 'var(--red)', HIGH: 'var(--amber, #f0b429)', INFO: 'var(--text-dim)' };
         const rows = (d.alerts || []).map(a => `
@@ -6652,10 +7345,111 @@ async function loadAlertQueue() {
                  marked failed <em>with its error</em> and stays visible. Nothing under
                  ${_wUSD(d.min_alert_usd)} fires at all.</div>`;
     } catch (e) {
+        // UNREADABLE IS NOT CALM. Leaving the banner as it was would show a
+        // count from an earlier pass as though it were current; clearing it
+        // silently would read as "no alerts". Say which it is.
+        const top = document.getElementById('alarm-top-wrap');
+        if (top) {
+            top.style.display = 'block';
+            top.innerHTML = `<div style="margin-bottom:14px; padding:12px 15px;
+                border-radius:8px; border:2px solid var(--amber, #f0b429);
+                background:rgba(240,180,41,0.07); font-size:0.82em; line-height:1.5;">
+                <strong style="color:var(--amber, #f0b429);">The alarm could not be
+                read</strong> (${escText(e.message)}). Whether anything has fired is
+                UNKNOWN, which is not the same as nothing having fired.</div>`;
+        }
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
             Could not read the queue: ${escText(e.message)}. The alarm's own health is unknown,
             which is not the same as healthy.</div>`;
     }
+}
+
+
+// ---- The alarm, where it cannot be scrolled past --------------------
+//
+// WHY THIS EXISTS. Every alert this system has ever raised was generated
+// correctly, stored durably, and never delivered: measured 2026-10-02,
+// 85 rows pending, 0 sent, 0 failed - 36 CRITICAL breaches, 33 coverage
+// losses, 16 recoveries. Both mail transports are refused by the host
+// (smtp:465 and smtp:587 answer with SMTPServerDisconnected) and no
+// HTTPS mail credential is set, so there is no route off the box.
+//
+// The full queue panel already existed, but it sits near the bottom of a
+// long page and asked for 12 rows, so it was showing 12 of 85 to someone
+// who had to scroll past everything else to find it. The account owner
+// learned about three tripped breakers by pasting Railway logs.
+//
+// So this is the delivery route while transport is down: the top of the
+// page the owner already opens. It reads NOTHING of its own - the queue
+// fetch loadAlertQueue already makes feeds both panels.
+//
+// IT DOES NOT MARK ANYTHING SENT. Displaying a row is not delivering it;
+// a queue that reported success because a browser rendered it would be
+// the exact "looks like coverage" failure the worker refuses to commit.
+function renderTopAlarm(d) {
+    const wrap = document.getElementById('alarm-top-wrap');
+    if (!wrap) return;
+    const hide = () => { wrap.style.display = 'none'; wrap.innerHTML = ''; };
+    if (!d || typeof d !== 'object') return hide();
+    const all = (d.alerts || []).filter(a => a && a.status === 'pending');
+    if (!all.length) return hide();
+
+    const c = d.counts || {};
+    const pending = Number(c.pending);
+    // The counts are over the WHOLE table; the rows are only the page that
+    // was asked for. Say which number is which rather than implying the
+    // listed rows are all of them.
+    const shown = all.length;
+    const crit = all.filter(a => a.severity === 'CRITICAL');
+    const high = all.filter(a => a.severity === 'HIGH');
+    const lead = crit.length ? crit : (high.length ? high : all);
+    const colour = crit.length ? 'var(--red)'
+                 : high.length ? 'var(--amber, #f0b429)' : 'var(--text-dim)';
+
+    const top = lead.slice(0, 6).map(a => `
+        <div style="padding:5px 0; border-bottom:1px solid var(--border);
+                    font-size:0.8em; line-height:1.45;">
+          <span style="font-weight:700; color:${a.severity === 'CRITICAL'
+            ? 'var(--red)' : a.severity === 'HIGH'
+            ? 'var(--amber, #f0b429)' : 'var(--text-dim)'};">${escText(a.kind || '')}</span>
+          &nbsp;${escText(a.message || '')}
+        </div>`).join('');
+    const more = Math.max(0, lead.length - 6);
+
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-bottom:14px; padding:13px 15px; border-radius:8px;
+                  border:2px solid ${colour}; background:rgba(180,35,24,0.07);">
+        <div style="font-weight:700; color:${colour}; font-size:0.95em;">
+          🔔 ${isFinite(pending) ? pending : shown} alert(s) have fired and
+          <span style="text-decoration:underline;">none were delivered</span>
+        </div>
+        <div style="margin-top:7px; font-size:0.8em; font-variant-numeric:tabular-nums;">
+          ${crit.length ? `<strong style="color:var(--red);">${crit.length} critical</strong>` : ''}
+          ${crit.length && high.length ? ' &middot; ' : ''}
+          ${high.length ? `<strong style="color:var(--amber, #f0b429);">${high.length} high</strong>` : ''}
+          <span style="color:var(--text-dim);">
+            ${isFinite(pending) && pending > shown
+              ? ` &middot; ${shown} of ${pending} shown here`
+              : ''}</span>
+        </div>
+        <div style="margin-top:9px;">${top}</div>
+        ${more ? `<div style="margin-top:6px; font-size:0.76em; color:var(--text-dim);">
+            and ${more} more &mdash; the full queue is under
+            <strong>🔔 The alarm</strong> further down this page.</div>` : ''}
+        <div style="margin-top:10px; font-size:0.76em; color:var(--text-dim);
+                    line-height:1.5;">
+          <strong>Why you did not hear about these:</strong>
+          ${alertRemedy(d, d.channel_diagnosis)}
+        </div>
+        <div style="margin-top:7px; font-size:0.74em; color:var(--text-dim);
+                    line-height:1.5;">
+          Nothing is marked sent &mdash; showing a row here is not delivering
+          it, so the backlog is intact and flushes the moment a route exists.
+          No alert can place, size or cancel an order; the only thing the
+          alarm can do is tell someone something.
+        </div>
+      </div>`;
 }
 
 async function runMoneyTrace() {
@@ -6859,6 +7653,566 @@ function renderBackingBanner(bk) {
                 ${escText(bk.detail || '')}
             </div>
         </div>`;
+}
+
+// Crypto this key cannot see AT ALL, which is a different thing from
+// coin a branch cannot sell. On 2026-10-02 the Coinbase app showed
+// $13,912.19 of crypto while the API totalled $8,135.00 of coin: ETH
+// (99% staked) read as 0.0000000028 units, ATOM and ADA as accounts
+// that exist with 0.0 available. That is 29% of the money outside every
+// total on this page, and nothing said so.
+//
+// This never prints an estimate of the missing amount. The key cannot
+// see a staked balance, so the amount is UNKNOWN until the owner reads
+// it off the app and declares it - and UNKNOWN is shown as UNKNOWN,
+// because showing it as $0.00 is the bug.
+function renderOutOfReach(oor) {
+    const wrap = document.getElementById('out-of-reach-banner');
+    if (!wrap) return;
+    const hide = () => { wrap.style.display = 'none'; wrap.innerHTML = ''; };
+
+    // Unreadable is not "nothing out of reach", but it is also not a
+    // finding - there is nothing to report until a balance comes back.
+    if (!oor || oor.readable !== true) return hide();
+
+    const empties = oor.empty_trading_balance || [];
+    const declared = oor.out_of_reach_usd;
+    const known = (typeof declared === 'number' && isFinite(declared));
+
+    // Nothing to say: no branch on an empty balance, and the owner has
+    // explicitly declared there is nothing out of reach.
+    if (!empties.length && known && declared <= 0) return hide();
+
+    wrap.style.display = 'block';
+    const gold = 'var(--gold, #c9860a)';
+
+    const assets = empties.map(e => escText(e.asset)).join(', ');
+    const list = empties.length
+        ? `<div style="margin-top:8px; font-size:0.82em;
+                       font-variant-numeric:tabular-nums;">
+             <span style="color:var(--text-dim);">branches on an empty
+             trading balance</span>
+             <strong> ${empties.length}</strong>
+             <span style="color:var(--text-dim);"> &mdash; ${assets}</span>
+           </div>`
+        : '';
+
+    const figure = known
+        ? `<div style="margin-top:8px; font-size:0.82em;
+                       font-variant-numeric:tabular-nums;">
+             <span style="color:var(--text-dim);">declared out of reach</span>
+             <strong style="color:${gold};"> ${fmtUsd(declared)}</strong>
+             ${(typeof oor.out_of_reach_share_pct === 'number')
+                 ? `<span style="color:var(--text-dim);"> (${
+                      Number(oor.out_of_reach_share_pct).toFixed(1)
+                    }% of the account)</span>` : ''}
+           </div>`
+        : `<div style="margin-top:8px; font-size:0.82em;">
+             <span style="color:var(--text-dim);">out of reach</span>
+             <strong style="color:${gold};"> UNKNOWN</strong>
+             <span style="color:var(--text-dim);"> &mdash; not zero. A staked
+             balance is not in the trading account, so nothing here can
+             total it.</span>
+           </div>`;
+
+    wrap.innerHTML = `
+        <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                    border:1px solid ${gold}; background:rgba(201,134,10,0.07);">
+          <div style="font-weight:700; color:${gold}; font-size:0.9em;">
+            Money no bot here can reach
+          </div>
+          ${figure}
+          ${list}
+          <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                      line-height:1.45;">
+            ${escText(oor.detail || '')}
+          </div>
+        </div>`;
+}
+
+// THE ONE REMEDY THAT HAD NO BUTTON.
+//
+// slice_backing reports branches claiming coin the wallet does not hold
+// ($1,190.75 across 10 branches on 2026-10-02), and the fix for it is
+// POST /grid-status/reconcile-slices. That endpoint appeared NOWHERE on
+// this page: the only Reconcile control here is the family tree's
+// reconcile-asset, which is a different subsystem and does not touch a
+// grid slice. So the single action that puts QNT, ACH and PEPE back in
+// service - all three refusing every sell with BELOW_BASE_INCREMENT
+// because their books claim units that are not there - could only be run
+// from a command line, which is not where this account is operated from.
+//
+// Preview first, always. Clearing tracked cost basis is not reversible,
+// so the server defaults to dry_run and additionally demands
+// accept_writeoff on the real call; this UI never sends either flag
+// until the plan has been displayed and explicitly confirmed.
+//
+// It is NOT a loss and the panel says so: the coin was sold by another
+// subsystem and the proceeds are already in the wallet as cash. What is
+// corrected is bookkeeping that never learned about the sale.
+// What the backing report said this pass. The reconcile ENDPOINT and the
+// backing banner read the wallet by different routes, so they can
+// disagree - and when they do, that disagreement is the finding. Without
+// this the preview prints a green "nothing to fix" directly underneath a
+// red banner naming eight short branches, and the contradiction reads as
+// success.
+let _gridReconcileSeenUnbacked = null;
+
+function renderGridReconcile(bk) {
+    const wrap = document.getElementById('grid-reconcile-wrap');
+    if (!wrap) return;
+    _gridReconcileSeenUnbacked = (bk && bk.readable === true
+        && isFinite(Number(bk.unbacked_branches)))
+        ? Number(bk.unbacked_branches) : null;
+    // Unreadable is not "nothing to fix". Say nothing rather than imply
+    // the book is clean on a pass where the wallet could not be read.
+    if (!bk || bk.readable !== true) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    const short = Number(bk.not_in_wallet_usd);
+    const n = Number(bk.unbacked_branches);
+    if (!isFinite(short) || short <= 0 || !isFinite(n) || n <= 0) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    const phantom = Number(bk.phantom_unrealized_usd);
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                  border:1px solid var(--red); background:rgba(180,35,24,0.07);">
+        <div style="font-weight:700; color:var(--red); font-size:0.9em;">
+          ${n} branch(es) claim coin the wallet does not hold
+        </div>
+        <div style="margin-top:8px; font-size:0.82em;
+                    font-variant-numeric:tabular-nums;">
+          <span style="color:var(--text-dim);">not in wallet</span>
+          <strong> ${fmtUsd(short)}</strong>
+          ${isFinite(phantom) && phantom !== 0
+            ? `<span style="color:var(--text-dim);"> &middot; of the reported
+               unrealized, </span><strong>${fmtUsd(phantom)}</strong>
+               <span style="color:var(--text-dim);">cannot be sold at any
+               price</span>` : ''}
+        </div>
+        <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                    line-height:1.45;">
+          A branch cannot sell what it does not hold, so these sit refusing
+          every sell order. Correcting the books is not a loss: the coin was
+          already sold and the cash is already in the wallet.
+        </div>
+        <button class="unlock-btn" style="margin-top:10px;"
+                onclick="previewGridReconcile()">🔍 Preview the fix (changes nothing)</button>
+        <div id="grid-reconcile-status" style="margin-top:8px; font-size:0.82em;
+             color:var(--text-dim);"></div>
+        <div id="grid-reconcile-plan"></div>
+      </div>`;
+}
+
+function _gridReconcileUrl(productId, apply) {
+    const q = [];
+    if (productId) q.push('product_id=' + encodeURIComponent(productId));
+    if (apply) q.push('dry_run=false', 'accept_writeoff=true');
+    return API_BASE + '/grid-status/reconcile-slices'
+         + (q.length ? '?' + q.join('&') : '');
+}
+
+async function previewGridReconcile(productId) {
+    const st = document.getElementById('grid-reconcile-status');
+    const planWrap = document.getElementById('grid-reconcile-plan');
+    if (!st || !planWrap) return;
+    st.textContent = 'Computing the plan' + (productId ? ' for ' + productId : '')
+                   + '… nothing is being changed.';
+    planWrap.innerHTML = '';
+    try {
+        // No dry_run flag is sent: the server's own default is true, and
+        // relying on it means this path cannot apply anything even if the
+        // query string were tampered with.
+        const d = await postGuarded(_gridReconcileUrl(productId, false));
+        const rows = d.branches || [];
+        if (!rows.length) {
+            // A CHECKMARK HERE WAS WRONG. When the banner above counted
+            // short branches and this says there are none, the two
+            // readings disagree and nothing has been established - least
+            // of all that the book is clean.
+            if (_gridReconcileSeenUnbacked > 0) {
+                st.innerHTML = `\u26a0\ufe0f <strong>These two readings disagree.</strong>
+                    The backing report counts
+                    ${_gridReconcileSeenUnbacked} short branch(es), and reconcile reports
+                    none - so nothing was established and nothing was changed.
+                    <div style="margin-top:4px; color:var(--text-dim);">
+                    ${escText(d.detail || '')}</div>
+                    <div style="margin-top:4px; color:var(--text-dim);">They read the
+                    wallet by different routes. Until they agree, treat the book as
+                    UNRECONCILED rather than clean.</div>`;
+                return;
+            }
+            st.textContent = '\u2705 ' + escText(d.detail
+                || 'No branch claims more coin than the wallet holds. Nothing to fix.');
+            return;
+        }
+        st.innerHTML = escText(d.detail || '');
+        const body = rows.map(b => `<tr>
+            <td>${escText(b.product_id)}</td>
+            <td style="text-align:right;">${Number(b.tracked_units).toFixed(8)}</td>
+            <td style="text-align:right;">${Number(b.held_units).toFixed(8)}</td>
+            <td style="text-align:right; color:var(--red);">${fmtUsd(b.cost_basis_removed_usd)}</td>
+            <td style="text-align:right;">${Number(b.slices_removed) || 0} / ${Number(b.slices_reduced) || 0}</td>
+          </tr>`).join('');
+        planWrap.innerHTML = `
+          <div style="overflow-x:auto; margin-top:8px;">
+            <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+              <thead><tr>
+                <th>Branch</th><th>Claims</th><th>Wallet has</th>
+                <th>Cost basis cleared</th><th>Slices cut / trimmed</th>
+              </tr></thead>
+              <tbody>${body}</tbody>
+            </table>
+          </div>
+          <div style="margin-top:6px; font-size:0.78em;
+                      font-variant-numeric:tabular-nums;">
+            <span style="color:var(--text-dim);">total tracked cost basis cleared</span>
+            <strong> ${fmtUsd(d.cost_basis_removed_usd)}</strong>
+            <span style="color:var(--text-dim);"> across ${Number(d.branch_count)} branch(es)</span>
+          </div>
+          ${(d.skipped && d.skipped.length)
+            ? `<div style="margin-top:6px; font-size:0.76em; color:var(--gold, #c9860a);">
+                 ${d.skipped.length} branch(es) skipped - their wallet balance could not be
+                 read this pass, so they are UNKNOWN and were left alone:
+                 ${d.skipped.map(x => escText(x.product_id)).join(', ')}
+               </div>` : ''}
+          <div style="margin-top:6px; font-size:0.76em; color:var(--text-dim);
+                      line-height:1.45;">
+            Only tracked quantity changes. Allocation, entry price, target and stop are
+            untouched, and no Coinbase order is placed. This is not reversible.
+          </div>
+          <button class="unlock-btn" style="margin-top:10px;"
+                  onclick="executeGridReconcile(${productId ? "'" + productId + "'" : ''})">
+            ✅ Confirm and correct for real</button>`;
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message;
+    }
+}
+
+async function executeGridReconcile(productId) {
+    const st = document.getElementById('grid-reconcile-status');
+    const planWrap = document.getElementById('grid-reconcile-plan');
+    if (!st) return;
+    st.textContent = 'Applying…';
+    try {
+        const d = await postGuarded(_gridReconcileUrl(productId, true));
+        const applied = d.applied || [];
+        const total = Number(d.cost_basis_removed_usd);
+        // NOTHING APPLIED IS NOT SUCCESS.
+        //
+        // This printed "Corrected 0 branch(es), clearing $0.00" behind a
+        // green checkmark, which is indistinguishable from a real fix at a
+        // glance. The account owner reported the reconcile as done three
+        // times while the backing report never moved, because the button
+        // told him it had worked. A checkmark is a claim; it has to be
+        // earned by a row actually changing.
+        if (!applied.length) {
+            st.innerHTML = `\u26a0\ufe0f <strong>Nothing was changed.</strong>
+                The server applied no correction.
+                <div style="margin-top:4px; color:var(--text-dim);">
+                ${escText(d.detail || 'It reported no branch to reconcile.')}</div>`;
+            if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
+            return;
+        }
+        st.innerHTML = `\u2705 Corrected ${applied.length} branch(es), clearing
+            ${escText(fmtUsd(total))} of tracked cost basis.
+            <span style="color:var(--text-dim);">Not a loss - that coin was already
+            sold and the cash is already in the wallet.</span>`;
+        if (planWrap) planWrap.innerHTML = '';
+        if (typeof refresh === 'function') refresh();
+        else if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
+    }
+}
+
+// ---- Levels: how many rungs a branch may hold -----------------------
+//
+// A branch at num_levels is PARKED - it cannot buy another rung at any
+// price, however far the coin falls and however much allocation it has.
+// Nothing in the codebase could change that: coin_adoption_worker writes
+// num_levels once, as the slice count at adoption, so an adopted branch
+// is born full by construction. This is the only control that moves it.
+//
+// WHAT IT CHANGES: num_levels, and nothing else. Not the spacing, not the
+// reference price, not the stop, not the allocation, not an open slice.
+// It places NO order - the grid still decides when to buy through every
+// gate it already passes.
+//
+// Preview sends NO dry_run flag: the server's own default is true, so
+// this path cannot apply anything even if the request were tampered with.
+// Apply is a separate call that only exists after a plan has been shown.
+const GRID_LEVELS_MIN = 1, GRID_LEVELS_MAX = 20, GRID_LEVELS_MIN_SLICE = 5.0;
+
+// The server's own arithmetic, so the row and the plan cannot disagree:
+// slice_after = alloc / want, affordable = floor(unspent / slice_after).
+// The smallest count that affords one rung is the first want where
+// unspent >= alloc / want. Returns {unknown:true} on an unpriced slice -
+// a gap is not a zero.
+function _gridLevelsSuggest(b) {
+    const slices = (b && b.slices) || [];
+    const open_n = slices.length;
+    const old_n = Math.trunc(Number(b && b.num_levels) || 0);
+    const alloc = Number(b && b.allocated_usd);
+    if (!isFinite(alloc) || alloc <= 0) {
+        return {unknown: false, want: null,
+                why: 'no allocation, so a level count changes nothing'};
+    }
+    let spent = 0;
+    for (const s of slices) {
+        // Number(null) is 0 and Number('') is 0, and isFinite(0) is true -
+        // so a missing price has to be rejected BEFORE the coercion, or an
+        // unpriced slice reads as $0.00 spent and inflates the unspent
+        // allocation this suggestion is computed from.
+        const qr = s ? s.qty : undefined, er = s ? s.entry_price : undefined;
+        const blank = v => v === null || v === undefined || v === ''
+                           || typeof v === 'boolean';
+        if (blank(qr) || blank(er)) {
+            return {unknown: true, want: null,
+                    why: 'a slice carries no price, so unspent allocation is UNKNOWN'};
+        }
+        const q = Number(qr), e = Number(er);
+        if (!isFinite(q) || !isFinite(e)) {
+            return {unknown: true, want: null,
+                    why: 'a slice carries no price, so unspent allocation is UNKNOWN'};
+        }
+        spent += q * e;
+    }
+    const free = Math.round((alloc - spent) * 100) / 100;
+    // Never below what is already open, and never a slice under the floor.
+    const lo = Math.max(GRID_LEVELS_MIN, open_n + 1, old_n + 1);
+    const hi = Math.min(GRID_LEVELS_MAX, Math.floor(alloc / GRID_LEVELS_MIN_SLICE));
+    for (let want = lo; want <= hi; want++) {
+        const slice_after = Math.round((alloc / want) * 100) / 100;
+        if (slice_after > 0 && Math.floor(free / slice_after) >= 1) {
+            return {unknown: false, want, free, slice_after,
+                    why: 'the smallest count that can actually open a rung'};
+        }
+    }
+    return {unknown: false, want: null, free,
+            why: (hi < lo
+                  ? 'no count in range keeps a slice above $' + GRID_LEVELS_MIN_SLICE.toFixed(2)
+                  : 'no count opens a rung on $' + free.toFixed(2)
+                    + ' unspent - the money is the constraint, not the rungs')};
+}
+
+function renderGridLevels(branches) {
+    const wrap = document.getElementById('grid-levels-wrap');
+    if (!wrap) return;
+    const rows = (branches || []).filter(b => {
+        const n = Math.trunc(Number(b && b.num_levels) || 0);
+        const open_n = ((b && b.slices) || []).length;
+        return n > 0 && open_n >= n;
+    });
+    if (!rows.length) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    let parkedUsd = 0, anyUsd = false;
+    for (const b of rows) {
+        const a = Number(b.allocated_usd);
+        if (isFinite(a)) { parkedUsd += a; anyUsd = true; }
+    }
+    const body = rows.map(b => {
+        const pid = String(b.product_id || '');
+        const n = Math.trunc(Number(b.num_levels) || 0);
+        const open_n = (b.slices || []).length;
+        const sug = _gridLevelsSuggest(b);
+        const val = sug.want === null ? '' : sug.want;
+        return `<tr>
+            <td>${escText(pid)}</td>
+            <td style="text-align:right;">${open_n} / ${n}</td>
+            <td style="text-align:right;">${isFinite(Number(b.allocated_usd))
+                ? fmtUsd(b.allocated_usd) : '<span style="color:var(--gold,#c9860a);">unreadable</span>'}</td>
+            <td style="text-align:right;">${sug.unknown
+                ? '<span style="color:var(--gold,#c9860a);">UNKNOWN</span>'
+                : (isFinite(Number(sug.free)) ? fmtUsd(sug.free) : '&mdash;')}</td>
+            <td style="text-align:right;">
+              <input class="grid-levels-in" type="number" inputmode="numeric"
+                     data-product="${escText(pid)}" data-current="${n}"
+                     min="${GRID_LEVELS_MIN}" max="${GRID_LEVELS_MAX}" step="1"
+                     value="${val}" placeholder="${n}"
+                     style="width:4.6em; text-align:right; font-variant-numeric:tabular-nums;">
+            </td>
+            <td style="font-size:0.92em; color:var(--text-dim);">${escText(sug.why)}</td>
+          </tr>`;
+    }).join('');
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                  border:1px solid var(--gold, #c9860a); background:rgba(201,134,10,0.07);">
+        <div style="font-weight:700; color:var(--gold, #c9860a); font-size:0.9em;">
+          ${rows.length} branch(es) are parked &mdash; they cannot buy at any price
+        </div>
+        <div style="margin-top:8px; font-size:0.82em; font-variant-numeric:tabular-nums;">
+          ${anyUsd ? `<span style="color:var(--text-dim);">allocation that cannot
+             open a rung</span><strong> ${fmtUsd(parkedUsd)}</strong>` : ''}
+        </div>
+        <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                    line-height:1.45;">
+          Each holds as many open slices as its own level count permits, so the
+          rung count is the binding constraint &mdash; not the price and not the
+          money. Raising it changes <strong>num_levels and nothing else</strong>:
+          no order is placed, no cash moves, and the spacing, reference price,
+          stop and open slices are untouched. Every future slice on the same
+          allocation gets smaller, which is the trade-off.
+        </div>
+        <div style="overflow-x:auto; margin-top:9px;">
+          <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+            <thead><tr>
+              <th>Branch</th><th>Slices / levels</th><th>Allocated</th>
+              <th>Unspent</th><th>Set levels</th><th>Suggested because</th>
+            </tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+        <button class="unlock-btn" style="margin-top:10px;"
+                onclick="previewGridLevels()">🔍 Preview the change (changes nothing)</button>
+        <div id="grid-levels-status" style="margin-top:8px; font-size:0.82em;
+             color:var(--text-dim);"></div>
+        <div id="grid-levels-plan"></div>
+      </div>`;
+}
+
+// Only rows the person actually changed are sent. A box left at its
+// current count is not a request, and the server would call it NO_CHANGE
+// anyway - sending it only pads the plan.
+function _gridLevelsWanted() {
+    const out = {};
+    document.querySelectorAll('.grid-levels-in').forEach(el => {
+        const pid = el.getAttribute('data-product');
+        const cur = Math.trunc(Number(el.getAttribute('data-current')) || 0);
+        const raw = String(el.value || '').trim();
+        if (!pid || raw === '') return;
+        const n = Number(raw);
+        if (!isFinite(n) || Math.trunc(n) !== n) return;
+        if (n === cur) return;
+        out[pid] = Math.trunc(n);
+    });
+    return out;
+}
+
+async function previewGridLevels() {
+    const st = document.getElementById('grid-levels-status');
+    const planWrap = document.getElementById('grid-levels-plan');
+    if (!st || !planWrap) return;
+    planWrap.innerHTML = '';
+    const levels = _gridLevelsWanted();
+    const keys = Object.keys(levels);
+    if (!keys.length) {
+        st.textContent = 'Nothing to preview - no box differs from its current '
+                       + 'level count. Type a new count on a row first.';
+        return;
+    }
+    st.textContent = 'Computing the plan for ' + keys.join(', ')
+                   + '… nothing is being changed.';
+    try {
+        // No dry_run is sent: the server defaults it to true.
+        const d = await postGuarded(API_BASE + '/grid-status/set-levels', {levels});
+        _gridLevelsShowPlan(d, st, planWrap, levels);
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message;
+    }
+}
+
+// The map the displayed plan was computed from. Set ONLY by the preview
+// path, so apply cannot send a count no plan was ever shown for, and the
+// ids never pass through an onclick attribute.
+let _gridLevelsPending = null;
+
+function _gridLevelsShowPlan(d, st, planWrap, levels) {
+    const plans = d.plans || [];
+    _gridLevelsPending = null;
+    st.innerHTML = escText(d.detail || '');
+    const body = plans.map(p => {
+        const good = p.ok === true;
+        const hollow = good && p.buys_nothing_without_more_allocation === true;
+        const colour = hollow ? 'var(--gold, #c9860a)'
+                     : good ? 'var(--green)' : 'var(--red)';
+        return `<tr>
+            <td>${escText(p.product_id || '')}</td>
+            <td style="text-align:right;">${Number(p.levels_before)} &rarr; ${Number(p.levels_after)}</td>
+            <td style="text-align:right;">${p.slice_usd_before == null ? '&mdash;'
+                : fmtUsd(p.slice_usd_before)} &rarr; ${p.slice_usd_after == null
+                ? '&mdash;' : fmtUsd(p.slice_usd_after)}</td>
+            <td style="text-align:right;">${p.rungs_it_could_actually_open == null
+                ? '&mdash;' : Number(p.rungs_it_could_actually_open)}</td>
+            <td style="color:${colour}; font-weight:600;">${escText(
+                hollow ? 'READY (buys nothing yet)' : String(p.status || ''))}</td>
+          </tr>`;
+    }).join('');
+    const notes = plans.filter(p => p.detail).map(p =>
+        `<div style="margin-top:5px;">&middot; ${escText(p.detail)}</div>`).join('');
+    const ready = (d.ready || []);
+    if (ready.length) _gridLevelsPending = levels;
+    planWrap.innerHTML = `
+      <div style="overflow-x:auto; margin-top:8px;">
+        <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+          <thead><tr>
+            <th>Branch</th><th>Levels</th><th>Slice size</th>
+            <th>Rungs it could open</th><th>Verdict</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+      ${(d.missing && d.missing.length)
+        ? `<div style="margin-top:6px; font-size:0.76em; color:var(--gold, #c9860a);">
+             not a live branch, so left alone: ${d.missing.map(escText).join(', ')}
+           </div>` : ''}
+      <div style="margin-top:6px; font-size:0.78em; color:var(--text-dim);
+                  line-height:1.45;">${notes}</div>
+      ${ready.length
+        ? `<div style="margin-top:6px; font-size:0.76em; color:var(--text-dim);
+                       line-height:1.45;">
+             Applying changes num_levels on ${ready.length} branch(es) and nothing
+             else. It takes effect on the next grid cycle - no restart - and places
+             no order.
+           </div>
+           <button class="unlock-btn" style="margin-top:10px;"
+                   onclick="executeGridLevels()">
+             ✅ Confirm and set the levels</button>`
+        : `<div style="margin-top:8px; font-size:0.8em; color:var(--red);">
+             No plan came back READY, so there is nothing to confirm. Nothing was
+             changed.
+           </div>`}`;
+}
+
+// Takes the SAME map the plan was computed from, passed in from the
+// preview's own button - so this cannot apply a count the person never
+// saw a plan for.
+async function executeGridLevels() {
+    const st = document.getElementById('grid-levels-status');
+    const planWrap = document.getElementById('grid-levels-plan');
+    if (!st) return;
+    const levels = _gridLevelsPending;
+    if (!levels || !Object.keys(levels).length) {
+        st.textContent = 'Nothing was sent - no previewed plan to apply. '
+                       + 'Preview the change first.';
+        return;
+    }
+    st.textContent = 'Applying…';
+    try {
+        const d = await postGuarded(API_BASE + '/grid-status/set-levels',
+                                    {levels, dry_run: false});
+        const applied = d.applied || [];
+        if (!applied.length) {
+            st.innerHTML = '⚠️ ' + escText(d.detail || 'nothing was changed');
+            return;
+        }
+        st.innerHTML = `✅ ${applied.length} branch(es) changed: `
+            + applied.map(a => escText(a.product_id) + ' '
+                + Number(a.levels_before) + '&rarr;' + Number(a.levels_after)).join(', ')
+            + `. <span style="color:var(--text-dim);">Takes effect on the next grid
+               cycle - no restart, and no order was placed.</span>`;
+        // A plan that has been applied is spent: clear it so a second
+        // click cannot re-send a change that already happened.
+        _gridLevelsPending = null;
+        if (planWrap) planWrap.innerHTML = '';
+        if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
+    } catch (e) {
+        st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
+    }
 }
 
 // The running total of closed grid profit, trade by trade. Drawn from
@@ -7808,14 +9162,40 @@ async function refresh() {
         // belongs to - two systems on one page is exactly how the zeros went
         // unnoticed.
         let gridData = null;
-        try { gridData = await apiGet('/grid-status'); } catch (e) { gridData = null; }
+        let gridErr = null;
+        // A BARE DASH IS NOT A DIAGNOSIS. This used to swallow the error
+        // entirely, so a reader saw "—" on two tiles with no way to tell a
+        // timeout from a 502 from a bad payload - and /grid-status is 116KB
+        // and takes 4.8-8.8s, so it fails more than anything else on the
+        // page. The dash stays (a gap is still not a zero) but it now says
+        // which gap it is.
+        try {
+            gridData = await apiGet('/grid-status');
+        } catch (e) {
+            gridData = null;
+            gridErr = (e && e.message) ? e.message : String(e);
+        }
         // A failed fetch must not print 0 - a gap is not a zero, and a zero
         // here is the bug being fixed.
-        document.getElementById('stat-count').textContent =
+        const _gridNote = gridErr
+            ? `could not read /grid-status - ${gridErr}`
+            : 'the grid reported no figure for this';
+        const _cEl = document.getElementById('stat-count');
+        const _tEl = document.getElementById('stat-total');
+        _cEl.textContent =
             (gridData && gridData.branch_count != null) ? gridData.branch_count : '—';
-        document.getElementById('stat-total').textContent =
+        _tEl.textContent =
             (gridData && gridData.total_allocated_usd != null)
                 ? fmtUsd(gridData.total_allocated_usd) : '—';
+        // Say it on the tile, not only in a tooltip nobody can hover on a phone.
+        for (const el of [_cEl, _tEl]) {
+            const dash = el.textContent === '—';
+            el.title = dash ? _gridNote : '';
+            el.style.fontSize = dash ? '0.62em' : '';
+            el.style.color = dash ? 'var(--text-dim)' : '';
+            if (dash) el.textContent = gridErr ? 'unreadable' : 'not reported';
+        }
+        if (gridErr) console.warn('[dashboard] /grid-status failed:', gridErr);
         document.getElementById('stat-locked').textContent = fmtUsd(data.locked_usd || 0);
         lastLockedProfit = data.locked_usd || 0;
         document.getElementById('stat-refreshed').textContent = new Date().toLocaleTimeString();
@@ -8075,7 +9455,7 @@ function renderTreeLoopBanner(data) {
     if (data.family_tree_loop_running !== false) { el.innerHTML = ''; return; }
     const mode = String(data.crypto_strategy_mode || '(unset)')
         .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-    el.innerHTML = `<div class="panel" style="background:#fff4e8; border:1px solid #f3d9b3;
+    el.innerHTML = `<div class="panel" style="background:var(--gold-bg); border:1px solid var(--gold);
         padding:14px 18px; margin-bottom:16px;">
         <strong>⚙️ Tree trading controls are inert right now.</strong>
         This deploy runs <code>${mode}</code>, so the family-tree loop is never started —
@@ -8809,6 +10189,45 @@ function renderObservations(observations) {
     `).join('');
 }
 
+// LAST KNOWN, WITH ITS AGE - never a blank, never a zero.
+//
+// A poll that fails is not a balance of zero, and this panel already
+// refuses to caption one leg as the combined total. What it did NOT do
+// was keep the real number it had sixty seconds earlier: the gauge fell
+// to "unavailable this poll" and the legend to "—", throwing away a
+// measured figure because the NEXT read missed. On a phone dropping in
+// and out of signal that is most reads.
+//
+// So the last non-null reading is kept per field with the time it was
+// taken, and a failed poll shows that figure WITH ITS AGE. Stale and
+// labelled stale beats blank, and it is still never a fabricated zero.
+// Nothing is kept for a field that has never once been read.
+const _lastGood = { combined: null, alpaca: null, crypto: null };
+
+function _remember(key, value) {
+    if (value != null && isFinite(value)) {
+        _lastGood[key] = { value: value, at: Date.now() };
+    }
+    return _lastGood[key];
+}
+
+function _fmtAge(ms) {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.round(s / 60) + 'm ago';
+    if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return Math.round(s / 86400) + 'd ago';
+}
+
+// The whole rule in one place: a real reading, else the last real
+// reading with its age, else an honest gap. Never 0, never invented.
+function _lastKnownStr(key, live) {
+    const seen = _remember(key, live);
+    if (live != null && isFinite(live)) return fmtUsd(live);
+    if (seen) return fmtUsd(seen.value) + ' \u00b7 as of ' + _fmtAge(seen.at);
+    return null;
+}
+
 // The last value each side actually read, from the logged history. Shown
 // (clearly marked with its time) when a live read fails, so one failed
 // Coinbase call no longer blanks the whole panel. It is never mixed into a
@@ -8825,22 +10244,38 @@ function _cpTime(iso) {
 }
 
 function renderCombinedProgress(data) {
+    // No combined total when either real side failed to read - the
+    // surviving leg alone is not the combined number and must never be
+    // captioned as if it were. What CAN be shown is the last real figure,
+    // plainly marked as stale: this page's own last good read first (it is
+    // seconds old), else the last logged snapshot, else an honest gap.
     const hist = data.history || [];
-    const tile = (label, swatch, live, key, err) => {
+    // Called for every field on every poll: remembering is a side effect of
+    // the read, so a field that succeeds now is fresh for the next failure.
+    _lastKnownStr('combined', data.combined_equity);
+    _lastKnownStr('alpaca', data.alpaca_equity);
+    _lastKnownStr('crypto', data.crypto_equity);
+    const tile = (label, swatch, live, field, key, err, neverRead) => {
         if (live != null) {
             return { html: `<div class="cp-kpi"><div class="lbl">${swatch}${label}</div>
                 <div class="val">${fmtUsd(live)}</div><div class="sub">live</div></div>`, stale: false };
         }
+        const mem = _lastGood[field];
         const lk = _cpLastKnown(hist, key);
+        const val = mem ? fmtUsd(mem.value) : (lk ? fmtUsd(lk[key]) : '\u2014');
+        const sub = mem ? 'last good read, this poll failed \u00b7 ' + _fmtAge(mem.at)
+            : (lk ? 'last logged ' + _cpTime(lk.created_at) : neverRead);
         const why = err ? ' title="' + String(err).replace(/"/g, '&quot;') + '"' : '';
         return { html: `<div class="cp-kpi stale"${why}><div class="lbl">${swatch}${label}</div>
-            <div class="val">${lk ? fmtUsd(lk[key]) : '—'}</div>
-            <div class="sub">${lk ? 'last read ' + _cpTime(lk.created_at) : 'not read yet'}</div></div>`, stale: true };
+            <div class="val">${val}</div><div class="sub">${sub}</div></div>`, stale: true };
     };
     const sw = c => `<i class="sw" style="background:${c}"></i>`;
-    const comb = tile('Combined', sw('#009845'), data.combined_equity, 'combined_equity', data.combined_unavailable_reason);
-    const alp = tile('Alpaca', sw('#1f3864'), data.alpaca_equity, 'alpaca_equity', data.alpaca_error);
-    const cb = tile('Coinbase', sw('#e8752c'), data.crypto_equity, 'crypto_equity', data.crypto_error);
+    const comb = tile('Combined', sw('#009845'), data.combined_equity, 'combined', 'combined_equity',
+                      data.combined_unavailable_reason, 'not read yet');
+    const alp = tile('Alpaca', sw('#1f3864'), data.alpaca_equity, 'alpaca', 'alpaca_equity',
+                     data.alpaca_error, data.alpaca_error ? 'unavailable' : 'not read yet');
+    const cb = tile('Coinbase', sw('#e8752c'), data.crypto_equity, 'crypto', 'crypto_equity',
+                    data.crypto_error, data.crypto_error ? 'unavailable' : 'not read yet');
 
     const goal = data.goal || 1000000;
     const basis = data.combined_equity != null ? data.combined_equity
@@ -8914,21 +10349,73 @@ loadCombinedProgress();
 // the thing this whole section exists to replace.
 loadAlertQueue();
 loadTradingProfile();
-setInterval(refresh, 15000);
-setInterval(loadTicker, 15000);
-setInterval(loadActivityFeed, 5000);
-setInterval(loadCombinedProgress, 60000);
-setInterval(loadAlertQueue, 60000);
-setInterval(loadTradingProfile, 60000);
-// The tape is the one panel that must actually move.
-setInterval(loadTape, 6000);
+// The charts read Coinbase from this browser, not through the app, so a
+// slow or unreachable candles endpoint delays nothing else on the page
+// and adds no load to the process that places orders. It owns its own
+// 60s interval rather than joining refresh().
+loadFleetReadiness();
+
+// ───────────────────────────── POLLING, MEASURED ─────────────────────────
+// A BACKGROUNDED TAB WAS STILL PULLING 4 MB A MINUTE.
+//
+// Measured on 2026-10-01 by loading this page in a real browser for 60s and
+// counting every request it made:
+//
+//     96 calls, 4.04 MB in 60 seconds  ->  242 MB per HOUR, per open tab
+//     /grid-status alone: 21 calls, 2.65 MB  (65% of all of it)
+//
+// Exactly one poll on this page checked document.hidden
+// (refreshProximityOnly). Everything else - refresh, the ticker, the
+// activity feed, the tape, the alarm, the profile, fleet readiness - kept
+// running at full rate on a phone that was not even showing the page. That
+// is the whole bill above, charged to the owner's cellular data and to a
+// mobile browser's patience with a tab that never goes quiet. A tab that
+// never goes quiet is the one the browser evicts, and an evicted tab comes
+// back WHITE.
+//
+// So every interval now goes through onlyWhenVisible(). Nothing polls while
+// hidden; everything catches up the moment the tab is looked at again. The
+// FIRST load is untouched - each loader is still called directly above, so
+// opening the page behaves exactly as it did.
+function onlyWhenVisible(fn) {
+    return function () {
+        if (document.hidden) return;
+        try { return fn.apply(this, arguments); }
+        catch (e) { console.warn('[dashboard] poll failed:', e); }
+    };
+}
+function pollEvery(fn, ms) { return setInterval(onlyWhenVisible(fn), ms); }
+
+setInterval(onlyWhenVisible(loadFleetReadiness), 60000);
+initAdvancedCharts();
+pollEvery(refresh, 15000);
+pollEvery(loadTicker, 15000);
+// 5s -> 15s. The feed is a list of things that already happened; three
+// reads a minute of it is not journalism, it is bandwidth.
+pollEvery(loadActivityFeed, 15000);
+pollEvery(loadCombinedProgress, 60000);
+pollEvery(loadAlertQueue, 60000);
+pollEvery(loadTradingProfile, 60000);
+// The tape is the one panel that must actually move - 6s -> 12s, still
+// faster than the 30s cycle that produces anything for it to show.
+pollEvery(loadTape, 12000);
 // The panels that should visibly move, on their own fast loops.
-setInterval(refreshProximityOnly, 6000);
-setInterval(tickProximityAge, 1000);
+pollEvery(refreshProximityOnly, 6000);
+// Pure arithmetic on numbers already in the page - no network, so it is
+// left alone except for not ticking a clock nobody is looking at.
+pollEvery(tickProximityAge, 1000);
+
 // A backgrounded tab skips its polls, so catch up the moment it returns
-// rather than showing a stale price until the next tick.
+// rather than showing a stale page until the next tick. This is now the
+// ONLY thing that runs on return, and it has to be a real refresh: the
+// whole page was frozen, not just the price.
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { refreshProximityOnly(); loadTicker(); }
+    if (document.hidden) return;
+    refresh();
+    loadTicker();
+    refreshProximityOnly();
+    loadActivityFeed();
+    loadTape();
 });
 
 // ------------------------------------------------------------------ THE TRIMMER
@@ -9071,10 +10558,15 @@ async function loadCostTruth() {
              </div>`;
 
         wrap.innerHTML = `
-          <div style="font-size:1.05em;margin-bottom:12px">
-            priced at <strong style="color:var(--danger,#e05a4e)">${d.cost_in_force_pct}%</strong>
-            &nbsp;·&nbsp; would be <strong style="color:var(--success,#16a34a)">${d.cost_if_measured_were_swapped_pct}%</strong>
-            &nbsp;·&nbsp; gap <strong>${d.gap_pct}%</strong>
+          <div style="font-size:1.0em;margin-bottom:6px">
+            in force <strong>${d.cost_in_force_pct}%</strong>
+            <span style="color:var(--text-dim);font-size:0.86em">
+              &nbsp;·&nbsp; ${d.cost_if_measured_were_swapped_pct}% if priced off rising markets only
+              &nbsp;·&nbsp; margin ${d.gap_pct}%</span>
+          </div>
+          <div style="font-size:0.8em;line-height:1.6;margin-bottom:12px;
+                      border-left:3px solid var(--blue,#0052ff);padding:7px 11px;">
+            ${esc2(d.headline || '')}
           </div>
 
           <table style="width:100%;border-collapse:collapse;font-size:0.85em;margin-bottom:12px">
@@ -9090,11 +10582,17 @@ async function loadCostTruth() {
             </tbody>
           </table>
 
-          <div style="font-size:0.82em;font-weight:600;margin-bottom:4px">Where the measurements came from</div>
-          ${bar('rising', c.RISING, 'var(--success,#16a34a)')}
-          ${bar('falling', c.FALLING, 'var(--danger,#e05a4e)')}
+          <div style="font-size:0.82em;font-weight:600;margin-bottom:2px">Where the measurements came from</div>
+          <div style="font-size:0.74em;color:var(--text-dim);line-height:1.5;margin-bottom:6px">
+            Counts of the market each sample was taken in. Not wins and losses \u2014 nothing here
+            is competing with anything.</div>
+          ${bar('rising', c.RISING, 'var(--text-dim)')}
+          ${bar('falling', c.FALLING, 'var(--blue,#0052ff)')}
           ${bar('flat', c.FLAT, 'var(--text-dim)')}
           ${bar('unknown', c.UNKNOWN, 'var(--border)')}
+          <div style="font-size:0.74em;color:var(--text-dim);line-height:1.5;margin-top:6px">
+            <strong style="color:var(--blue,#0052ff)">Falling is highlighted because it is the one
+            that counts.</strong> ${esc2(d.how_to_read_the_regime_counts || '')}</div>
 
           <div style="margin-top:12px;padding:10px 12px;border-left:3px solid ${ok?'var(--success,#16a34a)':'var(--danger,#e05a4e)'};
                       background:var(--panel2,#0000000a);font-size:0.84em;line-height:1.55">
@@ -9104,7 +10602,8 @@ async function loadCostTruth() {
           </div>
 
           <div style="margin-top:10px;font-size:0.78em;color:var(--text-dim);line-height:1.55">
-            ${esc2(a.why_not_a_blend || '')}<br><br>${esc2(d.what_would_change || '')}
+            ${esc2(a.why_not_a_blend || '')}<br><br>${esc2(d.what_the_gap_is || '')}
+            <br><br>${esc2(d.what_would_change || '')}
           </div>`;
     } catch (e) {
         wrap.innerHTML = '<div class="coin-history-empty">Could not read it: ' + e.message + '</div>';

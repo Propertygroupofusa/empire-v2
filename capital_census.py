@@ -152,37 +152,138 @@ def coinbase_holdings():
     # value of None and excluded from the total rather than guessed at - an
     # unpriced holding is an unknown, and quietly calling it $0 or carrying
     # last week's number is how a balance stops meaning anything.
+    return {"venue": "Coinbase", "status": "OK", "usd_cash": round(usd, 2),
+            "source": f"{key_var} / {priv_var}",
+            **price_holdings(coins)}
+
+
+def price_holdings(coins):
+    """Price a {currency: units} book and report its COVERAGE, not just a sum.
+
+    Split out of coinbase_holdings so the rule below can be exercised
+    without credentials or a network: the caller above builds its request
+    inside a closure, so for a long time the only way to reach this
+    arithmetic was to actually call the venue, and it went untested.
+    """
     priced, unpriced, coin_usd = {}, [], 0.0
+    reasons = {}
     for cur, amt in coins.items():
-        px = _spot_price(f"{cur}-USD")
+        px, why = _spot_price(f"{cur}-USD")
+        # A retired ticker is not a worthless coin. Retry under the
+        # venue's current symbol before giving up on the holding.
+        traded_as = resolve_symbol(cur)
+        if px is None and traded_as != cur.upper():
+            px2, why2 = _spot_price(f"{traded_as}-USD")
+            if px2 is not None:
+                px, why = px2, None
+                priced[cur] = {"units": amt, "price": px,
+                               "usd": round(amt * px, 2),
+                               "traded_as": traded_as,
+                               "note": (f"{cur} is this wallet's name for it; the venue "
+                                        f"trades it as {traded_as} since the rename.")}
+                coin_usd += amt * px
+                continue
         if px is None:
             unpriced.append(cur)
-            priced[cur] = {"units": amt, "usd": None}
+            priced[cur] = {"units": amt, "usd": None, "no_price_because": why,
+                           # Delisted and "the request failed" need opposite
+                           # responses: one is permanent and means no exit
+                           # exists on this venue at any price, the other
+                           # clears by itself. They were the same word.
+                           "permanently_unpriceable": bool(
+                               why and "delist" in str(why).lower())}
+            reasons[why] = reasons.get(why, 0) + 1
         else:
             value = amt * px
             priced[cur] = {"units": amt, "price": px, "usd": round(value, 2)}
             coin_usd += value
 
-    return {"venue": "Coinbase", "status": "OK", "usd_cash": round(usd, 2),
-            "coin_usd": round(coin_usd, 2), "coin_balances": priced,
-            "unpriced": unpriced, "source": f"{key_var} / {priv_var}",
-            "note": (f"could not price {', '.join(unpriced)} - excluded from the "
-                     f"total rather than guessed" if unpriced else "")}
+    # Coverage, stated as a number rather than implied by a silence. When
+    # NOTHING could be priced, the coin subtotal is not 0.00 - it is
+    # unknown, and it is reported as None so that no caller can print it as
+    # a dollar figure. This module already refuses to guess at a single
+    # unpriced holding; a total assembled entirely out of holdings it
+    # refused to guess at is the same refusal, and for a while it was the
+    # one place the rule was not applied. $0.00 sat under "Coinbase coins"
+    # while thousands of dollars of coin were held, because every one of
+    # the fifty-five price requests had been rate-limited away.
+    n_held = len(coins)
+    n_priced = n_held - len(unpriced)
+    readable = n_priced > 0 or n_held == 0
+    note = ""
+    if unpriced:
+        why = ", ".join(f"{k} x{v}" for k, v in sorted(reasons.items(),
+                                                       key=lambda kv: -kv[1]))
+        if readable:
+            note = (f"could not price {len(unpriced)} of {n_held} holdings "
+                    f"({', '.join(unpriced)}) - excluded from the total rather "
+                    f"than guessed. Failures: {why}")
+        else:
+            note = (f"NONE of the {n_held} holdings could be priced ({why}), so "
+                    f"the coin subtotal is UNKNOWN, not zero. Coin held here is "
+                    f"missing from every total on this reading.")
+
+    return {"coin_usd": round(coin_usd, 2) if readable else None,
+            "coin_balances": priced,
+            "unpriced": unpriced,
+            "coin_holdings_count": n_held,
+            "coin_priced_count": n_priced,
+            "coin_usd_readable": readable,
+            "unpriced_reasons": reasons,
+            "note": note}
+
+
+# TICKERS THE VENUE RENAMED.
+#
+# Coinbase answers "Not allowed for delisted products" for a ticker it has
+# retired, which is indistinguishable from "this coin is worthless" to
+# anything reading only the price. For a RENAME it is actively wrong: the
+# holding is live and sellable under a new symbol.
+#
+# Measured 2026-10-01: the account holds 9.8790564 RNDR, which priced as
+# UNPRICED and displayed as $0.00 while RENDER-USD traded at $1.9173 -
+# $18.94 of real, sellable coin that no level watched and no
+# concentration rule counted, because the ticker changed and nothing told
+# the account.
+#
+# Only one-to-one symbol renames belong here. A merger, a redenomination
+# or any swap that changes the number of units is NOT a rename and must
+# not be aliased - the unit count would carry over wrong.
+TICKER_RENAMES = {
+    "RNDR": "RENDER",   # Render Network, renamed 2026
+}
+
+
+def resolve_symbol(asset: str) -> str:
+    """The symbol the venue trades today for a coin the wallet still calls
+    by its old name. Unknown symbols pass through unchanged."""
+    return TICKER_RENAMES.get((asset or "").upper(), (asset or "").upper())
 
 
 def _spot_price(product_id: str):
-    """Last trade price from the public exchange feed, or None.
+    """(price, reason) from the public exchange feed. reason is None on success.
 
     Deliberately the public endpoint and not the authenticated one: pricing
     is not privileged data, and using the unauthenticated feed means this
     still reports coin values on a key that has lost trading permission.
+
+    Returns the FAILURE REASON rather than a bare None because every caller
+    of this used to see the same silent None whether the coin does not
+    trade, the request timed out, or the venue returned 429. Fifty-five
+    holdings all priced at None rendered as "$0.00 coins held" next to
+    "every venue read successfully", and nothing anywhere recorded that the
+    exchange had refused every single request. A reading that failed and a
+    balance of zero are different facts; so are the reasons a reading
+    fails, and the rate-limit case is the one that is fixable.
     """
     url = f"https://api.exchange.coinbase.com/products/{product_id}/ticker"
     try:
         with urllib.request.urlopen(url, timeout=15) as r:
-            return float(json.loads(r.read().decode())["price"])
-    except Exception:
-        return None
+            return float(json.loads(r.read().decode())["price"]), None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except Exception as e:
+        return None, type(e).__name__
 
 
 # --- Alpaca ---------------------------------------------------------------
@@ -288,7 +389,14 @@ def build_report(data) -> str:
         if v.get("buying_power") is not None and "buying_power" in v:
             p(f"    buying power  ${v['buying_power']:>12,.2f}")
         if v.get("coin_balances"):
-            p(f"    coins held    ${v.get('coin_usd', 0.0):>12,.2f}")
+            if v.get("coin_usd") is None:
+                p(f"    coins held    {'UNKNOWN':>13}   "
+                  f"(0 of {v.get('coin_holdings_count', 0)} could be priced)")
+            else:
+                p(f"    coins held    ${v['coin_usd']:>12,.2f}"
+                  + (f"   ({v.get('coin_priced_count', 0)} of "
+                     f"{v.get('coin_holdings_count', 0)} priced)"
+                     if v.get("unpriced") else ""))
             for cur, d in sorted(v["coin_balances"].items(),
                                  key=lambda kv: -(kv[1].get("usd") or 0)):
                 if d.get("usd") is None:
@@ -298,8 +406,14 @@ def build_report(data) -> str:
                       f"  = ${d['usd']:>10,.2f}")
         if "coin_usd" in v:
             p(f"    ---")
-            p(f"    venue total   ${v['usd_cash'] + v['coin_usd']:>12,.2f}"
-              f"   (cash + coins)")
+            if v.get("coin_usd") is None:
+                # Never add a number to an unknown and print the result as
+                # a venue total. Cash is still a fact; the sum is not.
+                p(f"    venue total   {'UNKNOWN':>13}   "
+                  f"(cash ${v['usd_cash']:,.2f} + coins that could not be priced)")
+            else:
+                p(f"    venue total   ${v['usd_cash'] + v['coin_usd']:>12,.2f}"
+                  f"   (cash + coins)")
         for k in ("source", "endpoint"):
             if v.get(k):
                 p(f"    {k:<13} {v[k]}")

@@ -6589,6 +6589,46 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                         "CONCENTRATION", _conc_reason)
             return
 
+        # THE EXECUTION GATE. Called here so no buy path can reach the venue
+        # without passing it - the failure this exists to prevent is a worker
+        # doing `if branch.active: place_order()` and walking past the whole
+        # safety layer, which is exactly how two coins reached 26% each.
+        #
+        # OBSERVE BY DEFAULT. There are 23 branches and no control rows yet, and
+        # the gate correctly refuses a branch it has never reconciled - so
+        # enforcing on the first deploy would halt the fleet. It records what it
+        # would have blocked until EXECUTION_GATE_MODE=enforce.
+        #
+        # Its own failure is never a reason to trade. An exception here returns
+        # without buying, because an un-auditable buy is the one nobody can
+        # reconstruct afterwards.
+        try:
+            import branch_audit_service as _bas
+            from database import get_session_factory as _gsf
+            async with _gsf()() as _asess:
+                _svc = _bas.BranchAuditService(_asess)
+                await _bas.ensure_control_state(
+                    _asess, bot_name=branch.bot_name, branch_id=branch.id)
+                _truth = _bas.ExchangeTruth(
+                    readable=True, is_current=True, matched=True,
+                    detail="grid cycle read the venue this pass")
+                _d = await _bas.check_or_observe(
+                    _bas.ExecutionGate(_svc), bot_name=branch.bot_name,
+                    action="ENTRY", truth=_truth,
+                    context={"spend_usd": spend, "product_id": branch.product_id})
+                await _asess.commit()
+            if not _d.allowed:
+                log.info(f"[GRID] {branch.bot_name}: 🔒 execution gate - "
+                         f"{_d.reason_code} ({_d.gate}): {_d.detail}")
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "EXECUTION_GATE", _d.detail)
+                return
+        except Exception as _exc:
+            log.warning(f"[GRID] {branch.bot_name}: execution gate unavailable "
+                        f"({type(_exc).__name__}: {_exc}) - NOT buying. An "
+                        f"un-auditable buy is refused, not allowed through.")
+            return
+
         _gate_detail = {}
         gate_ok, gate_reason = await _net_edge_gate_ok(
             session, branch.product_id, grid_pct, spend, bot_name=branch.bot_name,
@@ -8323,6 +8363,18 @@ async def get_grid_status() -> dict:
                 total_net_usd += net_usd
                 total_cost_basis += cost_basis
             slices_out.append({
+                # THE PRIMARY KEY, WITHOUT WHICH RECONCILE CANNOT WRITE.
+                #
+                # slice_reconcile builds its actions as {"slice_id": r.get("id"),
+                # ...} and the reconcile endpoint then looks the row up by it.
+                # This serialiser never served the id, so every action carried
+                # slice_id=None, every lookup matched nothing, and the whole
+                # apply path deleted and reduced exactly zero rows while
+                # reporting each branch as corrected. A field that is stored
+                # but not served is indistinguishable from one that was never
+                # written - the comment three lines down says so about
+                # order_side, and the same trap caught this.
+                "id": getattr(s, "id", None),
                 "entry_price": s.entry_price, "qty": s.qty,
                 "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None,
                 "unrealized_net_usd": round(net_usd, 2) if net_usd is not None else None,
@@ -9054,7 +9106,10 @@ def _funnel_bottleneck(sig, attempted, filled, completed) -> str:
 
 
 async def close_all_grid_slices(only_bot_name: str = None,
-                                only_product_id: str = None) -> dict:
+                                only_product_id: str = None,
+                                only_slice_ids=None,
+                                exit_reason: str = "close_all",
+                                allow_unverified_balance: bool = True) -> dict:
     """Real, one-way "close everything" - per the account owner's direct
     request for one button at the bottom of the Grid Bot section that
     takes all the real profit if the whole section is up, instead of
@@ -9080,6 +9135,35 @@ async def close_all_grid_slices(only_bot_name: str = None,
     real close in the same call - each branch's outcome is independent
     and reported separately.
 
+    THREE PARAMETERS MAKE THIS REUSABLE BY THE ROTATION, all defaulting to
+    exactly today's close-all behaviour so that path is byte-identical:
+
+      only_slice_ids   settle a SUBSET of a branch's slices instead of all
+                       of them. This is what the concentration rotation
+                       needs, and handing it this function rather than a
+                       parallel sell path is the whole point: the slice row
+                       is retired, allocated_usd is written back, the trade
+                       history row is written and the reference price moves,
+                       all by the code that already does it. The first
+                       rotation worker did none of that - it incremented a
+                       counter and logged a line, and every "successful"
+                       rotation would have widened the $1,168.59 gap between
+                       what the books claim and what the wallet holds.
+
+      exit_reason      so the ledger can tell a rotation from a close-all.
+                       Both are market exits at the taker rate, and a column
+                       that calls them the same thing cannot answer "did
+                       rotating actually pay?".
+
+      allow_unverified_balance
+                       close-all is a PROTECTION and fails OPEN: leaving a
+                       live position unsold is the worse outcome, so it is
+                       allowed to sell an unverified quantity. The rotation
+                       is OPPORTUNISTIC, not a protection - there is always
+                       a next pass - so it passes False and refuses rather
+                       than sending an order sized off a number the wallet
+                       could not confirm.
+
     `only_bot_name` / `only_product_id` narrow it to a single branch,
     which is what makes closing ONE position possible at all - there was
     no path to it before, and the only alternative was a raw Coinbase
@@ -9103,8 +9187,17 @@ async def close_all_grid_slices(only_bot_name: str = None,
     async with engine.aiohttp.ClientSession() as session:
         for b in branches:
             slices = await get_grid_slices(b.bot_name)
+            if only_slice_ids is not None:
+                # Settle only the named rows. An id that is not on this
+                # branch simply does not match - this never widens the set.
+                _want = {str(x) for x in only_slice_ids}
+                slices = [s for s in slices if str(s.id) in _want]
             if not slices:
                 continue
+            # Computed AFTER the filter, so a subset sells only its own
+            # quantity. Reading this before the filter would have sold the
+            # whole branch and settled a fraction of it - the exact books/
+            # wallet divergence this function is being reused to avoid.
             total_qty = sum(s.qty for s in slices)
             # close-all is a PROTECTION, and protections fail open: if the
             # balance cannot be read here, leaving a live position open is
@@ -9112,7 +9205,7 @@ async def close_all_grid_slices(only_bot_name: str = None,
             # an unverified quantity. Every other seller refuses.
             fill = await engine.place_market_sell(session, total_qty, b.product_id,
                                                   source="grid_close_branch",
-                                                  allow_unverified_balance=True)
+                                                  allow_unverified_balance=allow_unverified_balance)
             if not fill:
                 reason = engine._last_order_error.get(b.product_id, "real sell did not fill")
                 results.append({
@@ -9148,7 +9241,7 @@ async def close_all_grid_slices(only_bot_name: str = None,
                     await _log_grid_trade(
                         b.bot_name, b.product_id, s.entry_price, filled_price,
                         s.qty, pnl, s.opened_at,
-                        exit_reason="close_all",
+                        exit_reason=exit_reason,
                         mae_pct=getattr(s, "mae_pct", None),
                         mfe_pct=getattr(s, "mfe_pct", None),
                         entry_atr_pct=getattr(s, "entry_atr_pct", None),

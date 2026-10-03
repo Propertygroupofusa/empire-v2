@@ -56,6 +56,7 @@ from models import BotPosition
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 import execution_quantity as _eq
+import dust_cooldown as _dust
 log = logging.getLogger("crypto_btc_compound_bot")
 
 
@@ -518,11 +519,70 @@ def _auth_headers(method: str, path: str, body: str = "") -> dict:
     raise ValueError("No Coinbase API credentials configured. Set either CDP (COINBASE_API_KEY_NAME + COINBASE_API_PRIVATE_KEY) or HMAC (COINBASE_API_KEY + COINBASE_SECRET_KEY + COINBASE_PASSPHRASE)")
 
 
+# ONE ACCOUNT PULL SERVES EVERY CURRENCY IN IT.
+#
+# get_asset_balance reads /api/v3/brokerage/accounts - the WHOLE account
+# list, up to 250 rows a page - and then scans it for ONE currency. Reading
+# USD and USDC was therefore two complete account pulls for two numbers that
+# arrive in the same response. There are 38 call sites across 7 files, and
+# place_maker_sell calls it per branch per cycle: 23 branches on a 30s cycle
+# is 23 full account listings a minute from that path alone, before the
+# census, the dashboard and the other bots.
+#
+# That is where the rate limiting came from. Measured 2026-10-01 05:21Z:
+#
+#     WARNING HTTP 429 fetching USD
+#     WARNING HTTP 429 fetching USDC
+#     WARNING [GRID] real fee-tier lookup failed (HTTP 429)
+#     [GRID] account book unreadable - concentration not checked this cycle
+#     [DEPLOY] UNKNOWN: free cash unreadable - a gap is not a zero
+#
+# Every one of those is downstream of the same thing: too many identical
+# calls. The response already contains every currency, so one pull now
+# answers all of them for a short window.
+#
+# THE TTL IS SHORT ON PURPOSE. place_maker_sell sizes REAL ORDERS against
+# this number. Ten seconds collapses one cycle's reads into one call while
+# staying current inside that cycle; anything longer starts sizing orders
+# against a balance that a fill may already have changed.
+_BALANCE_TTL_SECONDS = float(os.getenv("COINBASE_BALANCE_TTL_SECONDS", "10"))
+_BALANCES_CACHE = {"at": 0.0, "by_currency": None}
+
+
+def invalidate_balance_cache(reason: str = "") -> None:
+    """Drop the cached balances. Call after anything that moves money.
+
+    A fill changes a balance, and an order sized against the balance from
+    before it is an order sized against money that is already gone. Cheaper
+    to re-read than to reason about which currencies a fill touched.
+    """
+    _BALANCES_CACHE["by_currency"] = None
+    _BALANCES_CACHE["at"] = 0.0
+    if reason:
+        log.debug(f"[balances] cache dropped: {reason}")
+
+
 async def get_asset_balance(session, currency: str) -> tuple:
     """Real available balance of a given asset currency (e.g. 'USD', 'DOT',
-    'LDO'). Returns (balance, None) or (None, reason)."""
+    'LDO'). Returns (balance, None) or (None, reason).
+
+    Served from a short-lived cache of the whole account listing - see
+    _BALANCES_CACHE above. A FAILED read is never cached and never served:
+    an error returns an error, so a rate limit still reads as a gap rather
+    than as a stale number wearing a current one's clothes.
+    """
+    cached = _BALANCES_CACHE.get("by_currency")
+    if cached is not None and (time.time() - _BALANCES_CACHE["at"]) < _BALANCE_TTL_SECONDS:
+        if currency in cached:
+            return cached[currency], None
+        # A currency absent from a COMPLETE listing genuinely has no account
+        # on this key. That is the same answer the uncached path gives.
+        return None, f"no {currency} account found on this key"
+
     path = "/api/v3/brokerage/accounts"
     cursor = None
+    _all = {}
+    _walked_to_end = False
     try:
         while True:
             params = {"limit": 250}
@@ -544,11 +604,38 @@ async def get_asset_balance(session, currency: str) -> tuple:
                     return None, f"HTTP {r.status}: {body}"
                 data = await r.json()
                 for account in data.get("accounts", []):
-                    if account.get("currency") == currency:
-                        return float(account["available_balance"]["value"]), None
-                if not data.get("has_next") or not data.get("cursor"):
+                    # Keep EVERY currency this page carried, not just the one
+                    # asked for. The rows are already here; throwing them away
+                    # is what made the next caller fetch them again.
+                    cur = account.get("currency")
+                    if not cur:
+                        continue
+                    try:
+                        _all[cur] = float(account["available_balance"]["value"])
+                    except (TypeError, ValueError, KeyError):
+                        continue      # an unreadable row is skipped, never zeroed
+                if not data.get("has_next"):
+                    _walked_to_end = True      # genuinely the last page
+                    break
+                if not data.get("cursor"):
+                    # has_next says there IS more and the venue gave us no way
+                    # to ask for it. The listing is INCOMPLETE, and the
+                    # difference matters: a complete listing can say "this key
+                    # has no DOGE account", an incomplete one cannot.
                     break
                 cursor = data.get("cursor")
+        # Cache only a listing walked to its end. Caching a partial one would
+        # make a currency on an unfetched page look like it has no account at
+        # all - a gap reported as a fact, which is the bug this codebase keeps
+        # relearning.
+        if _walked_to_end:
+            _BALANCES_CACHE["by_currency"] = _all
+            _BALANCES_CACHE["at"] = time.time()
+        if currency in _all:
+            return _all[currency], None
+        if not _walked_to_end:
+            return None, (f"{currency} not found, but the account listing was "
+                          f"incomplete - this is UNKNOWN, not an absent account")
         return None, f"no {currency} account found on this key"
     except asyncio.TimeoutError:
         return None, "Coinbase API timeout"
@@ -1646,7 +1733,13 @@ async def place_maker_buy(session, usd_amount: float, product_id: str = PRODUCT_
             "post_only": True,
         }},
     }
-    return await _place_maker_order(session, order, wait_seconds)
+    _buy_result = await _place_maker_order(session, order, wait_seconds)
+    if _buy_result:
+        # Inventory on this product just grew, so a dust verdict recorded
+        # against the old balance is stale. Drop it and let the next cycle
+        # ask the venue properly instead of serving the stale answer.
+        _dust.clear(product_id)
+    return _buy_result
 
 
 async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wait_seconds: int = 45):
@@ -1666,6 +1759,38 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     # reached it is 0.0, and recording that as the requested size would say
     # nothing at all.
     _asked_qty = qty
+    # DO NOT RE-ASK A QUESTION WHOSE ANSWER CANNOT HAVE CHANGED. The three
+    # calls below - balance, product rules, order book - are all spent
+    # BEFORE the dust verdict is even computed, and on a branch holding less
+    # than one tradeable unit that verdict is already known. The cooldown is
+    # armed only by a computed DUST decision, never by an unreadable read,
+    # and a buy on this product clears it the moment inventory could grow.
+    _dust_skip = _dust.skip_reason(product_id)
+    if _dust_skip:
+        log.debug(f"[GRID] {product_id}: no maker sell attempted - {_dust_skip}")
+        _last_order_error[product_id] = f"dust cooldown: {_dust_skip}"
+        _last_order_rested[product_id] = False
+        # available_units deliberately absent: nothing was read this pass, so
+        # there is no current figure. The last known one lives in the cooldown.
+        _last_order_block[product_id] = {"requested_qty": _asked_qty,
+                                         "decision": _dust.DUST,
+                                         "reason": "DUST_COOLDOWN"}
+        return None
+    # NOTHING IS ARMED YET, AND THREE AWAITS ARE ABOUT TO HAPPEN. The check
+    # above passed, the real verdict is computed at the bottom of this
+    # function, and between here and there this coroutine awaits the balance,
+    # the product rules and the order book. A second attempt on the same
+    # product that starts inside that window passes the same check and spends
+    # its own three Coinbase calls.
+    #
+    # Live, over 15.2 hours on a 900s cooldown, the gaps between REAL venue
+    # attempts were: QNT median 310s shortest 8s, PEPE median 198s, TIA
+    # median 55s. An 8-second gap is not an expiry.
+    #
+    # The hold is provisional and is overwritten by the real verdict moments
+    # later. It asserts nothing about inventory - it only stops the SECOND
+    # caller inside the gap from paying for the same answer.
+    _dust.hold(product_id)
     real_balance, _bal_err = await get_asset_balance(session, base_currency)
     if real_balance is None:
         # Same rule, no exception. This is the opportunistic maker path and
@@ -1724,6 +1849,11 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         price=ask, base_increment=rules["base_increment"],
         base_min_size=rules["base_min_size"],
         quote_min_size=rules["quote_min_size"])
+
+    # One call covers both directions: a DUST decision arms the cooldown,
+    # and anything else (EXECUTE included) clears it.
+    _dust.note_dust(product_id, plan.decision, available_units=real_balance,
+                    reason=plan.reason)
 
     if not plan.should_execute:
         # DUST IS NOT A FAILED SALE. The old message here was "nothing
@@ -1909,6 +2039,14 @@ async def _place_and_confirm(session, path: str, order: dict, source: str = None
                     _last_order_error[product_id] = reason
                 return None
             order_id = resp["success_response"]["order_id"]
+            # THE BALANCE JUST CHANGED. Coinbase has minted an order, so the
+            # coin or cash behind it is reserved from this instant - before
+            # any fill. Serving the pre-order balance to the next caller is
+            # how an order gets sized against money that is already spoken
+            # for, so the cache is dropped here rather than waiting out its
+            # TTL. Cheaper to re-read than to reason about which currencies
+            # this order touched.
+            invalidate_balance_cache(f"order {order_id} created")
             if product_id:
                 _last_order_error.pop(product_id, None)
                 # Recorded at the same instant as _record_order_source below

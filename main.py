@@ -1145,6 +1145,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"alert queue not started: {type(e).__name__}: {e}")
 
+        # TELL THE OWNER WHEN A TRADE CLOSES. crypto_grid_bot.py has no
+        # email code at all, so all 162 round trips closed in silence.
+        # Off unless TRADE_EMAIL_MODE=send; the loop itself is harmless
+        # either way, since check_once refuses before it reads anything.
+        try:
+            import trade_notify_worker
+            from database import get_session_factory as _trade_sf
+            asyncio.create_task(trade_notify_worker.run_periodically(_trade_sf))
+            log.info("📧 Trade notifier running (sends only when "
+                     "TRADE_EMAIL_MODE=send)")
+        except Exception as e:
+            log.warning(f"trade notifier not started: {type(e).__name__}: {e}")
+
         # THE EXPERIMENT GUARD. A budget nobody enforces is a wish.
         #
         # It can only ever move the profile in the SAFE direction - this
@@ -1178,6 +1191,66 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             try:
                 log.warning(f"auto-trimmer not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
+        # CONCENTRATION ROTATION. Frees capital out of a branch that is over
+        # the 20% limit, at a PROFIT or not at all - and it does not own a
+        # sell path. It hands the chosen slices to close_all_grid_slices,
+        # the grid's own sell-and-settle code, which retires the slice row,
+        # writes allocated_usd back and records the trade. Two earlier
+        # versions of this worker were thrown away for doing none of that:
+        # they sold, incremented a counter, and left the books claiming coin
+        # the wallet no longer held.
+        #
+        # INERT UNTIL ARMED. Nothing happens unless
+        # CONCENTRATION_ROTATION_MODE is exactly "arm" - unset, misspelled,
+        # "true" and "yes" all observe. Checked before anything is fetched
+        # and again immediately before each settle. There is no buy path in
+        # the module and a test asserts it.
+        try:
+            import concentration_rotation_worker
+            asyncio.create_task(concentration_rotation_worker.run_periodically())
+            try:
+                log.info(f"🔁 Concentration rotation running, "
+                         f"mode={concentration_rotation_worker.current_mode()}, "
+                         f"every {concentration_rotation_worker.INTERVAL_SECONDS}s, "
+                         f"max {concentration_rotation_worker.MAX_SELLS_PER_PASS} "
+                         f"slice(s)/pass")
+            except Exception:
+                pass          # a failure to LOG must never unstart the task
+        except Exception as e:
+            try:
+                log.warning(f"concentration rotation not started: "
+                            f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
+
+        # EXCHANGE TRUTH. Reads only - no orders, no money, no switch to
+        # arm, because there is nothing here to arm. It compares the grid's
+        # books against the venue's balances every 5 minutes and writes the
+        # verdict into branch_control_state and exchange_truth_failures.
+        #
+        # It exists because those tables were empty while the fleet was in
+        # exactly the condition they were built for: on 2026-10-01 the
+        # failure table read 0 rows AND readable, beside 8 branches holding
+        # $1,168.59 of claimed coin that is not in the wallet. The execution
+        # gate therefore denied on UNKNOWN - "never checked" - when the check
+        # had been running every cycle inside the dashboard and had nowhere
+        # to go. An unreadable balance still records NOTHING here: a venue
+        # that will not answer is not evidence about the books.
+        try:
+            import exchange_truth_worker
+            from database import get_session_factory as _truth_sf
+            asyncio.create_task(exchange_truth_worker.run_periodically(_truth_sf))
+            try:
+                log.info(f"🔍 Exchange-truth recorder running, every "
+                         f"{exchange_truth_worker.CHECK_SECONDS}s (read-only)")
+            except Exception:
+                pass          # a failure to LOG must never unstart the task
+        except Exception as e:
+            try:
+                log.warning(f"exchange-truth recorder not started: {type(e).__name__}: {e}")
             except Exception:
                 pass
 

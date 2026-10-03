@@ -718,22 +718,24 @@ TRADE_ALERT_EMAIL = os.getenv("TRADE_ALERT_EMAIL", "delfarrell591@gmail.com")
 
 
 def send_trade_alert(subject: str, body: str):
-    sender_email = os.getenv("GMAIL_EMAIL", "")
-    sender_password = os.getenv("GMAIL_PASSWORD", "")
-    if not sender_email or not sender_password:
-        log.info(f"(trade alert email skipped - GMAIL_EMAIL/GMAIL_PASSWORD not set) {subject}")
-        return
+    """One shared transport, so this stops failing silently.
+
+    This used to open smtp.gmail.com:465 directly. Measured on this host
+    2026-10-01: Railway blocks outbound SMTP on BOTH 465 and 587, so
+    every send here has been failing and saying so only in a log line
+    nobody reads. alert_sender.send_email tries HTTPS first - which
+    demonstrably works, the app talks to Coinbase all day - and names
+    every transport it tried when none of them land.
+    """
     try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = sender_email
-        msg["To"] = TRADE_ALERT_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender_email, sender_password)
-            server.sendmail(sender_email, TRADE_ALERT_EMAIL, msg.as_string())
-        log.info(f"📧 Trade alert emailed to {TRADE_ALERT_EMAIL}")
+        import alert_sender
+        ok, err = alert_sender.send_email(subject, body)
     except Exception as e:
-        log.warning(f"Trade alert email failed: {e}")
+        ok, err = False, f"{type(e).__name__}"
+    if ok:
+        log.info(f"📧 Trade alert emailed: {subject}")
+    else:
+        log.warning(f"Trade alert NOT delivered ({err}): {subject}")
 
 
 _price_rsi_last_failure = {}
@@ -2011,6 +2013,16 @@ def format_order_qty(qty):
     return f"{rounded:.9f}".rstrip("0").rstrip("."), True
 
 
+# Alpaca's minimum order value, quoted by the venue in its own rejection:
+# "cost basis must be >= minimal amount of order 1".
+MIN_ORDER_NOTIONAL_USD = 1.0
+
+# Last under-minimum notional logged per symbol, so the condition is
+# reported when it changes rather than on every cycle. Keyed by symbol;
+# an absent key means "never seen", which is not the same as $0.
+_below_min_logged = {}
+
+
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend,
                                 stop_loss=None, target=None, source="unlabelled"):
     """Place a real order via Alpaca. `action` is the literal order side
@@ -2028,6 +2040,49 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     if qty_str is None:
         log.error(f"❌ Refusing to order {qty!r} of {contract} ({symbol}) - not a usable "
                   f"quantity. No order was placed.")
+        return False
+
+    # THE VENUE'S MINIMUM ORDER VALUE, CHECKED BEFORE SENDING.
+    #
+    # Live 2026-10-01, every ~30 seconds for hours:
+    #
+    #   READY TO ENTER: LONG SH | Price: $32.40 | Qty: 0.020988
+    #   Futures order REJECTED (HTTP 403): cost basis must be >= minimal
+    #   amount of order 1 | BUY 0.020988 SH
+    #
+    # A $980 account sizing 8 positions by risk produces sub-dollar orders,
+    # and Alpaca refuses anything under $1 of cost basis. The bot had no
+    # idea: it computed the size, sent it, got a 403, and tried again on the
+    # next cycle, forever. Hours of log noise and API calls over an order
+    # the venue was never going to accept.
+    #
+    # IT REFUSES RATHER THAN ROUNDING THE SIZE UP. Bumping 0.020988 to the
+    # $1 minimum is a 47% larger position than the risk model asked for.
+    # The dollar amount is trivial; silently overriding the sizing model is
+    # not, and a guard that quietly buys more than it was told to is the
+    # kind that is fine until the day it isn't.
+    #
+    # Only SELLs are exempt: an exit must always be able to leave, and a
+    # sell is bounded by the position already held.
+    _notional = None
+    try:
+        _notional = abs(float(qty)) * abs(float(price))
+    except (TypeError, ValueError):
+        _notional = None          # unreadable is not "fine", see below
+    if side == "buy" and (_notional is None or _notional < MIN_ORDER_NOTIONAL_USD):
+        _seen = _below_min_logged.get(symbol)
+        if _seen != round(_notional or -1.0, 2):
+            # Logged once per distinct size, not once per cycle. The retry
+            # storm is the bug; the condition itself is worth knowing once.
+            _below_min_logged[symbol] = round(_notional or -1.0, 2)
+            log.warning(
+                f"⛔ NOT SENT - {contract} ({symbol}) sizes to "
+                f"{'an unreadable notional' if _notional is None else f'${_notional:,.2f}'}, "
+                f"under Alpaca's ${MIN_ORDER_NOTIONAL_USD:,.2f} minimum order value. "
+                f"Refusing rather than buying more than the risk model asked for. "
+                f"This account is too small for its position count at this price - "
+                f"fewer concurrent positions, or more equity, is the fix."
+            )
         return False
 
     # DAY, always.

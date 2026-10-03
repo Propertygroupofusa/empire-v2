@@ -65,10 +65,46 @@ def test_exactly_at_the_ceiling_is_allowed_not_refused():
     assert allow is True, "20.0% is at the ceiling, not over it"
 
 
-def test_an_unreadable_fleet_fails_open_and_says_so():
+def test_an_unreadable_fleet_fails_CLOSED_and_says_so():
+    """REVERSED 2026-10-01. This test used to assert fail-OPEN.
+
+    The reasoning then was "unknown is not a breach". That is true of a
+    measurement and false of a ceiling. The book goes unreadable exactly
+    when Coinbase rate-limits - 05:21Z that morning: HTTP 429 fetching USD,
+    then "[GRID] account book unreadable - concentration not checked this
+    cycle" - which is to say the 20% rule switched itself off under load,
+    which is when it was most needed. ZEC and XRP reached 26.6% each and
+    between them carried 89% of the account's unrealised loss.
+
+    The two errors are not symmetric. A refused buy costs one cycle and the
+    grid buys dips, so there is another one. An unmeasured buy is unbounded.
+    """
     allow, reason = gate.concentration_verdict("ZEC-USD", None, 100.0)
-    assert allow is True
+    assert allow is False
     assert "unreadable" in reason
+    assert "REFUSING" in reason
+
+
+def test_the_429_scenario_end_to_end():
+    """The live failure, as a fixture: ZEC already over, book unreadable."""
+    readable = {"ZEC": 2272.62, "XRP": 2240.84, "USD": 1276.40, "XLM": 469.69}
+    allow, _ = gate.concentration_verdict("ZEC-USD", readable, 500.0)
+    assert allow is False, "a readable book already refuses this"
+    # Same buy, same instant, only the account read failed.
+    allow, _ = gate.concentration_verdict("ZEC-USD", None, 500.0)
+    assert allow is False, ("a rate limit must not be a way around the ceiling - "
+                            "this is the whole bug")
+
+
+def test_a_first_buy_is_still_possible_when_nothing_is_held():
+    """Failing closed must not make the fleet unable to ever start.
+
+    An EMPTY book is readable and says the account holds nothing; that is a
+    different thing from a book that could not be read at all, and only the
+    second one refuses.
+    """
+    allow, _ = gate.concentration_verdict("ZEC-USD", {}, 100.0)
+    assert allow is True
 
 
 def test_an_empty_fleet_is_unknown_not_zero():
@@ -110,4 +146,8 @@ def test_a_coin_the_fleet_does_not_hold_is_measured_on_the_buy_alone():
 
 def test_garbage_in_is_unknown_not_a_crash():
     assert gate.coin_share("A-USD", {"A-USD": "not-a-number"}, 0.0) is None
-    assert gate.concentration_verdict("A-USD", "not-a-map", 10.0)[0] is True
+    # Garbage still must not CRASH - but it is now refused rather than
+    # allowed, for the same reason an unreadable book is.
+    allow, reason = gate.concentration_verdict("A-USD", "not-a-map", 10.0)
+    assert allow is False
+    assert "unreadable" in reason

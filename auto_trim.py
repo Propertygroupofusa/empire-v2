@@ -62,6 +62,19 @@ LIMIT_PCT = concentration_gate.MAX_SINGLE_COIN_SHARE * 100
 BUFFER_PCT = 0.5          # trim to 19.5%, so a small tick does not re-fire
 
 # --- bounds on a single pass ------------------------------------------
+# THE PROFIT FLOOR. Shares one number with the rotation planner rather than
+# restating it - a second copy of a cost model is how the maker/taker bug got
+# in. 1.6407% = 0.35% maker entry + 0.75% TAKER exit + 0.5407% adverse
+# selection, measured on this account's own live fee tier.
+try:                                     # pragma: no cover - import shape only
+    from concentration_rotation import DEFAULT_ROUND_TRIP_COST_PCT as ROUND_TRIP_COST_PCT
+except Exception:                        # the planner must never be able to
+    ROUND_TRIP_COST_PCT = 1.6407         # disarm the floor by failing to import
+
+# Default ON. Turning it off lets an armed trimmer realise a loss without a
+# human, which is the thing the account owner has said has no exceptions.
+REQUIRE_PROFIT = True
+
 MIN_TRIM_USD = 25.0       # below this the fee is a meaningful share of it
 MAX_TRIM_USD = 750.0      # no single order larger than this
 MAX_DAILY_TRIM_USD = 1500.0
@@ -191,7 +204,9 @@ def spent_today(history, now):
 def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
                buffer_pct=BUFFER_PCT, max_trim_usd=MAX_TRIM_USD,
                max_daily_usd=MAX_DAILY_TRIM_USD, min_trim_usd=MIN_TRIM_USD,
-               cooldown_hours=COOLDOWN_HOURS, actively_traded=()):
+               cooldown_hours=COOLDOWN_HOURS, actively_traded=(),
+               cost_basis=None, require_profit=REQUIRE_PROFIT,
+               round_trip_cost_pct=ROUND_TRIP_COST_PCT):
     """What to trim right now, and for every holding, why not.
 
     `holdings` is the census list: dicts with `asset`, `usd`, `units`,
@@ -295,6 +310,60 @@ def plan_trims(holdings, total_usd, *, now, history=(), limit_pct=LIMIT_PCT,
                                f"slices on it - trimming here would sell coin the grid "
                                f"still has on its books. Raise it with the grid instead."))
             out.append(rec); continue
+
+        # NOTHING NEGATIVE REALISED. The owner's rule, absolute, and until now
+        # this file had no way to honour it: there is no entry_price, no
+        # net_pct and no round-trip anywhere in it. Its own docstring says so
+        # - "It does not know whether now is a good time to sell. It has no
+        # view on price, trend, or whether the coin is mid-crash."
+        #
+        # That was survivable only by accident. Measured 2026-10-01, XRP sat
+        # at 20.7% - over the line, $120.22 of excess, armed - and the ONLY
+        # thing standing between it and an automatic sale at -4.18% was the
+        # ACTIVELY_TRADED guard above, which exists for a completely
+        # different reason. Take the grid slices off XRP and this file would
+        # have realised that loss on its own, with no human in the loop.
+        #
+        # AN UNKNOWN BASIS IS NOT A PROFIT. If nothing can say what the coin
+        # cost, nothing can say the sale is a gain, and the rule is absolute
+        # rather than probable. So it refuses and says which it is - a
+        # refusal costs a cycle of concentration, a wrong sale costs money
+        # and breaks the one rule that has no exceptions.
+        if require_profit:
+            basis = _num((cost_basis or {}).get(asset))
+            if basis is None or basis <= 0:
+                rec.update(reason="BASIS_UNKNOWN",
+                           detail=(f"{asset} is {share:.2f}% of the account and "
+                                   f"${need:,.2f} over the {limit_pct:.0f}% rule, but "
+                                   f"nothing here knows what it cost. An unknown basis "
+                                   f"cannot be shown to be a profit, and this account's "
+                                   f"rule is that nothing is realised at a loss."))
+                out.append(rec); continue
+            # The price comes off the holding row. The census carries one;
+            # when it does not, usd/units is the same number the account is
+            # actually marked at, and is preferred over refusing a holding
+            # whose value IS known.
+            px = _num(h.get("price"))
+            if px is None or px <= 0:
+                _u = _num(h.get("units"))
+                px = (usd / _u) if (usd is not None and _u not in (None, 0)) else None
+            if px is None or px <= 0:
+                rec.update(reason="PRICE_UNREADABLE",
+                           detail=(f"{asset} has no readable price, so the sale cannot "
+                                   f"be shown to clear its cost. Not trimmed."))
+                out.append(rec); continue
+            net = (px / basis - 1.0) * 100.0 - (_num(round_trip_cost_pct) or 0.0)
+            if net <= 0:
+                rec.update(reason="WOULD_REALISE_A_LOSS",
+                           detail=(f"{asset} is {share:.2f}% of the account and "
+                                   f"${need:,.2f} over the {limit_pct:.0f}% rule, but "
+                                   f"selling now nets {net:+.2f}% after the "
+                                   f"{_num(round_trip_cost_pct):.4f}% round trip. "
+                                   f"Over the limit is not a reason to book a loss - "
+                                   f"it waits for a price that clears cost."))
+                rec["net_pct_if_sold"] = round(net, 4)
+                out.append(rec); continue
+            rec["net_pct_if_sold"] = round(net, 4)
 
         last = last_trim_at(history, asset)
         if last is not None and isinstance(now, datetime):

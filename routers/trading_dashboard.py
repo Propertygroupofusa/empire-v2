@@ -349,6 +349,52 @@ def _bot_pl(bot: TradingBotState) -> float:
     return bot.base_capital - baseline
 
 
+async def _alpaca_realized_record(session: aiohttp.ClientSession) -> dict:
+    """The account's REAL closed-trade record, or an explicit UNKNOWN.
+
+    Never returns zeros on failure. A fetch that did not happen and a
+    genuine flat record are different facts, and this figure is read to
+    decide whether a strategy is working - the most expensive place in
+    the app to confuse the two.
+    """
+    import closed_trades
+    try:
+        params = {"status": "closed", "direction": "asc", "limit": "500"}
+        async with session.get(f"{ALPACA_BASE_URL}/v2/orders",
+                               headers=ALPACA_HEADERS, params=params) as r:
+            if r.status != 200:
+                return {"readable": False,
+                        "reason": f"HTTP {r.status} fetching order history"}
+            orders = await r.json()
+    except Exception as exc:
+        return {"readable": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    out = closed_trades.pair_round_trips(orders, _KNOWN_ORDER_SOURCES)
+    t = out["totals"]
+    n = t["round_trips"]
+    if not n:
+        return {"readable": True, "round_trips": 0, "net_pnl": 0.0,
+                "winners": 0, "losers": 0, "win_rate_pct": None,
+                "avg_per_trade": None,
+                "note": "No closed round trip in the fetched order window."}
+    net = t["realised_pnl"]
+    return {
+        "readable": True,
+        "round_trips": n,
+        "net_pnl": round(net, 2),
+        "winners": t["winners"],
+        "losers": t["losers"],
+        "win_rate_pct": round(t["winners"] / n * 100, 1),
+        "avg_per_trade": round(net / n, 4),
+        "is_losing": net < 0,
+        "orders_scanned": len(orders) if isinstance(orders, list) else 0,
+        "note": ("This is what the trading EARNED. The per-bot 'profit' "
+                 "field below is a capital-bucket delta floored at zero, "
+                 "so it reads 0.00 for a bucket that is down - it is not "
+                 "this number and never was."),
+    }
+
+
 async def _fetch_dividend_activities(session: aiohttp.ClientSession) -> list:
     """Real dividend cash actually paid into the account, from Alpaca's
     account-activities history (activity_type=DIV) - not a projection or
@@ -2297,6 +2343,55 @@ async def get_trading_profile_status():
     out["how_to_switch"] = ("POST /api/trading-dashboard/trading-profile "
                             "?profile=aug2026&confirm=yes with the "
                             "x-dashboard-token header.")
+
+    # WHAT IT HAS DONE SINCE, so the historical loss is not the only
+    # number on the panel.
+    #
+    # measured_basis describes 2026-08-26..09-24: -$86.83 realized, on a
+    # fee tier that no longer applies. It is there to justify the switch,
+    # but it was the ONLY dollar figure rendered, under a green heading,
+    # and it reads as the account's current state. It is not - it is a
+    # closed window at 1.50% taker fees, and maker-only has been on since.
+    #
+    # Reported as UNREADABLE rather than zero when the history cannot be
+    # read: a missing record must not display as break-even.
+    out["since_then"] = {"readable": False,
+                         "note": "trade history could not be read - making no claim"}
+    try:
+        from models import CryptoGridTradeHistory
+        from database import get_session_factory
+        async with get_session_factory()() as _db:
+            _rows = (await _db.execute(
+                select(CryptoGridTradeHistory.pnl, CryptoGridTradeHistory.closed_at)
+                .where(CryptoGridTradeHistory.closed_at != None)  # noqa: E711
+                .order_by(CryptoGridTradeHistory.closed_at.asc()))).all()
+        _pnl = [float(r.pnl or 0) for r in _rows]
+        if _pnl:
+            _days = sorted({str(r.closed_at)[:10] for r in _rows if r.closed_at})
+            out["since_then"] = {
+                "readable": True,
+                "trades": len(_pnl),
+                "net_usd": round(sum(_pnl), 2),
+                "wins": sum(1 for v in _pnl if v > 0),
+                "first_day": _days[0] if _days else None,
+                "last_day": _days[-1] if _days else None,
+                "fee_basis": "0.70% maker round trip",
+                "note": ("What the fleet has actually realized on today's fee "
+                         "tier. The window in measured_basis is a CLOSED "
+                         "period at the old 1.50% taker rate, kept only to "
+                         "show why maker-only was turned on."),
+            }
+    except Exception as exc:
+        log.warning(f"[profile] since_then unreadable: {type(exc).__name__}: {exc}")
+
+    # The label is a SAFETY STATE, not a money verdict. Said here so the
+    # page does not have to infer it from a profile name.
+    out["label_means"] = {
+        "GUARDED": "protection is ON - every buy is checked before it is placed",
+        "is_a_money_claim": False,
+        "warning": ("This word names the gate set in force. It is not a "
+                    "statement about profit and must never be coloured as one."),
+    }
     return out
 
 
@@ -2664,6 +2759,22 @@ async def get_holdings_watch(window_days: int = 30, fresh: int = 0):
     out["window_days"] = window_days
     out["stop_policy"] = adaptive_stop.policy()
     out["as_of"] = census.get("as_of")
+    # THE DRAWDOWN BREAKERS, SO THE ALARM CAN SEE THEM.
+    #
+    # alert_queue.plan reads watch["breakers"] and had no source for it,
+    # which is why QNT (-29.99%), JASMY (-28.28%) and ONDO (-27.98%) all
+    # tripped without producing a single alert.
+    #
+    # CACHE ONLY, NEVER A FETCH. This is read off the grid-status cache
+    # that the dashboard already fills; if the cache is cold the key is
+    # OMITTED, not set to an empty list - an absent key is UNKNOWN to
+    # plan() and produces no rows, whereas [] would assert that no
+    # breaker is tripped on a pass where none could be seen. Adding a
+    # real grid-status rebuild here would put a heavy call on the alarm
+    # loop, which is the one loop that must not be able to stall.
+    out["breakers"] = _breakers_from_cache()
+    if out["breakers"] is None:
+        out.pop("breakers")
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0.0
     out["cache_seconds"] = WATCH_CACHE_SECONDS
@@ -5741,6 +5852,21 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
             if sym:
                 opened_at_by_symbol[sym] = await _fetch_position_opened_at(session, sym)
 
+        # THE REAL TRADING RECORD, on the page the owner actually reads.
+        # This account ran 232 closed round trips to a net of -$3.20 at a
+        # 32.8% win rate, and this endpoint showed "profit: 0.00" for all
+        # eight buckets the entire time - because _bot_profit floors at 0
+        # and _bot_pl measures a bucket's capital delta, which is not the
+        # same question as "what did the trading actually earn". Nobody
+        # could see a losing strategy for 141 days, over which equity
+        # ranged $973.03 to $1,016.50 and never grew.
+        #
+        # Reuses closed_trades.pair_round_trips - the same tested pure
+        # function /trades/closed serves - rather than a second copy of
+        # the pairing arithmetic, because two implementations of "what did
+        # we earn" is how the two numbers start disagreeing.
+        realized = await _alpaca_realized_record(session)
+
     try:
         equity = float(account.get("equity", 0))
         cash = float(account.get("cash", 0))
@@ -5808,6 +5934,12 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         "auto_close_profit_pct": ALPACA_AUTO_CLOSE_PROFIT_PCT,
         "auto_close_max_hold_days": ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS,
         "profit_skim_pct": ALPACA_PROFIT_SKIM_PCT,
+        "realized": realized,
+        "bot_profit_is_floored_at_zero": (
+            "bots[].profit is max(0, pl) for withdrawal eligibility, so a "
+            "bucket that is DOWN reports 0.00 rather than a negative "
+            "number. Read bots[].pl for the signed bucket delta, and "
+            "realized.net_pnl for what the trading actually earned."),
         "bots": [{"name": b.bot_name, "capital": round(b.base_capital, 2), "profit": round(_bot_profit(b), 2), "pl": round(_bot_pl(b), 2)} for b in bots],
         "positions": [
             {
@@ -8315,11 +8447,240 @@ async def capital_mobility():
     return out
 
 
+# THE HEAVIEST ENDPOINT ON THE PAGE, POLLED EVERY 15 SECONDS.
+#
+# Measured 2026-10-01 against production:
+#
+#     one request alone        4.98s   116,472 bytes
+#     four at once             9.6-9.7s each
+#
+# family_tree_dashboard.html runs setInterval(refresh, 15000) and
+# setInterval(loadActivityFeed, 5000) across 25 apiGet call sites, so this
+# 116KB response is asked for every 15s while it takes up to 9.7s to build.
+# On a phone the download pushes that past the point where the next poll has
+# already begun, requests stack, and the two GRID tiles fall back to a bare
+# dash with no reason attached.
+#
+# This is the failure /auto-trim already hit and already solved: "a poll every
+# 55s drove /auto-trim to accounts HTTP 429 AND starved the worker". Same
+# cure, same shape - a short read cache with ?fresh=1 to bypass.
+#
+# 25 SECONDS IS NOT ARBITRARY. crypto_grid_bot.CYCLE_SECONDS is 30, so the
+# fleet only changes once a cycle; serving a read fresher than the bot can
+# produce buys nothing and costs a full rebuild. Nothing that TRADES reads
+# this endpoint - every worker calls get_grid_status() in-process - so this
+# can only ever make a DASHBOARD number up to 25s old, never an order.
+_GRID_STATUS_CACHE = {"at": 0.0, "payload": None}
+_GRID_STATUS_TTL_SECONDS = float(os.getenv("GRID_STATUS_TTL_SECONDS", "25"))
+
+
+def _breakers_from_cache():
+    """Breaker verdicts off the grid-status cache. None when cold.
+
+    None means UNKNOWN and callers must omit the key rather than send an
+    empty list: "nothing could be read" and "nothing is tripped" are
+    different answers and only one of them is safe to act on.
+
+    Reads the cache without regard to its TTL on purpose. A breaker that
+    tripped 40 seconds ago is still tripped, and the alternative to a
+    slightly stale verdict here is no verdict at all - which is the state
+    that let three of them trip in silence.
+    """
+    payload = _GRID_STATUS_CACHE.get("payload")
+    if not payload:
+        return None
+    rows = payload.get("branches")
+    if not rows:
+        return None
+    out = []
+    for b in rows:
+        if not isinstance(b, dict):
+            continue
+        pid = b.get("product_id")
+        if not pid:
+            continue
+        br = b.get("drawdown_breached")
+        out.append({
+            "asset": str(pid),
+            # Pass the verdict through as-is: plan() refuses anything that
+            # is not a real bool, so a missing field stays UNKNOWN here
+            # instead of being flattened to False one layer early.
+            "breached": br if isinstance(br, bool) else None,
+            "drawdown_pct": b.get("drawdown_pct"),
+            "usd": b.get("allocated_usd"),
+        })
+    return out or None
+
+
 @router.get("/grid-status")
-async def get_grid_status_endpoint():
+async def get_grid_status_endpoint(fresh: int = 0):
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    _now = time.time()
+    if (not fresh and _GRID_STATUS_CACHE["payload"] is not None
+            and (_now - _GRID_STATUS_CACHE["at"]) < _GRID_STATUS_TTL_SECONDS):
+        _cached = dict(_GRID_STATUS_CACHE["payload"])
+        # Say it is cached and how old. A number with no age on it is how a
+        # stale reading gets argued about as though it were current.
+        _cached["served_from_cache"] = True
+        _cached["cache_age_seconds"] = round(_now - _GRID_STATUS_CACHE["at"], 1)
+        # Same no-store headers as the live path below. The BROWSER must still
+        # never cache this - that was a deliberate decision and it is untouched.
+        # What is new is a 25s cache on the SERVER, which is a different thing:
+        # the browser always asks, and sometimes the answer was built a few
+        # seconds ago. The two fields above make that visible rather than
+        # silent.
+        return JSONResponse(
+            content=_cached,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0"
+            }
+        )
     data = await crypto_grid_bot_module.get_grid_status()
+
+    # DOES THE COIN BEHIND THESE NUMBERS EXIST? Measured 2026-09-30
+    # 20:35Z: QNT-USD reported +$87.90 unrealized - the largest single
+    # gain in the fleet - on 0.675982 units the venue did not have, and
+    # its escape sell had been refused 182 times in 24 hours with
+    # BELOW_BASE_INCREMENT. Fleet-wide the books claimed $7,053.11 of
+    # coin with $1,199.90 of it absent. None of that was visible beside
+    # the gain it invalidates.
+    #
+    # available_units is what a sell is actually sized against, so it is
+    # the figure that decides whether a gain can be taken - not `held`,
+    # which includes coin sitting under someone else's resting order.
+    # held_including_zero separates a CONFIRMED ZERO (the venue listed
+    # the currency at 0.0 - the largest shortfall there is) from an
+    # asset the reading never mentioned, which is UNKNOWN. Folding the
+    # second into the first would invent shortfalls out of a rate limit.
+    try:
+        import account_census
+        import slice_backing
+        import out_of_reach
+        async with aiohttp.ClientSession() as _s:
+            _bal = await account_census.fetch_balances(_s)
+        if _bal and _bal.get("available"):
+            _avail = dict(_bal.get("available_units") or {})
+            for _cur, _tot in (_bal.get("held_including_zero") or {}).items():
+                _avail.setdefault(_cur, 0.0 if not _tot else _avail.get(_cur, 0.0))
+            data["backing"] = slice_backing.assess(
+                data.get("branches") or [], _avail)
+
+            # AND THE MONEY THIS KEY CANNOT SEE AT ALL. Measured
+            # 2026-10-02: the Coinbase app showed $13,912.19 of crypto
+            # while this reading totalled $8,135.00 of coin. The
+            # difference was staked - ETH 99%, SOL 96%, ATOM 100%, ADA
+            # 100% - and a staked balance is not in the Advanced Trade
+            # account in any form. Queried per currency the venue
+            # answered 0.0000000028 ETH, and ATOM and ADA as accounts
+            # that exist with 0.0 available.
+            #
+            # That is 29% of the owner's crypto outside every total on
+            # this dashboard, including the one is-it-growing divides
+            # by. Reusing the SAME _bal read above - a second pass over
+            # the accounts endpoint is what got this rate-limited the
+            # last time, and blind is worse than under-reported.
+            data["out_of_reach"] = out_of_reach.assess(
+                data.get("branches") or [],
+                _bal.get("held_including_zero") or {},
+                _bal.get("available_units") or {})
+        else:
+            data["backing"] = {"readable": False,
+                               "reason": "balances unreadable this pass - "
+                                         "backing is UNKNOWN, not zero"}
+            data["out_of_reach"] = {"readable": False,
+                                    "reason": "balances unreadable this pass "
+                                              "- what is out of reach is "
+                                              "UNKNOWN, not zero",
+                                    "out_of_reach_usd": None}
+    except Exception as _exc:
+        data["backing"] = {"readable": False,
+                           "reason": f"{type(_exc).__name__}: {_exc}"}
+        data["out_of_reach"] = {"readable": False,
+                                "reason": f"{type(_exc).__name__}: {_exc}",
+                                "out_of_reach_usd": None}
+
+    # CAN EACH BRANCH WORK ITS POSITION, OR IS IT JUST HOLDING IT?
+    #
+    # A grid earns by holding rungs at DIFFERENT prices and selling one on a
+    # bounce. Some branches have that; some hold one lump split into equal
+    # pieces at ONE price, where every piece needs the same move and they all
+    # move together. On 2026-10-01 that was 51% of the fleet's measured
+    # capital, and the two biggest lumps - ZEC and XRP - held 52.9% of it
+    # while producing 0.3% of the profit.
+    #
+    # Fed the realised P&L so the label is checked against outcomes rather
+    # than asserted. It reports its own separation and refuses to call it a
+    # finding under its sample floor; today that reads is_a_finding False at
+    # 21 branches, which is the honest answer.
+    try:
+        import ladder_health
+        _realized = {}
+        try:
+            _hist = await crypto_grid_bot_module.get_grid_trade_history(limit_recent=1)
+            for _row in (_hist.get("coins") or []):
+                _pid = _row.get("product_id") or _row.get("coin")
+                _p = _row.get("total_pnl")
+                if _pid and _p is not None:
+                    _realized[_pid if "-" in str(_pid) else f"{_pid}-USD"] = float(_p)
+        except Exception:
+            _realized = {}          # unchecked is not the same as checked-and-fine
+        data["ladder_health"] = ladder_health.assess(
+            data.get("branches") or [], _realized or None)
+    except Exception as _exc:
+        data["ladder_health"] = {
+            "readable": False,
+            "reason": f"{type(_exc).__name__}: {_exc}",
+            "this_is_unknown_not_healthy": True}
+
+    # IS THE QUIET BENIGN OR IS IT THE SEPTEMBER OUTAGE AGAIN? Between
+    # 2026-09-10 and 09-25 this fleet closed ZERO round trips because a
+    # mis-signed JWT meant "no maker order was ever placed" - and nobody
+    # knew for eleven days. Silence alone is never the alarm (a 3% grid on
+    # coins with a 2.71% median daily range is supposed to be quiet
+    # sometimes); silence WITH refusals, or a branch sitting past its own
+    # trigger, is.
+    try:
+        import trading_silence
+        _ref, _last, _errs = {}, None, 0
+        try:
+            _blocked = await orders_not_placed()
+            _ref = {g.get("product_id"): g.get("count")
+                    for g in (_blocked.get("by_product_and_side") or [])
+                    if g.get("side") == "sell"}
+        except Exception:
+            _ref = {}
+        for _b in (data.get("branches") or []):
+            for _sl in (_b.get("slices") or []):
+                _o = _sl.get("opened_at")
+                if _o and (_last is None or str(_o) > str(_last)):
+                    _last = _o
+        _hrs = None
+        if _last:
+            try:
+                _dt = datetime.fromisoformat(str(_last).replace("Z", "+00:00"))
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                _hrs = (datetime.now(timezone.utc) - _dt).total_seconds() / 3600.0
+            except ValueError:
+                _hrs = None
+        data["silence"] = trading_silence.assess(
+            hours_since_last_fill=_hrs, refusals_by_product=_ref,
+            cycle_errors=_errs, branches=data.get("branches") or [])
+    except Exception as _exc:
+        data["silence"] = {"verdict": "UNKNOWN", "alarm": False,
+                           "reason": f"{type(_exc).__name__}: {_exc}",
+                           "this_is_unknown_not_healthy": True}
+    # Cache the fully-built payload, including every check appended above, so
+    # a cached read is identical to a live one rather than a thinner version
+    # of it. Stored on the way OUT: a request that raised never populates it,
+    # so an error can never be served to the next caller as a status.
+    data["served_from_cache"] = False
+    data["cache_age_seconds"] = 0.0
+    _GRID_STATUS_CACHE["payload"] = data
+    _GRID_STATUS_CACHE["at"] = time.time()
     # Force fresh data on every request - prevent browser caching stale grid status
     return JSONResponse(
         content=data,
@@ -8731,6 +9092,133 @@ async def set_grid_auto_rotate_endpoint(payload: SetGridAutoRotateRequest):
     await crypto_grid_bot_module.set_grid_auto_rotate_active(payload.enabled)
     log.info(f"[dashboard] 🔁 Grid Bot automatic idle-cash rotation {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "auto_rotate_active": payload.enabled}
+
+
+class SetGridBranchLevelsRequest(BaseModel):
+    #: product_id -> new level count, e.g. {"LINK-USD": 6, "NEAR-USD": 6}
+    levels: dict[str, int]
+    dry_run: bool = True
+
+
+@router.post("/grid-status/set-levels")
+async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
+    """How many rungs a branch may hold at once. Dry run by default.
+
+    THE CONSTRAINT THIS RELIEVES. A branch at num_levels is PARKED: it
+    cannot buy another rung at any price, however far the coin falls and
+    however much allocation it has. Measured 2026-10-02, ELEVEN of
+    twenty-three branches were parked, including the two best earners per
+    dollar on the account - LINK (3 slices / 3 levels, $11.01 earned on
+    $137.87) and NEAR (3/3, $13.00 on $183.30). Both fill their three
+    rungs and wait.
+
+    Nothing in this codebase could change it. coin_adoption_worker writes
+    num_levels once, as `len(open_now) + len(t["slices"])` - the slice
+    count at adoption - so an adopted branch is born full by construction,
+    and create-branch does not take a level count at all.
+
+    WHAT IT CHANGES: num_levels, and nothing else. Not the spacing, not
+    the reference price, not the stop, not the allocation, not an open
+    slice. It places NO order. The grid still decides WHEN to buy through
+    every gate it already passes; this only decides how many rungs it may
+    hold.
+
+    WHAT IT WILL NOT DO: set a count below the branch's own open slices
+    (that is the parked condition, not a cure for it), make a slice
+    smaller than the venue minimum, or report success for a change that
+    buys nothing - a branch with no spare allocation gains room it cannot
+    use, and the plan says so in `buys_nothing_without_more_allocation`
+    rather than stopping at READY.
+
+    Write-guarded like every POST here. dry_run=true (the default)
+    returns the plan and changes nothing.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        raise HTTPException(status_code=400,
+                            detail="STOP_TRADING is set - configuration changes are paused")
+    import branch_levels
+    from models import CryptoGridBranch
+
+    # LOG WHAT ARRIVED, NOT ONLY WHAT SUCCEEDED.
+    #
+    # Until now the only log line in this endpoint sat inside `for a in
+    # applied`, so a request that arrived with an empty map, or whose
+    # every plan was refused, produced SILENCE - indistinguishable in the
+    # logs from a request that never arrived at all. Three rounds were
+    # spent guessing between those two cases. A check that cannot see the
+    # failure is not a check.
+    _want = payload.levels or {}
+    log.warning(f"[levels] REQUEST dry_run={payload.dry_run} n={len(_want)} {dict(_want)}")
+    if not _want:
+        log.warning("[levels] REFUSED: the request carried no levels at all")
+        return {"plans": [], "ready": [], "refused": [], "applied": [],
+                "dry_run": payload.dry_run,
+                "is_a_plan_not_a_change": True,
+                "detail": ("The request carried no level changes at all, so nothing "
+                           "was planned and nothing was changed. The page sends only "
+                           "boxes whose value differs from the branch's current count.")}
+
+    status = await crypto_grid_bot_module.get_grid_status()
+    report = branch_levels.plan_many(status.get("branches") or [], payload.levels or {})
+    log.warning(f"[levels] PLANNED ready={report.get('ready')} "
+                f"refused={report.get('refused')} missing={report.get('missing')}")
+
+    if payload.dry_run:
+        report["dry_run"] = True
+        report["detail"] = ("PREVIEW ONLY - nothing was changed. Re-send with "
+                            "dry_run=false to apply the plans marked READY.")
+        return report
+
+    ready = [r for r in report["plans"] if r.get("ok")]
+    if not ready:
+        for r in report["plans"]:
+            log.warning(f"[levels] NOT APPLICABLE {r.get('product_id')}: "
+                        f"{r.get('status')} - {r.get('detail')}")
+        report["dry_run"] = False
+        report["applied"] = []
+        report["detail"] = ("no plan was applicable - nothing was changed. "
+                            + "; ".join(f"{r.get('product_id')}: {r.get('detail')}"
+                                        for r in report["plans"] if r.get("detail")))
+        return report
+
+    applied = []
+    async with crypto_grid_bot_module.get_session_factory()() as db:
+        for r in ready:
+            row = (await db.execute(select(CryptoGridBranch).where(
+                CryptoGridBranch.bot_name == r["bot_name"]))).scalars().first()
+            if row is None:
+                log.warning(f"[levels] NO ROW for bot_name={r.get('bot_name')!r} "
+                            f"({r.get('product_id')}) - nothing written for it")
+                continue
+            # Re-check against the row we are about to write, not the
+            # snapshot the plan was built from: a slice may have opened in
+            # between, and a count below the open slices is the one thing
+            # this must never write.
+            if r["levels_after"] < (r["open_slices"] or 0):
+                log.warning(f"[levels] RE-CHECK SKIPPED {r.get('product_id')}: "
+                            f"{r['levels_after']} levels is below its "
+                            f"{r['open_slices']} open slice(s)")
+                continue
+            row.num_levels = r["levels_after"]
+            applied.append({"product_id": r["product_id"],
+                            "bot_name": r["bot_name"],
+                            "levels_before": r["levels_before"],
+                            "levels_after": r["levels_after"],
+                            "rungs_it_could_actually_open":
+                                r.get("rungs_it_could_actually_open")})
+        await db.commit()
+
+    for a in applied:
+        log.warning(f"[levels] WROTE {a['product_id']} {a['levels_before']} -> "
+                    f"{a['levels_after']} level(s)")
+    log.warning(f"[levels] COMMITTED {len(applied)} row(s)")
+    report["dry_run"] = False
+    report["applied"] = applied
+    report["detail"] = (f"{len(applied)} branch(es) changed. Takes effect on the bot's "
+                        f"next grid cycle - no restart. No order was placed.")
+    return report
 
 
 class CreateGridBranchRequest(BaseModel):
@@ -9164,7 +9652,42 @@ async def grid_lessons_endpoint():
             fleet = [b.product_id for b in branches if b.active]
     except Exception as exc:
         log.warning(f"[dashboard] fleet unreadable for lesson tagging: {exc}")
-    return JSONResponse(content=await grid_learning.get_all_lessons(fleet), headers={
+    payload = await grid_learning.get_all_lessons(fleet)
+
+    # AND WHAT THE CLOSED-TRADE MEMORY CANNOT SEE. Measured 2026-10-02:
+    # 29 lessons, 187 trades, $128.95 recorded - reconciling exactly to
+    # the live book - and every verdict it had ever produced was "earning"
+    # or "watch". Never one negative word, because the grid sells only
+    # ABOVE entry, so closed-trade P&L is positive by construction.
+    #
+    # ZEC-USD held 7 slices and $2,341 of cost basis at -$388 and had NO
+    # LESSON AT ALL, having never completed a round trip. The largest
+    # drain in the account was the one position the learning system had
+    # never heard of.
+    #
+    # holding_cost sets each coin's sale proceeds against the cost of
+    # still holding it, so a coin that earns $15 while bleeding $29 stops
+    # reading as a winner. It reports and nothing more - no enforcement
+    # switch, by design: the last mechanism that retired branches on thin
+    # evidence left 64% of the account idle.
+    try:
+        import holding_cost
+        _status = await crypto_grid_bot_module.get_grid_status() \
+            if crypto_grid_bot_module is not None else {}
+        payload["holding_cost"] = holding_cost.assess(
+            _status.get("branches") or [],
+            payload.get("lessons") or [],
+            # The backing report keeps a phantom mark-to-market from being
+            # counted as the cost of holding coin that is not there.
+            backing=_status.get("backing"))
+    except Exception as exc:
+        log.warning(f"[dashboard] holding cost unreadable: {exc}")
+        payload["holding_cost"] = {
+            "readable": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "this_is_unknown_not_zero_cost": True}
+
+    return JSONResponse(content=payload, headers={
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache", "Expires": "0"})
 
@@ -10450,6 +10973,8 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     from sqlalchemy import select
 
     g = crypto_grid_bot_module
+    log.warning(f"[reconcile] REQUEST product_id={product_id!r} dry_run={dry_run} "
+                f"accept_writeoff={accept_writeoff}")
     status = await g.get_grid_status()
     async with _aiohttp.ClientSession() as _s:
         census = await account_census.census(_s, tracked_usd=0.0)
@@ -10459,8 +10984,44 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
             detail=("the wallet holdings could not be read, so no position can be "
                     "confirmed. A gap is not a zero, and a zero here would delete "
                     "every slice on the fleet."))
-    wallet = {str(r.get("asset")).upper(): r.get("units")
-              for r in (census.get("holdings") or [])}
+    # THE DUST FILTER IS WHY FOUR BRANCHES WERE NEVER RECONCILABLE.
+    #
+    # census["holdings"] drops every asset worth under DUST_USD ($0.50)
+    # and every asset it could not price - it exists to answer "what is
+    # this account WORTH". Reading it here asked a different question,
+    # "does the account hold X at all", and got silence for an answer.
+    # Measured live: QNT (0.00097323, $0.24), PEPE ($0.00), TIA (0.0) and
+    # PRIME (0.0) were all absent from holdings while being present and
+    # readable in the account. They were reported NOT_IN_WALLET_READING -
+    # UNKNOWN - and skipped, every run, forever. QNT meanwhile showed
+    # +$57.44 of unrealised gain on coin it did not have.
+    #
+    # account_census already carries the unfiltered map for exactly this
+    # caller, and says so in its own comment: "That makes `holdings` the
+    # wrong input for 'does this account hold X at all', which is a
+    # different question and the one the shortfall check asks."
+    #
+    # OWNED, NOT AVAILABLE - AND THAT CHOICE IS THE SAFETY PROPERTY.
+    # held_including_zero is total owned, which includes staked and
+    # otherwise locked coin. Reconciling against AVAILABLE units instead
+    # would write off real coin the account owns and will get back: SOL
+    # (0.776 staked of 1.035) and LINK (6.63 locked of 6.85) are owned in
+    # full and only locked, and against available they would have had
+    # their slices deleted. This writes off only what is genuinely NOT
+    # OWNED.
+    #
+    # An asset missing from BOTH maps stays UNKNOWN and is skipped. A gap
+    # is not a zero, and a zero here would delete every slice on the fleet.
+    _unfiltered = census.get("held_including_zero")
+    if isinstance(_unfiltered, dict) and _unfiltered:
+        wallet = {str(k).upper(): v for k, v in _unfiltered.items()}
+        wallet_source = "held_including_zero (unfiltered owned units)"
+    else:
+        wallet = {str(r.get("asset")).upper(): r.get("units")
+                  for r in (census.get("holdings") or [])}
+        wallet_source = ("holdings (DUST-FILTERED fallback - the unfiltered map "
+                         "was not in this census reading, so assets under "
+                         "$0.50 cannot be seen and are skipped as UNKNOWN)")
 
     want = (product_id or "").strip().upper() or None
     branches, skipped = [], []
@@ -10484,9 +11045,18 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
 
     total_basis = round(sum(x["cost_basis_removed_usd"] or 0.0 for x in branches), 2)
     out = {"branches": branches, "branch_count": len(branches),
-           "cost_basis_removed_usd": total_basis, "skipped": skipped or None}
+           "cost_basis_removed_usd": total_basis, "skipped": skipped or None,
+           # Which map the wallet side of this comparison came from. A
+           # reader cannot judge a reconcile plan without knowing whether
+           # dust was visible to it.
+           "wallet_source": wallet_source,
+           "writes_off_only_unowned_coin": True,
+           "locked_or_staked_coin_is_not_written_off": True}
 
     if not branches:
+        log.warning(f"[reconcile] NOTHING TO DO - wallet_source={wallet_source}, "
+                    f"{len(skipped)} branch(es) skipped as unreadable: "
+                    f"{[x['product_id'] for x in skipped]}")
         out["detail"] = ("no branch claims more coin than the wallet holds - nothing to "
                          "reconcile")
         return out
@@ -10505,21 +11075,48 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
                     f"{len(branches)} branch(es) and is not reversible. Re-send with "
                     f"accept_writeoff=true if that is intended."))
 
-    applied = []
+    # A BRANCH IS ONLY "APPLIED" IF A ROW ACTUALLY CHANGED.
+    #
+    # applied.append used to sit outside the inner loop, so a branch whose
+    # every slice lookup missed was still reported as corrected. Combined
+    # with the unserved slice id above, that made this endpoint answer
+    # "8 branch(es), $1,157.41 of cost basis cleared" while writing
+    # nothing at all - three times, to an owner who reasonably believed
+    # it. A report of a write that did not happen is worse than an error,
+    # because nobody retries it.
+    applied, not_applied = [], []
     async with g.get_session_factory()() as db:
         for br in branches:
+            changed, unfound = 0, 0
             for a in br["actions"]:
+                sid = a.get("slice_id")
+                if sid is None:
+                    # No primary key means this plan cannot be executed. It
+                    # is not a slice that is already gone.
+                    unfound += 1
+                    continue
                 row = (await db.execute(select(CryptoGridSlice).where(
-                    CryptoGridSlice.id == a["slice_id"]))).scalars().first()
+                    CryptoGridSlice.id == sid))).scalars().first()
                 if row is None:
+                    unfound += 1
                     continue
                 if a["action"] == "REMOVE":
                     await db.delete(row)
                 else:
                     row.qty = a["qty_after"]
-            applied.append({"product_id": br["product_id"],
-                            "units_removed": br["units_removed"],
-                            "cost_basis_removed_usd": br["cost_basis_removed_usd"]})
+                changed += 1
+            if changed:
+                applied.append({"product_id": br["product_id"],
+                                "units_removed": br["units_removed"],
+                                "cost_basis_removed_usd": br["cost_basis_removed_usd"],
+                                "slice_rows_changed": changed,
+                                "slice_rows_not_found": unfound or None})
+            else:
+                not_applied.append({
+                    "product_id": br["product_id"],
+                    "slice_rows_not_found": unfound,
+                    "reason": ("not one of this branch's planned slice rows could be "
+                               "found to write, so nothing was changed for it")})
         await db.commit()
 
     for a in applied:
@@ -10528,10 +11125,36 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
             f"Wrote off {a['units_removed']:.8f} units another subsystem had already sold "
             f"- ${a['cost_basis_removed_usd']:,.2f} of tracked cost basis. Not a loss: the "
             f"proceeds were already in the wallet.")
-    log.warning(f"[reconcile] {len(applied)} branch(es), ${total_basis:,.2f} of tracked "
-                f"cost basis written off")
+    # Compute the written figure HERE rather than reading out[...]: at this
+    # point out["cost_basis_removed_usd"] still holds the PLAN's total, which
+    # is recomputed from `applied` a few lines below. Reading it would have
+    # logged the planned amount as the amount cleared - the exact class of
+    # claim this endpoint was just fixed for making.
+    _cleared = round(sum(a["cost_basis_removed_usd"] or 0.0 for a in applied), 2)
+    log.warning(f"[reconcile] COMMITTED {len(applied)} branch(es) written, "
+                f"{len(not_applied)} could not be written "
+                f"({[x['product_id'] for x in not_applied]}), "
+                f"${_cleared:,.2f} actually cleared")
     out["applied"] = applied
+    out["not_applied"] = not_applied or None
     out["dry_run"] = False
+    # The headline figure must describe what was WRITTEN, not what was
+    # planned. total_basis is the plan's number and stays available as
+    # cost_basis_planned_usd; the top-level field now sums only branches
+    # that really changed.
+    out["cost_basis_planned_usd"] = total_basis
+    out["cost_basis_removed_usd"] = round(
+        sum(a["cost_basis_removed_usd"] or 0.0 for a in applied), 2)
+    if not applied:
+        out["detail"] = (
+            f"NOTHING WAS CHANGED. {len(branches)} branch(es) had a plan, but no "
+            f"slice row could be found to write. The books are unchanged.")
+    else:
+        out["detail"] = (
+            f"{len(applied)} branch(es) corrected, ${out['cost_basis_removed_usd']:,.2f} "
+            f"of tracked cost basis cleared."
+            + (f" {len(not_applied)} branch(es) could not be written and were left "
+               f"alone." if not_applied else ""))
     return out
 
 
@@ -10589,6 +11212,202 @@ async def schema_health_endpoint():
             f"silently, and anything reading them returns empty - which "
             f"looks identical to 'nothing has happened yet'."),
     }
+
+
+#: One read of the denial log is bounded. A day on 23 branches cannot
+#: plausibly exceed this, and a window that does is reported as capped
+#: rather than silently truncated into a smaller-looking number.
+GATE_OBSERVATION_ROW_CAP = 2000
+
+
+@router.get("/gate-observations")
+async def get_gate_observations(hours: float = 24.0, limit: int = 40):
+    """What the execution gate saw, and whether it was binding when it saw it.
+
+    THIS IS THE MISSING HALF OF OBSERVE MODE. branch_audit_service ships
+    EXECUTION_GATE_MODE=observe, and its own comment says what that buys:
+    "a day of evidence showing exactly which branches would have been
+    refused and why, before that refusal becomes real money not being
+    deployed." The gate was wired into the order path and the audit rows
+    were being written - and nothing could read them. An evidence log with
+    no reader cannot inform the decision it exists to inform, so the
+    enforce/observe call was being left to judgement after all.
+
+    Read-only. It places no order, moves no capital, and changes no mode.
+    Flipping EXECUTION_GATE_MODE is the owner's, from Railway.
+
+    A MISSING TABLE IS NOT A QUIET DAY. Every count here is None when the
+    table could not be read, never 0, and `readable` says which. "0 denials
+    observed" from an absent table reads exactly like "the gate found
+    nothing wrong" and would argue for enforce on the strength of evidence
+    that was never collected - the opposite of the truth. OBSERVED_ is also
+    reported apart from a bare denial, because in observe mode a denial did
+    not stop anything, and a reader who cannot tell those apart cannot tell
+    a refusal from a note.
+    """
+    import audit_models as _am
+    try:
+        import branch_audit_service as _bas
+        _mode = _bas.gate_mode()
+        _binding = _bas.is_enforcing()
+    except Exception as exc:
+        _mode, _binding = None, None
+        _mode_err = f"{type(exc).__name__}: {exc}"
+    else:
+        _mode_err = None
+
+    hours = max(0.0, min(float(hours), 24.0 * 30))
+    limit = max(1, min(int(limit), 200))
+    since = datetime.utcnow() - timedelta(hours=hours)
+    out = {
+        "gate_mode": _mode,
+        "gate_is_binding": _binding,
+        "gate_mode_unreadable": _mode_err,
+        "window_hours": hours,
+        "since_utc": since.isoformat() + "Z",
+        "row_cap": GATE_OBSERVATION_ROW_CAP,
+    }
+
+    async def _read(label, stmt):
+        """Run one narrow read. An error lands as UNKNOWN, never as empty."""
+        try:
+            async with get_session_factory()() as db:
+                return list((await db.execute(stmt)).all()), None
+        except Exception as exc:
+            log.warning(f"[gate-observations] {label} unreadable: "
+                        f"{type(exc).__name__}: {exc}")
+            return None, f"{type(exc).__name__}: {exc}"
+
+    # ── denials, grouped by what actually refused ──────────────────────
+    D = _am.AllocatorDenial
+    rows, err = await _read("denial counts", (
+        select(D.reason_code, D.gate_failed, func.count().label("n"))
+        .where(D.created_at >= since)
+        .group_by(D.reason_code, D.gate_failed)
+        .order_by(func.count().desc())
+        .limit(GATE_OBSERVATION_ROW_CAP)))
+    if rows is None:
+        out["denials"] = {"readable": False, "unreadable": err,
+                          "total": None, "by_reason": None,
+                          "detail": "the denial log could not be read. That is "
+                                    "UNKNOWN, not zero denials."}
+    else:
+        total = sum(r.n for r in rows)
+        out["denials"] = {
+            "readable": True,
+            "total": total,
+            # OBSERVED_ means the gate said no and the worker proceeded
+            # anyway. Counting it with real refusals would overstate what
+            # the gate has actually prevented.
+            "observed_only": sum(r.n for r in rows
+                                 if str(r.reason_code).startswith("OBSERVED_")),
+            "by_reason": [{"reason_code": r.reason_code,
+                           "gate_failed": r.gate_failed, "count": r.n}
+                          for r in rows],
+        }
+
+    rows, err = await _read("denials by branch", (
+        select(D.bot_name, func.count().label("n"))
+        .where(D.created_at >= since)
+        .group_by(D.bot_name).order_by(func.count().desc())
+        .limit(GATE_OBSERVATION_ROW_CAP)))
+    out["denials_by_branch"] = (
+        {"readable": False, "unreadable": err, "branches": None} if rows is None
+        else {"readable": True,
+              "branches": [{"bot_name": r.bot_name, "count": r.n} for r in rows]})
+
+    rows, err = await _read("recent denials", (
+        select(D.created_at, D.bot_name, D.reason_code, D.gate_failed,
+               D.reason_detail, D.candidate_id)
+        .where(D.created_at >= since)
+        .order_by(D.created_at.desc()).limit(limit)))
+    out["recent_denials"] = (
+        {"readable": False, "unreadable": err, "rows": None} if rows is None
+        else {"readable": True,
+              "rows": [{"at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                        "bot_name": r.bot_name, "reason_code": r.reason_code,
+                        "gate_failed": r.gate_failed,
+                        "detail": r.reason_detail,
+                        "candidate_id": r.candidate_id} for r in rows]})
+
+    # ── authority changes: who gained or lost the right to trade ───────
+    A = _am.ExecutionAuthorityEvent
+    rows, err = await _read("authority events", (
+        select(A.created_at, A.bot_name, A.previous_authority, A.new_authority,
+               A.reason_code, A.reconciliation_status)
+        .where(A.created_at >= since)
+        .order_by(A.created_at.desc()).limit(limit)))
+    out["authority_events"] = (
+        {"readable": False, "unreadable": err, "rows": None} if rows is None
+        else {"readable": True,
+              "rows": [{"at": r.created_at.isoformat() + "Z" if r.created_at else None,
+                        "bot_name": r.bot_name,
+                        "from": r.previous_authority, "to": r.new_authority,
+                        "reason_code": r.reason_code,
+                        "reconciliation_status": r.reconciliation_status}
+                       for r in rows]})
+
+    # ── exchange truth failures: the book disagreeing with the venue ───
+    T = _am.ExchangeTruthFailure
+    rows, err = await _read("truth failures", (
+        select(T.reason_code, T.classification, func.count().label("n"))
+        .where(T.created_at >= since)
+        .group_by(T.reason_code, T.classification)
+        .order_by(func.count().desc()).limit(GATE_OBSERVATION_ROW_CAP)))
+    out["truth_failures"] = (
+        {"readable": False, "unreadable": err, "total": None, "by_reason": None}
+        if rows is None else
+        {"readable": True, "total": sum(r.n for r in rows),
+         "by_reason": [{"reason_code": r.reason_code,
+                        "classification": r.classification, "count": r.n}
+                       for r in rows],
+         "note": "a disagreement between the book and the venue. NOT a loss."})
+
+    # ── control state: the materialised permission, as a census ────────
+    C = _am.BranchControlState
+    rows, err = await _read("control state", (
+        select(C.lifecycle_status, C.reconciliation_status, C.execution_enabled,
+               func.count().label("n"))
+        .group_by(C.lifecycle_status, C.reconciliation_status,
+                  C.execution_enabled)
+        .order_by(func.count().desc()).limit(GATE_OBSERVATION_ROW_CAP)))
+    out["control_state"] = (
+        {"readable": False, "unreadable": err, "rows_seeded": None, "census": None}
+        if rows is None else
+        {"readable": True, "rows_seeded": sum(r.n for r in rows),
+         "census": [{"lifecycle_status": r.lifecycle_status,
+                     "reconciliation_status": r.reconciliation_status,
+                     "execution_enabled": r.execution_enabled, "count": r.n}
+                    for r in rows],
+         "note": "execution_enabled is the last answer the gate CACHED, never "
+                 "the authority. The order path recomputes from exchange truth."})
+
+    # ── the one sentence a reader needs ───────────────────────────────
+    _d = out["denials"]
+    if not _d.get("readable"):
+        out["verdict"] = "UNREADABLE"
+        out["detail"] = ("The denial log could not be read, so there is no "
+                         "evidence either way. Do not read this as a quiet "
+                         "window - nothing was measured.")
+    elif _d["total"] == 0:
+        out["verdict"] = "NOTHING_OBSERVED"
+        out["detail"] = (
+            f"The gate recorded no denial in the last {hours:g}h. The tables "
+            f"are readable, so this is a real zero - but a real zero can mean "
+            f"the gate is passing everything OR that the path it is wired "
+            f"into has not run. Check the heartbeat before reading it as "
+            f"evidence that enforcing would cost nothing.")
+    else:
+        out["verdict"] = ("OBSERVED_ONLY" if _mode != "enforce" else "ENFORCING")
+        _obs = _d.get("observed_only") or 0
+        out["detail"] = (
+            f"{_d['total']} denial(s) in {hours:g}h"
+            + (f", {_obs} of them observe-only (the gate said no and the "
+               f"worker proceeded anyway)" if _obs else "")
+            + f". Gate mode is {_mode!r}"
+            + ("; it is binding." if _binding else
+               "; it is NOT binding - nothing here stopped a trade."))
+    return out
 
 
 #: How many rows one summary will count. A day of kill-condition
@@ -12506,6 +13325,9 @@ async def cost_truth():
     except Exception:
         pass
     in_force = view["adverse_pct_in_force"]
+    cost_in_force_label = (
+        "The bar in force is priced off the worst measured regime; the lower "
+        "number is priced off the friendliest one.")
     cost_now = regime_tag.round_trip_cost_pct(fee, in_force)
     cost_if = regime_tag.round_trip_cost_pct(fee, view["means_by_regime"].get("RISING"))
 
@@ -12528,18 +13350,59 @@ async def cost_truth():
         "gap_pct": (round(cost_now - cost_if, 4)
                     if cost_now is not None and cost_if is not None else None),
         "adverse": view,
+        # TWO STATES, TWO SENTENCES. This template had only one: it said
+        # "It is not [swapped in], because N more falling-market samples
+        # are needed" with no branch for N == 0. Once the 30-sample bar
+        # was cleared the page started printing "It is not, because 0 more
+        # falling-market samples are needed" - a self-contradiction that
+        # reported the fleet as BLOCKED at the moment it stopped being
+        # blocked, and sent the owner looking for something to fix that
+        # had already fixed itself.
+        "measurement_is_in_force": bool(view["may_replace_assumption"]),
         "headline": (
-            f"A round trip is priced at {cost_now}% and would be {cost_if}% if the "
-            f"measured figure were used. It is not, because "
-            f"{view['falling_samples_needed']} more falling-market samples are needed "
-            f"before that measurement has tested the case it exists for."
-            if cost_now is not None and cost_if is not None else
-            "Not enough data to price the gap yet."),
+            ("Not enough data to price this yet."
+             if cost_now is None or cost_if is None else
+             (f"A round trip is priced at {cost_now}%, and that figure is MEASURED: "
+              f"{view['counts'].get('FALLING', 0)} falling-market samples put adverse "
+              f"selection at {in_force}%, so the conservative assumption of "
+              f"{view['assumed_pct']}% has already been retired and the bar came down "
+              f"with it. The {cost_if}% below is NOT a pending improvement - it is what "
+              f"the bar would be if priced off RISING markets only, and that is the "
+              f"mistake this measurement exists to prevent."
+              if view["may_replace_assumption"] else
+              f"A round trip is priced at {cost_now}% and would be {cost_if}% if the "
+              f"measured figure were used. It is not, because "
+              f"{view['falling_samples_needed']} more falling-market samples are needed "
+              f"before that measurement has tested the case it exists for."))),
+        "what_the_gap_is": (
+            (f"A safety margin, not a locked improvement. {cost_in_force_label}"
+             if view["may_replace_assumption"] else
+             "The cost of not yet knowing. It closes by collecting falling-market "
+             "samples, not by lowering the bar.")),
         "what_would_change": (
-            "Halving the cost turns a large share of the refusals into trades. That is "
-            "the point and the danger: passing more and paying worse is what a lowered "
-            "threshold looks like, and the only thing separating this from that is "
-            "whether the cheaper number has been checked in a falling market."),
+            ("The bar is already priced off the worst regime that has been measured. "
+             "Lowering it further would mean pricing risk off rising markets - passing "
+             "more trades and paying worse on each, which is what a lowered threshold "
+             "looks like. More trades from here should come from better setups, not a "
+             "cheaper bar."
+             if view["may_replace_assumption"] else
+             "Halving the cost turns a large share of the refusals into trades. That is "
+             "the point and the danger: passing more and paying worse is what a lowered "
+             "threshold looks like, and the only thing separating this from that is "
+             "whether the cheaper number has been checked in a falling market.")),
+        # The bars on this panel are a CENSUS OF MARKET CONDITIONS, not a
+        # scoreboard. Stated here because a rising bar shorter than a
+        # falling bar reads as losing, and the opposite is true: the
+        # falling-market count is the evidence that retires the
+        # assumption, so MORE of it is better.
+        "how_to_read_the_regime_counts": (
+            "These are sample counts of the market each measurement was taken in, not "
+            "wins and losses. A taller FALLING bar is GOOD: falling-market samples are "
+            "the evidence required to retire the conservative assumption, and reaching "
+            f"{view['counts'].get('FALLING', 0)} of them is what lowered this bar from "
+            f"{round((fee or 0) + (view['assumed_pct'] or 0), 4)}% to {cost_now}%. "
+            "Nothing here can or should be tuned to make RISING larger - that would "
+            "remove the evidence, not improve the result."),
     }
 
 

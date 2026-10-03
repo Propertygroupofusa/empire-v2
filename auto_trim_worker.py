@@ -230,20 +230,108 @@ async def check_once(session_factory, *, place=True) -> dict:
         holdings = census.get("holdings") or []
         total = census.get("total_usd")
         # Coins the grid currently holds open slices on. Trimming those
-        # sells coin the grid still has on its books - see the note in
-        # plan_trims. Fails OPEN on an unreadable grid: an empty set
-        # protects nothing, which is the behaviour this loop had before.
+        # sells coin the grid still has on its books, which is how a
+        # branch ends up claiming units the wallet does not have.
+        #
+        # THIS NOW FAILS CLOSED, and it is the whole point of this block.
+        # It used to fail OPEN, and the way it did so was invisible:
+        # fleet_tracked_units_by_product returns (None, None) on a failed
+        # read - deliberately, its docstring says "never an empty dict,
+        # which would read as 'the fleet holds nothing' and pass every
+        # check trivially" - and the old `if _units:` collapsed that None
+        # straight back into "protect nothing". No exception was raised,
+        # so the warning below never fired either. Under the venue rate
+        # limiting this account actually sees, that is a silent licence
+        # to market-sell coin the grid is holding.
+        #
+        # Measured 2026-09-30: ALGO, TIA and PRIME each carried REAL grid
+        # buys (adopted=False) and held 0.017%, 0.000% and 0.000% of the
+        # units their slices claim. $1,195.34 across eight branches, and
+        # QNT's exit had been refused 200 times because the coin behind it
+        # was gone. That is the shape this produces.
+        #
+        # A skipped trim costs a few more minutes of concentration, and
+        # the ceiling is still there next pass. A blind trim costs coin,
+        # a phantom slice row, and a manual reconcile. Every other
+        # unreadable input in this function already returns rather than
+        # guessing; this one was the outlier.
+        # RETRY BEFORE REFUSING. Failing closed is correct, but a guard
+        # that gives up on the first miss turns every transient rate
+        # limit into a skipped pass, and the ceiling then goes
+        # unenforced for as long as the venue is busy. The read is
+        # cheap and the failure it guards against is expensive, so it
+        # gets three attempts with a widening pause before the refusal
+        # stands. Measured on this account, the venue's 429s clear in
+        # seconds; it is the ten-second timeouts that cluster.
         protected = ()
+        _units = None
+        for _attempt in range(3):
+            try:
+                import crypto_grid_bot as _grid
+                _units, _ = await _grid.fleet_tracked_units_by_product()
+            except Exception as exc:
+                _units = None
+                log.warning(f"[auto_trim] grid positions raised on attempt "
+                            f"{_attempt + 1}/3 ({type(exc).__name__}: {exc})")
+            if _units is not None:
+                if _attempt:
+                    log.info(f"[auto_trim] grid positions readable on attempt "
+                             f"{_attempt + 1} - protection restored without a skip")
+                break
+            if _attempt < 2:
+                await asyncio.sleep(2 ** _attempt)
+        if _units is None:
+            log.warning("[auto_trim] grid positions UNREADABLE - skipping this pass "
+                        "rather than trimming coin the grid may be holding")
+            return {"mode": mode, "armed": True, "acted": 0,
+                    "detail": ("grid positions could not be read in 3 attempts, so which "
+                               "coins are "
+                               "actively traded is UNKNOWN; nothing placed. Trimming "
+                               "without that list sells coin the grid still has on its "
+                               "books and leaves a slice claiming units the wallet no "
+                               "longer holds."),
+                    "skipped_because": "grid_positions_unreadable"}
+        protected = {p.split("-")[0].upper() for p in _units}
+
+        # WHAT EACH COIN COST, so the profit floor has something to judge.
+        #
+        # Without this the floor refuses everything as BASIS_UNKNOWN, which
+        # would silently disable the trimmer rather than make it safe. The
+        # basis is the quantity-weighted entry price across that asset's open
+        # grid slices - the only cost the system actually knows.
+        #
+        # An asset with NO slices gets no entry here and is therefore refused.
+        # That is correct and it is also a real narrowing: the tail positions
+        # this worker used to size have no recorded cost anywhere, so nothing
+        # can show that selling them books a gain. Refusing is the direction
+        # the owner's rule points.
+        basis = {}
         try:
-            import crypto_grid_bot as _grid
-            _units, _ = await _grid.fleet_tracked_units_by_product()
-            if _units:
-                protected = {p.split("-")[0].upper() for p in _units}
+            from models import CryptoGridSlice
+            from sqlalchemy import select
+            async with session_factory()() as _db:
+                _slices = (await _db.execute(select(CryptoGridSlice))).scalars().all()
+            _acc = {}
+            for s in _slices:
+                a = (s.product_id or "").split("-")[0].upper()
+                try:
+                    q, e = float(s.qty or 0), float(s.entry_price or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not a or q <= 0 or e <= 0:
+                    continue
+                qty, cost = _acc.get(a, (0.0, 0.0))
+                _acc[a] = (qty + q, cost + q * e)
+            basis = {a: (c / q) for a, (q, c) in _acc.items() if q > 0}
         except Exception as exc:
-            log.warning(f"[auto_trim] could not read grid positions ({type(exc).__name__}) "
-                        f"- trimming without that protection this pass")
+            # A basis that could not be read is NOT an empty basis that permits
+            # selling - it leaves `basis` empty, and an empty basis refuses.
+            # Failing this way round is deliberate.
+            log.warning(f"[trim] cost basis unreadable ({type(exc).__name__}: {exc}) "
+                        f"- the profit floor will refuse every trim this pass")
+
         plans = auto_trim.plan_trims(holdings, total, now=now, history=history,
-                                     actively_traded=protected)
+                                     actively_traded=protected, cost_basis=basis)
         summary = auto_trim.summarise(plans, mode)
 
         for p in plans:
