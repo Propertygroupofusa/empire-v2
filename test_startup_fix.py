@@ -23,6 +23,13 @@ WHAT IS PINNED HERE
  10. a plan whose rows cannot be found reports NOTHING WAS CHANGED
  11. attempts are bounded, so a crash loop cannot re-run forever
  12. no order is placed, and nothing but num_levels and slice qty is written
+ 13. a cold fleet is waited for, not acted on
+ 14. a fleet that never arrives is UNKNOWN and never settles
+ 15. an unsettled step leaves the ticket unspent, and the next boot writes
+     what the first one lost - the exact fault that dropped the levels on
+     2026-10-03
+ 16. both level outcomes reach the durable activity log, so "why it wrote
+     nothing" survives the restart that erased the first run's report
 """
 import asyncio
 import sys
@@ -93,15 +100,20 @@ class FakeDB:
 
 
 class FakeGrid:
-    def __init__(self, status, store, raise_on_status=False):
+    def __init__(self, status, store, raise_on_status=False, cold_calls=0):
         self.status, self.store = status, store
         self.raise_on_status = raise_on_status
+        self.cold_calls = cold_calls      # boots served an empty fleet first
+        self.status_calls = 0
         self.log = []
         self.activity = []
 
     async def get_grid_status(self):
+        self.status_calls += 1
         if self.raise_on_status:
             raise RuntimeError("grid status unavailable")
+        if self.status_calls <= self.cold_calls:
+            return {"branches": []}       # the shape that lost the level change
         return self.status
 
     def get_session_factory(self):
@@ -110,6 +122,9 @@ class FakeGrid:
 
     async def _log_activity_safe(self, *a, **k):
         self.activity.append(a)
+
+    def activity_kinds(self):
+        return [x[2] for x in self.activity if len(x) > 2]
 
 
 def branch_row(bot_name, levels):
@@ -363,6 +378,75 @@ ok("the attempt is claimed before the work, not after",
    "an attempt counted after the work would let a crash loop re-run forever")
 ok("the module is inert unless the environment arms it",
    'os.getenv(TICKET_ENV)' in src)
+
+# ----------------------------------------------------------------- 13
+print("\n[13] a cold fleet is waited for, not acted on")
+startup_fix.READY_SLEEP_SECONDS = 0.0      # no real waiting in a test
+store = fresh_store()
+g = FakeGrid(live_status(), store, cold_calls=2)
+out = run(startup_fix.apply_levels(g))
+xrp = [r for r in store["CryptoGridBranch"] if r.bot_name == "crypto_grid_6"][0]
+ok("it kept asking until the fleet was readable", g.status_calls == 3, g.status_calls)
+ok("and then wrote the levels", out.get("rows_written") == 2, out)
+ok("XRP really holds 10 levels", xrp.num_levels == 10, xrp.num_levels)
+ok("the step is settled", out.get("settled") is True, out)
+
+# ----------------------------------------------------------------- 14
+print("\n[14] a fleet that never arrives is UNKNOWN, and never settled")
+startup_fix.READY_TRIES = 2
+store = fresh_store()
+g = FakeGrid({"branches": []}, store, cold_calls=99)
+out = run(startup_fix.apply_levels(g))
+ok("the status names the unreadable fleet",
+   out.get("status") == "UNKNOWN_FLEET_NOT_READABLE", out)
+ok("nothing was written", out.get("rows_written") == 0, out)
+ok("the levels row is untouched",
+   store["CryptoGridBranch"][0].num_levels == 3,
+   store["CryptoGridBranch"][0].num_levels)
+ok("it is NOT settled", out.get("settled") is False, out)
+ok("it calls itself UNKNOWN, not a refusal", "UNKNOWN" in (out.get("detail") or ""),
+   out.get("detail"))
+
+# ----------------------------------------------------------------- 15
+print("\n[15] an unsettled step leaves the ticket unspent - the fault that lost "
+      "the level change")
+store = fresh_store(slices=[(100 + n, 38.0) for n in range(7)]
+                           + [(200 + n, 1.44) for n in range(3)])
+g = FakeGrid({"branches": []}, store, cold_calls=99)
+rep = run(startup_fix.run_at_boot(
+    g, tkt="t-cold", census_fn=lambda: _c(XRP=266.0, LINK=4.32)))
+ok("the run reports levels as unsettled",
+   "levels" in (rep.get("unsettled_steps") or []), rep)
+ok("the ticket is NOT marked done", rep.get("marked_done") is False, rep)
+ok("the marker never reads DONE",
+   all(r.base_capital != startup_fix.DONE for r in store["TradingBotState"]),
+   [(r.bot_name, r.base_capital) for r in store["TradingBotState"]])
+ok("the detail says the next boot will try again",
+   "next boot will try again" in (rep.get("detail") or ""), rep.get("detail"))
+startup_fix.READY_TRIES = 20
+# A second boot really does retry, and once the fleet is there it writes.
+g2 = FakeGrid(live_status(), store)
+rep2 = run(startup_fix.run_at_boot(g2, tkt="t-cold", census_fn=lambda: _c(XRP=190.0, LINK=4.32)))
+ok("the second boot ran", rep2.get("ran") is True, rep2)
+ok("and wrote the levels it had lost",
+   [r for r in store["CryptoGridBranch"] if r.bot_name == "crypto_grid_6"][0].num_levels == 10,
+   [(r.bot_name, r.num_levels) for r in store["CryptoGridBranch"]])
+ok("now it is marked done", rep2.get("marked_done") is True, rep2)
+
+# ----------------------------------------------------------------- 16
+print("\n[16] both level outcomes are logged durably, not only to memory")
+store = fresh_store()
+g = FakeGrid(live_status(), store)
+run(startup_fix.apply_levels(g))
+ok("a write is logged as LEVELS", g.activity_kinds().count("LEVELS") == 2,
+   g.activity_kinds())
+g = FakeGrid(live_status(), fresh_store())
+run(startup_fix.apply_levels(g, wanted={"XRP-USD": 2}))
+ok("a refusal is logged too, so why it did not write survives a restart",
+   g.activity_kinds().count("LEVELS") == 1, g.activity_kinds())
+ok("the refusal line says it was not changed",
+   any("NOT changed" in x[3] for x in g.activity if len(x) > 3),
+   [x[3][:80] for x in g.activity if len(x) > 3])
 
 print("\n" + ("ALL PASS" if not fail else f"{fail} FAILURE(S)"))
 sys.exit(1 if fail else 0)

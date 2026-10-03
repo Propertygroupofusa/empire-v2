@@ -52,6 +52,31 @@ FAIL CLOSED, EVERY BRANCH OF IT:
                                       measurement to check, not an
                                       instruction to obey)
 
+WHAT THE FIRST ARMED RUN ACTUALLY DID, 2026-10-03. The reconcile landed:
+twelve branches written at 04:49:38Z, $921.25 of phantom cost basis
+cleared, and ACH's and QNT's refusal loops - 24 refused sell cycles each
+per twenty minutes, every cycle asking to sell coin the wallet did not
+hold - stopped within seconds (ACH's last refusal 04:49:28Z, QNT's
+04:49:17Z, none since).
+
+The levels did not. XRP and LINK still read 3/3, and the run marked itself
+done anyway. Two faults, both fixed here:
+
+  * The levels step runs first, milliseconds after boot, and read a grid
+    status that did not yet contain the fleet. An empty or incomplete
+    branch list is UNKNOWN. status_with() now waits for the branches the
+    request names before anything is planned.
+  * "Wrote nothing" was treated as "finished". It is not. A step is
+    SETTLED only when it wrote something, or when re-running could not do
+    better (levels already at target, nothing left to reconcile). An
+    unsettled step leaves the ticket unspent for the next boot.
+
+And the reason the first run's own report could not be read afterwards is
+that it lived in memory and the process restarted. The reconcile could be
+confirmed only because it writes to the activity log; the levels step
+wrote nothing there, so why it wrote nothing was unrecoverable. Both
+outcomes now write a durable activity line, success and refusal alike.
+
 ATTEMPTS ARE COUNTED BEFORE THE WORK, NOT AFTER. A hard crash mid-run still
 spends an attempt, so a crash loop cannot re-run this forever. Both
 operations are idempotent - a level already set reports NO_CHANGE, and a
@@ -82,7 +107,21 @@ TICKET_ENV = "STARTUP_FIX_TICKET"
 MARKER_PREFIX = "startup_fix:"
 
 # How many boots a single ticket may spend trying. Counted before the work.
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = 5
+
+# A COLD STATUS IS NOT AN ANSWER.
+#
+# The first armed run wrote the reconcile (12 branches, $921.25 of phantom
+# cost basis, 2026-10-03T04:49:38Z) and wrote NO levels, then marked itself
+# done - so the level change was lost and the ticket was spent. The levels
+# step runs first, milliseconds after boot, and asked get_grid_status()
+# before the fleet was there to be read; the reconcile asked again seconds
+# later and got twenty-three branches. An empty or incomplete branch list is
+# UNKNOWN, and a step that acted on one must not be allowed to call itself
+# finished. So: wait for the branches the request actually names, and if
+# they never appear, leave the ticket unspent for the next boot.
+READY_TRIES = 20
+READY_SLEEP_SECONDS = 15.0
 # Sentinel stored in the marker row once a run completed without crashing.
 DONE = -1.0
 
@@ -146,6 +185,41 @@ async def _mark_done(session_factory, key):
             await db.commit()
 
 
+async def status_with(grid, product_ids, tries=None, sleep_seconds=None):
+    """A grid status that actually contains the named branches.
+
+    Returns (status, ready). `ready` False means the branches never turned
+    up inside the window - UNKNOWN, and the caller must write nothing and
+    must not mark the ticket done.
+
+    The two limits are read from the module here rather than bound as
+    argument defaults, so changing them changes this function's behaviour.
+    A default captured at definition time silently ignores the change.
+    """
+    import asyncio
+    tries = READY_TRIES if tries is None else tries
+    sleep_seconds = READY_SLEEP_SECONDS if sleep_seconds is None else sleep_seconds
+    want = {str(p) for p in (product_ids or ())}
+    status, seen = {}, set()
+    for n in range(1, int(tries) + 1):
+        status = await grid.get_grid_status() or {}
+        branches = status.get("branches") or []
+        seen = {str(b.get("product_id")) for b in branches if isinstance(b, dict)}
+        if want and want <= seen:
+            if n > 1:
+                log.warning(f"[startup-fix] the fleet was readable on attempt {n} "
+                            f"({len(branches)} branch(es))")
+            return status, True
+        log.warning(f"[startup-fix] waiting for the fleet: attempt {n} of {tries} "
+                    f"served {len(branches)} branch(es), missing "
+                    f"{sorted(want - seen)}")
+        if n < int(tries):
+            await asyncio.sleep(float(sleep_seconds))
+    log.warning(f"[startup-fix] the fleet never served {sorted(want - seen)} - "
+                f"UNKNOWN, so nothing is written and the ticket stays unspent")
+    return status, False
+
+
 async def apply_levels(grid, wanted=None):
     """Write num_levels on the named branches. Places no order.
 
@@ -158,7 +232,13 @@ async def apply_levels(grid, wanted=None):
     from models import CryptoGridBranch
 
     want = dict(wanted if wanted is not None else LEVELS)
-    status = await grid.get_grid_status()
+    status, ready = await status_with(grid, want.keys())
+    if not ready:
+        return {"requested": want, "rows_written": 0, "settled": False,
+                "status": "UNKNOWN_FLEET_NOT_READABLE",
+                "detail": ("the fleet never served the branches this asks about, so "
+                           "no level was planned and none was written. UNKNOWN, not "
+                           "a refusal - the ticket stays unspent for the next boot.")}
     report = branch_levels.plan_many(status.get("branches") or [], want)
     ready = [r for r in report["plans"] if r.get("ok")]
     log.warning(f"[startup-fix] levels planned ready={report.get('ready')} "
@@ -193,10 +273,36 @@ async def apply_levels(grid, wanted=None):
                                     r.get("rungs_it_could_actually_open")})
             await db.commit()
 
+    # DURABLE, because an in-memory report dies with the process and the
+    # first armed run's did exactly that - the only reason the reconcile
+    # could be confirmed at all is that it writes to the activity log. The
+    # levels step wrote nothing there, so WHY it wrote nothing could not be
+    # recovered. Both outcomes are logged now, success and refusal alike.
     for a in applied:
         log.warning(f"[startup-fix] levels WROTE {a['product_id']} "
                     f"{a['levels_before']} -> {a['levels_after']}")
+        await _activity(grid, a["product_id"], "LEVELS",
+                        f"Raised the rung limit from {a['levels_before']} to "
+                        f"{a['levels_after']}. It can open "
+                        f"{a.get('rungs_it_could_actually_open')} more rung(s) on its "
+                        f"own dips. No order was placed and no money moved.")
+    for r in report["plans"]:
+        if not r.get("ok"):
+            await _activity(grid, r.get("product_id"), "LEVELS",
+                            f"Rung limit NOT changed ({r.get('status')}): "
+                            f"{r.get('detail')}")
+    for r in not_applied:
+        await _activity(grid, r.get("product_id"), "LEVELS",
+                        f"Rung limit NOT written: {r.get('reason')}")
+
+    # SETTLED means re-running could not do better. Zero writes with a
+    # refusal standing is NOT settled: the whole point of the ticket is that
+    # the change lands, and the run that quietly marked itself done on zero
+    # level writes is why this distinction exists.
+    all_no_change = bool(report["plans"]) and all(
+        r.get("status") == "NO_CHANGE" for r in report["plans"])
     out = {"requested": want, "applied": applied,
+           "settled": bool(applied) or all_no_change,
            "not_applied": not_applied or None,
            "refused": report.get("refused") or None,
            "missing": report.get("missing") or None,
@@ -209,6 +315,15 @@ async def apply_levels(grid, wanted=None):
         "NOTHING WAS WRITTEN. No level plan was applicable - see plans for why.")
     log.warning(f"[startup-fix] levels {out['detail']}")
     return out
+
+
+async def _activity(grid, product_id, kind, message):
+    """One durable line. Never raises into the caller."""
+    try:
+        await grid._log_activity_safe(None, product_id, kind, message)
+    except Exception as e:
+        log.warning(f"[startup-fix] could not log activity for {product_id}: "
+                    f"{type(e).__name__}: {e}")
 
 
 async def _default_census():
@@ -241,6 +356,7 @@ async def apply_reconcile(grid, census_fn=None, max_writeoff_usd=MAX_WRITEOFF_US
                     "be read. A gap is not a zero, and a zero here would delete "
                     "every slice on the fleet.")
         return {"status": "SKIPPED_WALLET_UNREADABLE", "rows_written": 0,
+                "settled": False,
                 "detail": ("the wallet holdings could not be read, so nothing was "
                            "written off. A gap is not a zero.")}
 
@@ -250,6 +366,7 @@ async def apply_reconcile(grid, census_fn=None, max_writeoff_usd=MAX_WRITEOFF_US
                     "unfiltered owned-units map, and the dust-filtered one cannot "
                     "answer whether a coin is owned at all.")
         return {"status": "SKIPPED_NO_UNFILTERED_WALLET_MAP", "rows_written": 0,
+                "settled": False,
                 "detail": ("this census reading carried no unfiltered owned-units "
                            "map. The dust-filtered map hides anything under $0.50, "
                            "so it cannot answer whether a coin is owned at all, and "
@@ -277,7 +394,7 @@ async def apply_reconcile(grid, census_fn=None, max_writeoff_usd=MAX_WRITEOFF_US
                 f"${planned:,.2f} of tracked cost basis, "
                 f"{len(skipped)} skipped as unreadable")
     if not branches:
-        return {"status": "NOTHING_TO_DO", "rows_written": 0,
+        return {"status": "NOTHING_TO_DO", "rows_written": 0, "settled": True,
                 "skipped": skipped or None,
                 "detail": ("no branch claims more coin than the wallet owns - "
                            "nothing to reconcile")}
@@ -285,6 +402,7 @@ async def apply_reconcile(grid, census_fn=None, max_writeoff_usd=MAX_WRITEOFF_US
         log.warning(f"[startup-fix] reconcile REFUSED: ${planned:,.2f} planned is over "
                     f"the ${max_writeoff_usd:,.2f} ceiling")
         return {"status": "REFUSED_OVER_CEILING", "rows_written": 0,
+                "settled": False,
                 "cost_basis_planned_usd": planned,
                 "branch_count": len(branches),
                 "detail": (f"the plan would clear ${planned:,.2f} of tracked cost "
@@ -329,18 +447,16 @@ async def apply_reconcile(grid, census_fn=None, max_writeoff_usd=MAX_WRITEOFF_US
     cleared = round(sum(a["cost_basis_removed_usd"] or 0.0 for a in applied), 2)
     rows = sum(a["slice_rows_changed"] for a in applied)
     for a in applied:
-        try:
-            await grid._log_activity_safe(
-                None, a["product_id"], "RECONCILE",
-                f"Wrote off {a['units_removed']:.8f} units another subsystem had "
-                f"already sold - ${a['cost_basis_removed_usd']:,.2f} of tracked cost "
-                f"basis. Not a loss: the proceeds were already in the wallet.")
-        except Exception:
-            pass
+        await _activity(
+            grid, a["product_id"], "RECONCILE",
+            f"Wrote off {a['units_removed']:.8f} units another subsystem had "
+            f"already sold - ${a['cost_basis_removed_usd']:,.2f} of tracked cost "
+            f"basis. Not a loss: the proceeds were already in the wallet.")
     log.warning(f"[startup-fix] reconcile COMMITTED {len(applied)} branch(es), "
                 f"{rows} slice row(s), ${cleared:,.2f} actually cleared "
                 f"({len(not_applied)} could not be written)")
     return {"status": "APPLIED" if applied else "NOTHING_WRITTEN",
+            "settled": bool(applied),
             "branch_count": len(branches),
             "applied": applied, "not_applied": not_applied or None,
             "skipped": skipped or None,
@@ -423,15 +539,25 @@ async def run_at_boot(grid, tkt=None, census_fn=None):
 
     failed = [k for k in ("levels", "reconcile")
               if (out[k] or {}).get("status") == "FAILED"]
+    unsettled = [k for k in ("levels", "reconcile")
+                 if not (out[k] or {}).get("settled")]
     out["failed_steps"] = failed or None
+    out["unsettled_steps"] = unsettled or None
     lv = (out["levels"] or {}).get("rows_written") or 0
     rc = (out["reconcile"] or {}).get("rows_written") or 0
     out["rows_written_total"] = lv + rc
-    if failed:
+    if failed or unsettled:
+        why = []
+        if failed:
+            why.append(f"{', '.join(failed)} raised and wrote nothing")
+        if unsettled:
+            why.append(f"{', '.join(unsettled)} did not settle "
+                       f"({'; '.join((out[k] or {}).get('status') or '?' for k in unsettled)})")
         out["detail"] = (
-            f"{', '.join(failed)} raised and wrote nothing. "
-            f"{out['rows_written_total']} row(s) were written in total. The attempt is "
-            f"spent; {MAX_ATTEMPTS - int(used)} remain on this ticket.")
+            f"{'; '.join(why)}. {out['rows_written_total']} row(s) were written in "
+            f"total. The ticket is NOT marked done, so the next boot will try again; "
+            f"{MAX_ATTEMPTS - int(used)} attempt(s) remain on it.")
+        out["marked_done"] = False
     else:
         try:
             await _mark_done(grid.get_session_factory, key)
@@ -446,6 +572,8 @@ async def run_at_boot(grid, tkt=None, census_fn=None):
             if out["rows_written_total"] else
             "NOTHING WAS WRITTEN. Both steps ran and both found nothing applicable - "
             "see levels and reconcile for exactly why.")
-    log.warning(f"[startup-fix] DONE {out['detail']}")
+    log.warning(f"[startup-fix] "
+                f"{'SETTLED' if out.get('marked_done') else 'NOT SETTLED'} "
+                f"{out['detail']}")
     _LAST = out
     return out
