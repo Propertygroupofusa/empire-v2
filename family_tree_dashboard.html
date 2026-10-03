@@ -1131,6 +1131,7 @@
                 <div class="tv-sub" id="strip-branches-sub"></div>
             </div>
         </div>
+        <div id="tab-lock-banner" style="display:none;"></div>
         <div id="alarm-top-wrap" style="display:none;"></div>
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
@@ -6516,6 +6517,9 @@ function setWriteToken(v) {
         else { sessionStorage.removeItem(TOKEN_KEY); }
     } catch (e) { /* private mode - the header still works for this page load */ }
     renderTokenBar();
+    // Clearing or pasting the token changes what every button can do, so the
+    // banner must follow immediately rather than wait for the next poll.
+    try { renderTabLock(); } catch (e) { /* defined later in the file */ }
 loadTape();
 }
 
@@ -7032,6 +7036,7 @@ async function loadFleetReadiness() {
         const d = await apiGet('/grid-status');
         const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
         // Same payload, no extra request: grid-status carries it.
+        renderTabLock();
         renderOutOfReach(d.out_of_reach);
         renderGridReconcile(d.backing);
         renderGridLevels(d.branches || []);
@@ -7364,6 +7369,85 @@ async function loadAlertQueue() {
     }
 }
 
+
+// ---- IS THIS TAB ABLE TO SEND ANYTHING AT ALL? ----------------------
+//
+// THE FAILURE THIS ENDS. Every write attempt of one long session failed
+// with nothing in the server log, because postGuarded refuses BEFORE it
+// sends when sessionStorage holds no token:
+//
+//     const tok = getWriteToken();
+//     if (!tok) { throw ...'This browser tab is locked'... }   // never sends
+//
+// So the request never left the browser, the guard never saw it, and the
+// server-side recorder read zero - which is indistinguishable from a dead
+// button. Confirmed live: write-attempts count 0 on a single replica with
+// 17 minutes of uptime.
+//
+// sessionStorage is PER TAB AND ORIGIN. It SURVIVES a reload and survives
+// switching away from the tab; it ends when the tab is CLOSED. A mobile
+// browser discarding a backgrounded tab can produce a new page session,
+// but that is a restoration edge case, not routine. An earlier version of
+// this comment claimed phones clear it whenever you switch apps, which
+// overstates it.
+//
+// AND THE ZERO DOES NOT NAME THIS CAUSE BY ITSELF. count 0 proves only
+// that nothing was sent. The refusal above is one way that happens;
+// previewGridLevels bailing on an empty map, executeGridLevels bailing
+// with no previewed plan, and any script error before the fetch are
+// others. This banner distinguishes the locked case from the rest - it
+// does not prove it.
+//
+// A lock notice was added to the Levels panel, but not to Reconcile, and
+// a per-panel notice was the wrong shape anyway: the lock disables every
+// write on the page. So it is stated once, at the top, where no button
+// can be reached without passing it.
+// Tell the server where a button stopped. A GET, because every POST is
+// write-guarded and the thing being diagnosed is a request that never
+// gets far enough to carry a token. Fire-and-forget: it must never be
+// able to break the button it is observing.
+function uiTrace(code, n) {
+    try {
+        const q = '?e=' + encodeURIComponent(code)
+                + (n === undefined || n === null ? '' : '&n=' + encodeURIComponent(n));
+        fetch(API_BASE + '/ui-trace' + q, { cache: 'no-store' }).catch(() => {});
+    } catch (e) { /* a diagnostic must not throw into the path it measures */ }
+}
+
+function renderTabLock() {
+    const wrap = document.getElementById('tab-lock-banner');
+    if (!wrap) return;
+    let locked;
+    try {
+        locked = (typeof getWriteToken === 'function') ? !getWriteToken() : false;
+    } catch (e) {
+        // An accessor that throws is not an unlocked tab.
+        locked = true;
+    }
+    if (!locked) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+    wrap.style.display = 'block';
+    uiTrace('locked_banner_shown');
+    wrap.innerHTML = `
+      <div style="margin-bottom:14px; padding:13px 15px; border-radius:8px;
+                  border:2px solid var(--red); background:rgba(180,35,24,0.09);">
+        <div style="font-weight:700; color:var(--red); font-size:0.95em;">
+          \u{1F512} This tab cannot save anything right now
+        </div>
+        <div style="margin-top:7px; font-size:0.82em; line-height:1.55;">
+          Every button that changes something &mdash; Levels, Reconcile, all of them
+          &mdash; will refuse <strong>before sending</strong>, so nothing reaches the
+          server and nothing appears in the logs. It looks exactly like a broken
+          button and it is not.
+        </div>
+        <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                    line-height:1.5;">
+          The dashboard token is kept for this browser tab only. It survives a
+          refresh, but it is gone once the tab is closed &mdash; and a phone that
+          drops a background tab from memory can end the session the same way.
+          Paste it into the \u{1F512} lock bar above and this message disappears.
+        </div>
+      </div>`;
+}
 
 // ---- The alarm, where it cannot be scrolled past --------------------
 //
@@ -7818,6 +7902,7 @@ async function previewGridReconcile(productId) {
     const st = document.getElementById('grid-reconcile-status');
     const planWrap = document.getElementById('grid-reconcile-plan');
     if (!st || !planWrap) return;
+    uiTrace('rec_preview_enter');
     st.textContent = 'Computing the plan' + (productId ? ' for ' + productId : '')
                    + '… nothing is being changed.';
     planWrap.innerHTML = '';
@@ -7825,7 +7910,9 @@ async function previewGridReconcile(productId) {
         // No dry_run flag is sent: the server's own default is true, and
         // relying on it means this path cannot apply anything even if the
         // query string were tampered with.
+        uiTrace('rec_preview_sending');
         const d = await postGuarded(_gridReconcileUrl(productId, false));
+        uiTrace('rec_preview_ok', (d.branches || []).length);
         const rows = d.branches || [];
         if (!rows.length) {
             // A CHECKMARK HERE WAS WRONG. When the banner above counted
@@ -7895,8 +7982,10 @@ async function executeGridReconcile(productId) {
     const st = document.getElementById('grid-reconcile-status');
     const planWrap = document.getElementById('grid-reconcile-plan');
     if (!st) return;
+    uiTrace('rec_apply_enter');
     st.textContent = 'Applying…';
     try {
+        uiTrace('rec_apply_sending');
         const d = await postGuarded(_gridReconcileUrl(productId, true));
         const applied = d.applied || [];
         const total = Number(d.cost_basis_removed_usd);
@@ -7924,6 +8013,7 @@ async function executeGridReconcile(productId) {
         if (typeof refresh === 'function') refresh();
         else if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
     } catch (e) {
+        uiTrace('rec_apply_threw');
         st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
     }
 }
@@ -7998,9 +8088,42 @@ function _gridLevelsSuggest(b) {
                     + ' unspent - the money is the constraint, not the rungs')};
 }
 
+// IS THE PERSON IN THE MIDDLE OF USING THIS PANEL?
+//
+// loadFleetReadiness runs on a 60-second timer and this renderer rebuilds
+// the panel with wrap.innerHTML, which destroys every DOM node inside it.
+// So a value typed into a box was silently replaced by the suggested
+// default within a minute, and - worse - a plan on screen had its Confirm
+// button DELETED out from under the person. Tapping where it had been did
+// nothing and sent nothing, which is indistinguishable from a dead button
+// and is exactly what produced an empty server log.
+//
+// A background refresh must never destroy input the person has given. It
+// yields instead, and the panel updates on the next pass after they are
+// done.
+function _gridLevelsInUse() {
+    const plan = document.getElementById('grid-levels-plan');
+    if (plan && plan.innerHTML.trim()) return 'a plan is on screen';
+    const st = document.getElementById('grid-levels-status');
+    if (st && st.textContent.trim()) return 'a result is on screen';
+    const els = document.querySelectorAll('.grid-levels-in');
+    for (const el of els) {
+        if (String(el.value || '') !== String(el.getAttribute('data-rendered') || '')) {
+            return 'a box has been edited';
+        }
+    }
+    return null;
+}
+
 function renderGridLevels(branches) {
     const wrap = document.getElementById('grid-levels-wrap');
     if (!wrap) return;
+    const busy = _gridLevelsInUse();
+    if (busy && wrap.innerHTML.trim()) {
+        // Leave it exactly as it is. Refreshing the numbers underneath
+        // someone mid-decision is how the Confirm button disappeared.
+        return;
+    }
     const rows = (branches || []).filter(b => {
         const n = Math.trunc(Number(b && b.num_levels) || 0);
         const open_n = ((b && b.slices) || []).length;
@@ -8009,6 +8132,15 @@ function renderGridLevels(branches) {
     if (!rows.length) {
         wrap.style.display = 'none'; wrap.innerHTML = ''; return;
     }
+    // THE LOCK STATE, SHOWN BEFORE THE TAP RATHER THAN AFTER.
+    //
+    // The token lives in sessionStorage, which is per-tab and is cleared
+    // when the tab is closed OR discarded - which phones do routinely when
+    // you switch apps. postGuarded then refuses before sending, so the
+    // request never reaches the server and the server log stays empty,
+    // which is indistinguishable from a broken button. Saying so up front
+    // costs one line and removes a whole class of wasted round trip.
+    const _lvlLocked = (typeof getWriteToken === 'function') ? !getWriteToken() : false;
     let parkedUsd = 0, anyUsd = false;
     for (const b of rows) {
         const a = Number(b.allocated_usd);
@@ -8032,7 +8164,7 @@ function renderGridLevels(branches) {
               <input class="grid-levels-in" type="number" inputmode="numeric"
                      data-product="${escText(pid)}" data-current="${n}"
                      min="${GRID_LEVELS_MIN}" max="${GRID_LEVELS_MAX}" step="1"
-                     value="${val}" placeholder="${n}"
+                     value="${val}" placeholder="${n}" data-rendered="${val}"
                      style="width:4.6em; text-align:right; font-variant-numeric:tabular-nums;">
             </td>
             <td style="font-size:0.92em; color:var(--text-dim);">${escText(sug.why)}</td>
@@ -8067,8 +8199,23 @@ function renderGridLevels(branches) {
             <tbody>${body}</tbody>
           </table>
         </div>
+        ${_lvlLocked ? `
+          <div style="margin-top:10px; padding:10px 12px; border-radius:6px;
+                      border:1px solid var(--red); background:rgba(180,35,24,0.10);
+                      font-size:0.8em; line-height:1.5;">
+            <strong style="color:var(--red);">\u{1F512} This tab is locked - the buttons
+            below cannot send anything.</strong>
+            <div style="margin-top:4px; color:var(--text-dim);">
+              The dashboard token is kept per browser tab and is cleared whenever the
+              tab is closed or dropped from memory - which phones do routinely when you
+              switch apps. Paste it into the \u{1F512} lock bar at the top of this page,
+              then come back. Nothing you type here is lost.
+            </div>
+          </div>` : ''}
         <button class="unlock-btn" style="margin-top:10px;"
-                onclick="previewGridLevels()">🔍 Preview the change (changes nothing)</button>
+                onclick="previewGridLevels()">${_lvlLocked
+                  ? '\u{1F512} Locked - unlock at the top of the page first'
+                  : '\u{1F50D} Preview the change (changes nothing)'}</button>
         <div id="grid-levels-status" style="margin-top:8px; font-size:0.82em;
              color:var(--text-dim);"></div>
         <div id="grid-levels-plan"></div>
@@ -8098,20 +8245,41 @@ async function previewGridLevels() {
     const planWrap = document.getElementById('grid-levels-plan');
     if (!st || !planWrap) return;
     planWrap.innerHTML = '';
+    uiTrace('preview_enter');
     const levels = _gridLevelsWanted();
     const keys = Object.keys(levels);
+    uiTrace('render_levels', document.querySelectorAll('.grid-levels-in').length);
     if (!keys.length) {
-        st.textContent = 'Nothing to preview - no box differs from its current '
-                       + 'level count. Type a new count on a row first.';
+        uiTrace('preview_empty', 0);
+        // DIAGNOSE, DO NOT JUST DECLINE. A bare "nothing to preview" sent
+        // the last three rounds of this hunt looking at the server for a
+        // request the browser had never sent. Say what was actually on the
+        // page so the next look is a reading, not a guess.
+        const els = Array.from(document.querySelectorAll('.grid-levels-in'));
+        const seen = els.map(el => `${el.getAttribute('data-product')}=`
+            + `${JSON.stringify(String(el.value || ''))}`
+            + ` (current ${el.getAttribute('data-current')})`).join(', ');
+        st.innerHTML = `\u26a0\ufe0f <strong>Nothing was sent.</strong> No box differs
+            from its branch's current level count, so there was nothing to ask the
+            server about.
+            <div style="margin-top:4px; color:var(--text-dim);">
+              ${els.length} input(s) on the page: ${escText(seen || 'none found')}
+            </div>
+            <div style="margin-top:4px; color:var(--text-dim);">
+              Type the new count into a box, then tap Preview.
+            </div>`;
         return;
     }
     st.textContent = 'Computing the plan for ' + keys.join(', ')
                    + '… nothing is being changed.';
     try {
         // No dry_run is sent: the server defaults it to true.
+        uiTrace('preview_sending', keys.length);
         const d = await postGuarded(API_BASE + '/grid-status/set-levels', {levels});
+        uiTrace('preview_ok', (d.ready || []).length);
         _gridLevelsShowPlan(d, st, planWrap, levels);
     } catch (e) {
+        uiTrace('preview_threw');
         st.textContent = 'Error: ' + e.message;
     }
 }
@@ -8185,16 +8353,20 @@ async function executeGridLevels() {
     const st = document.getElementById('grid-levels-status');
     const planWrap = document.getElementById('grid-levels-plan');
     if (!st) return;
+    uiTrace('apply_enter');
     const levels = _gridLevelsPending;
     if (!levels || !Object.keys(levels).length) {
+        uiTrace('apply_no_pending', 0);
         st.textContent = 'Nothing was sent - no previewed plan to apply. '
                        + 'Preview the change first.';
         return;
     }
     st.textContent = 'Applying…';
     try {
+        uiTrace('apply_sending', Object.keys(levels).length);
         const d = await postGuarded(API_BASE + '/grid-status/set-levels',
                                     {levels, dry_run: false});
+        uiTrace('apply_ok', (d.applied || []).length);
         const applied = d.applied || [];
         if (!applied.length) {
             st.innerHTML = '⚠️ ' + escText(d.detail || 'nothing was changed');

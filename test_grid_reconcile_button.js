@@ -1,3 +1,4 @@
+const TRACE_STUB = 'var uiTrace=function(){};';
 // The control that runs reconcile-slices from the page. The failure that
 // matters is not a cosmetic one: this clears tracked cost basis and is NOT
 // reversible, so the preview path must be incapable of applying, and the
@@ -161,7 +162,7 @@ const runExec = (serverPayload) => {
                                      : id === 'grid-reconcile-plan' ? plan : null) };
   const fn = new Function('document', 'postGuarded', '_gridReconcileUrl', 'escText',
     'fmtUsd', 'loadFleetReadiness', 'refresh',
-    grab2('executeGridReconcile') + '; return executeGridReconcile;')(
+    TRACE_STUB + grab2('executeGridReconcile') + '; return executeGridReconcile;')(
     doc, async () => serverPayload, () => 'u', esc2,
     n => '$' + Number(n || 0).toFixed(2), () => {}, undefined);
   return fn().then(() => out);
@@ -192,7 +193,7 @@ runExec({ applied: [], cost_basis_removed_usd: 0,
                                        : id === 'grid-reconcile-plan' ? plan : null) };
     const fn = new Function('document', 'postGuarded', '_gridReconcileUrl', 'escText',
       'fmtUsd', '_gridReconcileSeenUnbacked',
-      grab2('previewGridReconcile') + '; return previewGridReconcile;')(
+      TRACE_STUB + grab2('previewGridReconcile') + '; return previewGridReconcile;')(
       doc, async () => payload, () => 'u', esc2,
       n => '$' + Number(n || 0).toFixed(2), seenUnbacked);
     return fn().then(() => out);

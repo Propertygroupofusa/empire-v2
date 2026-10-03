@@ -2775,6 +2775,11 @@ async def get_holdings_watch(window_days: int = 30, fresh: int = 0):
     out["breakers"] = _breakers_from_cache()
     if out["breakers"] is None:
         out.pop("breakers")
+    # Same cache, same rule: absent rather than empty when it cannot be
+    # read, so "nothing is frozen" is never asserted from a blind pass.
+    out["frozen"] = _frozen_from_cache()
+    if out["frozen"] is None:
+        out.pop("frozen")
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0.0
     out["cache_seconds"] = WATCH_CACHE_SECONDS
@@ -8519,6 +8524,25 @@ _GRID_STATUS_CACHE = {"at": 0.0, "payload": None}
 _GRID_STATUS_TTL_SECONDS = float(os.getenv("GRID_STATUS_TTL_SECONDS", "25"))
 
 
+def _frozen_from_cache():
+    """Per-branch can-buy / can-sell verdicts off the grid-status cache.
+
+    None when cold - UNKNOWN, never an empty list, because an empty list
+    asserts that nothing is stuck on a pass where nothing could be seen.
+    Cache-only like _breakers_from_cache: the alarm loop must not be able
+    to stall behind a rebuild.
+    """
+    payload = _GRID_STATUS_CACHE.get("payload")
+    if not payload:
+        return None
+    rows = payload.get("branches")
+    if not rows:
+        return None
+    import frozen_branches
+    out = [frozen_branches.assess_branch(b) for b in rows if isinstance(b, dict)]
+    return out or None
+
+
 def _breakers_from_cache():
     """Breaker verdicts off the grid-status cache. None when cold.
 
@@ -8555,6 +8579,91 @@ def _breakers_from_cache():
             "usd": b.get("allocated_usd"),
         })
     return out or None
+
+
+# The browser's own account of where a button stopped. A GET, because
+# every POST is write-guarded and the thing being diagnosed is a request
+# that never gets far enough to carry a token. Bounded, in memory, and it
+# records only short codes the page chooses - never a token, never a URL
+# with one in it, never free user text.
+_UI_TRACE: list = []
+_UI_TRACE_MAX = 60
+_UI_TRACE_OK = {
+    "preview_enter", "preview_empty", "preview_sending", "preview_ok", "preview_threw",
+    "apply_enter", "apply_no_pending", "apply_sending", "apply_ok", "apply_threw",
+    "rec_preview_enter", "rec_preview_sending", "rec_preview_ok", "rec_preview_threw",
+    "rec_apply_enter", "rec_apply_sending", "rec_apply_ok", "rec_apply_threw",
+    "locked_banner_shown", "render_levels",
+}
+
+
+@router.get("/ui-trace")
+async def ui_trace_endpoint(e: str = None, n: int = None, read: int = 0):
+    """Where a dashboard button stopped, as the page itself reports it.
+
+    `count: 0` on write-attempts proves only that NOTHING WAS SENT. It does
+    not say which of several browser-side paths stopped it: the locked-tab
+    refusal in postGuarded, an empty collected map, an apply with no
+    previewed plan, or a script error before the fetch. This is how the
+    page says which.
+
+    Only codes on a fixed allowlist are recorded, so the page cannot write
+    arbitrary text here and no token can arrive by accident.
+    """
+    import time as _t
+    if read or not e:
+        return {"readable": True, "count": len(_UI_TRACE),
+                "events": list(reversed(_UI_TRACE)),
+                "known_codes": sorted(_UI_TRACE_OK),
+                "detail": ("the page has reported nothing since this process started"
+                           if not _UI_TRACE else
+                           f"{len(_UI_TRACE)} event(s), newest first"),
+                "note": "in memory and per-process: a restart empties it"}
+    code = str(e)[:40]
+    if code not in _UI_TRACE_OK:
+        return {"recorded": False, "reason": "code not on the allowlist"}
+    _UI_TRACE.append({"at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+                      "event": code,
+                      "n": (int(n) if n is not None else None)})
+    del _UI_TRACE[:-_UI_TRACE_MAX]
+    return {"recorded": True}
+
+
+@router.get("/write-attempts")
+async def write_attempts_endpoint():
+    """Every state-changing request the guard has seen, newest first.
+
+    READ-ONLY, and it exists so nobody has to filter a log viewer on a
+    phone at one in the morning. Four rounds of this session were spent
+    guessing between three cases that this answers outright:
+
+      empty list        the request never reached the server at all -
+                        a browser problem, not a server one
+      guard_status 401  it arrived with no token
+      guard_status 403  it arrived with a token that did not match
+      guard_status 503  this deployment has no token configured
+      guard_status null the guard PASSED it to the endpoint, so any
+                        failure after that is the endpoint's, not the door's
+
+    It carries no credential material of any kind - not the token, not a
+    prefix, not a length, not a hash. Only whether one was present.
+    """
+    import write_guard
+    rows = write_guard.recent_attempts()
+    return {
+        "readable": True,
+        "is_a_measurement_not_a_change": True,
+        "count": len(rows),
+        "attempts": rows,
+        "carries_no_token_material": True,
+        "detail": ("no state-changing request has reached this process since it "
+                   "started - if a button was pressed, it never left the browser"
+                   if not rows else
+                   f"{len(rows)} write attempt(s) reached the guard; newest first"),
+        "note": ("in-memory and per-process: a restart empties it, and an empty "
+                 "list after a restart means only that nothing has been tried "
+                 "since - UNKNOWN, not proof of a browser fault"),
+    }
 
 
 @router.get("/grid-status")

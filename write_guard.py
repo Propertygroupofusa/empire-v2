@@ -112,6 +112,45 @@ def is_protected(method: str, path: str) -> bool:
     return True
 
 
+# ── WHAT ACTUALLY ARRIVED, SO NOBODY HAS TO READ LOGS ON A PHONE ──────
+#
+# Every write attempt this session failed, and four rounds were spent
+# guessing between "the browser never sent it", "the guard refused it" and
+# "the endpoint ran and wrote nothing" - because the only evidence lived in
+# a Railway log viewer the account owner had to filter by hand on a phone,
+# at one in the morning, after being asked repeatedly to try again.
+#
+# This records the OUTCOME of each state-changing request in memory so a
+# read-only endpoint can report it. It settles the three cases instantly:
+# an empty list means the request never arrived at all.
+#
+# IT NEVER RECORDS THE TOKEN, NOR ANY PREFIX, LENGTH OR HASH OF IT. Only
+# whether one was present, and what the guard decided. A diagnostic that
+# leaks the credential it is diagnosing is worse than no diagnostic.
+_ATTEMPTS: list = []
+_ATTEMPTS_MAX = 40
+
+
+def record_attempt(method: str, path: str, status, presented_present: bool,
+                   detail: str = None):
+    import time as _t
+    _ATTEMPTS.append({
+        "at": _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime()),
+        "method": method,
+        "path": path,
+        # None means the guard let it through to the endpoint.
+        "guard_status": status,
+        "token_was_present": bool(presented_present),
+        "guard_detail": detail,
+    })
+    del _ATTEMPTS[:-_ATTEMPTS_MAX]
+
+
+def recent_attempts():
+    """Newest first. Read-only; carries no credential material."""
+    return list(reversed(_ATTEMPTS))
+
+
 def check(method: str, path: str, presented: str):
     """Returns None to allow, or (status, detail) to refuse."""
     if not is_protected(method, path):
@@ -140,11 +179,19 @@ async def guard(request, call_next):
     is a guard that stops being tested.
     """
     from starlette.responses import JSONResponse
-    verdict = check(request.method, request.url.path, _presented(request))
+    _p = _presented(request)
+    verdict = check(request.method, request.url.path, _p)
     if verdict is not None:
         status, detail = verdict
+        if is_protected(request.method, request.url.path):
+            record_attempt(request.method, request.url.path, status, bool(_p), detail)
         log.warning(
             "[GUARD] refused %s %s (%s) from %s", request.method, request.url.path,
             status, getattr(request.client, "host", "?"))
         return JSONResponse({"detail": detail, "guard": "write_guard"}, status_code=status)
+    # Allowed through. Recorded too - "the guard passed it" is exactly the
+    # fact that separates a browser problem from an endpoint problem.
+    if is_protected(request.method, request.url.path):
+        record_attempt(request.method, request.url.path, None, bool(_p),
+                       "allowed through to the endpoint")
     return await call_next(request)
