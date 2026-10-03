@@ -1377,6 +1377,7 @@ async def lifespan(app: FastAPI):
         # GRID_AUTO_ROTATE and never reads that flag.
         async def _daily_idle_sweep_loop():
             import rotation_task as _rt
+            import profit_harvest as _ph
             import crypto_grid_bot as _sg
             # Let the fleet finish booting before the first look. The sweep
             # reads live branch state and a cold read would measure nothing.
@@ -1387,6 +1388,19 @@ async def lifespan(app: FastAPI):
                     if r.get("ran"):
                         log.warning(f"[rotation] daily idle sweep moved "
                                     f"${r.get('added_usd', 0):,.2f}")
+                    # Then take the profit off anything that went flat, per
+                    # the owner's standing instruction. Every dollar it can
+                    # take is a closed win logged AFTER profit_harvest first
+                    # saw that branch, so it can never reach capital, and a
+                    # branch holding coin is refused by withdraw itself.
+                    # Hourly rather than daily: a branch is only flat for as
+                    # long as it takes to buy the next dip, and a missed
+                    # window means the profit rides on into the next trade.
+                    h = await _ph.run(_sg, dry_run=False)
+                    if h.get("ran"):
+                        log.warning(f"[harvest] took ${h.get('harvested_usd', 0):,.2f} "
+                                    f"of profit off {len(h.get('branches') or [])} "
+                                    f"branch(es)")
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:

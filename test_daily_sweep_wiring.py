@@ -90,5 +90,58 @@ class WiringTests(unittest.TestCase):
         self.assertIn("ROTATION_TASK_TICKET unset", SRC)
 
 
+
+
+class HarvestWiringTests(unittest.TestCase):
+    """The profit harvest shares the sweep's hourly loop. What matters here
+    is that it actually runs LIVE (dry_run=False - a dry run would log a
+    plan forever and never take a dollar), that it runs AFTER the sweep so
+    freshly rotated cash is seen, and that its failure cannot stop the
+    sweep or the loop."""
+
+    def test_the_harvest_is_called_from_the_loop(self):
+        body = ast.unparse(_fn("_daily_idle_sweep_loop"))
+        self.assertIn("_ph.run", body)
+
+    def test_IT_RUNS_LIVE_NOT_AS_A_DRY_RUN(self):
+        body = ast.unparse(_fn("_daily_idle_sweep_loop"))
+        self.assertIn("dry_run=False", body,
+                      "profit_harvest.run defaults to dry_run=True and would "
+                      "log a plan forever without ever taking a dollar")
+
+    def test_it_runs_after_the_sweep_not_before(self):
+        body = ast.unparse(_fn("_daily_idle_sweep_loop"))
+        self.assertLess(body.index("run_daily_idle_sweep"), body.index("_ph.run"),
+                        "harvesting before rotating would miss cash the sweep "
+                        "just moved")
+
+    def test_the_module_is_imported_in_the_loop(self):
+        body = ast.unparse(_fn("_daily_idle_sweep_loop"))
+        self.assertIn("profit_harvest", body)
+
+    def test_a_harvest_error_cannot_kill_the_loop(self):
+        f = _fn("_daily_idle_sweep_loop")
+        body = ast.unparse(f)
+        i = body.index("_ph.run")
+        tries = [n for n in ast.walk(f) if isinstance(n, ast.Try)]
+        covered = False
+        for t in tries:
+            seg = ast.unparse(t)
+            if "_ph.run" in seg and any(
+                    h.type and "Exception" in ast.unparse(h.type) for h in t.handlers):
+                covered = True
+        self.assertTrue(covered, "the harvest call must sit inside the loop's "
+                                 "except Exception")
+
+    def test_the_loop_still_re_raises_cancellation(self):
+        body = ast.unparse(_fn("_daily_idle_sweep_loop"))
+        self.assertIn("CancelledError", body)
+
+    def test_the_call_site_places_no_order_itself(self):
+        body = ast.unparse(_fn("_daily_idle_sweep_loop"))
+        for forbidden in ("place_market_sell", "_submit_order",
+                          "close_all_grid_slices", "withdraw_from_grid_branch"):
+            self.assertNotIn(forbidden, body)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
