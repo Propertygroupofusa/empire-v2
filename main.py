@@ -1358,6 +1358,54 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # Daily idle sweep: once every 24 hours, move idle cash out of
+        # COMPLETELY FLAT branches into branches that still have a free
+        # rung. Needs no variable and no button - the two earlier ways of
+        # arming this both proved unreachable on this account, one because
+        # the environment variable could not be changed and one because the
+        # browser tab lock caught the owner away from a desk.
+        #
+        # It lives here rather than inside run_grid_branches_cycle because
+        # a once-a-day job does not belong in a per-cycle hot path, and
+        # because crypto_grid_bot.py is the live trading engine and is not
+        # edited lightly. Every decision - the 24h clock, the $50 floor,
+        # flat-only sources, the database-backed stamp - belongs to
+        # rotation_task.run_daily_idle_sweep; this is only the ticker.
+        #
+        # It writes allocated_usd and nothing else: no order is placed and
+        # no coin is sold, so it cannot move realised P&L. It is NOT
+        # GRID_AUTO_ROTATE and never reads that flag.
+        async def _daily_idle_sweep_loop():
+            import rotation_task as _rt
+            import crypto_grid_bot as _sg
+            # Let the fleet finish booting before the first look. The sweep
+            # reads live branch state and a cold read would measure nothing.
+            await asyncio.sleep(300)
+            while True:
+                try:
+                    r = await _rt.run_daily_idle_sweep(_sg)
+                    if r.get("ran"):
+                        log.warning(f"[rotation] daily idle sweep moved "
+                                    f"${r.get('added_usd', 0):,.2f}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # Never let this kill the loop: it retries in an hour and
+                    # its own database clock decides whether it is due.
+                    log.warning(f"[rotation] daily idle sweep error "
+                                f"({type(e).__name__}: {e})")
+                await asyncio.sleep(3600)
+
+        try:
+            _sweep_task = asyncio.create_task(_daily_idle_sweep_loop())
+            log.warning("[rotation] daily idle sweep armed - checks hourly, "
+                        "acts at most once every 24h")
+        except Exception as e:
+            try:
+                log.warning(f"daily idle sweep not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # Claim reconciliation: when the fleet's UNSPENT claims exceed the
         # cash that really exists, lower the claims until they fit. Writes
         # one number - allocated_usd - and never an order, a slice or a coin.
