@@ -122,10 +122,10 @@ ok("every source is marked flat", all(s["flat"] for s in p["sources"]), p["sourc
 ok("the skipped non-flat branches say why",
    any("non-flat" in (s.get("why") or "") for s in (p.get("skipped") or [])),
    p.get("skipped"))
-pool_flat = round(sum(b["allocated_usd"] for b in BOOK
-                      if not b["slices"] and b["product_id"] not in
-                      {t["product_id"] for t in p["targets"]}), 2)
-ok("the pool is exactly the flat branches outside the target set",
+srcs = {s["product_id"] for s in p["sources"]}
+pool_flat = round(sum(max(0.0, b["allocated_usd"] - rt.KEEP_BRANCH_ALIVE_USD)
+                      for b in BOOK if b["product_id"] in srcs), 2)
+ok("the pool is the flat sources' allocation less the keep-alive floor",
    abs(p["pool_usd"] - pool_flat) < 0.02, f"{p['pool_usd']} vs {pool_flat}")
 
 print("\n[4] with the switch armed, it releases only down to deployed cost")
@@ -203,7 +203,45 @@ src_names = {s["bot_name"] for s in p["sources"]}
 ok("only source branches were withdrawn from",
    {b for k, b, _ in g.calls if k == "withdraw"} == src_names)
 
-print("\n[10] the module writes nothing but allocated_usd")
+print("\n[10] a source is never drained to the point of deletion")
+for src in p["sources"]:
+    b = next(x for x in BOOK if x["product_id"] == src["product_id"])
+    left = b["allocated_usd"] - src["release_usd"]
+    ok(f"{src['product_id']} keeps at least the viability floor",
+       left >= rt.KEEP_BRANCH_ALIVE_USD - 0.01,
+       f"would be left with ${left:,.2f}")
+ok("the keep-alive floor is the $15 viability floor",
+   rt.KEEP_BRANCH_ALIVE_USD == 15.0, rt.KEEP_BRANCH_ALIVE_USD)
+
+print("\n[11] a PARKED branch is never funded - it cannot spend it")
+# Sized so the 20% ceiling does NOT bind - otherwise it refuses everything
+# and the test proves nothing about parking. A first version used a $1,000
+# book and a $485 pool, which pushed every target past 20% and failed for
+# the wrong reason.
+parked = [branch("AAA-USD", 900.0, [(1, 1.0)] * 3, levels=3),   # 3/3 parked
+          branch("BBB-USD", 900.0, [(1, 1.0)] * 5, levels=3),   # 5/3 parked
+          branch("CCC-USD", 900.0, [(1, 1.0)], levels=3),       # 1/3 can buy
+          branch("DDD-USD", 900.0, [(1, 1.0)], levels=3),
+          branch("EEE-USD", 900.0, [(1, 1.0)], levels=3),
+          branch("GGG-USD", 900.0, [(1, 1.0)], levels=3),
+          branch("HHH-USD", 900.0, [(1, 1.0)], levels=3),
+          branch("III-USD", 900.0, [(1, 1.0)], levels=3),
+          branch("FFF-USD", 315.0)]                             # flat source
+pr = rt.plan(parked, [("AAA-USD", .9), ("BBB-USD", .8), ("CCC-USD", .7),
+                      ("DDD-USD", .6), ("EEE-USD", .5), ("GGG-USD", .4),
+                      ("HHH-USD", .3), ("III-USD", .2)])
+funded = {t["product_id"] for t in (pr.get("targets") or [])}
+ok("neither parked branch was funded", not (funded & {"AAA-USD", "BBB-USD"}),
+   sorted(funded))
+ok("the refusal says it is parked",
+   any("parked" in (r.get("why") or "") for r in (pr.get("refused") or [])),
+   pr.get("refused"))
+ok("the branches that CAN open a rung were funded instead",
+   {"CCC-USD", "DDD-USD", "EEE-USD"} <= funded, sorted(funded))
+ok("and it backfilled further down the ranking to reach six",
+   len(funded) == rt.TOP_N, sorted(funded))
+
+print("\n[12] the module writes nothing but allocated_usd")
 import re  # noqa: E402
 s = open("/home/user/empire-v2/rotation_task.py").read()
 for bad_tok in ("place_order", "create_order", "market_order", "num_levels =",

@@ -85,6 +85,17 @@ MAX_COIN_SHARE_PCT = 20.0
 MIN_TRANSFER_USD = 10.0
 # A slice under this cannot be placed (MIN_TRADE_USD in crypto_grid_bot).
 MIN_SLICE_USD = 5.0
+
+# DRAINING A FLAT BRANCH TO ZERO DELETES IT.
+#
+# withdraw_from_grid_branch ends with `deleted = branch.allocated_usd <
+# 0.01` and removes the row, releasing the coin. A dry run against the live
+# book had this task take 100% of JASMY and TIA - both flat - which would
+# have silently destroyed two branches as a side effect of a rotation. They
+# hold no coin so nothing would have been lost but the rows; it would still
+# have been a deletion nobody asked for. Every source keeps at least the
+# $15 viability floor (MIN_TRADE_USD x MIN_LEVELS) so the branch survives.
+KEEP_BRANCH_ALIVE_USD = 15.0
 # Money is compared in cents. Float equality on dollars stalled the
 # continuous engine for 498 candles before a test caught it.
 CENT = 0.01
@@ -215,8 +226,9 @@ def plan(branches, ranked, release_deployed_idle=False, top_n=TOP_N):
         alloc = float(b.get("allocated_usd") or 0.0)
         n_open = len(_slices(b))
         if n_open == 0:
-            free = alloc
-            why = "flat - no open slices"
+            free = max(0.0, alloc - KEEP_BRANCH_ALIVE_USD)
+            why = (f"flat - no open slices, keeping ${KEEP_BRANCH_ALIVE_USD:,.2f} "
+                   f"so the branch is not deleted")
         else:
             if not release_deployed_idle:
                 skipped.append({"product_id": pid, "idle_usd": None,
@@ -260,6 +272,22 @@ def plan(branches, ranked, release_deployed_idle=False, top_n=TOP_N):
         b = by.get(pid)
         if b is None:
             return None, "no branch for this coin"
+        # A PARKED BRANCH CANNOT SPEND WHAT IT IS GIVEN.
+        #
+        # open slices >= num_levels means the buy gate's
+        # `len(slices) < num_levels` is already false, so the branch cannot
+        # open another rung at any price. The same dry run had this task
+        # send $459 each to HBAR (5 slices / 3 levels) and NEAR (3/3) -
+        # $918, a third of the whole rotation, into two branches that
+        # physically could not use it. That is the identical mistake as
+        # topping up a branch that is already sitting on idle, and it gets
+        # refused here rather than explained afterwards.
+        n_open = len(b.get("slices") or [])
+        nl_now = int(b.get("num_levels") or 0) or 1
+        if n_open >= nl_now:
+            return None, (f"parked at {n_open} open slice(s) against {nl_now} "
+                          f"level(s) - it cannot open a rung, so new budget "
+                          f"would sit unused")
         have = float(b.get("allocated_usd") or 0.0)
         after = ((have + share_usd) / book_total * 100.0) if book_total else 0.0
         if after > MAX_COIN_SHARE_PCT:
