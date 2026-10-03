@@ -7213,6 +7213,23 @@ async def check_and_auto_close_positions():
             log.info(f"[AUTO-CLOSE] {symbol} closed ({reason}) | qty={qty} | unrealized {unrealized_plpc*100:+.1f}% | "
                      f"realized_pnl=${pnl:.2f}{age_note}")
 
+            # The outcome of a position some bot opened. Recorded in the same
+            # ClosedTrade ledger the bots write, so the realised record (and
+            # /alpaca-growth) counts it - before this, a position closed here
+            # existed only as a Payment row and vanished from every edge figure.
+            try:
+                from models import ClosedTrade
+                async with AsyncSessionLocal() as db:
+                    db.add(ClosedTrade(
+                        bot="alpaca_auto_close", symbol=symbol, side="long",
+                        entry_price=entry_price, exit_price=current_price, qty=qty,
+                        pnl=pnl, pnl_pct=unrealized_plpc * 100, exit_reason=reason.upper(),
+                        hold_hours=(age_days * 24 if age_days is not None else None),
+                        closed_at=datetime.now(timezone.utc),
+                    ))
+                    await db.commit()
+            except Exception as e:
+                log.warning(f"[AUTO-CLOSE] ledger write failed for {symbol}: {e} - trade happened, sample lost")
             try:
                 async with AsyncSessionLocal() as db:
                     payment = Payment(
@@ -13682,14 +13699,14 @@ async def alpaca_growth(days: int = 60, fresh: int = 0):
 
     Read-only. It places nothing and changes no setting.
     """
-    import time as _time
+    import time as _growth_clock
     key = int(days)
     c = _ALPACA_GROWTH_CACHE
     if not fresh and c["payload"] is not None and c["key"] == key \
-            and _time.time() - c["at"] < _ALPACA_GROWTH_TTL_SECONDS:
+            and _growth_clock.time() - c["at"] < _ALPACA_GROWTH_TTL_SECONDS:
         out = dict(c["payload"])
         out["served_from_cache"] = True
-        out["cache_age_seconds"] = round(_time.time() - c["at"], 1)
+        out["cache_age_seconds"] = round(_growth_clock.time() - c["at"], 1)
         return out
 
     import alpaca_growth as ag
@@ -13699,7 +13716,7 @@ async def alpaca_growth(days: int = 60, fresh: int = 0):
     async with get_session_factory()() as db:
         rows = (await db.execute(
             select(ClosedTrade)
-            .where(ClosedTrade.bot.in_(["prop_apex", "alpaca_swing"]),
+            .where(ClosedTrade.bot.in_(["prop_apex", "alpaca_swing", "alpaca_auto_close"]),
                    ClosedTrade.closed_at >= since)
             .order_by(ClosedTrade.closed_at))).scalars().all()
     trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
@@ -13725,14 +13742,14 @@ async def alpaca_growth(days: int = 60, fresh: int = 0):
                       max_risk_pct=max_risk, min_position_usd=min_pos)
     out["window_days"] = key
     out["trades_by_bot"] = {b: sum(1 for t in trades if t["bot"] == b)
-                            for b in ("prop_apex", "alpaca_swing")}
+                            for b in ("prop_apex", "alpaca_swing", "alpaca_auto_close")}
     out["open_positions"] = len(positions)
     out["note"] = ("ClosedTrade carries no strategy tag. If the live strategy family "
                    "changed inside this window, the sample mixes configurations - narrow "
                    "`days` to the period since the last switch before acting on it.")
     out["served_from_cache"] = False
     out["cache_age_seconds"] = 0
-    c.update(at=_time.time(), key=key, payload=out)
+    c.update(at=_growth_clock.time(), key=key, payload=out)
     return out
 
 

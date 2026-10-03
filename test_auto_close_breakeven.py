@@ -90,3 +90,41 @@ def test_startup_summary_is_accurate():
          mock.patch.object(td, "ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN", True):
         s = td.auto_close_summary()
     assert "no profit skim" in s and "breakeven" in s and "10%" not in s
+
+
+def test_a_close_is_written_to_the_closed_trade_ledger():
+    import os, tempfile
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    import models
+    fd, path = tempfile.mkstemp(suffix=".db"); os.close(fd)
+    eng = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    factory = async_sessionmaker(eng, expire_on_commit=False)
+    now = datetime.now(timezone.utc)
+    positions = [{"symbol": "NVDA", "qty": "2", "avg_entry_price": "100",
+                  "current_price": "109", "unrealized_plpc": "0.09"}]
+    s = _S()
+
+    async def is_open(_s): return True
+    async def pos(_s): return positions
+    async def opened_at(_s, sym): return (now - timedelta(days=3)).isoformat()
+
+    async def run():
+        async with eng.begin() as c:
+            await c.run_sync(models.Base.metadata.create_all)
+        with mock.patch.object(td, "ALPACA_KEY", "k"), mock.patch.object(td, "ALPACA_SECRET", "s"), \
+             mock.patch.object(td, "ALPACA_AUTO_CLOSE_PROFIT_PCT", 0.08), \
+             mock.patch.object(td.aiohttp, "ClientSession", lambda: s), \
+             mock.patch.object(td, "_is_market_open", is_open), \
+             mock.patch.object(td, "_fetch_alpaca_positions", pos), \
+             mock.patch.object(td, "_fetch_position_opened_at", opened_at), \
+             mock.patch.object(td, "AsyncSessionLocal", factory):
+            await td.check_and_auto_close_positions()
+        async with factory() as db:
+            return (await db.execute(select(models.ClosedTrade))).scalars().all()
+
+    rows = asyncio.run(run())
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r.bot, r.symbol, r.exit_reason) == ("alpaca_auto_close", "NVDA", "PROFIT TARGET")
+    assert abs(r.pnl - 18.0) < 1e-9 and abs(r.hold_hours - 72) < 0.1

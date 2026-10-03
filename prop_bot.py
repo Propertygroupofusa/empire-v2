@@ -1672,6 +1672,113 @@ async def _run_scheduled_backtest_and_update_exclusions():
     )
 
 
+# ── WHO OWNS A BROKER POSITION ────────────────────────────────────────────
+#
+# Alpaca reports ONE position per symbol. Three systems in this file can hold
+# one: the whole-account scan (open_prop_positions), the Alpaca branches
+# (open_alpaca_branch_positions) and the opening-bar legs
+# (open_opening_bar_positions). Two gaps, found auditing the account-wide
+# auto-close loop in routers/trading_dashboard.py, which sells any of them:
+#
+#  1. reconcile_positions_with_broker ADOPTED every broker position on a
+#     traded symbol that the scan was not tracking - including a branch's or
+#     an opening-bar leg's. Entries already skipped branch-claimed contracts;
+#     adoption did not. Two systems then managed the same shares, each with
+#     its own exits, and whichever sold first left the other holding a ghost.
+#  2. Only the scan noticed a position vanishing. A branch whose shares were
+#     sold elsewhere (auto-close, a manual sell in the Alpaca app) kept
+#     "holding" them: every exit check sent a SELL for shares that were gone,
+#     Alpaca refused it, and because the branch still believed it held a
+#     position it never bought again. Frozen, permanently.
+
+async def _contracts_owned_elsewhere():
+    """Contracts held by a branch or an opening-bar leg, or None if unknown.
+    None means "do not adopt this cycle": skipping an adoption is harmless,
+    adopting another system's position is the bug."""
+    # Only a RUNNING owner counts. With branch mode or opening-bar trading
+    # switched off, that system's cycle returns before managing anything -
+    # exits included - and the scan's adoption is then the only thing
+    # protecting those shares. Excluding them would leave them unmanaged.
+    try:
+        owned = set()
+        if await is_opening_bar_live_active():
+            owned |= set(open_opening_bar_positions)
+        if await is_alpaca_branch_mode_active():
+            for b in await get_alpaca_branches():
+                if b.bot_name in open_alpaca_branch_positions:
+                    owned.add(b.contract)
+        return owned
+    except Exception as e:
+        log.warning(f"[APEX_589296] could not read branch ownership - adoption skipped this cycle: {e}")
+        return None
+
+
+async def _broker_held_symbols(session):
+    """Symbols with a non-zero position at Alpaca, or None if unreadable."""
+    try:
+        async with session.get(f"{get_base_url()}/v2/positions", headers=get_headers()) as r:
+            if r.status != 200:
+                return None
+            return {p.get("symbol") for p in await r.json()
+                    if p.get("symbol") and float(p.get("qty") or 0) != 0}
+    except Exception as e:
+        log.warning(f"[APEX_589296] broker positions unreadable: {e}")
+        return None
+
+
+VANISHED_GRACE = timedelta(minutes=5)
+
+
+def _is_older_than_grace(open_time, now=None):
+    if open_time is None:
+        return True
+    if open_time.tzinfo is None:
+        open_time = open_time.replace(tzinfo=timezone.utc)
+    return ((now or datetime.now(timezone.utc)) - open_time) >= VANISHED_GRACE
+
+
+async def drop_vanished_branch_and_leg_positions(session):
+    """Stop tracking branch / opening-bar positions the broker no longer holds.
+
+    An unreadable broker read drops nothing (a gap is not an empty account),
+    and a position younger than VANISHED_GRACE is kept - a fresh fill may not
+    show in /v2/positions yet. P&L is NOT booked here: the sale happened
+    elsewhere at a price this code did not see, and inventing one would put a
+    guess into the branch's capital. Returns the list of what was dropped.
+    """
+    held = await _broker_held_symbols(session)
+    if held is None:
+        return []
+    dropped = []
+    try:
+        branches = await get_alpaca_branches()
+    except Exception:
+        branches = []
+    for b in branches:
+        pos = open_alpaca_branch_positions.get(b.bot_name)
+        cfg = FUTURES.get(b.contract)
+        if not pos or not cfg or cfg["symbol"] in held:
+            continue
+        if not _is_older_than_grace(pos.get("open_time")):
+            continue
+        open_alpaca_branch_positions.pop(b.bot_name, None)
+        await _db_delete_branch_open(b.bot_name, b.contract)
+        log.warning(f"[ALPACA-BRANCH] {b.bot_name}: its {b.contract} ({cfg['symbol']}) position no "
+                    f"longer exists at Alpaca (sold outside this branch) - stopped tracking it, so the "
+                    f"branch can trade again. Allocated capital left unchanged: the sale price was not seen here.")
+        dropped.append(b.bot_name)
+    for contract in list(open_opening_bar_positions):
+        cfg = FUTURES.get(contract)
+        pos = open_opening_bar_positions[contract]
+        if not cfg or cfg["symbol"] in held or not _is_older_than_grace(pos.get("open_time")):
+            continue
+        open_opening_bar_positions.pop(contract, None)
+        log.warning(f"[OPENING-BAR] {contract} ({cfg['symbol']}): position no longer exists at Alpaca "
+                    f"(sold outside this system) - stopped tracking it.")
+        dropped.append(contract)
+    return dropped
+
+
 async def reconcile_positions_with_broker(session):
     """Confirmed in production: a real Alpaca position (USO/MCL) sat at
     -4.9% - more than double STOP_LOSS_PCT - completely unmanaged, because
@@ -1729,8 +1836,14 @@ async def reconcile_positions_with_broker(session):
             else:
                 _broker_last_price.pop(contract, None)
 
+    owned_elsewhere = await _contracts_owned_elsewhere()
     for contract, p in broker_by_contract.items():
         if contract in open_prop_positions:
+            continue
+        if owned_elsewhere is None or contract in owned_elsewhere:
+            # A branch or opening-bar leg owns these shares (or ownership
+            # could not be read). Adopting them would put two systems'
+            # exits on the same position - see _contracts_owned_elsewhere.
             continue
         qty = float(p.get("qty", 0))
         if qty == 0:
@@ -4136,6 +4249,9 @@ async def run_alpaca_branches_cycle():
     connector = aiohttp.TCPConnector(use_dns_cache=True, limit=10, limit_per_host=5, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=60, connect=20, sock_read=30, sock_connect=10)
     async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        # Before any branch acts: forget positions sold elsewhere, so a
+        # branch never tries to exit shares it no longer holds.
+        await drop_vanished_branch_and_leg_positions(session)
         equity = await get_account_equity(session)
         if equity is None:
             log.warning("[ALPACA-BRANCH] could not fetch real account equity - skipping this cycle")
@@ -4437,6 +4553,7 @@ async def run_opening_bar_live_cycle():
     connector = aiohttp.TCPConnector(use_dns_cache=True, limit=10, limit_per_host=5, ttl_dns_cache=300)
     timeout = aiohttp.ClientTimeout(total=60, connect=20, sock_read=30, sock_connect=10)
     async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
+        await drop_vanished_branch_and_leg_positions(session)
         equity = await get_account_equity(session)
         if equity is None:
             log.warning("[OPENING-BAR] could not fetch real account equity - skipping this cycle")

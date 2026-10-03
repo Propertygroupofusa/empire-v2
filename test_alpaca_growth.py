@@ -104,6 +104,9 @@ def test_endpoint_reads_both_alpaca_bots_and_ignores_crypto():
                 db.add(models.ClosedTrade(bot="alpaca_swing", symbol="SLV", side="long",
                                           entry_price=30, exit_price=30.5, qty=3, pnl=1.5,
                                           closed_at=now - timedelta(hours=10 * i + 2)))
+            db.add(models.ClosedTrade(bot="alpaca_auto_close", symbol="GLD", side="long",
+                                      entry_price=400, exit_price=432, qty=1, pnl=32.0,
+                                      closed_at=now - timedelta(hours=4)))
             db.add(models.ClosedTrade(bot="crypto_coinbase", symbol="BTC-USD", side="long",
                                       entry_price=1, exit_price=1, qty=1, pnl=-999,
                                       closed_at=now - timedelta(hours=3)))
@@ -123,9 +126,9 @@ def test_endpoint_reads_both_alpaca_bots_and_ignores_crypto():
             return await td.alpaca_growth(days=60, fresh=1)
 
     out = asyncio.run(run())
-    assert out["trades_by_bot"] == {"prop_apex": 20, "alpaca_swing": 15}
-    assert out["kpis"]["trades"] == 35
-    assert out["kpis"]["net_usd"] == round(20 * 0.4 + 15 * 1.5, 4)  # no -999 crypto row
+    assert out["trades_by_bot"] == {"prop_apex": 20, "alpaca_swing": 15, "alpaca_auto_close": 1}
+    assert out["kpis"]["trades"] == 36
+    assert out["kpis"]["net_usd"] == round(20 * 0.4 + 15 * 1.5 + 32.0, 4)  # auto-close counted; no -999 crypto row
     assert out["cap"]["cap_binding"] is True
     assert out["lever"] == "RAISE_RISK_CAP"
     os.unlink(path)
