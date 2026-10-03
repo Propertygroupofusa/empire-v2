@@ -151,7 +151,11 @@ ok('preview sends NO dry_run flag at all (server default is true)',
 ok('preview sends only the levels map', /\{levels\}/.test(fnPrev));
 ok('preview goes through the write guard', /postGuarded\(/.test(fnPrev));
 ok('preview refuses to send an empty map',
-   /keys\.length/.test(fnPrev) && /Nothing to preview/.test(fnPrev));
+   /keys\.length/.test(fnPrev) && /Nothing was sent/.test(fnPrev));
+// The refusal must come BEFORE the request, not after it.
+ok('and it returns before postGuarded is reached',
+   fnPrev.indexOf('Nothing was sent') < fnPrev.indexOf('postGuarded('),
+   'the empty-map bail must precede the send');
 
 console.log('\n[5] the apply path carries dry_run=false and nothing else');
 ok('apply sends dry_run: false', /dry_run:\s*false/.test(fnExec));
@@ -206,11 +210,19 @@ const mkWrap = () => { let html = '', disp = ''; return {
   set innerHTML(v) { html = v; }, get innerHTML() { return html; },
   style: { set display(v) { disp = v; }, get display() { return disp; } },
   get _disp() { return disp; } }; };
+// renderGridLevels now calls _gridLevelsInUse, so the harness has to
+// supply it or the renderer throws instead of rendering.
+const fnInUseEarly = grab('_gridLevelsInUse');
 const runRender = branches => {
   const wrap = mkWrap();
-  new Function('document', 'escText', 'fmtUsd', CONSTS + fnSuggest + fnRender
-    + '; return renderGridLevels;')(
-    { getElementById: () => wrap }, esc, n => '$' + Number(n).toFixed(2))(branches);
+  // A fresh panel: no plan, no status, no inputs -> not in use.
+  const doc = {
+    getElementById: id => (id === 'grid-levels-wrap' ? wrap : null),
+    querySelectorAll: () => [],
+  };
+  new Function('document', 'escText', 'fmtUsd',
+    CONSTS + fnSuggest + fnInUseEarly + fnRender + '; return renderGridLevels;')(
+    doc, esc, n => '$' + Number(n).toFixed(2))(branches);
   return wrap;
 };
 let w = runRender([]);
@@ -251,6 +263,73 @@ ok('the call rides the grid-status fetch the page already makes',
 ok('the panel adds no fetch of its own', !/apiGet|XMLHttpRequest|fetch\(/.test(fnRender));
 ok('the panel touches no threshold or other setting',
    !/allocated_usd\s*=|num_levels\s*=|GRID_CASH_RESERVE|stop_loss/.test(fnRender));
+
+// no verdict here - blocks [10] and [11] below are part of this suite
+
+// ====================================================================
+// A BACKGROUND REFRESH MUST NOT DESTROY WHAT THE PERSON IS DOING.
+//
+// loadFleetReadiness runs every 60s and renderGridLevels rebuilds the
+// panel with wrap.innerHTML. That silently replaced typed values with
+// the suggested defaults, and deleted the Confirm button out from under
+// a displayed plan - so tapping it sent nothing, and the server log was
+// empty. Three rounds were spent looking at the server for a request the
+// browser had never sent.
+// ====================================================================
+console.log('\n[10] a refresh yields to a panel in use');
+
+const fnInUse = fnInUseEarly;
+const fnRender2 = grab('renderGridLevels');
+
+const mkPanel = ({planHtml = '', statusText = '', inputs = []}) => {
+  const els = inputs.map(i => ({
+    value: i.value,
+    getAttribute: k => ({'data-product': i.product, 'data-current': String(i.current),
+                         'data-rendered': String(i.rendered)})[k],
+  }));
+  return {
+    getElementById: id => ({
+      'grid-levels-plan': {innerHTML: planHtml},
+      'grid-levels-status': {textContent: statusText},
+    }[id] || null),
+    querySelectorAll: () => els,
+  };
+};
+const inUse = (doc) => new Function('document', fnInUse + '; return _gridLevelsInUse;')(doc)();
+
+ok('a clean panel is not in use',
+   inUse(mkPanel({inputs: [{product: 'XRP-USD', current: 3, rendered: 8, value: '8'}]})) === null);
+ok('an edited box counts as in use',
+   inUse(mkPanel({inputs: [{product: 'XRP-USD', current: 3, rendered: 8, value: '10'}]}))
+   === 'a box has been edited');
+ok('a displayed plan counts as in use',
+   inUse(mkPanel({planHtml: '<table>...</table>'})) === 'a plan is on screen');
+ok('a result message counts as in use',
+   inUse(mkPanel({statusText: 'Applying...'})) === 'a result is on screen');
+ok('whitespace alone does NOT count as in use',
+   inUse(mkPanel({planHtml: '   ', statusText: '  '})) === null);
+
+// the renderer must actually honour it
+ok('the renderer checks before rebuilding', /_gridLevelsInUse\(\)/.test(fnRender2));
+ok('and returns without touching innerHTML when busy',
+   /if \(busy && wrap\.innerHTML\.trim\(\)\) \{[\s\S]*?return;/.test(fnRender2));
+const guardAt = fnRender2.indexOf('if (busy');
+const writeAt = fnRender2.indexOf('wrap.innerHTML = `');
+ok('the guard comes BEFORE the rebuild', guardAt !== -1 && writeAt !== -1 && guardAt < writeAt,
+   `guard@${guardAt} write@${writeAt}`);
+ok('an empty panel still renders the first time (busy but nothing drawn yet)',
+   /busy && wrap\.innerHTML\.trim\(\)/.test(fnRender2),
+   'the guard must require existing content, or the panel could never draw');
+ok('each input records what it was rendered with',
+   /data-rendered="\$\{val\}"/.test(fnRender2));
+
+console.log('\n[11] an empty collection diagnoses itself');
+ok('it says nothing was SENT, not just nothing to preview',
+   /Nothing was sent/.test(fnPrev));
+ok('it reports how many inputs it found', /els\.length\} input\(s\)/.test(fnPrev));
+ok('it reports each box value and the current count',
+   /data-product/.test(fnPrev) && /data-current/.test(fnPrev));
+ok('the reported values are escaped', /escText\(seen/.test(fnPrev));
 
 console.log();
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }

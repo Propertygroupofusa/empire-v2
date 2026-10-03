@@ -7919,9 +7919,42 @@ function _gridLevelsSuggest(b) {
                     + ' unspent - the money is the constraint, not the rungs')};
 }
 
+// IS THE PERSON IN THE MIDDLE OF USING THIS PANEL?
+//
+// loadFleetReadiness runs on a 60-second timer and this renderer rebuilds
+// the panel with wrap.innerHTML, which destroys every DOM node inside it.
+// So a value typed into a box was silently replaced by the suggested
+// default within a minute, and - worse - a plan on screen had its Confirm
+// button DELETED out from under the person. Tapping where it had been did
+// nothing and sent nothing, which is indistinguishable from a dead button
+// and is exactly what produced an empty server log.
+//
+// A background refresh must never destroy input the person has given. It
+// yields instead, and the panel updates on the next pass after they are
+// done.
+function _gridLevelsInUse() {
+    const plan = document.getElementById('grid-levels-plan');
+    if (plan && plan.innerHTML.trim()) return 'a plan is on screen';
+    const st = document.getElementById('grid-levels-status');
+    if (st && st.textContent.trim()) return 'a result is on screen';
+    const els = document.querySelectorAll('.grid-levels-in');
+    for (const el of els) {
+        if (String(el.value || '') !== String(el.getAttribute('data-rendered') || '')) {
+            return 'a box has been edited';
+        }
+    }
+    return null;
+}
+
 function renderGridLevels(branches) {
     const wrap = document.getElementById('grid-levels-wrap');
     if (!wrap) return;
+    const busy = _gridLevelsInUse();
+    if (busy && wrap.innerHTML.trim()) {
+        // Leave it exactly as it is. Refreshing the numbers underneath
+        // someone mid-decision is how the Confirm button disappeared.
+        return;
+    }
     const rows = (branches || []).filter(b => {
         const n = Math.trunc(Number(b && b.num_levels) || 0);
         const open_n = ((b && b.slices) || []).length;
@@ -7953,7 +7986,7 @@ function renderGridLevels(branches) {
               <input class="grid-levels-in" type="number" inputmode="numeric"
                      data-product="${escText(pid)}" data-current="${n}"
                      min="${GRID_LEVELS_MIN}" max="${GRID_LEVELS_MAX}" step="1"
-                     value="${val}" placeholder="${n}"
+                     value="${val}" placeholder="${n}" data-rendered="${val}"
                      style="width:4.6em; text-align:right; font-variant-numeric:tabular-nums;">
             </td>
             <td style="font-size:0.92em; color:var(--text-dim);">${escText(sug.why)}</td>
@@ -8022,8 +8055,23 @@ async function previewGridLevels() {
     const levels = _gridLevelsWanted();
     const keys = Object.keys(levels);
     if (!keys.length) {
-        st.textContent = 'Nothing to preview - no box differs from its current '
-                       + 'level count. Type a new count on a row first.';
+        // DIAGNOSE, DO NOT JUST DECLINE. A bare "nothing to preview" sent
+        // the last three rounds of this hunt looking at the server for a
+        // request the browser had never sent. Say what was actually on the
+        // page so the next look is a reading, not a guess.
+        const els = Array.from(document.querySelectorAll('.grid-levels-in'));
+        const seen = els.map(el => `${el.getAttribute('data-product')}=`
+            + `${JSON.stringify(String(el.value || ''))}`
+            + ` (current ${el.getAttribute('data-current')})`).join(', ');
+        st.innerHTML = `\u26a0\ufe0f <strong>Nothing was sent.</strong> No box differs
+            from its branch's current level count, so there was nothing to ask the
+            server about.
+            <div style="margin-top:4px; color:var(--text-dim);">
+              ${els.length} input(s) on the page: ${escText(seen || 'none found')}
+            </div>
+            <div style="margin-top:4px; color:var(--text-dim);">
+              Type the new count into a box, then tap Preview.
+            </div>`;
         return;
     }
     st.textContent = 'Computing the plan for ' + keys.join(', ')
