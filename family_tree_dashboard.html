@@ -1136,6 +1136,7 @@
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
         <div id="grid-reconcile-wrap" style="display:none;"></div>
+        <div id="grid-rotation-wrap" style="display:none;"></div>
         <div id="grid-levels-wrap" style="display:none;"></div>
     </div>
 
@@ -7039,6 +7040,7 @@ async function loadFleetReadiness() {
         renderTabLock();
         renderOutOfReach(d.out_of_reach);
         renderGridReconcile(d.backing);
+        renderGridRotation(d.branches || []);
         renderGridLevels(d.branches || []);
         const rows = FLEET.readiness(d.branches || [], unbacked);
         const s = FLEET.summarise(rows);
@@ -7888,6 +7890,156 @@ function renderGridReconcile(bk) {
              color:var(--text-dim);"></div>
         <div id="grid-reconcile-plan"></div>
       </div>`;
+}
+
+
+// ---------------------------------------------------------------------------
+// IDLE ROTATION - preview, then run.
+//
+// The endpoints existed before this card did, and that was the whole problem:
+// running them meant hand-building a POST with an x-dashboard-token header,
+// on a phone. The token is not the friction - the page already attaches it to
+// every POST once the tab is unlocked. The friction was having no button.
+//
+// RUN IS NOT REACHABLE UNTIL A PREVIEW HAS BEEN SEEN. The button is not
+// rendered until a preview comes back READY, and it carries the ticket that
+// preview minted. Clicking Run twice re-sends the same ticket, which the
+// server refuses outright (one rotation per ticket, reserved by a UNIQUE
+// insert) - so a double tap cannot move money twice.
+// ---------------------------------------------------------------------------
+
+let _rotTicket = null;      // minted by preview, spent by run
+let _rotPreviewed = null;   // the figure the person actually saw
+
+function renderGridRotation(branches) {
+    const wrap = document.getElementById('grid-rotation-wrap');
+    if (!wrap) return;
+    const rows = Array.isArray(branches) ? branches : [];
+    // Flat = zero open slices. Only a flat branch can be a source, because
+    // withdraw_from_grid_branch refuses one holding any slice.
+    const flat = rows.filter(b => !((b.slices || []).length));
+    const movable = flat.reduce(
+        (s, b) => s + Math.max(0, Number(b.allocated_usd || 0) - 15), 0);
+    if (!flat.length || movable < 10) {
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    const freeRung = rows.filter(
+        b => (b.slices || []).length < (Number(b.num_levels) || 1)).length;
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
+                  border:1px solid var(--text-dim); background:rgba(90,90,90,0.06);">
+        <div style="font-weight:700; font-size:0.9em;">
+          \u{1F501} ${fmtUsd(movable)} of idle cash can be put back to work
+        </div>
+        <div style="margin-top:8px; font-size:0.82em; color:var(--text-dim);
+                    line-height:1.45;">
+          ${flat.length} branch(es) hold no coin, so their cash is sitting
+          still. This moves it to branches with a free rung - ${freeRung} of
+          them right now. It places no order and sells no coin; only the
+          allocation moves. Each source keeps $15 so the branch is not
+          deleted.
+        </div>
+        <button class="unlock-btn" style="margin-top:10px;"
+                onclick="previewGridRotation()">\u{1F50D} Preview (moves nothing)</button>
+        <div id="grid-rotation-status" style="margin-top:8px; font-size:0.82em;
+             color:var(--text-dim);"></div>
+        <div id="grid-rotation-plan"></div>
+      </div>`;
+}
+
+async function previewGridRotation() {
+    const st = document.getElementById('grid-rotation-status');
+    const planWrap = document.getElementById('grid-rotation-plan');
+    if (!st || !planWrap) return;
+    st.textContent = 'Computing the plan… nothing is being moved.';
+    planWrap.innerHTML = '';
+    _rotTicket = null; _rotPreviewed = null;
+    try {
+        const d = await postGuarded(API_BASE + '/grid-status/rotation/preview');
+        if (!d.ready) {
+            st.textContent = 'ℹ️ ' + escText(d.why_not || d.detail
+                || 'Nothing to move right now.');
+            return;
+        }
+        if (!d.balances) {
+            // Out must equal in. The server refuses an unbalanced plan too,
+            // but saying so here means the person is never shown a Run
+            // button for a plan that cannot be applied.
+            st.innerHTML = `⚠️ <strong>This plan does not balance.</strong>
+                ${fmtUsd(d.would_withdraw_usd)} out against
+                ${fmtUsd(d.would_place_usd)} in. Nothing was moved and there is
+                nothing safe to run.`;
+            return;
+        }
+        _rotPreviewed = Number(d.would_withdraw_usd);
+        _rotTicket = 'ui-' + new Date().toISOString().replace(/[^0-9]/g, '');
+        st.innerHTML = escText(d.detail || '');
+        const src = (d.sources || []).map(s => `<tr>
+            <td>${escText(s.product_id)}</td>
+            <td style="text-align:right;">${fmtUsd(s.release_usd)}</td>
+            <td style="color:var(--text-dim); font-size:0.95em;">${escText(s.why || '')}</td>
+          </tr>`).join('');
+        const tgt = (d.targets || []).map(a => `<tr>
+            <td>${escText(a.product_id)}</td>
+            <td style="text-align:right;">${fmtUsd(a.add_usd)}</td>
+            <td style="color:var(--text-dim); font-size:0.95em;">dip ${
+                Number(a.dip_depth).toFixed(4)}</td>
+          </tr>`).join('');
+        planWrap.innerHTML = `
+          <div style="overflow-x:auto; margin-top:8px;">
+            <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+              <thead><tr><th>Out of</th><th>Amount</th><th>Why</th></tr></thead>
+              <tbody>${src}</tbody>
+              <thead><tr><th>Into</th><th>Amount</th><th></th></tr></thead>
+              <tbody>${tgt}</tbody>
+            </table>
+          </div>
+          <div style="margin-top:6px; font-size:0.78em;
+                      font-variant-numeric:tabular-nums;">
+            <span style="color:var(--text-dim);">moves</span>
+            <strong> ${fmtUsd(d.would_withdraw_usd)}</strong>
+            <span style="color:var(--text-dim);">, out equals in</span>
+          </div>
+          <button class="unlock-btn" style="margin-top:10px;"
+                  onclick="runGridRotation()">▶️ Run it - move ${
+                      fmtUsd(d.would_withdraw_usd)}</button>`;
+    } catch (e) {
+        st.textContent = '⚠️ ' + escText(e && e.message ? e.message : String(e));
+    }
+}
+
+async function runGridRotation() {
+    const st = document.getElementById('grid-rotation-status');
+    if (!st) return;
+    if (!_rotTicket) {
+        st.textContent = '⚠️ Preview it first - nothing was sent.';
+        return;
+    }
+    if (!window.confirm('Move ' + fmtUsd(_rotPreviewed) + ' between branches?\n\n'
+        + 'No order is placed and no coin is sold - only the allocation moves.')) {
+        st.textContent = 'Cancelled. Nothing was moved.';
+        return;
+    }
+    st.textContent = 'Running…';
+    try {
+        // The ticket minted by the preview. A second tap re-sends it and the
+        // server refuses it, so this cannot run twice.
+        const d = await postGuarded(API_BASE + '/grid-status/rotation/execute'
+            + '?ticket=' + encodeURIComponent(_rotTicket) + '&confirm=true');
+        const moved = Number(d.added_usd || 0);
+        st.innerHTML = d.ran
+            ? `✅ <strong>Moved ${fmtUsd(moved)}</strong> into
+               ${(d.added || []).length} branch(es) from ${(d.withdrawn || []).length}.
+               <div style="margin-top:4px; color:var(--text-dim);">${
+                   escText(d.detail || '')}</div>`
+            : 'ℹ️ ' + escText(d.detail || 'Nothing was moved.');
+        const plan = document.getElementById('grid-rotation-plan');
+        if (plan) plan.innerHTML = '';
+        if (typeof loadGridStatus === 'function') loadGridStatus();
+    } catch (e) {
+        st.textContent = '⚠️ ' + escText(e && e.message ? e.message : String(e));
+    }
 }
 
 function _gridReconcileUrl(productId, apply) {
