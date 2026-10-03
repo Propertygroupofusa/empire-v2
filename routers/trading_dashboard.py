@@ -10583,25 +10583,44 @@ async def close_one_grid_branch_endpoint(product_id: str, dry_run: bool = True,
                     f"would be a guess - refusing to close blind. A gap is not a zero."))
 
     # The exit leg is TAKER: this is a market sell by design.
+    # EXACTLY what close_all_grid_slices uses when it executes. This preview
+    # used to charge the exit leg only (value * rate/2) while the engine
+    # charges qty * (entry + exit) * rate/2, except on an ADOPTED slice whose
+    # basis never paid a commission - so the quoted figure was always
+    # optimistic. Measured 2026-10-03 across the live fleet: $9.21 too
+    # favourable overall, and on BTC it read +$0.05 on a close the engine
+    # books at -$0.08. A preview that shows green on a red, irreversible
+    # close is the precise failure _grid_slice_net_pnl was extracted to
+    # prevent ("the dashboard saying +$4.21 while the actual sale produces
+    # something different"). Resolve the rate per slice and run the one
+    # shared formula; derive nothing twice.
     round_trip = await g.get_effective_round_trip_fee_rate()
-    exit_leg = (round_trip or 0.0) / 2
+    exit_leg = ((round_trip or 0.0) / 2) if await g.is_maker_orders_active() else None
+    exit_fee_rate = exit_leg if exit_leg is not None else (round_trip or 0.0) / 2
 
-    rows, cost_total, value_total = [], 0.0, 0.0
+    rows, cost_total, value_total, realized = [], 0.0, 0.0, 0.0
     for sl in slices:
         qty = float(sl.get("qty") or 0.0)
         entry = float(sl.get("entry_price") or 0.0)
         cost = qty * entry
         value = qty * price
-        net = value - cost - (value * exit_leg)
+        # get_grid_status hands back dicts; _slice_rate reads attributes.
+        shim = SimpleNamespace(adopted=sl.get("adopted"),
+                               entry_fee_rate=sl.get("entry_fee_rate"))
+        rate = g._slice_rate(shim, round_trip, exit_leg)
+        net = g._grid_slice_net_pnl(qty, entry, price, rate)
         cost_total += cost
         value_total += value
-        rows.append({"qty": qty, "entry_price": round(entry, 8),
+        realized += net
+        rows.append({"slice_id": sl.get("id"), "qty": qty,
+                     "entry_price": round(entry, 8),
+                     "adopted": bool(sl.get("adopted")),
+                     "round_trip_fee_rate": rate,
                      "value_usd": round(value, 2), "cost_usd": round(cost, 2),
                      "net_pnl_usd": round(net, 2),
                      "net_pct": round(net / cost * 100, 2) if cost else None})
 
-    fees = value_total * exit_leg
-    realized = value_total - cost_total - fees
+    fees = value_total - cost_total - realized
     preview = {
         "product_id": product_id,
         "bot_name": branch.get("bot_name"),
@@ -10610,10 +10629,11 @@ async def close_one_grid_branch_endpoint(product_id: str, dry_run: bool = True,
         "price": price,
         "cost_basis_usd": round(cost_total, 2),
         "market_value_usd": round(value_total, 2),
-        "exit_fee_usd": round(fees, 2),
-        "exit_leg_fee_rate": exit_leg,
+        "total_fee_usd": round(fees, 2),
+        "exit_leg_fee_rate": exit_fee_rate,
+        "maker_orders_active": exit_leg is not None,
         "realized_pnl_usd": round(realized, 2),
-        "cash_returned_usd": round(value_total - fees, 2),
+        "cash_returned_usd": round(value_total - value_total * exit_fee_rate, 2),
         "allocated_usd": branch.get("allocated_usd"),
     }
 
