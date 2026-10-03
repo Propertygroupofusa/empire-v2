@@ -24,6 +24,8 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 
+import fib_gold_zone
+
 from alpaca_mean_reversion import should_exit_position
 from prop_bot import FUTURES, get_headers
 
@@ -2407,4 +2409,144 @@ async def run_red_bar_takeout_backtest(symbols=None, days: int = BACKTEST_DAYS, 
             "entry_buffer_usd": OPENING_BAR_ENTRY_BUFFER_USD,
             "days": days,
         },
+    }
+
+
+# ============================================================================
+# FIBONACCI GOLD ZONE (shadow mode, additive only)
+# ============================================================================
+# The same YouTube gold-zone pullback rules the crypto side tests
+# (fib_gold_zone.py - one shared implementation, so the two venues can
+# never be scored by different rules), replayed on Alpaca's own real
+# bars for every symbol prop_bot trades, and compared against the live
+# Alpaca strategy on the identical 15-minute history. Never places an
+# order.
+#
+# Costs: Alpaca charges no commission, so the resting-limit entry and
+# target cost nothing. A stop or a time-out exits at market, so it is
+# charged ALPACA_FIB_SLIPPAGE (5 bps) for crossing the spread - small, but
+# not zero, because pretending a stop fills at its exact price flatters
+# any strategy with a tight stop.
+
+ALPACA_FIB_SLIPPAGE = 0.0005
+ALPACA_FIB_TIMEFRAMES = (
+    # label, Alpaca timeframe, days, max hold (bars), setup timeout (bars)
+    ("1m", "1Min", 3, 120, 60),
+    ("15m", "15Min", 30, 96, 48),
+    ("1h", "1Hour", 90, 70, 35),
+    ("4h", "4Hour", 90, 40, 20),
+)
+
+
+async def _fetch_ohlc(session, symbol: str, timeframe: str, days: int):
+    """Real Alpaca OHLC bars, oldest first, following next_page_token.
+    Returns ((highs, lows, closes), None) or (None, reason)."""
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    base = (f"https://data.alpaca.markets/v2/stocks/{symbol}/bars"
+            f"?timeframe={timeframe}&start={start}&limit=10000&feed=iex")
+    bars, token = [], None
+    try:
+        for _ in range(10):
+            url = base + (f"&page_token={token}" if token else "")
+            async with session.get(url, headers=get_headers(),
+                                   timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    return None, f"HTTP {r.status}: {(await r.text())[:200]}"
+                data = await r.json()
+            bars.extend(data.get("bars") or [])
+            token = data.get("next_page_token")
+            if not token:
+                break
+    except asyncio.TimeoutError:
+        return None, "Alpaca API timeout"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {str(e)[:150]}"
+    if len(bars) < 30:
+        return None, f"only {len(bars)} bars (need 30+)"
+    return ([b["h"] for b in bars], [b["l"] for b in bars], [b["c"] for b in bars]), None
+
+
+async def run_fib_gold_zone_backtest(contract_codes=None, ratios=fib_gold_zone.DEFAULT_RATIOS,
+                                     max_concurrent: int = 4) -> dict:
+    """Gold-zone results per symbol, timeframe and entry ratio, beside the
+    live Alpaca strategy on the same 30 days of 15-minute bars."""
+    codes = contract_codes or list(FUTURES.keys())
+    tickers = list(dict.fromkeys(FUTURES[c]["symbol"] for c in codes))
+    strategy_family = await _live_strategy_family()
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _one(session, ticker):
+        out = {"product_id": ticker, "timeframes": {}, "live_15m": None, "errors": []}
+        async with semaphore:
+            for label, tf, days, hold, timeout in ALPACA_FIB_TIMEFRAMES:
+                got, err = await _fetch_ohlc(session, ticker, tf, days)
+                if got is None:
+                    out["errors"].append(f"{label}: {err}")
+                    continue
+                h, l, c = got
+                per_ratio = {}
+                for r in ratios:
+                    trades = fib_gold_zone.replay(
+                        h, l, c, ratio=r, maker_fee=0.0, taker_fee=ALPACA_FIB_SLIPPAGE,
+                        max_hold_bars=hold, setup_timeout_bars=timeout)
+                    per_ratio[str(r)] = fib_gold_zone.summarize(trades, SPEND_PER_TRADE)
+                out["timeframes"][label] = {"candles": len(c), "days": days, "by_ratio": per_ratio}
+                if label == "15m":
+                    live = _replay_for_live_family(c, ticker, strategy_family)
+                    out["live_15m"] = {
+                        "trades": len(live),
+                        "total_net_usd": round(sum(t["pnl_usd"] for t in live), 2),
+                        "win_rate_pct": (round(sum(1 for t in live if t["pnl_usd"] > 0) / len(live) * 100, 1)
+                                         if live else None),
+                    }
+        return out
+
+    async with aiohttp.ClientSession() as session:
+        per_symbol = await asyncio.gather(*(_one(session, t) for t in tickers))
+
+    totals = {}
+    for row in per_symbol:
+        for label, tf in row["timeframes"].items():
+            for r, s in tf["by_ratio"].items():
+                a = totals.setdefault((label, r), {"symbols": 0, "trades": 0, "wins": 0,
+                                                   "net_pct_sum": 0.0, "total_net_usd": 0.0})
+                a["symbols"] += 1
+                a["trades"] += s["trades"]
+                a["total_net_usd"] += s["total_net_usd"]
+                if s["trades"]:
+                    a["wins"] += round(s["win_rate_pct"] / 100 * s["trades"])
+                    a["net_pct_sum"] += s["avg_net_pct"] * s["trades"]
+    summary = []
+    for label, *_ in ALPACA_FIB_TIMEFRAMES:
+        for r in ratios:
+            a = totals.get((label, str(r)))
+            if not a:
+                continue
+            summary.append({
+                "timeframe": label, "ratio": r, "coins": a["symbols"], "trades": a["trades"],
+                "win_rate_pct": round(a["wins"] / a["trades"] * 100, 1) if a["trades"] else None,
+                "avg_net_pct": round(a["net_pct_sum"] / a["trades"], 3) if a["trades"] else None,
+                "total_net_usd": round(a["total_net_usd"], 2),
+            })
+    live_rows = [r["live_15m"] for r in per_symbol if r["live_15m"]]
+    live_total = {
+        "strategy_family": strategy_family,
+        "symbols": len(live_rows),
+        "trades": sum(x["trades"] for x in live_rows),
+        "total_net_usd": round(sum(x["total_net_usd"] for x in live_rows), 2),
+    }
+    fib_15m_best = max((s for s in summary if s["timeframe"] == "15m"),
+                       key=lambda s: s["total_net_usd"], default=None)
+    return {
+        "shadow_mode": True,
+        "stake_usd_per_trade": SPEND_PER_TRADE,
+        "costs": {"commission": 0.0, "stop_slippage_per_leg": ALPACA_FIB_SLIPPAGE},
+        "timeframes": [{"label": l, "days": d} for l, _tf, d, _h, _t in ALPACA_FIB_TIMEFRAMES],
+        "ratios": list(ratios),
+        "summary": summary,
+        "live_on_same_15m_30d": live_total,
+        "best_fib_on_15m": fib_15m_best,
+        "fib_beats_live": bool(fib_15m_best is not None and live_rows
+                               and fib_15m_best["total_net_usd"] > live_total["total_net_usd"]),
+        "per_coin": per_symbol,
     }

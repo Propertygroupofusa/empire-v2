@@ -126,6 +126,44 @@ ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_S
 ALPACA_AUTO_CLOSE_PROFIT_PCT = float(os.getenv("ALPACA_AUTO_CLOSE_PROFIT_PCT", "0.08"))
 ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS = float(os.getenv("ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS", "10"))
 ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS = int(os.getenv("ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS", "900"))
+# The max-hold rule closes a position for being OLD, not for being good. As
+# first built it closed at any P&L, so a position down 6% on day 10 was sold
+# for its age alone - realizing a loss the position's own stop had not
+# called for. On by default: an aged position is closed only once it is at
+# or above breakeven, and otherwise left to its own exits (the bot's stop,
+# or the profit target here). Set to "false" to restore close-at-any-P&L.
+ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN = (
+    os.getenv("ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN", "true").strip().lower() != "false")
+
+
+def auto_close_decision(unrealized_plpc, age_days, *,
+                        profit_pct=None, max_hold_days=None, aged_require_breakeven=None):
+    """(close?, reason) for one position. Pure, so the rule can be tested.
+
+    reason is "profit target", "max hold", "aged, waiting for breakeven",
+    or None.
+    """
+    profit_pct = ALPACA_AUTO_CLOSE_PROFIT_PCT if profit_pct is None else profit_pct
+    max_hold_days = ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS if max_hold_days is None else max_hold_days
+    req = (ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN
+           if aged_require_breakeven is None else aged_require_breakeven)
+    if unrealized_plpc >= profit_pct:
+        return True, "profit target"
+    if age_days is not None and age_days >= max_hold_days:
+        if req and unrealized_plpc < 0:
+            return False, "aged, waiting for breakeven"
+        return True, "max hold"
+    return False, None
+
+
+def auto_close_summary():
+    """One accurate description of the rules, for the startup log."""
+    return (f"profit target {ALPACA_AUTO_CLOSE_PROFIT_PCT*100:.0f}%, "
+            f"max hold {ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS:.0f}d"
+            + (" (only at or above breakeven)" if ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN else "")
+            + (f", {ALPACA_PROFIT_SKIM_PCT*100:.0f}% of profit locked" if ALPACA_PROFIT_SKIM_PCT > 0
+               else ", no profit skim")
+            + f", checking every {ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS}s while the market is open")
 # Defaulted to 0.0 (no skim at all), matching crypto_family_tree_bot.py's
 # own PROFIT_SKIM_PCT change, per the account owner's explicit request:
 # "take away the lock profit, I don't want that anymore for any of my
@@ -1341,6 +1379,12 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
                     if price is not None:
                         current_price_by_bot[bot_name] = price
                 real_balance, balance_err = await engine.get_usd_balance(session)
+                if real_balance is None:
+                    # One retry. A single 429/timeout on the key the trading
+                    # loop is also using is the common failure, and it was
+                    # blanking the whole Coinbase figure for a full poll.
+                    await asyncio.sleep(1.0)
+                    real_balance, balance_err = await engine.get_usd_balance(session)
                 # Real, read-only visibility into a confirmed-live confusion:
                 # get_usd_balance() (and therefore spendable_for_spawn below)
                 # only ever sees the literal USD account - a real balance
@@ -2091,11 +2135,11 @@ async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
         # would recreate exactly that phantom crash.
         crypto_equity = crypto_data["real_crypto_net_worth_usd"]
         if crypto_equity is None:
+            missing = crypto_data.get("real_crypto_net_worth_missing") or []
             crypto_error = (
-                "Real Coinbase net worth couldn't be fully priced this poll "
-                "(a real balance or live price fetch came back empty) - skipped "
-                "rather than reported as a partial total."
-            )
+                ("Could not read: " + ", ".join(missing) + ". ") if missing else ""
+            ) + ("The Coinbase total is skipped this poll rather than shown "
+                 "as a partial number.")
     except Exception as exc:
         crypto_error = str(exc)
         log.warning(f"[dashboard] combined-equity: crypto side unavailable this poll: {exc}")
@@ -4898,6 +4942,21 @@ async def run_red_bar_takeout_backtest_endpoint():
     return await crypto_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
+@router.post("/crypto-selection-backtest/fib-gold-zone")
+async def run_fib_gold_zone_backtest_endpoint():
+    """SHADOW-MODE ONLY - places no orders, changes no live setting.
+    Replays a YouTube "Fibonacci gold zone" pullback strategy (break of
+    structure in an uptrend of higher lows, buy the .5-.618 retracement,
+    stop at the higher low, target the prior swing high) on 1m/15m/1h/4h
+    real Coinbase candles across the grid working set, charging the real
+    maker/taker fees, and compares it with Grid Bot's live spacing on the
+    same 1h history. See fib_gold_zone.py for the exact rules.
+    Many paginated candle pulls - expect 1-3 minutes."""
+    if crypto_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+    return await crypto_selection_backtest_module.run_fib_gold_zone_backtest()
+
+
 @router.post("/crypto-selection-backtest/strategy-lab")
 async def run_strategy_lab_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
@@ -5486,6 +5545,19 @@ async def run_crypto_forced_exit_reversal_backtest():
     if crypto_selection_backtest_module is None:
         raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
     return await crypto_selection_backtest_module.run_forced_exit_reversal_backtest()
+
+
+@router.post("/alpaca-selection-backtest/fib-gold-zone")
+async def run_alpaca_fib_gold_zone_backtest():
+    """SHADOW-MODE ONLY - places no orders, changes no live setting.
+    The Alpaca counterpart to /crypto-selection-backtest/fib-gold-zone: the
+    same gold-zone rules (fib_gold_zone.py, shared) on 1m/15m/1h/4h real
+    Alpaca bars for every symbol prop_bot trades, compared against the live
+    Alpaca strategy on the same 30 days of 15-minute bars. No commission;
+    stop and time-out exits charged 5 bps of slippage."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_fib_gold_zone_backtest()
 
 
 @router.post("/alpaca-selection-backtest")
@@ -7149,11 +7221,13 @@ async def check_and_auto_close_positions():
                 except ValueError:
                     age_days = None
 
-            hit_profit_target = unrealized_plpc >= ALPACA_AUTO_CLOSE_PROFIT_PCT
-            hit_max_hold = age_days is not None and age_days >= ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS
-            if not (hit_profit_target or hit_max_hold):
+            should_close, reason = auto_close_decision(unrealized_plpc, age_days)
+            if not should_close:
+                if reason:
+                    log.info(f"[AUTO-CLOSE] {symbol} is {age_days:.1f}d old but "
+                             f"{unrealized_plpc*100:+.1f}% - held until it is back to breakeven "
+                             f"(its own stop still applies)")
                 continue
-            reason = "profit target" if hit_profit_target else "max hold"
 
             # cancel_orders=true - see close_alpaca_position's comment above;
             # this is the exact real failure this feature hit on its first
@@ -7172,6 +7246,23 @@ async def check_and_auto_close_positions():
             log.info(f"[AUTO-CLOSE] {symbol} closed ({reason}) | qty={qty} | unrealized {unrealized_plpc*100:+.1f}% | "
                      f"realized_pnl=${pnl:.2f}{age_note}")
 
+            # The outcome of a position some bot opened. Recorded in the same
+            # ClosedTrade ledger the bots write, so the realised record (and
+            # /alpaca-growth) counts it - before this, a position closed here
+            # existed only as a Payment row and vanished from every edge figure.
+            try:
+                from models import ClosedTrade
+                async with AsyncSessionLocal() as db:
+                    db.add(ClosedTrade(
+                        bot="alpaca_auto_close", symbol=symbol, side="long",
+                        entry_price=entry_price, exit_price=current_price, qty=qty,
+                        pnl=pnl, pnl_pct=unrealized_plpc * 100, exit_reason=reason.upper(),
+                        hold_hours=(age_days * 24 if age_days is not None else None),
+                        closed_at=datetime.now(timezone.utc),
+                    ))
+                    await db.commit()
+            except Exception as e:
+                log.warning(f"[AUTO-CLOSE] ledger write failed for {symbol}: {e} - trade happened, sample lost")
             try:
                 async with AsyncSessionLocal() as db:
                     payment = Payment(
@@ -7193,7 +7284,8 @@ async def check_and_auto_close_positions():
                             row.base_capital += skim
                         else:
                             db.add(TradingBotState(bot_name=ALPACA_LOCKED_PROFIT_KEY, base_capital=skim, starting_capital=0.0))
-                        log.info(f"[AUTO-CLOSE] 🔒 Locked ${skim:.2f} (10% of {symbol}'s ${pnl:.2f} profit)")
+                        log.info(f"[AUTO-CLOSE] 🔒 Locked ${skim:.2f} "
+                                 f"({ALPACA_PROFIT_SKIM_PCT*100:.0f}% of {symbol}'s ${pnl:.2f} profit)")
 
                     await db.commit()
             except Exception as e:
@@ -7201,8 +7293,7 @@ async def check_and_auto_close_positions():
 
 
 async def run_auto_close_periodically():
-    log.info(f"Alpaca auto-close loop started: profit target {ALPACA_AUTO_CLOSE_PROFIT_PCT*100:.0f}%, "
-             f"max hold {ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS:.0f}d, checking every {ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS}s")
+    log.info(f"Alpaca auto-close loop started: {auto_close_summary()}")
     while True:
         try:
             await check_and_auto_close_positions()
@@ -13726,6 +13817,81 @@ async def capital_kpis(fresh: int = 0, limit: int = 2000):
     out["cache_age_seconds"] = 0
     _KPI_CACHE["at"] = _time.time()
     _KPI_CACHE["payload"] = out
+    return out
+
+
+_ALPACA_GROWTH_CACHE = {"at": 0.0, "key": None, "payload": None}
+_ALPACA_GROWTH_TTL_SECONDS = 180
+
+
+@router.get("/alpaca-growth")
+async def alpaca_growth(days: int = 60, fresh: int = 0):
+    """Why Alpaca is not growing, and whether raising the risk cap would help.
+
+    The crypto side's /capital-kpis answers "is it the edge or the
+    capital?" Alpaca had no equivalent, although every Alpaca round trip
+    is already in ClosedTrade (prop_apex and alpaca_swing). This reads
+    those rows, the live account, and the live positions, and hands them
+    to alpaca_growth.diagnose() - which judges them with the SAME
+    capital_kpis rules the crypto side uses.
+
+    The answer that matters is `lever`: RAISE_RISK_CAP only appears on a
+    measured positive edge with enough trades behind it. Anything else
+    means more capital would scale noise or a loss.
+
+    Read-only. It places nothing and changes no setting.
+    """
+    import time as _growth_clock
+    key = int(days)
+    c = _ALPACA_GROWTH_CACHE
+    if not fresh and c["payload"] is not None and c["key"] == key \
+            and _growth_clock.time() - c["at"] < _ALPACA_GROWTH_TTL_SECONDS:
+        out = dict(c["payload"])
+        out["served_from_cache"] = True
+        out["cache_age_seconds"] = round(_growth_clock.time() - c["at"], 1)
+        return out
+
+    import alpaca_growth as ag
+    from models import ClosedTrade
+
+    since = datetime.utcnow() - timedelta(days=max(1, key))
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(ClosedTrade)
+            .where(ClosedTrade.bot.in_(["prop_apex", "alpaca_swing", "alpaca_auto_close"]),
+                   ClosedTrade.closed_at >= since)
+            .order_by(ClosedTrade.closed_at))).scalars().all()
+    trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+               "exit_price": r.exit_price, "opened_at": r.opened_at,
+               "closed_at": r.closed_at, "symbol": r.symbol, "bot": r.bot}
+              for r in rows]
+
+    # A live-read failure must surface as unavailable, never as $0 equity:
+    # a zero here would read as "cap binding at zero" and be wrong.
+    async with aiohttp.ClientSession() as session:
+        account = await _fetch_alpaca_account(session)
+        positions = await _fetch_alpaca_positions(session)
+    equity = _safe_float(account.get("equity"))
+    cash = _safe_float(account.get("cash"))
+    deployed = sum(abs(_safe_float(p.get("market_value")) or 0.0) for p in positions)
+
+    max_risk = (getattr(prop_bot_module, "MAX_RISK_PERCENT", None)
+                if prop_bot_module is not None else None)
+    min_pos = (getattr(prop_bot_module, "MIN_POSITION_NOTIONAL", None)
+               if prop_bot_module is not None else None) or ag.DEFAULT_MIN_POSITION_USD
+
+    out = ag.diagnose(trades, equity=equity, cash=cash, deployed=deployed,
+                      max_risk_pct=max_risk, min_position_usd=min_pos)
+    out["window_days"] = key
+    out["trades_by_bot"] = {b: sum(1 for t in trades if t["bot"] == b)
+                            for b in ("prop_apex", "alpaca_swing", "alpaca_auto_close")}
+    out["open_positions"] = len(positions)
+    out["note"] = ("ClosedTrade carries no strategy tag. If the live strategy family "
+                   "changed inside this window, the sample mixes configurations - narrow "
+                   "`days` to the period since the last switch before acting on it.")
+    out["served_from_cache"] = False
+    out["cache_age_seconds"] = 0
+    c.update(at=_growth_clock.time(), key=key, payload=out)
     return out
 
 

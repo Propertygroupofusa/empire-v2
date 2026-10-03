@@ -1386,7 +1386,10 @@ async def lifespan(app: FastAPI):
                 log.warning(f"growth ledger not started: {type(e).__name__}: {e}")
             except Exception:
                 pass
-        log.info("⏱️ Alpaca auto-close loop started (8% profit target / 10-day max hold, 10% skim to locked profit)")
+        # The loop logs its own rules when it starts (auto_close_summary), read
+        # from the live settings. This line used to restate them by hand and
+        # still claimed a 10% skim long after the skim was turned off.
+        log.info("⏱️ Alpaca auto-close loop scheduled")
     except Exception as e:
         log.warning(f"Alpaca auto-close loop startup failed: {e}")
 

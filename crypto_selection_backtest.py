@@ -51,6 +51,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 import crypto_btc_compound_bot as engine
+import fib_gold_zone
 import crypto_grid_bot as grid_engine  # only for its own real constants (TARGET_NET_MARGIN_PCT etc.) - no circular import, crypto_grid_bot never imports this module
 from crypto_family_tree_bot import COIN_FAMILY_TREE, BREAKEVEN_TRIGGER_PCT
 from database import get_session_factory
@@ -5114,3 +5115,136 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# Fibonacci "gold zone" pullback strategy - SHADOW MODE, places no orders.
+#
+# Tests a YouTube lesson's rules (fib_gold_zone.py has them made concrete)
+# on four timeframes of real Coinbase history, with this account's real
+# maker/taker fees, and sets the result beside what Grid Bot's live
+# spacing makes on the same 1h history. Settles "should we trade this?"
+# with numbers instead of a chart drawn after the fact.
+# ---------------------------------------------------------------------------
+
+FIB_TIMEFRAMES = (
+    # label, Coinbase granularity (s), days of history, max hold (bars),
+    # setup timeout (bars). 4h has no native granularity; it is rolled up
+    # from the 1h pull so it costs no extra requests.
+    ("1m", 60, 3, 120, 60),
+    ("15m", 900, 30, 96, 48),
+    ("1h", 3600, 90, 96, 48),
+    ("4h", None, 90, 42, 24),
+)
+FIB_STAKE_USD = SPEND
+
+
+async def run_fib_gold_zone_backtest(product_ids=None, ratios=fib_gold_zone.DEFAULT_RATIOS,
+                                     max_concurrent=2):
+    """Replay the gold-zone rules per coin, timeframe and entry ratio.
+
+    Fees: entry and target at the real maker rate, stop and timeout at the
+    real taker rate (REAL_*_ROUND_TRIP_FEE_RATE / 2 per leg). Grid Bot's
+    comparison row uses _replay_grid_bot at the live-matching spacing on
+    the identical 1h/90d candles - its own replay charges taker on both
+    legs, so the grid number is the conservative one of the two.
+    """
+    if product_ids is None:
+        try:
+            product_ids = list(grid_engine.GRID_WORKING_SET)
+        except AttributeError:
+            product_ids = list(COIN_FAMILY_TREE)
+    maker = REAL_MAKER_ROUND_TRIP_FEE_RATE / 2
+    taker = REAL_TAKER_ROUND_TRIP_FEE_RATE / 2
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    semaphore = asyncio.Semaphore(max_concurrent)
+    errors = {}
+
+    async def _one(session, pid):
+        out = {"product_id": pid, "timeframes": {}, "grid_1h": None, "errors": []}
+        hourly = None
+        async with semaphore:
+            for label, gran, days, hold, timeout in FIB_TIMEFRAMES:
+                if gran is None:
+                    if hourly is None:
+                        out["errors"].append(f"{label}: no 1h data to roll up")
+                        continue
+                    t, h, l, c = fib_gold_zone.aggregate(
+                        hourly[3], hourly[1], hourly[2], hourly[0], 4 * 3600)
+                else:
+                    got = await fetch_candles_window(
+                        session, pid, now - timedelta(days=days), now,
+                        min_candles=50, last_error_out=errors, granularity=gran)
+                    if got is None:
+                        out["errors"].append(f"{label}: {errors.get(pid, 'no data')}")
+                        continue
+                    c, h, l, t = got
+                    if label == "1h":
+                        hourly = got
+                per_ratio = {}
+                for r in ratios:
+                    trades = fib_gold_zone.replay(
+                        h, l, c, ratio=r, maker_fee=maker, taker_fee=taker,
+                        max_hold_bars=hold, setup_timeout_bars=timeout)
+                    per_ratio[str(r)] = fib_gold_zone.summarize(trades, FIB_STAKE_USD)
+                out["timeframes"][label] = {"candles": len(c), "days": days,
+                                            "by_ratio": per_ratio}
+        if hourly is not None:
+            c, h, l, _t = hourly
+            g = _replay_grid_bot(c, h, l, spend=FIB_STAKE_USD,
+                                 grid_pct=_live_matching_grid_pct(c, h, l),
+                                 num_levels=STRATEGY_LAB_GRID_LEVELS)
+            if g is not None:
+                out["grid_1h"] = {"total_net_usd": round(g["total_pnl"], 2),
+                                  "trades": g["num_trades"], "win_rate_pct": g["win_rate"]}
+        return out
+
+    async with aiohttp.ClientSession() as session:
+        per_coin = await asyncio.gather(*(_one(session, p) for p in product_ids))
+
+    totals = {}
+    for row in per_coin:
+        for label, tf in row["timeframes"].items():
+            for r, s in tf["by_ratio"].items():
+                agg = totals.setdefault((label, r), {"trades": 0, "net_pct_sum": 0.0,
+                                                     "wins": 0, "total_net_usd": 0.0,
+                                                     "coins": 0})
+                agg["coins"] += 1
+                agg["trades"] += s["trades"]
+                agg["total_net_usd"] += s["total_net_usd"]
+                if s["trades"]:
+                    agg["net_pct_sum"] += s["avg_net_pct"] * s["trades"]
+                    agg["wins"] += round(s["win_rate_pct"] / 100 * s["trades"])
+    summary = []
+    for label, *_ in FIB_TIMEFRAMES:
+        for r in ratios:
+            a = totals.get((label, str(r)))
+            if not a:
+                continue
+            summary.append({
+                "timeframe": label, "ratio": r, "coins": a["coins"], "trades": a["trades"],
+                "win_rate_pct": round(a["wins"] / a["trades"] * 100, 1) if a["trades"] else None,
+                "avg_net_pct": round(a["net_pct_sum"] / a["trades"], 3) if a["trades"] else None,
+                "total_net_usd": round(a["total_net_usd"], 2),
+            })
+    grid_rows = [r["grid_1h"] for r in per_coin if r["grid_1h"]]
+    grid_total = {
+        "coins": len(grid_rows),
+        "trades": sum(g["trades"] for g in grid_rows),
+        "total_net_usd": round(sum(g["total_net_usd"] for g in grid_rows), 2),
+    }
+    fib_1h_best = max((s for s in summary if s["timeframe"] in ("1h", "4h")),
+                      key=lambda s: s["total_net_usd"], default=None)
+    return {
+        "shadow_mode": True,
+        "stake_usd_per_trade": FIB_STAKE_USD,
+        "fees": {"maker_per_leg": maker, "taker_per_leg": taker},
+        "timeframes": [{"label": l, "days": d} for l, _g, d, _h, _t in FIB_TIMEFRAMES],
+        "ratios": list(ratios),
+        "summary": summary,
+        "grid_on_same_1h_90d": grid_total,
+        "best_fib_on_1h_or_4h": fib_1h_best,
+        "fib_beats_grid": bool(fib_1h_best is not None and grid_rows
+                               and fib_1h_best["total_net_usd"] > grid_total["total_net_usd"]),
+        "per_coin": per_coin,
+    }

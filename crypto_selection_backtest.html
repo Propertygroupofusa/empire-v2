@@ -80,6 +80,78 @@
     .wl-manual-toggle:hover { color: var(--gold); }
     .wl-manual-toggle:disabled { color: var(--text-dim); cursor: default; text-decoration: none; }
 </style>
+<script>
+// WRITE TOKEN - shared by every dashboard page (keep the copies identical).
+//
+// write_guard refuses EVERY POST/PUT/PATCH/DELETE without an
+// x-dashboard-token header - including backtest "Run" buttons, which are
+// POSTs. Pages that never sent it had every button failing with the
+// server's raw "Missing x-dashboard-token header" text. This wraps fetch
+// once, so no call site can forget the header, and refuses a write BEFORE
+// sending it when the tab is locked, with a message that says what to do.
+// The token is kept in sessionStorage (this tab only) under the same key the
+// Coinbase page uses, so unlocking one page unlocks the others in the tab.
+(function () {
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;
+    var KEY = 'empire_write_token';
+    var WRITES = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
+    function tok() { try { return sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } }
+    window.empireSetWriteToken = function (v) {
+        try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch (e) {}
+        drawBar();
+    };
+    var orig = window.fetch.bind(window);
+    window.fetch = function (input, init) {
+        init = init || {};
+        var method = String(init.method || (input && input.method) || 'GET').toUpperCase();
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        if (WRITES[method] && url.indexOf('/api/') !== -1) {
+            var t = tok();
+            if (!t) {
+                return Promise.reject(new Error('This browser tab is locked, so nothing was sent '
+                    + 'and nothing changed. Tap the \u{1F512} LOCKED bar at the top of the page, paste '
+                    + 'your dashboard token and press Unlock. It is kept for this tab only, so it '
+                    + 'is needed again after the browser restarts.'));
+            }
+            var h = new Headers(init.headers || {});
+            h.set('x-dashboard-token', t);
+            init = Object.assign({}, init, { headers: h });
+        }
+        return orig(input, init);
+    };
+    function drawBar() {
+        if (document.getElementById('token-bar')) return;   // page has its own bar
+        var el = document.getElementById('empire-lock-bar');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'empire-lock-bar';
+            el.style.cssText = 'position:sticky;top:0;z-index:50;display:flex;gap:8px;'
+                + 'align-items:center;flex-wrap:wrap;padding:8px 14px;font:600 13px system-ui,sans-serif;'
+                + 'background:#0f172a;color:#e2e8f0;border-bottom:1px solid #1e293b;';
+            document.body.insertBefore(el, document.body.firstChild);
+        }
+        if (tok()) {
+            el.innerHTML = '<span style="color:#34d399">\u{1F513} UNLOCKED</span>'
+                + '<span style="font-weight:400;opacity:.7">buttons on this page can act</span>'
+                + '<button id="empire-lock-btn" style="margin-left:auto;padding:4px 10px;border-radius:6px;'
+                + 'border:1px solid #334155;background:#1e293b;color:#e2e8f0">Lock</button>';
+            document.getElementById('empire-lock-btn').onclick = function () { window.empireSetWriteToken(''); };
+        } else {
+            el.innerHTML = '<span style="color:#fbbf24">\u{1F512} LOCKED</span>'
+                + '<input id="empire-token-in" type="password" autocomplete="off" placeholder="paste dashboard token" '
+                + 'style="flex:1;min-width:160px;padding:6px 9px;border-radius:6px;border:1px solid #334155;'
+                + 'background:#1e293b;color:#e2e8f0">'
+                + '<button id="empire-unlock-btn" style="padding:6px 12px;border-radius:6px;border:0;'
+                + 'background:#4f46e5;color:#fff">Unlock</button>';
+            document.getElementById('empire-unlock-btn').onclick = function () {
+                window.empireSetWriteToken(document.getElementById('empire-token-in').value.trim());
+            };
+        }
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', drawBar);
+    else drawBar();
+})();
+</script>
 </head>
 <body>
 <div class="container">
@@ -193,6 +265,15 @@
     <button class="run-btn" id="labBtn" onclick="runStrategyLab()">▶ Run Strategy Lab: Grid Bot vs. real candidates (~30-90 seconds)</button>
     <div id="labStatus"></div>
     <div id="labResults"></div>
+
+    <div class="note" style="margin-top: 28px;">
+        <strong>📐 Fibonacci gold zone - does the YouTube pullback setup have a real edge here?</strong> Rules, long only: in an uptrend of higher lows, wait for a close above the last swing high (break of structure), then buy the pullback with a resting limit in the "gold zone" (.5, .559 or .618 retracement), stop at the higher low (the 1.0 level), target the swing high. Replayed on 1-minute (3 days), 15-minute (30 days), 1-hour and 4-hour (90 days) real candles across the grid coins, with this account's real fees: maker on the entry and target, taker on the stop. Grid Bot's live spacing on the same 1-hour history is shown for comparison.
+        <br><br>
+        <strong>Honest limits:</strong> the video never defines a swing point, so this uses 3-bar fractal pivots, only counted once confirmed (no hindsight). When a stop and a target land in the same candle it counts as the stop, and an entry-bar target is never credited - the conservative reading of OHLC data. Shadow mode only: nothing here places an order or changes the live bot.
+    </div>
+    <button class="run-btn" id="fibBtn" onclick="runFibGoldZone()">▶ Run Fibonacci Gold Zone Backtest (~1-3 minutes)</button>
+    <div id="fibStatus"></div>
+    <div id="fibResults"></div>
 
     <div class="note" style="margin-top: 28px;">
         <strong>🔄 Market-phase breakdown - does the four-part cycle actually change results?</strong> The lesson goes: every market, on every timeframe, cycles bottom → up → top → down → repeat, and you must first identify which part you're in, then use a matching "tool bag," or you'll be inconsistent. The part of that which is genuinely testable is whether the SAME strategy performs differently depending on the phase - so this tests exactly that. Today's <em>real live</em> Grid Bot config is replayed five times per coin on identical real historical candles: unrestricted (the baseline), then entering only during each of the four phases. Everything else - exits, fees, level count, spacing - is byte-for-byte identical across all five, so any difference is down to entry phase and nothing else.
@@ -1317,6 +1398,79 @@ const STRATEGY_LAB_ORDER = [
     'grid_bot', 'grid_bot_3lvl_2.0pct', 'grid_bot_3lvl_2.5pct', 'grid_bot_5lvl_2.0pct',
     'grid_bot_4lvl_1.5pct', 'grid_bot_3lvl_3.0pct',
 ];
+
+function _fibEsc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function _fibNum(v, digits, suffix) {
+    return (v == null || isNaN(v)) ? '—' : Number(v).toFixed(digits) + (suffix || '');
+}
+
+function renderFibGoldZoneResults(data) {
+    const rows = (data.summary || []).map(s => {
+        const cls = s.total_net_usd > 0 ? 'color:#1a7f4f' : (s.total_net_usd < 0 ? 'color:#c0392b' : '');
+        return `<tr><td>${_fibEsc(s.timeframe)}</td><td>${_fibEsc(s.ratio)}</td><td>${s.trades}</td>`
+            + `<td>${_fibNum(s.win_rate_pct, 1, '%')}</td><td>${_fibNum(s.avg_net_pct, 3, '%')}</td>`
+            + `<td style="${cls}">$${_fibNum(s.total_net_usd, 2)}</td></tr>`;
+    }).join('');
+    const g = data.grid_on_same_1h_90d || {};
+    const best = data.best_fib_on_1h_or_4h;
+    const verdict = best
+        ? `Best gold-zone result on 1h/4h: ${_fibEsc(best.timeframe)} at ${_fibEsc(best.ratio)} = $${_fibNum(best.total_net_usd, 2)} over ${best.trades} trades, against Grid Bot's $${_fibNum(g.total_net_usd, 2)} over ${g.trades || 0} trades on the same 90 days. `
+          + (data.fib_beats_grid ? 'The gold zone came out ahead on this history.' : 'Grid Bot came out ahead - the gold zone does not beat what is already running.')
+        : 'No gold-zone trades on 1h/4h in this window.';
+    const perCoin = (data.per_coin || []).map(c => {
+        const cells = (data.timeframes || []).map(tf => {
+            const t = (c.timeframes || {})[tf.label];
+            if (!t) return '<td>—</td>';
+            const vals = Object.values(t.by_ratio || {});
+            const tot = vals.reduce((a, s) => a + (s.total_net_usd || 0), 0) / Math.max(1, vals.length);
+            return `<td>$${_fibNum(tot, 2)}</td>`;
+        }).join('');
+        const grid = c.grid_1h ? `$${_fibNum(c.grid_1h.total_net_usd, 2)}` : '—';
+        const err = (c.errors || []).length ? ` <span title="${_fibEsc(c.errors.join('; '))}">⚠️</span>` : '';
+        return `<tr><td>${_fibEsc(c.product_id)}${err}</td>${cells}<td>${grid}</td></tr>`;
+    }).join('');
+    const tfHead = (data.timeframes || []).map(tf => `<th>${_fibEsc(tf.label)} (avg of ratios)</th>`).join('');
+    document.getElementById('fibResults').innerHTML =
+        `<p><strong>${verdict}</strong></p>`
+        + `<table><thead><tr><th>Timeframe</th><th>Entry ratio</th><th>Trades</th><th>Win rate</th><th>Avg net / trade</th><th>Total net ($${_fibNum(data.stake_usd_per_trade, 0)}/trade)</th></tr></thead><tbody>${rows}</tbody></table>`
+        + `<p style="margin-top:14px">Per coin:</p>`
+        + `<table><thead><tr><th>Coin</th>${tfHead}<th>Grid Bot 1h</th></tr></thead><tbody>${perCoin}</tbody></table>`;
+}
+
+async function runFibGoldZone() {
+    const btn = document.getElementById('fibBtn');
+    const statusEl = document.getElementById('fibStatus');
+    btn.disabled = true;
+    btn.textContent = 'Running... (pulling real candles on four timeframes)';
+    statusEl.textContent = '';
+    statusEl.className = '';
+    document.getElementById('fibResults').innerHTML = '';
+    try {
+        const key = getAdminKey();
+        const res = await fetch(API_BASE + '/crypto-selection-backtest/fib-gold-zone', {
+            method: 'POST',
+            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        });
+        if (res.status === 401 || res.status === 403) {
+            localStorage.removeItem(KEY_STORAGE);
+            adminKey = '';
+            throw new Error('Admin key rejected - try again');
+        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        renderFibGoldZoneResults(data);
+        statusEl.textContent = `Fees charged: ${(data.fees.maker_per_leg * 100).toFixed(2)}% maker / ${(data.fees.taker_per_leg * 100).toFixed(2)}% taker per leg. Shadow mode - no orders placed.`;
+    } catch (e) {
+        statusEl.textContent = 'Error: ' + e.message;
+        statusEl.className = 'error';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Fibonacci Gold Zone Backtest (~1-3 minutes)';
+    }
+}
 
 async function runStrategyLab() {
     const btn = document.getElementById('labBtn');
