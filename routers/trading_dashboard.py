@@ -10325,6 +10325,46 @@ async def grid_money_check_endpoint():
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/harvest-preview")
+async def grid_harvest_preview_endpoint():
+    """What the hourly profit harvest would take right now, and why not.
+
+    STRICTLY READ-ONLY. It calls profit_harvest.plan(create=False), which
+    records no baseline and withdraws nothing, so pressing this can never
+    move a dollar.
+
+    It exists because the harvest runs itself hourly inside main.py and,
+    until now, the only evidence it had ever run at all was a Railway log
+    line. A live loop that writes allocated_usd and cannot be observed
+    read-only is indistinguishable from a loop that is silently dead.
+
+    Read "baseline" first. A branch the harvest has marked shows a number;
+    one it has never seen shows null, and "unwatched_branches" counts them.
+    All branches null means the loop has not completed a pass yet - which
+    is also the expected state for the first five minutes after a deploy.
+
+    "earned_since_baseline" is the only pool the harvest can draw from, and
+    it is realised, fee-adjusted, closed-trade profit by construction. It
+    can never reach capital: allocated_usd mixes five weeks of compounding
+    and rotations together and the harvest never reads it as profit.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import profit_harvest
+    data = await profit_harvest.plan(crypto_grid_bot_module, create=False)
+    data["read_only"] = True
+    data["detail"] = (
+        "Nothing was withdrawn and no baseline was recorded. "
+        f"${data.get('total_harvest_usd', 0):,.2f} of realised profit is "
+        "sitting in flat branches right now."
+        + ("" if data.get("loop_has_run") else
+           f" {data.get('unwatched_branches', 0)} branch(es) have no baseline "
+           "yet, so the hourly harvest has not completed a pass."))
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/fill-mix")
 async def get_grid_fill_mix_endpoint():
     """How grid legs REALLY filled: maker, or fallen back to market (taker).

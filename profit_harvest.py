@@ -112,7 +112,17 @@ def harvestable(branch, realised_now, baseline):
       the branch is FLAT          - withdraw refuses anything else
       profit earned since baseline - never capital, only logged wins
       what is left stays >= $15    - a drained branch row is deleted
+
+    A baseline of None means the harvest has never looked at this branch, so
+    there is no mark to measure profit from. That is not zero profit - it is
+    an unknown, and the only safe reading of an unknown here is to take
+    nothing. The read-only preview passes None deliberately, so that a
+    fleet of None baselines is legible as "the loop has not run yet"
+    rather than silently reading as "nothing has been earned".
     """
+    if baseline is None:
+        return 0.0, ("no baseline yet - the harvest has not seen this branch, "
+                     "so there is nothing to measure profit against")
     slices = branch.get("slices") or []
     if slices:
         return 0.0, f"holds {len(slices)} open slice(s); withdraw needs a flat branch"
@@ -128,29 +138,48 @@ def harvestable(branch, realised_now, baseline):
     return min(earned, room), None
 
 
-async def plan(grid):
-    """What a harvest would take, per branch. Reads only; writes nothing."""
+async def plan(grid, create=True):
+    """What a harvest would take, per branch.
+
+    NOT read-only by default, and the previous docstring claiming otherwise
+    was wrong: create=True records a baseline for any branch that does not
+    have one, which is a write. That is correct for the hourly loop - a
+    branch has to be marked before it can ever be harvested, and marking it
+    is what makes the first sight take nothing.
+
+    create=False is the honest read. It writes nothing, and reports
+    baseline=None for any branch the loop has not marked yet, which is the
+    only way from outside to tell "watched, nothing earned" apart from
+    "never looked at". A live money-moving loop that cannot be observed
+    read-only is indistinguishable from one that is not running.
+    """
     status = await grid.get_grid_status()
     branches = status.get("branches") or []
     realised = await realised_by_branch(grid.get_session_factory)
-    rows, total = [], 0.0
+    rows, total, unwatched = [], 0.0, 0
     for b in branches:
         bot = b.get("bot_name")
         if not bot:
             continue
         now = round(realised.get(bot, 0.0), 2)
-        base = await _baseline(grid.get_session_factory, bot, now)
+        base = await _baseline(grid.get_session_factory, bot, now, create=create)
         take, why_not = harvestable(b, now, base)
+        if base is None:
+            unwatched += 1
         row = {"bot_name": bot, "product_id": b.get("product_id"),
                "allocated_usd": round(float(b.get("allocated_usd") or 0.0), 2),
-               "realised_total": now, "baseline": round(base, 2),
-               "earned_since_baseline": round(now - base, 2),
+               "realised_total": now,
+               "baseline": None if base is None else round(base, 2),
+               "earned_since_baseline": (None if base is None
+                                         else round(now - base, 2)),
                "harvest_usd": round(take, 2), "why_not": why_not}
         rows.append(row)
         total += take
     rows.sort(key=lambda r: -r["harvest_usd"])
     return {"branches": rows, "total_harvest_usd": round(total, 2),
-            "ready": round(total, 2) >= MIN_HARVEST_USD}
+            "ready": round(total, 2) >= MIN_HARVEST_USD,
+            "unwatched_branches": unwatched,
+            "loop_has_run": bool(rows) and unwatched < len(rows)}
 
 
 async def run(grid, dry_run=True):
