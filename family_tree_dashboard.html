@@ -1099,6 +1099,7 @@
                 <div class="tv-sub" id="strip-branches-sub"></div>
             </div>
         </div>
+        <div id="tab-lock-banner" style="display:none;"></div>
         <div id="alarm-top-wrap" style="display:none;"></div>
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
@@ -6437,6 +6438,9 @@ function setWriteToken(v) {
         else { sessionStorage.removeItem(TOKEN_KEY); }
     } catch (e) { /* private mode - the header still works for this page load */ }
     renderTokenBar();
+    // Clearing or pasting the token changes what every button can do, so the
+    // banner must follow immediately rather than wait for the next poll.
+    try { renderTabLock(); } catch (e) { /* defined later in the file */ }
 loadTape();
 }
 
@@ -6953,6 +6957,7 @@ async function loadFleetReadiness() {
         const d = await apiGet('/grid-status');
         const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
         // Same payload, no extra request: grid-status carries it.
+        renderTabLock();
         renderOutOfReach(d.out_of_reach);
         renderGridReconcile(d.backing);
         renderGridLevels(d.branches || []);
@@ -7285,6 +7290,62 @@ async function loadAlertQueue() {
     }
 }
 
+
+// ---- IS THIS TAB ABLE TO SEND ANYTHING AT ALL? ----------------------
+//
+// THE FAILURE THIS ENDS. Every write attempt of one long session failed
+// with nothing in the server log, because postGuarded refuses BEFORE it
+// sends when sessionStorage holds no token:
+//
+//     const tok = getWriteToken();
+//     if (!tok) { throw ...'This browser tab is locked'... }   // never sends
+//
+// So the request never left the browser, the guard never saw it, and the
+// server-side recorder read zero - which is indistinguishable from a dead
+// button. Confirmed live: write-attempts count 0 on a single replica with
+// 17 minutes of uptime.
+//
+// sessionStorage is PER TAB and is emptied when the tab is closed or
+// DISCARDED, which phones do routinely when you switch apps. The owner
+// had been switching between this page and a log viewer all night.
+//
+// A lock notice was added to the Levels panel, but not to Reconcile, and
+// a per-panel notice was the wrong shape anyway: the lock disables every
+// write on the page. So it is stated once, at the top, where no button
+// can be reached without passing it.
+function renderTabLock() {
+    const wrap = document.getElementById('tab-lock-banner');
+    if (!wrap) return;
+    let locked;
+    try {
+        locked = (typeof getWriteToken === 'function') ? !getWriteToken() : false;
+    } catch (e) {
+        // An accessor that throws is not an unlocked tab.
+        locked = true;
+    }
+    if (!locked) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+    wrap.style.display = 'block';
+    wrap.innerHTML = `
+      <div style="margin-bottom:14px; padding:13px 15px; border-radius:8px;
+                  border:2px solid var(--red); background:rgba(180,35,24,0.09);">
+        <div style="font-weight:700; color:var(--red); font-size:0.95em;">
+          \u{1F512} This tab cannot save anything right now
+        </div>
+        <div style="margin-top:7px; font-size:0.82em; line-height:1.55;">
+          Every button that changes something &mdash; Levels, Reconcile, all of them
+          &mdash; will refuse <strong>before sending</strong>, so nothing reaches the
+          server and nothing appears in the logs. It looks exactly like a broken
+          button and it is not.
+        </div>
+        <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                    line-height:1.5;">
+          The dashboard token is kept for this browser tab only, and your phone clears
+          it whenever it drops the tab from memory &mdash; which happens every time you
+          switch apps for a while. Paste it into the \u{1F512} lock bar at the top of
+          this page and this message disappears.
+        </div>
+      </div>`;
+}
 
 // ---- The alarm, where it cannot be scrolled past --------------------
 //
