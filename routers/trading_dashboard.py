@@ -10904,8 +10904,44 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
             detail=("the wallet holdings could not be read, so no position can be "
                     "confirmed. A gap is not a zero, and a zero here would delete "
                     "every slice on the fleet."))
-    wallet = {str(r.get("asset")).upper(): r.get("units")
-              for r in (census.get("holdings") or [])}
+    # THE DUST FILTER IS WHY FOUR BRANCHES WERE NEVER RECONCILABLE.
+    #
+    # census["holdings"] drops every asset worth under DUST_USD ($0.50)
+    # and every asset it could not price - it exists to answer "what is
+    # this account WORTH". Reading it here asked a different question,
+    # "does the account hold X at all", and got silence for an answer.
+    # Measured live: QNT (0.00097323, $0.24), PEPE ($0.00), TIA (0.0) and
+    # PRIME (0.0) were all absent from holdings while being present and
+    # readable in the account. They were reported NOT_IN_WALLET_READING -
+    # UNKNOWN - and skipped, every run, forever. QNT meanwhile showed
+    # +$57.44 of unrealised gain on coin it did not have.
+    #
+    # account_census already carries the unfiltered map for exactly this
+    # caller, and says so in its own comment: "That makes `holdings` the
+    # wrong input for 'does this account hold X at all', which is a
+    # different question and the one the shortfall check asks."
+    #
+    # OWNED, NOT AVAILABLE - AND THAT CHOICE IS THE SAFETY PROPERTY.
+    # held_including_zero is total owned, which includes staked and
+    # otherwise locked coin. Reconciling against AVAILABLE units instead
+    # would write off real coin the account owns and will get back: SOL
+    # (0.776 staked of 1.035) and LINK (6.63 locked of 6.85) are owned in
+    # full and only locked, and against available they would have had
+    # their slices deleted. This writes off only what is genuinely NOT
+    # OWNED.
+    #
+    # An asset missing from BOTH maps stays UNKNOWN and is skipped. A gap
+    # is not a zero, and a zero here would delete every slice on the fleet.
+    _unfiltered = census.get("held_including_zero")
+    if isinstance(_unfiltered, dict) and _unfiltered:
+        wallet = {str(k).upper(): v for k, v in _unfiltered.items()}
+        wallet_source = "held_including_zero (unfiltered owned units)"
+    else:
+        wallet = {str(r.get("asset")).upper(): r.get("units")
+                  for r in (census.get("holdings") or [])}
+        wallet_source = ("holdings (DUST-FILTERED fallback - the unfiltered map "
+                         "was not in this census reading, so assets under "
+                         "$0.50 cannot be seen and are skipped as UNKNOWN)")
 
     want = (product_id or "").strip().upper() or None
     branches, skipped = [], []
@@ -10929,7 +10965,13 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
 
     total_basis = round(sum(x["cost_basis_removed_usd"] or 0.0 for x in branches), 2)
     out = {"branches": branches, "branch_count": len(branches),
-           "cost_basis_removed_usd": total_basis, "skipped": skipped or None}
+           "cost_basis_removed_usd": total_basis, "skipped": skipped or None,
+           # Which map the wallet side of this comparison came from. A
+           # reader cannot judge a reconcile plan without knowing whether
+           # dust was visible to it.
+           "wallet_source": wallet_source,
+           "writes_off_only_unowned_coin": True,
+           "locked_or_staked_coin_is_not_written_off": True}
 
     if not branches:
         out["detail"] = ("no branch claims more coin than the wallet holds - nothing to "

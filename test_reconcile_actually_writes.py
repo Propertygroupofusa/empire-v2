@@ -133,7 +133,14 @@ ok("and counts only the row it changed", applied[0]["slice_rows_changed"] == 1, 
 print("\n[5] the endpoint's headline number describes the WRITE, not the plan")
 ep = open("/home/user/empire-v2/routers/trading_dashboard.py").read()
 i = ep.find('@router.post("/grid-status/reconcile-slices")')
-body = ep[i:i + 9000]
+# BOUND THE BODY BY THE NEXT ROUTE, NOT BY A CHARACTER COUNT. A fixed
+# ep[i:i+9000] window silently stopped covering the end of this function
+# the moment a comment was added above it, and three real assertions
+# turned red for a reason that had nothing to do with the code. A check
+# whose reach depends on how much prose sits above it is not a check.
+_next = ep.find("\n@router.", i + 10)
+body = ep[i:_next if _next != -1 else len(ep)]
+assert len(body) > 3000, "reconcile endpoint body looks truncated: %d chars" % len(body)
 ok("applied.append is inside the per-branch guard",
    "if changed:\n                applied.append(" in body)
 ok("a branch with no write goes to not_applied", "not_applied.append(" in body)
