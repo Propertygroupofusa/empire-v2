@@ -5542,6 +5542,19 @@ async def run_crypto_forced_exit_reversal_backtest():
     return await crypto_selection_backtest_module.run_forced_exit_reversal_backtest()
 
 
+@router.post("/alpaca-selection-backtest/fib-gold-zone")
+async def run_alpaca_fib_gold_zone_backtest():
+    """SHADOW-MODE ONLY - places no orders, changes no live setting.
+    The Alpaca counterpart to /crypto-selection-backtest/fib-gold-zone: the
+    same gold-zone rules (fib_gold_zone.py, shared) on 1m/15m/1h/4h real
+    Alpaca bars for every symbol prop_bot trades, compared against the live
+    Alpaca strategy on the same 30 days of 15-minute bars. No commission;
+    stop and time-out exits charged 5 bps of slippage."""
+    if alpaca_selection_backtest_module is None:
+        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+    return await alpaca_selection_backtest_module.run_fib_gold_zone_backtest()
+
+
 @router.post("/alpaca-selection-backtest")
 async def run_alpaca_selection_backtest():
     """SHADOW-MODE ONLY - does not touch live trading, places no orders.
