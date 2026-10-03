@@ -1338,6 +1338,26 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # One-shot idle rotation: move idle allocation into the best-ranked
+        # coins by dip_depth. SHIPPED INERT - nothing happens unless
+        # ROTATION_TASK_TICKET is set, and releasing idle from a non-flat
+        # branch needs its own second variable. It writes allocated_usd and
+        # nothing else: no order, no coin sold. See rotation_task.py for
+        # every way it fails closed.
+        try:
+            import rotation_task
+            import crypto_grid_bot as _rtg
+            if rotation_task.ticket():
+                _rot_task = asyncio.create_task(rotation_task.run_at_boot(_rtg))
+                log.warning("[rotation] armed by environment - running once")
+            else:
+                log.info("[rotation] not armed (ROTATION_TASK_TICKET unset)")
+        except Exception as e:
+            try:
+                log.warning(f"rotation task not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # Claim reconciliation: when the fleet's UNSPENT claims exceed the
         # cash that really exists, lower the claims until they fit. Writes
         # one number - allocated_usd - and never an order, a slice or a coin.
