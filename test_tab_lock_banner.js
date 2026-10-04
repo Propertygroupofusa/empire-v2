@@ -76,7 +76,15 @@ const makePG = (token) => new Function('getWriteToken','fetch','TOKEN_KEY',
   ok('the container exists', /id="tab-lock-banner"/.test(src));
   ok('it is above the alarm banner',
      src.indexOf('id="tab-lock-banner"') < src.indexOf('id="alarm-top-wrap"'));
-  ok('it runs on every refresh pass', /renderTabLock\(\);\s*\n\s*renderOutOfReach/.test(src));
+  // THE PROPERTY, NOT THE ADJACENCY. This matched renderTabLock() being
+  // IMMEDIATELY followed by renderOutOfReach, so inserting any other
+  // renderer between them failed a test about whether the lock banner
+  // refreshes - which it still did. renderEnvRejected() landed there on
+  // 4 October and broke it while changing nothing this test is about.
+  const _refresh = src.slice(src.indexOf('renderTabLock();'));
+  ok('it runs on every refresh pass',
+     /renderTabLock\(\);/.test(src)
+     && /renderTabLock\(\);[\s\S]{0,400}renderOutOfReach/.test(_refresh));
   ok('and the moment the token is set or cleared',
      /renderTokenBar\(\);[\s\S]{0,200}renderTabLock\(\)/.test(src));
   ok('the banner adds no fetch of its own', !/fetch\(|apiGet/.test(fn));

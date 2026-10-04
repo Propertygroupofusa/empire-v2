@@ -1132,6 +1132,7 @@
             </div>
         </div>
         <div id="tab-lock-banner" style="display:none;"></div>
+        <div id="env-rejected-banner" style="display:none;"></div>
         <div id="alarm-top-wrap" style="display:none;"></div>
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
@@ -7241,6 +7242,7 @@ async function loadFleetReadiness() {
         const unbacked = ((d.backing_owned || {}).unbacked || []).map(u => u.asset);
         // Same payload, no extra request: grid-status carries it.
         renderTabLock();
+        renderEnvRejected();
         renderOutOfReach(d.out_of_reach);
         renderGridReconcile(d.backing);
         renderGridRotation(d.branches || []);
@@ -7627,6 +7629,61 @@ function uiTrace(code, n) {
                 + (n === undefined || n === null ? '' : '&n=' + encodeURIComponent(n));
         fetch(API_BASE + '/ui-trace' + q, { cache: 'no-store' }).catch(() => {});
     } catch (e) { /* a diagnostic must not throw into the path it measures */ }
+}
+
+// A VARIABLE YOU SET THAT IS NOT IN EFFECT IS NOT A SMALL PROBLEM.
+//
+// env_float and env_int fall back to the built-in default when a value
+// cannot be parsed, record it in ENV_PARSE_FALLBACKS, and carry on. That
+// fail-soft is deliberate - a bad value must not kill the import, which is
+// exactly how one pasted "240 -> 3600" took the whole fleet offline on
+// 4 October. But the record was only readable by fetching /module-health
+// by hand, so a rejected value looked identical to a value that worked.
+//
+// Measured live the same day: GRID_PARKED_MIN_NET_PCT had been set to
+// "1.0%". The percent sign made it unparseable, the 0.010 default ran
+// instead, and nothing on any page said so. The account owner believed he
+// had changed a setting he had not.
+//
+// So this says it on the page, next to the lock banner, because both
+// answer the same question: something you set is not doing anything.
+async function renderEnvRejected() {
+    const wrap = document.getElementById('env-rejected-banner');
+    if (!wrap) return;
+    let report;
+    try {
+        const d = await apiGet('/module-health', 20000);
+        report = d && d.env_fallbacks;
+    } catch (e) {
+        // Could not ask. That is NOT "nothing was rejected" - say nothing
+        // rather than imply the settings are clean.
+        wrap.style.display = 'none'; wrap.innerHTML = ''; return;
+    }
+    const rows = (report && report.fallbacks) || [];
+    if (!report || !rows.length) { wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+    wrap.style.display = 'block';
+    wrap.innerHTML =
+        `<div style="margin-bottom:14px; padding:13px 15px; border-radius:8px;
+                     border:1px solid var(--red); background:rgba(180,35,24,0.07);">
+           <div style="font-weight:700; color:var(--red); font-size:0.95em;">
+             \u26a0\ufe0f ${rows.length} setting${rows.length === 1 ? ' is' : 's are'} being ignored</div>
+           <div style="font-size:0.82em; margin-top:6px; line-height:1.55;">
+             ${escText(report.note || '')}</div>
+           <div style="overflow-x:auto; margin-top:9px;">
+             <table style="font-size:0.78em; font-variant-numeric:tabular-nums;">
+               <thead><tr><th>Variable</th><th>You set</th><th>Running with</th><th>Why</th></tr></thead>
+               <tbody>${rows.map(r => `<tr>
+                 <td><code>${escText(String(r.variable))}</code></td>
+                 <td style="color:var(--red);">${escText(String(r.bad_value))}</td>
+                 <td>${escText(String(r.running_with_default))}</td>
+                 <td style="color:var(--text-dim);">${escText(String(r.error || ''))}</td>
+               </tr>`).join('')}</tbody>
+             </table></div>
+           <div style="font-size:0.74em; color:var(--text-dim); margin-top:8px; line-height:1.5;">
+             Set each to a bare number - digits and a decimal point only. No %, no $,
+             no commas, no arrows, no units, no quotes. The value is read when the
+             service starts, so it takes a restart to apply.</div>
+         </div>`;
 }
 
 function renderTabLock() {
