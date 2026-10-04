@@ -1,0 +1,47 @@
+22 live branches, 60d of 15m candles, fee 0.70% round trip, 3 rungs
+
+coin          bars   live |              BACKTEST best |         FRONT TEST (out of sample)
+                     step |   step  trips    net%  |  chosen  trips    net%   vs live
+--------------------------------------------------------------------------------------------------------
+BTC-USD       5760  1.37% |   1.2%     12   2.00%  |    1.2%      4   0.67%    +0.67%
+XLM-USD       5760  3.00% |   1.2%     98  16.33%  |    1.2%     39   6.50%    +1.53%
+ALGO-USD      5760  3.00% |   1.2%    125  20.83%  |    1.2%     73  12.17%    +3.07%
+BCH-USD       5760  2.84% |   2.5%     20  12.00%  |    2.5%     12   7.20%    +6.42%
+HBAR-USD      5760  3.00% |   1.2%    102  17.00%  |    0.9%    123   8.20%    +4.60%
+QNT-USD       5662  3.00% |   2.0%    152  65.87%  |    1.2%    249  41.50%   +55.20%
+SOL-USD       5760  2.34% |   1.2%     54   9.00%  |    1.2%     16   2.67%    +0.00%
+LINK-USD      5760  3.00% |   1.2%     70  11.67%  |    1.2%     33   5.50%    +0.77%
+ACH-USD       4501  3.00% |   1.2%     95  15.83%  |    1.5%     20   5.33%    +1.53%
+LTC-USD       5760  3.00% |   1.2%     69  11.50%  |    1.2%     42   7.00%    +3.07%
+NEAR-USD      5760  3.00% |   1.2%    370  61.67%  |    1.2%    226  37.67%   +12.27%
+JASMY-USD     5566  3.00% |   1.2%    200  33.33%  |    1.2%     77  12.83%    +4.60%
+ZEC-USD       5760  3.00% |   1.2%    253  42.17%  |    1.2%     78  13.00%    +3.83%
+TON-USD       5750  3.00% |   1.2%     48   8.00%  |    2.5%      2   1.20%    +0.00%
+APE-USD       4952  3.00% |   1.2%     73  12.17%  |    0.9%     58   3.87%    +1.53%
+PRIME-USD     4231  2.02% |   4.0%     23  25.30%  |    4.0%      7   7.70%    +7.02%
+ONDO-USD      5760  3.00% |   1.2%    173  28.83%  |    1.2%    104  17.33%    +6.13%
+FLOKI-USD     4476  3.00% |   1.2%     94  15.67%  |    1.2%     31   5.17%    +1.53%
+XRP-USD       5760  2.43% |   1.5%     68  18.13%  |    1.5%     16   4.27%    +2.31%
+TIA-USD       5757  3.00% |   1.2%    183  30.50%  |    1.2%     89  14.83%    +2.30%
+ETH-USD       5760  1.64% |   1.2%     28   4.67%  |    1.2%      6   1.00%    +0.32%
+SHIB-USD      5715  2.73% |   1.2%     71  11.83%  |    1.2%     25   4.17%    +0.00%
+
+========================================================================================================
+OUT OF SAMPLE, 18 days, 22 coins - the only figures worth reading
+  tuned step    1330 round trips   median +6.75% of allocation
+  LIVE step      166 round trips   median +2.30% of allocation
+  per coin per day, tuned: 3.36 trips   live: 0.42 trips
+
+  best out-of-sample coins (tuned step):
+    QNT-USD     step 1.2%  249 trips  +41.50%   (live 3.00% -> 72 trips, +55.20%)
+    NEAR-USD    step 1.2%  226 trips  +37.67%   (live 3.00% -> 16 trips, +12.27%)
+    ONDO-USD    step 1.2%  104 trips  +17.33%   (live 3.00% -> 8 trips, +6.13%)
+    TIA-USD     step 1.2%   89 trips  +14.83%   (live 3.00% -> 3 trips, +2.30%)
+    ZEC-USD     step 1.2%   78 trips  +13.00%   (live 3.00% -> 5 trips, +3.83%)
+    JASMY-USD   step 1.2%   77 trips  +12.83%   (live 3.00% -> 6 trips, +4.60%)
+
+  the tuned step lands within 0.25pp of the LIVE step on 1 of 22 coins
+
+Every count above is an UPPER BOUND: it assumes a resting maker order 
+always fills when price trades through it. The live fleet cancels 
+unfilled makers after the timeout, so it closes fewer.
