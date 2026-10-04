@@ -105,7 +105,37 @@ def _rows(trades, config_epoch=None):
     return out
 
 
-def analyse(trades, *, config_epoch=None):
+# An inherited position leaving is not one of this strategy's losses.
+#
+# coin_adoption hands the fleet a position already open, at a price set by
+# whoever bought it, and records the adoption-day mark as entry_price. A
+# close tagged this way is that old decision resolving - the grid chose
+# neither end of it - and before the booking fix it was priced against a
+# number nobody paid.
+#
+# On 2026-10-04 four such ZEC rows entered this book and took it over. They
+# were the WORST TWO losses in it (-$123.24 and -$123.21), which is the one
+# place a handful of rows can move every statistic at once:
+#
+#   avg_loss        -$12.76 with them, about -$0.80 without
+#   profit factor    0.47x  with them, well above 1 without
+#   worst_loss     -$123.24 with them, -$5.71 without
+#   big_losses            8 with them, counted against a $0.91 average win
+#
+# Each of those is read as a verdict on how this grid trades, and it funds
+# exactly one decision: tighten the stop. The stop did not fire on any of
+# the four. Tightening it would cut winners to fix a loss that never
+# happened - the same trap config_epoch already exists to prevent, arriving
+# through a different door.
+#
+# NOT HIDDEN. They stay in losses_by_exit_reason, keep their own counted
+# line, and the panel says what they were. They are only kept out of the
+# SHAPE statistics, which answer "how does this strategy lose" - the one
+# question an inherited position cannot speak to.
+ADOPTED_EXIT_REASON = "adopted_exit"
+
+
+def analyse(trades, *, config_epoch=None, exclude_inherited=True):
     """The shape of the losses, and which kind they are.
 
     Split against `config_epoch`, because a loss booked by a
@@ -115,8 +145,16 @@ def analyse(trades, *, config_epoch=None):
     _pick_profitable_slice_to_sell, whose whole job is to refuse a losing
     sale. Reading them as a live loss problem would send someone
     tightening a stop that never fired.
+
+    exclude_inherited drops adopted_exit rows from the shape statistics
+    for the reason above this function. Pass False to measure the raw
+    book including them.
     """
-    rows = _rows(trades, config_epoch)
+    rows_all = _rows(trades, config_epoch)
+    inherited = [r for r in rows_all
+                 if (r.get("exit_reason") or "") == ADOPTED_EXIT_REASON]
+    rows = ([r for r in rows_all if r not in inherited]
+            if exclude_inherited else rows_all)
     n = len(rows)
     wins = [r for r in rows if r["pnl"] > 0]
     losses = [r for r in rows if r["pnl"] < 0]
@@ -124,8 +162,10 @@ def analyse(trades, *, config_epoch=None):
     avg_win = statistics.mean([r["pnl"] for r in wins]) if wins else None
     avg_loss = statistics.mean([r["pnl"] for r in losses]) if losses else None
 
+    # Counted over the WHOLE book, so an excluded row still shows up here -
+    # that is the line that tells a reader the exclusion happened at all.
     by_reason = {}
-    for r in losses:
+    for r in [x for x in rows_all if x["pnl"] < 0]:
         by_reason[r["exit_reason"] or "unrecorded"] = \
             by_reason.get(r["exit_reason"] or "unrecorded", 0) + 1
 
@@ -185,6 +225,21 @@ def analyse(trades, *, config_epoch=None):
             "from one a replaced configuration booked."),
 
         "losses_by_exit_reason": by_reason,
+        # What was set aside, and why - never silent. None of these numbers
+        # is hidden; they are simply not folded into the shape above.
+        "inherited_excluded": len(inherited) if exclude_inherited else 0,
+        "inherited_excluded_usd": (round(sum(r["pnl"] for r in inherited), 2)
+                                   if exclude_inherited and inherited else 0.0),
+        "inherited_note": (
+            (f"{len(inherited)} inherited position(s) closed for "
+             f"${sum(r['pnl'] for r in inherited):,.2f} as booked are counted "
+             f"in the reasons above but kept OUT of the loss shape. The grid "
+             f"chose neither end of them, and before the basis fix they were "
+             f"priced against a mark nobody paid - including the worst two "
+             f"rows in this book. Left in, they move the average loss, the "
+             f"worst loss and the profit factor at once, and every one of "
+             f"those reads as a verdict on how this grid trades.")
+            if (exclude_inherited and inherited) else None),
         "big_losses": len(big),
         "worst_five": [{"pnl": round(r["pnl"], 4), "pct": round(r["pct"], 3) if r["pct"] else None,
                         "product_id": r["product_id"], "exit_reason": r["exit_reason"]}

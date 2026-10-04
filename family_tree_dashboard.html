@@ -12200,6 +12200,8 @@ async function loadLossStudy() {
 
           ${Object.keys(d.losses_by_exit_reason || {}).length ? `<div style="font-size:0.84em;color:${dim};margin-bottom:10px">
              How the losses were taken: ${Object.entries(d.losses_by_exit_reason).map(([k, v]) => `${esc2(k.replace(/_/g, ' '))} ×${v}`).join(' · ')}</div>` : ''}
+        ${d.inherited_note ? `<div class="why" style="margin:8px 0 0; padding:8px 10px; border-left:3px solid #f0c97a; background:rgba(240,201,122,.07)">
+             <strong>Inherited positions are counted above but kept out of the numbers.</strong> ${esc2(d.inherited_note)}</div>` : ''}
 
           ${sweepBlock}
 
