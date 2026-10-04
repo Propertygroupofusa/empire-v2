@@ -76,12 +76,32 @@ def diagnose() -> dict:
     }
     fallbacks = {}
     for name, keys in _email_sets.items():
-        present = [k for k in keys if (os.environ.get(k) or "").strip()]
+        present, misnamed = [], {}
+        for k in keys:
+            # Same tolerance the sender itself now uses - see _env_tolerant().
+            # A page that reports "present: []" for a variable the owner can
+            # see on his own dashboard sends him to re-enter a secret that
+            # was never wrong, which is how this one burned an hour.
+            val, actual = _env_tolerant(k)
+            if val:
+                present.append(k)
+                if actual != k:
+                    misnamed[k] = actual
         fallbacks[name] = {
             "variables": list(keys),
             "present": sorted(present),
             "complete": len(present) == len(keys),
         }
+        if misnamed:
+            # NAMES ONLY, never a value. Says which stored spelling was
+            # actually found so the owner can see the stray character that
+            # Railway's own list renders invisibly.
+            fallbacks[name]["found_under_a_different_name"] = misnamed
+            fallbacks[name]["what_to_do"] = (
+                "Delivery works - this is read correctly now. To make every "
+                "other reader of this variable find it too, rename it to the "
+                "exact spelling with no surrounding whitespace. The value "
+                "does not need to change.")
     _usable = sorted(n for n, v in fallbacks.items() if v["complete"])
     if url is None:
         why = (f"{WEBHOOK_ENV} is not present in this process at all. Either it "
@@ -348,6 +368,22 @@ def send_digest(alerts: list, *, force: bool = False) -> tuple:
 # forever, not to time out the infrastructure.
 NO_ROUTE_MARKER = "no transport delivered"
 
+# NO ADDRESS IS AS UNROUTABLE AS NO TRANSPORT.
+#
+# send_email returns "no recipient resolved (...)" when none of
+# TRADE_ALERT_EMAIL / DAILY_BRIEF_EMAIL / GMAIL_EMAIL is set, and that
+# string carries no NO_ROUTE_MARKER - so is_infrastructure_failure() read
+# False and the worker spent one of six attempts on a pass that never had
+# anywhere to go. Six quiet cycles and the alert is marked failed
+# permanently, which is precisely the loss the comment above this exists to
+# prevent, arriving through the other door. The message was never poisoned;
+# the mailbox was simply unset, and that is infrastructure.
+#
+# Found by a test asserting the round trip rather than the spelling. Not
+# live on this account - its recipient resolves - so this is a trap removed,
+# not an outage fixed.
+NO_RECIPIENT_MARKER = "no recipient resolved"
+
 
 def is_infrastructure_failure(err) -> bool:
     """True when nothing could carry the message, whatever it said.
@@ -355,8 +391,16 @@ def is_infrastructure_failure(err) -> bool:
     Kept as a marker check rather than exception sniffing because the
     sender already collapses every transport's exception to a type name;
     there is no exception left to inspect by the time a caller sees this.
+
+    Both markers mean the same thing to a caller deciding whether to spend
+    a retry: no route existed, so this pass proved nothing about the
+    message. A rejection the transport actually issued - a bad password, a
+    refused address - is NOT one of these and must still burn its attempt.
     """
-    return bool(err) and NO_ROUTE_MARKER in str(err)
+    if not err:
+        return False
+    text = str(err)
+    return NO_ROUTE_MARKER in text or NO_RECIPIENT_MARKER in text
 
 
 # Failures that prove the port was OPEN. Each of these can only be raised
@@ -531,6 +575,41 @@ def remedy_for(tried, legs=None) -> str:
             f"the app log for that exception before changing any variable.")
 
 
+# ---- A VARIABLE THE DASHBOARD SHOWS AND THE PROCESS CANNOT SEE -----------
+# Railway's variable list renders "SENDGRID_API_KEY" and "SENDGRID_API_KEY "
+# identically - the name is left-aligned and a trailing space is invisible.
+# os.getenv() is not: it looks up the exact string and misses the padded one.
+# That is not a hypothesis here. This project's own process environment
+# already carries one: "STRIPE_WEBHOOK_SECRET " with a trailing space, which
+# alert-queue's similar_variables_seen has been printing all along.
+#
+# The account owner confirmed the key is set, declined to re-enter it, and
+# asked whether it works. On a container two minutes old the sender still
+# reported `sendgrid: no SENDGRID_API_KEY`. So the lookup is made tolerant
+# rather than the person being asked to retype a secret to satisfy a string
+# comparison.
+#
+# NAMES ONLY leave this function in any diagnostic. The value is returned to
+# the caller that sends the mail and is never logged, echoed or reported -
+# the same contract the rest of this module already keeps.
+def _env_tolerant(name: str):
+    """(value, actual_variable_name) for `name`, allowing a name whose
+    stored spelling carries stray surrounding whitespace or differs in case.
+    The exact name always wins; a padded one is only a fallback, so nothing
+    about a correctly-named variable changes."""
+    exact = os.environ.get(name)
+    if exact is not None and exact.strip():
+        return exact.strip(), name
+    target = name.strip().upper()
+    for k, v in os.environ.items():
+        if k == name:
+            continue
+        if k.strip().upper() == target and (v or "").strip():
+            return v.strip(), k
+    return "", None
+
+
+
 def send_email(subject: str, body: str) -> tuple:
     """(ok, error). Delivers by whatever route this host actually permits.
 
@@ -571,7 +650,8 @@ def send_email(subject: str, body: str) -> tuple:
     """
     to = recipient()
     if not to:
-        return False, "no recipient resolved (TRADE_ALERT_EMAIL / DAILY_BRIEF_EMAIL / GMAIL_EMAIL)"
+        return False, (NO_RECIPIENT_MARKER
+                       + " (TRADE_ALERT_EMAIL / DAILY_BRIEF_EMAIL / GMAIL_EMAIL)")
 
     tried = []
     legs = []
@@ -579,7 +659,7 @@ def send_email(subject: str, body: str) -> tuple:
     # --- 1. SendGrid over HTTPS. Raw REST, deliberately NOT the sendgrid
     # package: it is in requirements.txt but importing it is one more way
     # to fail at runtime, and the v3 send endpoint is a single POST.
-    key = (os.getenv("SENDGRID_API_KEY") or "").strip()
+    key, key_var = _env_tolerant("SENDGRID_API_KEY")
     sender = (os.getenv(GMAIL_USER_ENV) or "").strip() or to
     if key:
         try:
@@ -597,7 +677,11 @@ def send_email(subject: str, body: str) -> tuple:
             with urllib.request.urlopen(req, timeout=30) as r:
                 if 200 <= r.status < 300:
                     return True, None
-                tried.append(f"sendgrid: HTTP {r.status}")
+                tried.append(
+                    f"sendgrid: HTTP {r.status}"
+                    + ("" if key_var == "SENDGRID_API_KEY"
+                       else f" (read from the variable named {key_var!r} - "
+                            f"note the stray whitespace in its name)"))
         except Exception as e:
             tried.append(f"sendgrid: {type(e).__name__}")
     else:

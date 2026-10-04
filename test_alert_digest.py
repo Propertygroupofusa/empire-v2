@@ -217,8 +217,28 @@ def test_every_transport_failure_is_reported_not_just_the_last():
 
 
 def test_a_missing_recipient_fails_before_any_transport():
+    # The ordering is the point - no address means no attempt, so nothing
+    # is dialled and no credential is put on the wire for a message that
+    # could not be addressed anyway.
+    #
+    # Matched on the shared constant rather than its text: the sender now
+    # builds this from NO_RECIPIENT_MARKER so that is_infrastructure_failure
+    # recognises it and the worker does not spend a retry on a pass that had
+    # nowhere to go. A test pinned to the literal would make that fix look
+    # like a regression - which is exactly what it did in test_notify_wiring.
     body = _send_email_src()
-    assert body.index("no recipient resolved") < body.index("api.sendgrid.com")
+    assert "NO_RECIPIENT_MARKER" in body or "no recipient resolved" in body, \
+        "the sender no longer reports an unresolved recipient at all"
+    where = (body.index("NO_RECIPIENT_MARKER") if "NO_RECIPIENT_MARKER" in body
+             else body.index("no recipient resolved"))
+    assert where < body.index("api.sendgrid.com"), \
+        "a transport is dialled before the recipient is even resolved"
+
+    # And the round trip the ordering exists to protect: the worker must see
+    # that failure as having no route, not as a rejection worth retrying.
+    import alert_sender
+    assert alert_sender.is_infrastructure_failure(
+        alert_sender.NO_RECIPIENT_MARKER + " (X / Y / Z)") is True
 
 
 def test_a_send_failure_reports_the_type_only():

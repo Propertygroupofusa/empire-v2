@@ -129,10 +129,63 @@ def test_the_marker_is_what_the_sender_actually_returns():
         "no transport delivered (sendgrid: no key, smtp:465: X)") is True
     assert alert_sender.is_infrastructure_failure("SMTPAuthenticationError") is False
     assert alert_sender.is_infrastructure_failure(None) is False
+    # WHAT THE TWO HALVES AGREEING ACTUALLY LOOKS LIKE.
+    #
+    # This searched send_email's source for the marker's literal text, so it
+    # failed the moment send_email was written the safe way - building its
+    # failure from the shared NO_ROUTE_MARKER constant by NAME. That is the
+    # construction that cannot drift from is_infrastructure_failure(), and
+    # the test was penalising it while a hand-copied literal would have
+    # passed. It had been red on main for some time, hiding real failures in
+    # this file behind an expected one.
+    #
+    # So the round trip is asserted instead of the spelling: whatever
+    # send_email returns when nothing can deliver must be recognised by the
+    # function the worker calls on it. That is the contract.
     src = open("alert_sender.py").read()
     i = src.index("def send_email")
-    assert alert_sender.NO_ROUTE_MARKER in src[i:], \
-        "the sender no longer emits the marker the worker looks for"
+    body = src[i:]
+    assert ("NO_ROUTE_MARKER" in body
+            or alert_sender.NO_ROUTE_MARKER in body), \
+        "send_email no longer builds its no-route failure from the marker"
+
+    # The real proof, run rather than read. Two ways to have no route, and
+    # the worker must recognise BOTH - otherwise it spends one of six
+    # attempts on a pass that proved nothing about the message, and six
+    # quiet cycles mark a perfectly good alert dead.
+    import os
+    _keys = ("SENDGRID_API_KEY", "GMAIL_EMAIL", "GMAIL_PASSWORD",
+             "ALERT_WEBHOOK_URL", "TRADE_ALERT_EMAIL", "DAILY_BRIEF_EMAIL")
+    saved = {k: os.environ.pop(k) for k in list(os.environ)
+             if k.strip().upper() in _keys}
+    try:
+        # (a) an address but no transport
+        os.environ["TRADE_ALERT_EMAIL"] = "someone@example.com"
+        sent, err = alert_sender.send_email("subject", "body")
+        assert sent is False, "it cannot have delivered with no credential"
+        assert alert_sender.NO_ROUTE_MARKER in str(err), err
+        assert alert_sender.is_infrastructure_failure(err), (
+            "no transport is not being seen as infrastructure: " f"{err!r}")
+
+        # (b) a transport but no address - this one was NOT recognised, and
+        # it is the same loss arriving through the other door.
+        os.environ.pop("TRADE_ALERT_EMAIL")
+        sent, err = alert_sender.send_email("subject", "body")
+        assert sent is False, "it cannot have delivered with no recipient"
+        assert alert_sender.is_infrastructure_failure(err), (
+            "the worker would spend a retry on a pass that had nowhere to "
+            f"go: {err!r}")
+    finally:
+        for k in _keys:
+            os.environ.pop(k, None)
+        os.environ.update(saved)
+
+    # A REJECTION IS NOT INFRASTRUCTURE. A transport that answered and
+    # refused must still burn its attempt, or a genuinely poisoned message
+    # retries forever - the exact thing MAX_ATTEMPTS exists for.
+    assert alert_sender.is_infrastructure_failure(
+        "SMTPAuthenticationError") is False
+    assert alert_sender.is_infrastructure_failure("sendgrid: HTTP 400") is False
 
 
 if __name__ == "__main__":
