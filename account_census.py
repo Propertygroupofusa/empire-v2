@@ -160,6 +160,45 @@ async def fetch_balances(session) -> dict:
             "pages": pages, "accounts_seen": len(accounts)}
 
 
+def owned_units_map(balances):
+    """{ASSET: units the account OWNS}, or None when unreadable.
+
+    OWNED, NOT AVAILABLE - and the difference is not cosmetic.
+    `available_units` excludes coin the venue is holding against a resting
+    order or a stake. That is the right figure for "can this branch place
+    a sell right now", which is what slice_backing and the dashboard's
+    `backing` block ask. It is the WRONG figure for "does this coin exist
+    at all".
+
+    Measured 2026-10-04 05:13Z, the four branches the backing gate was
+    refusing:
+        SOL   claims   1.034600  owns   1.034600  available   0.258650
+        LINK  claims   9.340000  owns  10.090000  available   3.460000
+        ALGO  claims 492.700000  owns 1347.646389 available 213.346389
+        ACH   claims 5345.2000   owns 5345.204595 available   0.004595
+    Every one owns at least what it claims. All $245.23 the gate called
+    "not in the wallet" was the fleet's own resting sell orders. A gate
+    reading `available` refuses a buy on a branch whose coin is entirely
+    present - which is a false refusal on a healthy branch, and the
+    reconcile endpoint's own comment already said so, naming SOL and LINK.
+
+    Same source and same choice as reconcile-slices, deliberately: these
+    two must never disagree about what the account owns.
+    """
+    if not balances or not balances.get("available"):
+        return None
+    owned = balances.get("held_including_zero")
+    if isinstance(owned, dict) and owned:
+        return {str(k).upper(): v for k, v in owned.items()}
+    # Older payload without the zero-inclusive map. `held` is also
+    # available+hold, so it answers the same question; it merely drops
+    # confirmed zeros, which read as UNKNOWN rather than as a shortfall.
+    held = balances.get("held")
+    if isinstance(held, dict) and held:
+        return {str(k).upper(): v for k, v in held.items()}
+    return None
+
+
 def available_units_map(balances):
     """{ASSET: units the venue will RELEASE}, or None when unreadable.
 

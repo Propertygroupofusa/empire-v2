@@ -2514,8 +2514,15 @@ _WALLET_UNITS_CACHE = {"units": None, "at": 0.0}
 WALLET_UNITS_TTL_SECONDS = 60.0
 
 
-async def wallet_available_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
-    """{ASSET: units the venue will RELEASE}, or None when unreadable.
+async def wallet_owned_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
+    """{ASSET: units the account OWNS}, or None when unreadable.
+
+    OWNED, NOT AVAILABLE. This read used available_units for its first
+    four hours and that was wrong: it refused buys on SOL, LINK, ALGO and
+    ACH, whose coin is entirely present and merely sitting under the
+    fleet's own resting sell orders. See account_census.owned_units_map
+    for the measurement, and reconcile-slices' own comment, which had
+    already named SOL and LINK as "owned in full and only locked".
 
     NOT account_market_book(). That book is built from census()'s
     holdings list, and account_census.wallet_units_for's own docstring
@@ -2549,7 +2556,7 @@ async def wallet_available_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
         import aiohttp as _aiohttp
         async with _aiohttp.ClientSession() as _s:
             _bal = await account_census.fetch_balances(_s)
-        units = account_census.available_units_map(_bal)
+        units = account_census.owned_units_map(_bal)
     except Exception as exc:
         log.warning(f"[GRID] wallet units unreadable ({type(exc).__name__}: {exc}) - "
                     f"backing not checked this cycle")
@@ -2576,11 +2583,19 @@ async def branch_backing_verdict(product_id, slices, price,
     Cash spent into a branch that cannot sell what it claims is worse
     than cash left idle: the branch takes the position and has no exit.
 
-    The verdict comes from slice_backing.assess(), the same function the
-    dashboard's `backing` block and exchange_truth_worker call, on the
-    same units map from account_census.available_units_map(). It is not
-    re-derived here - a gate that computes backing its own way would
-    refuse buys the owner's page calls fine.
+    THE UNITS MAP IS OWNED, NOT AVAILABLE, AND THAT IS THE WHOLE FIX.
+    This gate shipped reading available_units and spent four hours
+    refusing buys on SOL, LINK, ALGO and ACH - branches that own every
+    unit they claim, with the coin sitting under the fleet's own resting
+    sell orders. $245.23 was reported to the owner as "coin not in the
+    wallet"; none of it was missing. See account_census.owned_units_map.
+    The dashboard's `backing` block legitimately uses AVAILABLE, because
+    it answers "can this branch sell right now". This gate answers "does
+    this coin exist", so the two read different maps on purpose and will
+    disagree whenever coin is on hold - that disagreement is correct.
+
+    The arithmetic still comes from slice_backing.assess() rather than
+    being re-derived here, so the backed threshold lives in one place.
 
     REFUSE-ONLY, and it can never block a sell: the one caller is the
     buy branch of the gate. UNKNOWN is not a refusal.
@@ -6774,7 +6789,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         # balance leaves the buy exactly where it was before this check
         # existed, rather than freezing the fleet on a rate limit.
         _back_ok, _back_reason = await branch_backing_verdict(
-            branch.product_id, slices, price, await wallet_available_units())
+            branch.product_id, slices, price, await wallet_owned_units())
         if not _back_ok:
             log.warning(f"[GRID] {branch.bot_name}: 🧾 UNBACKED - no buy. {_back_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id,

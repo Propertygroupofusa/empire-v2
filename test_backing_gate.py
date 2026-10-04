@@ -97,6 +97,79 @@ class TestTheNormalizerIsShared(unittest.TestCase):
         self.assertNotIn("ZEC", out)
 
 
+class TestOwnedIsNotAvailable(unittest.TestCase):
+    """THE BUG THIS CLASS EXISTS FOR. The gate shipped reading
+    available_units and refused buys on SOL, LINK, ALGO and ACH for four
+    hours. Measured 2026-10-04 05:13Z:
+
+        SOL   claims   1.034600  owns   1.034600  available   0.258650
+        LINK  claims   9.340000  owns  10.090000  available   3.460000
+        ALGO  claims 492.700000  owns 1347.646389 available 213.346389
+        ACH   claims 5345.2000   owns 5345.204595 available   0.004595
+
+    Every one owns at least what it claims. All $245.23 called "not in
+    the wallet" was the fleet's own resting sell orders."""
+
+    BAL = {"available": True,
+           "available_units": {"SOL": 0.25865002, "LINK": 3.46},
+           "held_including_zero": {"SOL": 1.03460007, "LINK": 10.09, "TIA": 0.0}}
+
+    def test_unreadable_is_none_for_BOTH_maps(self):
+        """None means nobody could read it; {} would mean the account owns
+        nothing, which would be the largest shortfall there is."""
+        for fn in (account_census.owned_units_map,
+                   account_census.available_units_map):
+            self.assertIsNone(fn({"available": False}), fn.__name__)
+            self.assertIsNone(fn(None), fn.__name__)
+            self.assertIsNone(fn({}), fn.__name__)
+
+    def test_the_two_maps_differ_when_coin_is_on_hold(self):
+        av = account_census.available_units_map(self.BAL)
+        ow = account_census.owned_units_map(self.BAL)
+        self.assertLess(av["SOL"], ow["SOL"])
+        self.assertEqual(ow["SOL"], 1.03460007)
+
+    def test_the_gate_reads_OWNED(self):
+        b = body_of('wallet_owned_units')
+        self.assertIn('owned_units_map', b)
+        self.assertNotIn('available_units_map', b,
+                         'the gate is back on AVAILABLE - it will refuse '
+                         'branches whose coin is merely on a resting order')
+
+    def test_coin_on_hold_is_not_a_refusal(self):
+        """The four real branches, each with its real owned units."""
+        for pid, claim, owns, px in (
+                ("SOL-USD", 1.03460007, 1.03460007, 120.53),
+                ("LINK-USD", 9.34, 10.09, 14.027),
+                ("ALGO-USD", 492.70, 1347.646389, 0.12896),
+                ("ACH-USD", 5345.20, 5345.204595, 0.00621)):
+            ok, why = run(g.branch_backing_verdict(
+                pid, [{"qty": claim, "entry_price": px}], px,
+                {pid.split("-")[0]: owns}))
+            self.assertTrue(ok, '%s owns what it claims and must not be '
+                                'refused: %s' % (pid, why))
+
+    def test_a_GENUINE_shortfall_is_still_refused(self):
+        """QNT, from slice_backing's own docstring: 0.675982 claimed,
+        0.00097323 actually owned. The gate must still catch this."""
+        ok, why = run(g.branch_backing_verdict(
+            "QNT-USD", [{"qty": 0.675982, "entry_price": 130.0}], 130.0,
+            {"QNT": 0.00097323}))
+        self.assertFalse(ok)
+        self.assertIn('0.144% backed', why)
+
+    def test_it_agrees_with_reconcile_about_what_is_owned(self):
+        """reconcile-slices picks held_including_zero and its comment says
+        why. These two must never disagree about ownership."""
+        src = open(os.path.join(HERE, 'routers/trading_dashboard.py')).read()
+        i = src.index('OWNED, NOT AVAILABLE')
+        self.assertIn('held_including_zero', src[i:i+1200])
+        import inspect
+        self.assertIn('held_including_zero',
+                      inspect.getsource(account_census.owned_units_map),
+                      'owned_units_map no longer reads the owned map')
+
+
 class TestItRefusesTheRealThing(unittest.TestCase):
     def test_it_refuses_the_link_branch_that_took_the_45_dollars(self):
         ok, why = run(g.branch_backing_verdict(
@@ -174,22 +247,22 @@ class TestUnknownIsNotARefusal(unittest.TestCase):
         """RUN, not read. `{}` would mean "the account holds nothing",
         which is a different claim from "nobody could read it" - and a
         source-text check cannot tell the two returns apart."""
-        orig = account_census.available_units_map
+        orig = account_census.owned_units_map
         orig_fetch = account_census.fetch_balances
         async def _no_network(_s):
             return {"available": True, "available_units": {}, "held_including_zero": {}}
         try:
             account_census.fetch_balances = _no_network
-            account_census.available_units_map = lambda _b: None
+            account_census.owned_units_map = lambda _b: None
             g._WALLET_UNITS_CACHE.update(units=None, at=0.0)
-            self.assertIsNone(run(g.wallet_available_units()))
+            self.assertIsNone(run(g.wallet_owned_units()))
         finally:
-            account_census.available_units_map = orig
+            account_census.owned_units_map = orig
             account_census.fetch_balances = orig_fetch
             g._WALLET_UNITS_CACHE.update(units=None, at=0.0)
 
     def test_a_readable_map_is_cached_and_returned(self):
-        orig = account_census.available_units_map
+        orig = account_census.owned_units_map
         orig_fetch = account_census.fetch_balances
         calls = []
         async def _no_network(_s):
@@ -197,18 +270,18 @@ class TestUnknownIsNotARefusal(unittest.TestCase):
                     "held_including_zero": {"LINK": 3.46}}
         try:
             account_census.fetch_balances = _no_network
-            account_census.available_units_map = lambda _b: (calls.append(1)
+            account_census.owned_units_map = lambda _b: (calls.append(1)
                                                              or {"LINK": 3.46})
             g._WALLET_UNITS_CACHE.update(units=None, at=0.0)
-            first = run(g.wallet_available_units())
-            second = run(g.wallet_available_units())
+            first = run(g.wallet_owned_units())
+            second = run(g.wallet_owned_units())
             self.assertEqual(first, {"LINK": 3.46})
             self.assertEqual(second, {"LINK": 3.46})
             self.assertEqual(len(calls), 1,
                              'the wallet was re-read inside its own TTL - '
                              '22 branches a cycle is what got this rate-limited')
         finally:
-            account_census.available_units_map = orig
+            account_census.owned_units_map = orig
             account_census.fetch_balances = orig_fetch
             g._WALLET_UNITS_CACHE.update(units=None, at=0.0)
 
@@ -229,7 +302,7 @@ class TestUnknownIsNotARefusal(unittest.TestCase):
             # A reading older than the TTL must not be served.
             g._WALLET_UNITS_CACHE.update(units={"LINK": 3.46},
                                          at=0.0)   # 1970 - long expired
-            got = run(g.wallet_available_units())
+            got = run(g.wallet_owned_units())
             self.assertEqual(len(calls), 1,
                              'an expired wallet reading was served from cache')
             self.assertEqual(got, {"LINK": 9.34},
@@ -239,7 +312,7 @@ class TestUnknownIsNotARefusal(unittest.TestCase):
             g._WALLET_UNITS_CACHE.update(units=None, at=0.0)
 
     def test_the_ttl_is_a_real_bound_not_a_constant_true(self):
-        b = body_of('wallet_available_units')
+        b = body_of('wallet_owned_units')
         self.assertIn('max_age_seconds', b)
         self.assertIn('_WALLET_UNITS_CACHE["at"]', b)
 
@@ -320,7 +393,7 @@ class TestItUsesTheSharedMeasurement(unittest.TestCase):
         Checked on the CODE, not the text: both docstrings say the words
         "NOT account_market_book()" on purpose, and a naive substring
         search matches that warning and passes for the wrong reason."""
-        for fn in ('branch_backing_verdict', 'wallet_available_units'):
+        for fn in ('branch_backing_verdict', 'wallet_owned_units'):
             tree = ast.parse(body_of(fn))
             called = {
                 (n.func.attr if isinstance(n.func, ast.Attribute) else
@@ -332,8 +405,8 @@ class TestItUsesTheSharedMeasurement(unittest.TestCase):
             self.assertNotIn('census', called, fn + ' calls census()')
 
     def test_the_wallet_read_uses_the_shared_normalizer(self):
-        self.assertIn('account_census.available_units_map',
-                      body_of('wallet_available_units'))
+        self.assertIn('account_census.owned_units_map',
+                      body_of('wallet_owned_units'))
 
 
 class TestItCallsOnlyNamesThatExist(unittest.TestCase):
@@ -343,7 +416,7 @@ class TestItCallsOnlyNamesThatExist(unittest.TestCase):
 
     def test_account_census_names_are_real(self):
         import re
-        for fn in ('wallet_available_units',):
+        for fn in ('wallet_owned_units',):
             for attr in set(re.findall(r'account_census\.(\w+)', body_of(fn))):
                 self.assertTrue(hasattr(account_census, attr),
                                 'account_census has no ' + attr)
