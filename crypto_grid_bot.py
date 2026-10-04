@@ -457,6 +457,53 @@ def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None,
     return round(spend, 2), f"${spend:,.2f}, bounded by {bound}"
 
 
+# A slice too small to sell is not a rung.
+#
+# MEASURED 2026-10-04. BCH-USD held 3 slices against 3 levels and so read
+# PARKED - unable to buy, and its only escape route a sell the venue would
+# refuse. Its third "slice" was 0.00000022 BCH, worth $0.00007: the dust
+# remainder of a partial sell whose $0.58 of profit was already booked on
+# 2026-10-03 at 15:57. LINK-USD was locked the same way by 0.01 LINK ($0.14)
+# and had not closed a trade since 2026-09-29, four and a half days, after
+# averaging a close every 3.5 hours before that. $308.33 of capital sat in
+# two branches held shut by fourteen cents.
+#
+# The rung count asks "is this branch full", and a position the venue will
+# not let you sell cannot be what fills it. _pick_parked_slice_to_sell's own
+# comment predicted exactly this failure - "a branch whose only qualifying
+# slice is dust reports itself escapable while staying locked" - and the
+# notional was written into the feed so it would be visible. It was.
+#
+# THE FLOOR IS DELIBERATELY LOW. Erring low only preserves today's
+# behaviour: a slice above it keeps blocking a rung exactly as now. Erring
+# HIGH would let a branch treat a real small position as absent and buy a
+# rung it should not have. $1.00 sits under any plausible venue minimum for
+# a USD pair while being far above the $0.14 and $0.00007 actually seen, and
+# well below MIN_TRADE_USD ($5.00), the smallest rung the engine will buy -
+# so no slice this engine created can be mistaken for dust.
+GRID_DUST_SLICE_USD = float(os.getenv("GRID_DUST_SLICE_USD", "1.00"))
+
+
+def slice_basis_usd(s) -> float:
+    """What a slice really cost: qty x entry. Works on an ORM row or a dict."""
+    if hasattr(s, "get"):
+        qty, entry = s.get("qty"), s.get("entry_price")
+    else:
+        qty, entry = getattr(s, "qty", None), getattr(s, "entry_price", None)
+    return (float(qty or 0.0)) * (float(entry or 0.0))
+
+
+def slice_is_tradeable(s, min_usd: float = None) -> bool:
+    """False for a remnant too small for the venue to accept a sell on."""
+    floor = GRID_DUST_SLICE_USD if min_usd is None else min_usd
+    return slice_basis_usd(s) >= floor
+
+
+def tradeable_slices(slices) -> list:
+    """The slices that could actually be sold - the ones that fill a rung."""
+    return [s for s in (slices or []) if slice_is_tradeable(s)]
+
+
 def branch_is_adopted_only(slices) -> bool:
     """True when EVERY open slice on this branch was adopted.
 
@@ -5612,6 +5659,13 @@ def _pick_parked_slice_to_sell(slices: list, price: float, round_trip_fee_rate: 
         basis = (s.qty or 0) * (s.entry_price or 0)
         if basis <= 0:
             continue
+        # A branch CAN still be parked on real slices while also holding a
+        # remnant, and percentage does not care about size: BCH's dust read
+        # +1.80% and beat both real slices, which were negative. Offering it
+        # produced a sell the venue refused, 200 times. Size the candidate,
+        # not just its percentage.
+        if basis < GRID_DUST_SLICE_USD:
+            continue
         net = _grid_slice_net_pnl(s.qty, s.entry_price, price,
                                   _slice_rate(s, round_trip_fee_rate, exit_leg_rate))
         pct = net / basis
@@ -6531,7 +6585,8 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 f"${stored_peak_equity:,.2f} peak (breaker at {GRID_DRAWDOWN_BREAKER_PCT*100:.0f}%) - new buys paused, "
                 f"existing slices still sell normally"
             )
-    elif price <= branch.reference_price * (1 - grid_pct) and len(slices) < branch.num_levels:
+    elif (price <= branch.reference_price * (1 - grid_pct)
+          and len(tradeable_slices(slices)) < branch.num_levels):
         real_balance, real_balance_err = await engine.get_usd_balance(session)
         if real_balance is None:
             log.warning(f"[GRID] {branch.bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
@@ -7049,8 +7104,14 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     # switched the parked-sell gate back off for the eleven branches it was
     # built for, leaving them on the 2.5% reference-rise trigger they have
     # not been able to reach. Buy headroom must not cost sell freedom.
-    _parked = bool(slices) and (len(slices) >= (branch.num_levels or 0)
-                                or branch_is_adopted_only(slices))
+    # Counted on TRADEABLE slices for the same reason as the buy gate: a
+    # branch whose rungs are filled by a remnant the venue will not sell is
+    # not full, it is stuck, and calling it parked sent it to an escape
+    # hatch that could only offer that same remnant. BCH-USD placed a sell
+    # for 0.00000022 BCH every ~10 minutes for 200 attempts this way.
+    _parked = bool(slices) and (
+        len(tradeable_slices(slices)) >= (branch.num_levels or 0)
+        or branch_is_adopted_only(slices))
     _parked_sell = False
     _parked_slice = None
     if _parked and _stop_slice is None:

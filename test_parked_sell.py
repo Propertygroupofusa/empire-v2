@@ -30,8 +30,28 @@ sys.path.insert(0, ".")
 import crypto_grid_bot as grid  # noqa: E402
 
 # --- the condition is narrow ----------------------------------------------
-ok("parked means as many slices as levels",
-   "len(slices) >= (branch.num_levels or 0)" in CYCLE)
+# PARKED IS COUNTED ON TRADEABLE SLICES, NOT ON THE RAW LIST.
+#
+# This asserted the literal "len(slices) >= (branch.num_levels or 0)" and
+# correctly caught the 2026-10-04 dust change, which is the test doing its
+# job. The PROPERTY is unchanged - parked still means a slice count at or
+# above the level count - but the count now excludes a remnant too small
+# for the venue to sell, because a position you cannot exit is not what
+# fills a rung. BCH-USD read 3/3 PARKED on a third "slice" worth $0.00007
+# and spent 200 attempts offering it as its own escape route.
+#
+# Asserted on tradeable_slices specifically, so a regression back to the
+# raw count fails here rather than silently re-locking a branch.
+ok("parked is counted on TRADEABLE slices, not the raw list",
+   "len(tradeable_slices(slices)) >= (branch.num_levels or 0)" in CYCLE)
+ok("the buy gate counts tradeable slices too, so dust cannot block a rung",
+   "len(tradeable_slices(slices)) < branch.num_levels" in CYCLE)
+ok("the dust floor is defined and below the smallest rung the engine buys",
+   grid.GRID_DUST_SLICE_USD > 0 and grid.GRID_DUST_SLICE_USD < grid.MIN_TRADE_USD)
+ok("the real BCH remnant does not fill a rung",
+   not grid.slice_is_tradeable({"qty": 2.2e-07, "entry_price": 309.32}))
+ok("a real BCH position still does",
+   grid.slice_is_tradeable({"qty": 0.12644109, "entry_price": 339.58}))
 ok("a branch that can still buy keeps the full spacing gate",
    "price >= branch.reference_price * (1 + grid_pct)" in CYCLE)
 ok("the stop still takes precedence", "_stop_slice is None" in CYCLE)
