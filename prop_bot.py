@@ -2183,6 +2183,101 @@ MIN_ORDER_NOTIONAL_USD = 1.0
 _below_min_logged = {}
 
 
+# ── PASS-LEVEL CONCENTRATION LEDGER ───────────────────────────────────
+#
+# position_caps.CapLedger is deliberately caller-held so no module state
+# leaks between cycles. execute_futures_trade has no per-pass object to
+# hang one on, so the pass is made explicit instead: _begin_cap_pass()
+# resets it at the top of each outer cycle, and every order in that cycle
+# accumulates into the same ledger. A cycle that forgets to call it
+# inherits the previous ledger, which can only ever REFUSE more - the
+# safe direction for a gate on live money.
+_CAP_LEDGER = None
+_CAP_REFUSALS = []
+_CAP_EQUITY = None
+
+
+def _begin_cap_pass(equity=None):
+    """Start a fresh concentration pass. Called once per outer cycle.
+
+    equity is the figure the outer cycle ALREADY fetched. Caching it here
+    means the gate costs no extra API call per order, and - more
+    importantly - every order in a pass is sized against one consistent
+    denominator instead of a value that drifts mid-pass.
+    """
+    global _CAP_LEDGER, _CAP_REFUSALS, _CAP_EQUITY
+    import position_caps
+    _CAP_LEDGER = position_caps.CapLedger()
+    _CAP_REFUSALS = []
+    _CAP_EQUITY = equity
+    return _CAP_LEDGER
+
+
+async def _check_concentration(session, symbol, qty, price):
+    """(verdict, reason, notional) for one prospective BUY.
+
+    Fails CLOSED on every unreadable input, per position_caps' own
+    contract: an equity it cannot read, a ladder it cannot read, a NaN -
+    each refuses. A protection that cannot evaluate itself must not wave
+    money through.
+
+    THE FIRST DRAFT OF THIS CALLED A FUNCTION THAT DOES NOT EXIST
+    (_last_known_equity). It parsed, it imported, and every single buy
+    would have been refused by the except clause below - halting all stock
+    trading while looking like a working guard. Caught by grepping for the
+    name instead of trusting that I had written it. Equity now comes from
+    the pass cache, or failing that from the same get_account_equity() the
+    rest of this module uses.
+    """
+    global _CAP_LEDGER
+    try:
+        import position_caps
+        if _CAP_LEDGER is None:
+            _CAP_LEDGER = position_caps.CapLedger()
+        equity = _CAP_EQUITY
+        if equity is None:
+            equity = await get_account_equity(session)
+        if equity is None:
+            return "REFUSE", ("account equity unreadable, so no concentration "
+                              "ceiling can be computed"), None
+        caps = position_caps.caps_from_market_brain(equity)
+        if caps is None:
+            return "REFUSE", "market_brain sizing ladder returned nothing", None
+        verdict, why, notional = position_caps.check_order(
+            symbol, qty, price, caps, ledger=_CAP_LEDGER,
+            open_notional=_total_alpaca_branch_notional() + _total_opening_bar_notional(),
+            open_position_count=len(open_prop_positions),
+        )
+        if verdict == position_caps.ALLOW and notional:
+            # COMMIT ON SUBMIT, not on fill. The order is about to be sent;
+            # the next order in this pass must see it whether or not it has
+            # filled yet. That is precisely what failed on 28 Sep.
+            _CAP_LEDGER.record(symbol, notional)
+        return verdict, why, notional
+    except Exception as exc:
+        return "REFUSE", f"concentration gate error: {type(exc).__name__}: {exc}", None
+
+
+async def _record_cap_refusal(symbol, source, why, notional):
+    """Keep refusals visible. A guard whose firing cannot be observed is
+    indistinguishable from one that never fires."""
+    global _CAP_REFUSALS
+    try:
+        _CAP_REFUSALS.append({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "symbol": symbol, "source": source, "reason": why,
+            "notional_usd": round(float(notional), 2) if notional else None,
+        })
+        del _CAP_REFUSALS[:-50]
+    except Exception:
+        pass
+
+
+def concentration_refusals():
+    """What the gate has refused this process. Read-only."""
+    return list(_CAP_REFUSALS)
+
+
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend,
                                 stop_loss=None, target=None, source="unlabelled"):
     """Place a real order via Alpaca. `action` is the literal order side
@@ -2195,6 +2290,42 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     function doesn't."""
     symbol = FUTURES[contract]["symbol"]
     side = "buy" if action == "BUY" else "sell"
+
+    # ── THE CONCENTRATION GATE, SUMMED ACROSS THE PASS ────────────────
+    #
+    # On 2026-09-28 at 13:30:03Z six separate market orders for META went
+    # out in the same second - 0.163475 shares each at $748.91, $122.42
+    # apiece, $734.57 together, on a $1,007 account. 73% of equity in one
+    # name. It was the day's entire -$27.23, and it erased seven weeks:
+    # realised P&L went from its +$31.77 peak to -$0.20 in one session.
+    #
+    # Three ceilings existed and none fired, because each order was
+    # checked alone. Every one was $122.42, comfortably under every
+    # per-order limit. NOTHING SUMMED THEM. position_caps.py was written
+    # for this exact incident, with 21 passing tests - and had ZERO
+    # references anywhere in the codebase. Built, tested, never wired.
+    #
+    # It goes HERE because this is the one chokepoint every entry on the
+    # stock side passes through: branch_entry, entry_pass, idle_cash_sweep
+    # and opening_bar_entry all call this function. Guarding the callers
+    # one at a time would leave whichever path nobody thought of.
+    #
+    # BUYS ONLY. A gate that can refuse a SELL could trap the account in a
+    # position it needs to leave, which is a worse failure than the one
+    # being fixed. Exits are never consulted.
+    #
+    # The ledger is per-pass and reset by _begin_cap_pass() at the top of
+    # each outer cycle. It counts notional SUBMITTED, filled or not -
+    # which is the whole point: the sixth META order was sized against a
+    # denominator that did not include the five already in flight.
+    if side == "buy":
+        _cap_verdict, _cap_why, _cap_notional = await _check_concentration(
+            session, symbol, qty, price)
+        if _cap_verdict != "ALLOW":
+            log.warning(f"🛑 CONCENTRATION GATE refused {action} {qty} {contract} "
+                        f"({symbol}) @ ${price} [{source}] - {_cap_why}")
+            await _record_cap_refusal(symbol, source, _cap_why, _cap_notional)
+            return False
 
     qty_str, is_fractional = format_order_qty(qty)
     if qty_str is None:
@@ -2452,6 +2583,9 @@ async def run_prop_cycle():
     timeout = aiohttp.ClientTimeout(total=90, connect=20, sock_read=30, sock_connect=10)
     async with aiohttp.ClientSession(connector=connector, trust_env=False, timeout=timeout) as session:
         equity = await get_account_equity(session)
+
+        # One concentration pass for this whole-account scan.
+        _begin_cap_pass(equity)
 
         # MANDATE: Check kill conditions before trading
         if equity is not None:
@@ -4316,6 +4450,14 @@ async def run_alpaca_branches_cycle():
         strategy_family = await get_live_strategy_family()
         live_entry_variant = await get_live_entry_variant()
 
+        # ONE concentration pass for all eight branches. Without this the
+        # ledger from the previous cycle persists, which only ever refuses
+        # MORE - safe, but it would wrongly block entries. The six META
+        # orders of 28 Sep were eight branches each sized against a
+        # denominator that excluded the others; this is the shared
+        # denominator they were missing.
+        _begin_cap_pass(equity)
+
         for branch in branches:
             try:
                 await run_alpaca_branch_cycle(session, branch, equity, buying_power, strategy_family, live_entry_variant, kill_halted=should_halt)
@@ -4615,6 +4757,11 @@ async def run_opening_bar_live_cycle():
             if _closed:
                 should_halt = True
                 log.info(f"[OPENING-BAR] {_closed}")
+
+        # One concentration pass across every contract this cycle. This
+        # loop is the shape that produced 28 Sep: each symbol sized alone,
+        # nothing summing them.
+        _begin_cap_pass(equity)
 
         for contract, config in FUTURES.items():
             try:
