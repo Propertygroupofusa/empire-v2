@@ -23,6 +23,7 @@ from pathlib import Path
 import httpx
 
 import anthropic
+from ai_model import TEXT_MODEL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -164,7 +165,7 @@ Return ONLY the JSON, nothing else."""
     for attempt in range(MAX_RETRIES):
         try:
             message = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model=TEXT_MODEL,
                 max_tokens=2500,
                 messages=[{"role": "user", "content": prompt}]
             )

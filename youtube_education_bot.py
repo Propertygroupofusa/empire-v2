@@ -8,6 +8,7 @@ import asyncio
 import logging
 from datetime import datetime
 import anthropic
+from ai_model import TEXT_MODEL
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("youtube_bot")
@@ -59,7 +60,7 @@ Make it:
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=2000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -188,7 +189,7 @@ Just respond with the 3-word text, nothing else."""
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=20,
             messages=[{"role": "user", "content": prompt}]
         )

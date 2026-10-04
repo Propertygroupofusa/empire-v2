@@ -20,6 +20,7 @@ from payments_pause import payments_paused, PAUSE_MESSAGE
 from study_auth import (require_study_auth, create_study_token, hash_password,
                         verify_password, validate_password, normalize_email)
 from pydantic import BaseModel
+from ai_model import TEXT_MODEL
 
 log = logging.getLogger("study")
 router = APIRouter()
@@ -163,7 +164,7 @@ async def extract_text_from_image(image_data: bytes) -> str:
         base64_image = base64.standard_b64encode(image_data).decode("utf-8")
 
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=2000,
             messages=[
                 {
@@ -220,7 +221,7 @@ Remember: Return ONLY valid JSON, no markdown formatting."""
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=2000,
             messages=[
                 {"role": "user", "content": prompt}
@@ -282,7 +283,7 @@ Requirements:
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=3000,
             messages=[
                 {"role": "user", "content": prompt}
@@ -333,7 +334,7 @@ Requirements:
 
     try:
         message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=2500,
             messages=[
                 {"role": "user", "content": prompt}

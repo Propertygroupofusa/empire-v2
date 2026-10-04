@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
 from models import Job, SupportConversation, DailyBrief
+from ai_model import TEXT_MODEL
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("daily_brief")
@@ -146,7 +147,7 @@ def _generate_summary(trading: dict, notary: dict, support: dict) -> str:
         return "(ANTHROPIC_API_KEY not configured - raw numbers only below, no summary generated.)"
     try:
         response = _claude.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=400,
             messages=[{"role": "user", "content": _format_brief_prompt(trading, notary, support)}],
         )

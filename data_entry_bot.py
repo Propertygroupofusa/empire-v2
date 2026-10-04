@@ -17,6 +17,7 @@ from sqlalchemy import Column, String, Integer, DateTime, Text, Float, create_en
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 import stripe
+from ai_model import TEXT_MODEL
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("data_entry_bot")
@@ -150,7 +151,7 @@ async def process_documents(job_id: str, customer_id: str, job_name: str, files,
             # Call Claude with vision
             try:
                 response = anthropic_client.messages.create(
-                    model="claude-3-5-sonnet-20241022",
+                    model=TEXT_MODEL,
                     max_tokens=4096,
                     messages=[
                         {

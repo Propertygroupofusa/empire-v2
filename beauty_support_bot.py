@@ -13,6 +13,7 @@ import anthropic
 import os
 import json
 import logging
+from ai_model import TEXT_MODEL
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("beauty_support_bot")
@@ -116,7 +117,7 @@ Your job:
 IMPORTANT: Your response will be sent directly to the customer. Make sure it's professional and complete."""
 
         response = anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=512,
             messages=[
                 {

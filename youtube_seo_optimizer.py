@@ -22,6 +22,7 @@ import logging
 
 import httpx
 import anthropic
+from ai_model import TEXT_MODEL
 
 log = logging.getLogger("youtube_seo")
 
@@ -78,7 +79,7 @@ Rules:
 """
     try:
         resp = _claude.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model=TEXT_MODEL,
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )

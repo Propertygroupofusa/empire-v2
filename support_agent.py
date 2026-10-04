@@ -14,13 +14,14 @@ import os
 import logging
 
 import anthropic
+from ai_model import TEXT_MODEL
 
 log = logging.getLogger("support_agent")
 
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 client = anthropic.AsyncAnthropic(api_key=CLAUDE_KEY)
 
-MODEL = "claude-3-5-sonnet-20241022"
+MODEL = TEXT_MODEL
 ESCALATION_MARKER = "[ESCALATE]"
 
 SYSTEM_PROMPT = """You are a customer support agent for {business_name}. \
