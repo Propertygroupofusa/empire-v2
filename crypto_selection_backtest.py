@@ -1869,6 +1869,29 @@ def _summarize_strategy_trades(trades, spend):
         return None
     total_pnl = sum(net for _, net in trades)
     wins = [net for _, net in trades if net > 0]
+    # A MARK IS NOT A TRADE, AND COUNTING IT AS ONE FAVOURS WHICHEVER
+    # CANDIDATE HOLDS FEWER SLICES AT THE BELL.
+    #
+    # _replay_grid_bot ends by appending one ("OPEN_AT_WINDOW_END", gross)
+    # per slice still open - unrealized, and charged NO fee, unlike every
+    # completed cycle. Those entries have always been folded into
+    # num_trades, win_rate and total_pnl with no way to tell them apart.
+    #
+    # That is not a neutral rounding. Open slices are capped at num_levels,
+    # so the live 10-level configuration can end a window carrying up to
+    # 350 marks across 35 coins where a 3-level candidate carries at most
+    # 105 - and on the live fleet 98.5% of open coin is under water. The
+    # configuration holding more inventory therefore absorbs more negative
+    # marks, and the side-by-side reads as if it traded worse.
+    #
+    # Nothing is removed: total_pnl and num_trades keep their old meaning
+    # so every existing caller and test is unaffected. The realized figures
+    # are reported ALONGSIDE them, so a reader can compare completed round
+    # trips against completed round trips and decide for themselves.
+    realized = [net for tag, net in trades if tag != "OPEN_AT_WINDOW_END"]
+    open_marks = [net for tag, net in trades if tag == "OPEN_AT_WINDOW_END"]
+    realized_pnl = sum(realized)
+    realized_wins = [net for net in realized if net > 0]
     return {
         "num_trades": len(trades),
         "win_rate": len(wins) / len(trades) * 100,
@@ -1876,6 +1899,14 @@ def _summarize_strategy_trades(trades, spend):
         "roi_pct_of_spend": total_pnl / spend * 100,
         "avg_trade_pct": (total_pnl / len(trades)) / spend * 100,
         "spend_used": spend,
+        # --- completed round trips only, fees charged on both legs ---
+        "realized_trades": len(realized),
+        "realized_pnl": realized_pnl,
+        "realized_win_rate": (len(realized_wins) / len(realized) * 100) if realized else None,
+        "realized_avg_usd": (realized_pnl / len(realized)) if realized else None,
+        # --- what is still open, unrealized and fee-free ---
+        "open_mark_count": len(open_marks),
+        "open_mark_pnl": sum(open_marks),
     }
 
 
