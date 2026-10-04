@@ -10365,6 +10365,81 @@ async def grid_harvest_preview_endpoint():
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/rightsize-preview")
+async def grid_rightsize_preview_endpoint():
+    """Budget claimed by branches that are structurally unable to spend it.
+
+    STRICTLY READ-ONLY - calls branch_rightsize.plan(), which writes
+    nothing. Pressing this can never move a dollar.
+
+    Measured 2026-10-04: XRP-USD carries $2,228.05 of allocated_usd against
+    $653.60 of actual coin, on a 3-level grid holding 7 slices. The
+    $1,574.45 difference is CASH in the wallet, claimed by a branch that is
+    full on its rungs and therefore cannot buy. Across the six parked
+    branches the same arithmetic strands $1,830.57.
+
+    Read "floor_usd" next to "allocated_usd". The floor is the branch's own
+    coin cost basis (never less than $15, the row-deletion floor), and
+    "freeable_usd" is the gap. Nothing here can reach into the basis.
+
+    THE FREED MONEY IS NOT PROFIT AND NOT A WITHDRAWAL. It is budget that
+    was double-counted against rungs that cannot exist. Freeing it lowers
+    TOTAL ALLOCATED (GRID) and raises deployable cash by the same amount.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import branch_rightsize
+    data = await branch_rightsize.plan(crypto_grid_bot_module)
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
+class RightsizeRequest(BaseModel):
+    bot_name: str
+    amount_usd: float = None
+    dry_run: bool = True
+
+
+@router.post("/grid-status/rightsize")
+async def grid_rightsize_endpoint(payload: RightsizeRequest):
+    """Lower ONE parked branch's allocated_usd toward its coin cost basis.
+
+    DRY RUN BY DEFAULT. dry_run=false is required to write.
+
+    NO ORDER IS PLACED AND NO COIN IS SOLD. The account holds exactly the
+    same coins and the same dollars after this as before; the only change
+    is that a branch stops claiming budget it cannot reach. That is why it
+    is safe on a branch holding an open slice, which
+    withdraw_from_grid_branch correctly refuses - withdraw moves money out
+    of a position, and there is no position in the part being freed here.
+
+    THREE INVARIANTS, all re-derived from fresh rows INSIDE the writing
+    transaction rather than taken from the caller's plan:
+      the branch must still be PARKED (full on its rungs). A slice that
+        sold since the preview gives it a free rung, and a branch with a
+        free rung will spend its budget - so the write refuses.
+      allocated_usd never ends below the coin's cost basis. Understating it
+        would corrupt branch equity, the drawdown breaker that reads it,
+        and the P&L booked on the next sell.
+      allocated_usd never ends below $15.00, because a row drained under a
+        cent is DELETED and a deleted branch takes its coin out of the fleet.
+    An amount larger than the headroom is CLAMPED to the floor and the
+    response says clamped_to_floor, because the floor is the invariant and
+    the requested number is only a preference.
+
+    Write-guarded like every POST on this router.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    import branch_rightsize
+    log.warning(f"[rightsize] REQUEST bot={payload.bot_name!r} "
+                f"amount={payload.amount_usd} dry_run={payload.dry_run}")
+    return await branch_rightsize.apply_one(
+        crypto_grid_bot_module, payload.bot_name,
+        amount_usd=payload.amount_usd, dry_run=payload.dry_run)
+
+
 @router.get("/grid-status/fill-mix")
 async def get_grid_fill_mix_endpoint():
     """How grid legs REALLY filled: maker, or fallen back to market (taker).
