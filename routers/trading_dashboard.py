@@ -8855,6 +8855,35 @@ async def get_grid_status_endpoint(fresh: int = 0):
             data["backing"] = slice_backing.assess(
                 data.get("branches") or [], _avail)
 
+            # AVAILABLE ANSWERS "CAN THIS BRANCH SELL RIGHT NOW". IT DOES NOT
+            # ANSWER "DOES THIS COIN EXIST", AND THE DASHBOARD WAS ASKING THE
+            # SECOND WHILE READING THE FIRST.
+            #
+            # _avail above excludes coin sitting under a resting order - which
+            # on this fleet is overwhelmingly the fleet's OWN resting sells -
+            # and staked balances. Measured live 2026-10-04: SOL, ALGO, LINK
+            # and ACH were all reported as "the ledger claims coin the wallet
+            # does not hold" over $541.37 of branches. Every one of them was
+            # owned in full; ALGO held 1347.646389 units against a 492.70
+            # claim. The coin was not missing, it was working.
+            #
+            # So the owned-units measurement is published ALONGSIDE the
+            # available one rather than replacing it. Both questions are real:
+            # `backing` still gates anything that needs "can a sell be sized
+            # against the wallet this second", and `backing_owned` is what a
+            # claim about the coin EXISTING must be read from - the same
+            # choice, and the same reasoning, as the reconcile endpoint's own
+            # held_including_zero note.
+            #
+            # An unreadable census yields None from owned_units_map, and the
+            # key is then deliberately absent: a gap is not a clean bill of
+            # health, and a reader that cannot find this key must fall back to
+            # saying UNKNOWN, never to saying "backed".
+            _owned = account_census.owned_units_map(_bal)
+            if _owned:
+                data["backing_owned"] = slice_backing.assess(
+                    data.get("branches") or [], _owned)
+
             # AND THE MONEY THIS KEY CANNOT SEE AT ALL. Measured
             # 2026-10-02: the Coinbase app showed $13,912.19 of crypto
             # while this reading totalled $8,135.00 of coin. The

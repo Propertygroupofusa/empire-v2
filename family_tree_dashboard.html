@@ -7051,7 +7051,20 @@ async function loadFleetReadiness() {
     if (!wrap || typeof FLEET === 'undefined') return;
     try {
         const d = await apiGet('/grid-status');
-        const unbacked = ((d.backing || {}).unbacked || []).map(u => u.asset);
+        // OWNED, NOT AVAILABLE - the readiness row says "the ledger claims
+        // coin the wallet does not hold", which is a claim about the coin
+        // EXISTING, and `backing` measures whether it can be SOLD THIS
+        // SECOND. Those differ for every branch whose coin is sitting under
+        // the fleet's own resting sell order, which is the normal state of a
+        // working grid. Live on 2026-10-04 that gap put SOL, ALGO, LINK and
+        // ACH - $541.37 - behind a red LOCKED badge while all four were
+        // owned in full.
+        //
+        // backing_owned is absent when the census could not be read. Falling
+        // back to `backing` there would reinstate the same false claim, so an
+        // unreadable pass yields NO unbacked assets and the rows simply do not
+        // assert a shortfall they cannot substantiate.
+        const unbacked = ((d.backing_owned || {}).unbacked || []).map(u => u.asset);
         // Same payload, no extra request: grid-status carries it.
         renderTabLock();
         renderOutOfReach(d.out_of_reach);
