@@ -2183,6 +2183,79 @@ MIN_ORDER_NOTIONAL_USD = 1.0
 _below_min_logged = {}
 
 
+# What the broker will actually let a SELL take, which is not what it holds.
+#
+# Live 2026-10-04, every cycle for most of a weekend:
+#
+#   MNQ: Max hold time exceeded: 100034s >= 86400s
+#   Futures order REJECTED (HTTP 403): insufficient qty available for
+#   order (requested: 0.162956, available: 0) | SELL 0.162956 MNQ (QQQ)
+#
+# The account HELD 0.162956 QQQ the whole time. /v2/positions said so,
+# the dashboard said so, and the exit was sized off exactly that number.
+# Alpaca still refused, because `qty` and `qty_available` are different
+# fields answering different questions: qty is what you own,
+# qty_available is what is not already spoken for by a resting order.
+# They disagree the moment an earlier exit attempt is still open against
+# the same shares - which is precisely the situation a max-hold exit
+# retrying every cycle creates for itself.
+#
+# `qty_available` appeared NOWHERE in this repo before this commit.
+# Every path read `qty`. So the bot could not see the refusal coming,
+# and nothing in the rejection handler changed any state: it logged,
+# returned False, and the max-hold rule fired again on the next pass,
+# forever. Same retry-storm shape as the GTC bug above, different cause.
+#
+# This is the OWNED vs AVAILABLE distinction that cost four hours on the
+# crypto side of this repo the same morning, in the same shape: a module
+# asking "do I have this" must read owned, and one asking "can I sell it
+# right now" must read available. They disagree whenever something is on
+# hold, and that disagreement is correct.
+async def _sellable_qty(session, symbol):
+    """(qty_available, qty_owned) for a LONG position, or (None, None).
+
+    None means DO NOT INTERFERE, and it is returned for every case that
+    is not an unambiguous long position: an unreadable call, a 404, a
+    flat symbol, a short. An exit must always be able to leave, so a
+    guard built on this read fails OPEN - the one failure worse than the
+    retry storm being fixed is a position that cannot be closed because
+    a check could not make up its mind.
+
+    A SHORT entry is the reason this is narrowed to longs. "SELL" here
+    is a literal order side, not an exit (see execute_futures_trade's
+    docstring), and opening a short on a symbol with no position would
+    read as "0 available" on any looser version of this check - which
+    would block the entry outright.
+    """
+    try:
+        async with session.get(f"{get_base_url()}/v2/positions/{symbol}",
+                               headers=get_headers()) as r:
+            # One GET per sell attempt, and only on sells. It replaces a
+            # POST that could not have filled, so the call budget is flat.
+            if r.status != 200:          # 404 = flat, anything else = unreadable
+                return None, None
+            p = await r.json()
+    except Exception as e:
+        log.warning(f"[APEX_589296] sellable qty unreadable for {symbol}: {e}")
+        return None, None
+    try:
+        owned = float(p.get("qty"))
+        avail = float(p.get("qty_available"))
+    except (TypeError, ValueError):
+        return None, None                # a field we cannot parse is not a zero
+    if owned <= 0:                       # flat, or short - not ours to judge
+        return None, None
+    return max(0.0, avail), owned
+
+
+# Logged once per (symbol, available) rather than once per cycle. The
+# storm is the bug; the condition is worth knowing once, and again if
+# the number moves. Cleared as soon as the shares come free, so a later
+# recurrence is not swallowed by a stale key.
+_unsellable_logged = {}
+
+
+
 # ── PASS-LEVEL CONCENTRATION LEDGER ───────────────────────────────────
 #
 # position_caps.CapLedger is deliberately caller-held so no module state
@@ -2326,6 +2399,49 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
                         f"({symbol}) @ ${price} [{source}] - {_cap_why}")
             await _record_cap_refusal(symbol, source, _cap_why, _cap_notional)
             return False
+
+    # ── WHAT THE VENUE WILL RELEASE, CHECKED BEFORE SENDING ───────────
+    #
+    # SELLS ONLY, and only against a long the broker confirms. See
+    # _sellable_qty for the incident and for why every ambiguous read
+    # returns None: this gate fails OPEN, always. If the position cannot
+    # be read, or is flat, or is short, the order goes exactly as it did
+    # before this commit.
+    #
+    # When it IS readable and the venue will not release the WHOLE
+    # requested quantity, the order is refused and said once. Re-sending
+    # cannot succeed while the shares are held, and that retry is what
+    # filled a weekend of logs.
+    #
+    # IT DOES NOT SELL THE AVAILABLE PART INSTEAD, though that was the
+    # first version of this gate. Every caller on the sell side treats a
+    # True return as "the tracked position is closed": exit_pass books
+    # the full quantity's P&L into daily_pnl, branch_exit pops the branch
+    # and credits allocated_usd, opening_bar_exit pops the leg. A
+    # deliberate partial would hand all three a full-size P&L for a
+    # part-size sale and leave the remainder untracked. Partial exits
+    # need partial-fill accounting in those callers first; until then a
+    # sell either takes the whole tracked position or does nothing, which
+    # is the contract they were all written against.
+    if side == "sell":
+        _avail, _owned = await _sellable_qty(session, symbol)
+        if _avail is not None and _avail < float(qty):
+            _seen = _unsellable_logged.get(symbol)
+            if _seen != round(_avail, 9):
+                _unsellable_logged[symbol] = round(_avail, 9)
+                _held = ("0 AVAILABLE to sell" if _avail <= 0
+                         else f"only {_avail:.9f} AVAILABLE to sell")
+                log.warning(
+                    f"\u26d4 NOT SENT - {action} {qty} {contract} ({symbol}) "
+                    f"[{source}]: the account holds {_owned:.9f} but has "
+                    f"{_held}. The rest is spoken for by an order already "
+                    f"resting against those shares - most often this bot's "
+                    f"own earlier exit. Re-sending cannot fill. Cancel the "
+                    f"open order, or wait for it to fill or expire, and this "
+                    f"exit will go through on the next cycle."
+                )
+            return False
+        _unsellable_logged.pop(symbol, None)
 
     qty_str, is_fractional = format_order_qty(qty)
     if qty_str is None:
