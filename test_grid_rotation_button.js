@@ -41,6 +41,11 @@ function harness({ previewReply, executeReply, confirmReturns = true }) {
     loadGridStatus: undefined,
   };
   const body = `
+    // The page's own diagnostic beacon. Stubbed, not omitted: the real one
+    // is a fire-and-forget GET and these functions now call it, so a
+    // sandbox without it throws a ReferenceError before the first
+    // assertion. Same stub the levels and reconcile tests already use.
+    var uiTrace = function () {};
     let _rotTicket = null, _rotPreviewed = null;
     ${grab('renderGridRotation')}
     ${grab('previewGridRotation')}

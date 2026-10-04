@@ -74,6 +74,11 @@ function env(opts = {}) {
     };
     const fn = new Function('ctx', `
         const {API_BASE, document, fetch, postGuarded, console} = ctx;
+        // The page's own diagnostic beacon. Stubbed, not omitted: the real
+        // one is a fire-and-forget GET and these functions now call it, so
+        // a sandbox without it throws a ReferenceError before the first
+        // assertion. Same stub the levels and reconcile tests already use.
+        var uiTrace = function () {};
         ${src}
         return {renderGridFreeCash, previewFreeCash, runFreeCash, runDeployFreed,
                 els: ${'null'}};

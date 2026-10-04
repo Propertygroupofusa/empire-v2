@@ -6794,11 +6794,19 @@ function renderTokenBar() {
 let _pendingSale = null;
 
 async function previewSale(asset, usd) {
+    uiTrace('sale_preview_enter');
     const wrap = document.getElementById('sell-amount-wrap');
+    // THE NODE READ USED TO SIT OUTSIDE THE try. A missing panel threw an
+    // uncaught TypeError on the line below, nothing was rendered, nothing
+    // was logged, and the button read exactly as if it had never been
+    // pressed - the one case a trace most needs to tell apart.
+    if (!wrap) { uiTrace('sale_preview_no_nodes'); return; }
     wrap.innerHTML = `<div class="coin-history-empty">Pricing …</div>`;
     try {
+        uiTrace('sale_preview_sending');
         const d = await postGuarded('/api/trading-dashboard/coinbase/sell-amount',
                                     { asset, usd_amount: usd, confirm: false });
+        uiTrace('sale_preview_ok');
         const p = d.plan || d;
         _pendingSale = { asset, usd };
         wrap.innerHTML =
@@ -6817,6 +6825,7 @@ async function previewSale(asset, usd) {
                <div style="font-size:0.72em; color:var(--text-dim); margin-top:8px;">
                  Nothing has been placed. This is the plan only.</div></div>`;
     } catch (e) {
+        uiTrace('sale_preview_threw');
         _pendingSale = null;
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
             ${escText(e.message)}</div>`;
@@ -6824,13 +6833,19 @@ async function previewSale(asset, usd) {
 }
 
 async function executeSale() {
-    if (!_pendingSale) return;
+    uiTrace('sale_apply_enter');
+    // An apply with no previewed plan returned silently and read the same as
+    // a dead button. Same for a missing panel, which threw outside the try.
+    if (!_pendingSale) { uiTrace('sale_apply_no_pending'); return; }
     const { asset, usd } = _pendingSale;
     const wrap = document.getElementById('sell-amount-wrap');
+    if (!wrap) { uiTrace('sale_apply_no_nodes'); return; }
     wrap.innerHTML = `<div class="coin-history-empty">Placing …</div>`;
     try {
+        uiTrace('sale_apply_sending');
         const d = await postGuarded('/api/trading-dashboard/coinbase/sell-amount',
                                     { asset, usd_amount: usd, confirm: true });
+        uiTrace('sale_apply_ok');
         _pendingSale = null;
         wrap.innerHTML = `<div style="border:1px solid var(--green);
                  background:rgba(16,185,129,0.06); border-radius:8px; padding:11px 13px;
@@ -6840,6 +6855,7 @@ async function executeSale() {
         loadTradingProfile();
 renderTokenBar();
     } catch (e) {
+        uiTrace('sale_apply_threw');
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
             ${escText(e.message)}</div>`;
     }
@@ -8360,16 +8376,23 @@ function _rsEnable(id, on) {
 }
 
 async function previewFreeCash() {
+    uiTrace('rs_preview_enter');
+    // getElementById('rs-detail') was dereferenced straight away, outside any
+    // try: a missing panel threw before the first fetch and left no trace.
+    const detailEl = document.getElementById('rs-detail');
+    if (!detailEl) { uiTrace('rs_preview_no_nodes'); return; }
     _rsPreviewed = null;
     _rsEnable('rs-run-btn', false);
     _rsSay('Previewing\u2026 nothing is being moved.');
-    document.getElementById('rs-detail').innerHTML = '';
+    detailEl.innerHTML = '';
     let lines = [], total = 0;
     try {
+        uiTrace('rs_preview_sending');
         const pv = await (await fetch(API_BASE + '/grid-status/rightsize-preview',
                                       {cache: 'no-store'})).json();
         const rows = (pv.branches || []).filter(r => Number(r.freeable_usd) > 0);
-        if (!rows.length) { _rsSay('\u2139\uFE0F Nothing is stranded right now.'); return; }
+        if (!rows.length) { uiTrace('rs_preview_empty', 0);
+                            _rsSay('\u2139\uFE0F Nothing is stranded right now.'); return; }
         // Dry-run each branch through the WRITE endpoint, so the figures come
         // from the same code path that would do the work - not from the
         // read-only planner.
@@ -8387,19 +8410,27 @@ async function previewFreeCash() {
                 frees <strong>${fmtUsd(out.freed_usd)}</strong></div>`);
         }
     } catch (e) {
+        uiTrace('rs_preview_threw');
         _rsSay('\u26A0\uFE0F ' + escText(String(e.message || e)));
         return;
     }
-    document.getElementById('rs-detail').innerHTML = lines.join('');
-    if (total <= 0) { _rsSay('\u2139\uFE0F Nothing would be freed.'); return; }
+    detailEl.innerHTML = lines.join('');
+    if (total <= 0) { uiTrace('rs_preview_empty', 0);
+                      _rsSay('\u2139\uFE0F Nothing would be freed.'); return; }
     _rsPreviewed = Number(total.toFixed(2));
+    // Whole dollars only: n reaches the endpoint as an int query param, and
+    // a fractional value is rejected there, which would LOSE the event -
+    // the opposite of what a diagnostic is for.
+    uiTrace('rs_preview_ok', Math.round(_rsPreviewed));
     _rsEnable('rs-run-btn', true);
     _rsSay(`\u2705 Preview done, <strong>nothing moved</strong>. Would free
             <strong>${fmtUsd(_rsPreviewed)}</strong>. Press "Free it" to do it.`);
 }
 
 async function runFreeCash() {
+uiTrace('rs_apply_enter');
     if (_rsPreviewed === null) {
+uiTrace('rs_apply_no_preview');
         _rsSay('\u26A0\uFE0F Preview first.'); return;
     }
     _rsEnable('rs-run-btn', false);
@@ -8408,6 +8439,7 @@ async function runFreeCash() {
     try {
         const pv = await (await fetch(API_BASE + '/grid-status/rightsize-preview',
                                       {cache: 'no-store'})).json();
+uiTrace('rs_apply_sending');
         for (const r of (pv.branches || []).filter(x => Number(x.freeable_usd) > 0)) {
             const out = await postGuarded(API_BASE + '/grid-status/rightsize',
                 {bot_name: r.bot_name, amount_usd: null, dry_run: false});
@@ -8422,11 +8454,13 @@ async function runFreeCash() {
                 ${fmtUsd(out.allocated_after)} covering its coin</div>`);
         }
     } catch (e) {
+        uiTrace('rs_apply_threw');
         _rsSay('\u26A0\uFE0F ' + escText(String(e.message || e)));
         return;
     }
     document.getElementById('rs-detail').innerHTML = lines.join('');
     _rsRan = freed > 0;
+uiTrace('rs_apply_ok', Math.round(freed));
     _rsEnable('rs-deploy-btn', _rsRan);
     _rsSay(`\u2705 Freed <strong>${fmtUsd(freed)}</strong>. No order was placed
             and no coin was sold. It is now unclaimed cash \u2014 press "Put it
@@ -8434,17 +8468,21 @@ async function runFreeCash() {
 }
 
 async function runDeployFreed() {
+uiTrace('dep_apply_enter');
     if (!_rsRan) {
+uiTrace('dep_apply_no_free');
         _rsSay('\u26A0\uFE0F Free the money first \u2014 deploy only spends cash no branch claims.');
         return;
     }
     _rsEnable('rs-deploy-btn', false);
     _rsSay('Previewing the deploy\u2026 nothing is being moved.');
     try {
+uiTrace('dep_apply_sending');
         const pre = await postGuarded(
             API_BASE + '/idle-capital/deploy-cash?dry_run=true', {});
         const adds = (pre && pre.adds) || [];
         if (!adds.length) {
+uiTrace('dep_apply_empty', 0);
             _rsSay('\u2139\uFE0F ' + escText(String((pre && pre.detail) ||
                    'Nothing to deploy right now.')));
             _rsEnable('rs-deploy-btn', true);
@@ -8455,12 +8493,14 @@ async function runDeployFreed() {
         const live = await postGuarded(
             API_BASE + '/idle-capital/deploy-cash?dry_run=false', {});
         const done = (live && live.added) || [];
+uiTrace('dep_apply_ok', done.length);
         _rsSay(`\u2705 Put <strong>${fmtUsd(live && live.added_usd)}</strong> to
                 work across ${done.length} branch(es). No order was placed \u2014
                 each branch now buys its own dips at its own unchanged step.`);
         document.getElementById('rs-detail').innerHTML = done.map(a =>
             `<div>\u2705 ${escText(a.product_id)}: +${fmtUsd(a.usd)}</div>`).join('');
     } catch (e) {
+        uiTrace('dep_apply_threw');
         _rsSay('\u26A0\uFE0F ' + escText(String(e.message || e)));
         _rsEnable('rs-deploy-btn', true);
     }
@@ -8504,20 +8544,25 @@ function renderGridRotation(branches) {
 }
 
 async function previewGridRotation() {
+    uiTrace('rot_preview_enter');
     const st = document.getElementById('grid-rotation-status');
     const planWrap = document.getElementById('grid-rotation-plan');
-    if (!st || !planWrap) return;
+    // n says WHICH node is missing: 1 = status only, 2 = plan only, 0 = both.
+    if (!st || !planWrap) { uiTrace('rot_preview_no_nodes', (st ? 1 : 0) + (planWrap ? 2 : 0)); return; }
     st.textContent = 'Computing the plan… nothing is being moved.';
     planWrap.innerHTML = '';
     _rotTicket = null; _rotPreviewed = null;
     try {
+        uiTrace('rot_preview_sending');
         const d = await postGuarded(API_BASE + '/grid-status/rotation/preview');
         if (!d.ready) {
+            uiTrace('rot_preview_not_ready');
             st.textContent = 'ℹ️ ' + escText(d.why_not || d.detail
                 || 'Nothing to move right now.');
             return;
         }
         if (!d.balances) {
+            uiTrace('rot_preview_unbalanced');
             // Out must equal in. The server refuses an unbalanced plan too,
             // but saying so here means the person is never shown a Run
             // button for a plan that cannot be applied.
@@ -8528,6 +8573,7 @@ async function previewGridRotation() {
             return;
         }
         _rotPreviewed = Number(d.would_withdraw_usd);
+        uiTrace('rot_preview_ok', Math.round(_rotPreviewed));
         _rotTicket = 'ui-' + new Date().toISOString().replace(/[^0-9]/g, '');
         st.innerHTML = escText(d.detail || '');
         const src = (d.sources || []).map(s => `<tr>
@@ -8560,19 +8606,23 @@ async function previewGridRotation() {
                   onclick="runGridRotation()">▶️ Run it - move ${
                       fmtUsd(d.would_withdraw_usd)}</button>`;
     } catch (e) {
+        uiTrace('rot_preview_threw');
         st.textContent = '⚠️ ' + escText(e && e.message ? e.message : String(e));
     }
 }
 
 async function runGridRotation() {
+uiTrace('rot_apply_enter');
     const st = document.getElementById('grid-rotation-status');
     if (!st) return;
     if (!_rotTicket) {
+uiTrace('rot_apply_no_ticket');
         st.textContent = '⚠️ Preview it first - nothing was sent.';
         return;
     }
     if (!window.confirm('Move ' + fmtUsd(_rotPreviewed) + ' between branches?\n\n'
         + 'No order is placed and no coin is sold - only the allocation moves.')) {
+uiTrace('rot_apply_cancelled');
         st.textContent = 'Cancelled. Nothing was moved.';
         return;
     }
@@ -8580,9 +8630,11 @@ async function runGridRotation() {
     try {
         // The ticket minted by the preview. A second tap re-sends it and the
         // server refuses it, so this cannot run twice.
+uiTrace('rot_apply_sending');
         const d = await postGuarded(API_BASE + '/grid-status/rotation/execute'
             + '?ticket=' + encodeURIComponent(_rotTicket) + '&confirm=true');
         const moved = Number(d.added_usd || 0);
+uiTrace(d.ran ? 'rot_apply_ok' : 'rot_apply_nothing', Math.round(moved));
         st.innerHTML = d.ran
             ? `✅ <strong>Moved ${fmtUsd(moved)}</strong> into
                ${(d.added || []).length} branch(es) from ${(d.withdrawn || []).length}.
@@ -8593,6 +8645,7 @@ async function runGridRotation() {
         if (plan) plan.innerHTML = '';
         if (typeof loadGridStatus === 'function') loadGridStatus();
     } catch (e) {
+        uiTrace('rot_apply_threw');
         st.textContent = '⚠️ ' + escText(e && e.message ? e.message : String(e));
     }
 }
@@ -8681,6 +8734,11 @@ async function previewGridReconcile(productId) {
                   onclick="executeGridReconcile(${productId ? "'" + productId + "'" : ''})">
             ✅ Confirm and correct for real</button>`;
     } catch (e) {
+        // rec_preview_threw sat on the server allowlist from the day the
+        // trace was built and had never once fired, because this catch said
+        // nothing. On the very button we spent three rounds diagnosing, a
+        // thrown request read identically to one still in flight.
+        uiTrace('rec_preview_threw');
         st.textContent = 'Error: ' + e.message;
     }
 }
@@ -8712,6 +8770,7 @@ async function executeGridReconcile(productId) {
             if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
             return;
         }
+        uiTrace('rec_apply_ok', applied.length);
         st.innerHTML = `\u2705 Corrected ${applied.length} branch(es), clearing
             ${escText(fmtUsd(total))} of tracked cost basis.
             <span style="color:var(--text-dim);">Not a loss - that coin was already
@@ -9100,6 +9159,7 @@ async function executeGridLevels() {
         if (planWrap) planWrap.innerHTML = '';
         if (typeof loadFleetReadiness === 'function') loadFleetReadiness();
     } catch (e) {
+        uiTrace('apply_threw');
         st.textContent = 'Error: ' + e.message + ' - nothing was changed.';
     }
 }
@@ -10288,11 +10348,19 @@ async function previewReconcile(currency) {
     // places a Coinbase order) - see reconcile_asset_to_real_balance() in
     // crypto_family_tree_bot.py. Always shows the real plan (dry_run=true)
     // first; nothing is touched until explicitly confirmed below.
+    uiTrace('ast_preview_enter');
     const statusEl = document.getElementById('reconcile-status');
     const planWrap = document.getElementById('reconcile-plan-wrap');
+    // Both were dereferenced outside the try. n: 1 = status only, 2 = plan
+    // only, 0 = neither present. The CURRENCY is deliberately not sent -
+    // the allowlist records short codes and counts, never page data.
+    if (!statusEl || !planWrap) {
+        uiTrace('ast_preview_no_nodes', (statusEl ? 1 : 0) + (planWrap ? 2 : 0)); return;
+    }
     statusEl.textContent = `Computing the real reconcile plan for ${currency}…`;
     planWrap.innerHTML = '';
     try {
+        uiTrace('ast_preview_sending');
         const res = await fetch(API_BASE + `/family-tree-status/reconcile-asset/${encodeURIComponent(currency)}?dry_run=true`, {
             method: 'POST',
             headers: writeHeaders(),
@@ -10300,13 +10368,16 @@ async function previewReconcile(currency) {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         if (data.status === 'ok') {
+            uiTrace('ast_preview_clean');
             statusEl.textContent = `✅ ${currency} is no longer short - real Coinbase balance already covers what's tracked. Nothing to fix.`;
             return;
         }
         if (data.status === 'unchecked') {
+            uiTrace('ast_preview_unchecked');
             statusEl.textContent = `Could not check ${currency}'s real balance right now: ${data.detail}`;
             return;
         }
+        uiTrace('ast_preview_ok', (data.plan || []).length);
         statusEl.textContent = `Real plan: Coinbase's ${currency} balance (${data.real_balance}) is short of the tree's tracked ${data.tracked_qty} by ${data.deficit} - review the correction below, then confirm.`;
         const rows = data.plan.map(p => `<tr>
             <td>${p.bot_name}</td>
@@ -10320,12 +10391,20 @@ async function previewReconcile(currency) {
         <div style="font-size:0.78em; color:var(--text-dim); margin-top:6px;">Only the tracked quantity changes - entry price, target, stop, and allocated balance are all left exactly as they are. No Coinbase order is placed.</div>
         <button class="unlock-btn" style="margin-top:10px;" onclick="executeReconcile('${currency}')">✅ Confirm and correct for real</button>`;
     } catch (e) {
+        uiTrace('ast_preview_threw');
         statusEl.textContent = 'Error: ' + e.message;
     }
 }
 
 async function executeReconcile(currency) {
-    if (!confirm(`Correct ${currency}'s tracked quantity to match Coinbase's real balance? This only fixes bookkeeping (what the tree THINKS it holds) - no order is placed and no money moves. This cannot be undone by calling this again.`)) return;
+    uiTrace('ast_apply_enter');
+    // A DISMISSED confirm() RETURNS WITH NO REQUEST AND NO ERROR, which on a
+    // phone reads exactly like a silent failure - runMoneyAction already
+    // records that lesson in its own comment. Say which one happened.
+    if (!confirm(`Correct ${currency}'s tracked quantity to match Coinbase's real balance? This only fixes bookkeeping (what the tree THINKS it holds) - no order is placed and no money moves. This cannot be undone by calling this again.`)) {
+        uiTrace('ast_apply_cancelled'); return;
+    }
+uiTrace('ast_apply_sending');
     const statusEl = document.getElementById('reconcile-status');
     const planWrap = document.getElementById('reconcile-plan-wrap');
     statusEl.textContent = 'Correcting…';
@@ -10336,10 +10415,12 @@ async function executeReconcile(currency) {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+uiTrace('ast_apply_ok');
         statusEl.textContent = `✅ Corrected ${currency}'s tracked quantity for real.`;
         planWrap.innerHTML = '';
         await refresh();
     } catch (e) {
+        uiTrace('ast_apply_threw');
         statusEl.textContent = 'Error: ' + e.message;
     }
 }
@@ -10734,11 +10815,18 @@ async function previewConsolidate() {
     // consolidate_branches_by_coin() in crypto_family_tree_bot.py. Always
     // shows the real plan (dry_run=true) first; nothing is touched until
     // the account owner explicitly confirms it in the follow-up prompt.
+    uiTrace('con_preview_enter');
     const statusEl = document.getElementById('consolidate-status');
     const planWrap = document.getElementById('consolidate-plan-wrap');
+    // Both were dereferenced outside the try. n: 1 = status only, 2 = plan
+    // only, 0 = neither present.
+    if (!statusEl || !planWrap) {
+        uiTrace('con_preview_no_nodes', (statusEl ? 1 : 0) + (planWrap ? 2 : 0)); return;
+    }
     statusEl.textContent = 'Computing the real merge plan…';
     planWrap.innerHTML = '';
     try {
+        uiTrace('con_preview_sending');
         const res = await fetch(API_BASE + '/family-tree-status/consolidate-branches?dry_run=true', {
             method: 'POST',
             headers: writeHeaders(),
@@ -10746,9 +10834,11 @@ async function previewConsolidate() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         if (data.groups_to_merge === 0) {
+            uiTrace('con_preview_empty', 0);
             statusEl.textContent = '✅ No coin is currently shared by more than one branch - nothing to combine.';
             return;
         }
+        uiTrace('con_preview_ok', Number(data.groups_to_merge) || 0);
         statusEl.textContent = `Real plan: ${data.groups_to_merge} coin${data.groups_to_merge === 1 ? '' : 's'} would be consolidated. Review below, then confirm.`;
         const rows = data.plan.map(p => `<tr>
             <td>${p.product_id}</td>
@@ -10763,12 +10853,17 @@ async function previewConsolidate() {
         </table></div>
         <button class="unlock-btn" style="margin-top:10px;" onclick="executeConsolidate()">✅ Confirm and combine for real</button>`;
     } catch (e) {
+        uiTrace('con_preview_threw');
         statusEl.textContent = 'Error: ' + e.message;
     }
 }
 
 async function executeConsolidate() {
-    if (!confirm('Combine these branches for real? Merged-away branches will be permanently deleted (their coin\'s trade history is unaffected - it\'s tracked per-coin, not per-branch). This cannot be undone by calling this again.')) return;
+    uiTrace('con_apply_enter');
+    if (!confirm('Combine these branches for real? Merged-away branches will be permanently deleted (their coin\'s trade history is unaffected - it\'s tracked per-coin, not per-branch). This cannot be undone by calling this again.')) {
+        uiTrace('con_apply_cancelled'); return;
+    }
+uiTrace('con_apply_sending');
     const statusEl = document.getElementById('consolidate-status');
     const planWrap = document.getElementById('consolidate-plan-wrap');
     statusEl.textContent = 'Combining…';
@@ -10779,10 +10874,12 @@ async function executeConsolidate() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        uiTrace('con_apply_ok', Number(data.groups_merged) || 0);
         statusEl.textContent = `✅ Combined ${data.groups_merged} coin${data.groups_merged === 1 ? '' : 's'} for real.`;
         planWrap.innerHTML = '';
         await refresh();
     } catch (e) {
+        uiTrace('con_apply_threw');
         statusEl.textContent = 'Error: ' + e.message;
     }
 }

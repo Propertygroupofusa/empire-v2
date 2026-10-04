@@ -8825,7 +8825,11 @@ def _breakers_from_cache():
 # records only short codes the page chooses - never a token, never a URL
 # with one in it, never free user text.
 _UI_TRACE: list = []
-_UI_TRACE_MAX = 60
+# Raised from 60 when five more controls were instrumented. The rightsize
+# preview alone emits a sending/ok pair per short branch, so one session of
+# ordinary use could roll the old window and discard the earliest event -
+# which is usually the one that says where things started going wrong.
+_UI_TRACE_MAX = 150
 _UI_TRACE_OK = {
     "preview_enter", "preview_empty", "preview_sending", "preview_ok", "preview_threw",
     "apply_enter", "apply_no_pending", "apply_sending", "apply_ok", "apply_threw",
@@ -8837,6 +8841,46 @@ _UI_TRACE_OK = {
     # handler never running - the one case the trace most needed to tell
     # apart.
     "preview_no_nodes", "apply_no_nodes", "rec_no_nodes", "levels_panel_empty",
+    # THE FIVE SILENT CONTROLS, added 2026-10-04.
+    #
+    # Only two of the page's seven preview buttons reported anything, and
+    # that gap cost three rounds of "did my click land". The account owner
+    # pressed a preview twice; the trace read 0 events and the guard log read
+    # 0 attempts, and because five of the seven controls emit nothing those
+    # two zeros could not distinguish "the click never left the browser"
+    # from "a different button was pressed". Every POST-sending control on
+    # the page now reports, so that question is answerable on the first try.
+    #
+    # An unlisted code is dropped with recorded: false, so the page half of
+    # this is inert without these names - the two must be changed together.
+    "sale_preview_enter", "sale_preview_no_nodes", "sale_preview_sending",
+    "sale_preview_ok", "sale_preview_threw",
+    "sale_apply_enter", "sale_apply_no_pending", "sale_apply_no_nodes",
+    "sale_apply_sending", "sale_apply_ok", "sale_apply_threw",
+    "rs_preview_enter", "rs_preview_no_nodes", "rs_preview_empty",
+    "rs_preview_sending", "rs_preview_ok", "rs_preview_threw",
+    "rot_preview_enter", "rot_preview_no_nodes", "rot_preview_sending",
+    "rot_preview_not_ready", "rot_preview_unbalanced", "rot_preview_ok",
+    "rot_preview_threw",
+    "con_preview_enter", "con_preview_no_nodes", "con_preview_sending",
+    "con_preview_empty", "con_preview_ok", "con_preview_threw",
+    "ast_preview_enter", "ast_preview_no_nodes", "ast_preview_sending",
+    "ast_preview_clean", "ast_preview_unchecked", "ast_preview_ok",
+    "ast_preview_threw",
+    # THE APPLY HALF of those same five controls. Tracing a preview and
+    # leaving its apply silent reproduces the bug on the half that moves
+    # money: a dismissed confirm() returns with no request and no error,
+    # which on a phone reads exactly like a failed write.
+    "rs_apply_enter", "rs_apply_no_preview", "rs_apply_sending",
+    "rs_apply_ok", "rs_apply_threw",
+    "dep_apply_enter", "dep_apply_no_free", "dep_apply_sending",
+    "dep_apply_empty", "dep_apply_ok", "dep_apply_threw",
+    "rot_apply_enter", "rot_apply_no_ticket", "rot_apply_cancelled",
+    "rot_apply_sending", "rot_apply_ok", "rot_apply_nothing", "rot_apply_threw",
+    "ast_apply_enter", "ast_apply_cancelled", "ast_apply_sending",
+    "ast_apply_ok", "ast_apply_threw",
+    "con_apply_enter", "con_apply_cancelled", "con_apply_sending",
+    "con_apply_ok", "con_apply_threw",
 }
 
 

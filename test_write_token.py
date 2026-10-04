@@ -118,9 +118,18 @@ print("\nTHE SALE IS TWO TAPS AND THE FIRST PLACES NOTHING")
 ok("preview sends confirm: false", "confirm: false" in HTML)
 ok("execute sends confirm: true", "confirm: true" in HTML)
 ok("the preview says nothing was placed", "Nothing has been placed" in HTML)
+# The GUARD, not one spelling of it. This matched the exact text
+# "if (!_pendingSale) return;" and so broke the moment the early return
+# gained a uiTrace beacon - while the property it names was untouched.
+# What matters is that executeSale refuses when there is no pending plan.
+_exec_sale = HTML[HTML.index("async function executeSale()"):]
+_exec_sale = _exec_sale[:_exec_sale.index("\n}")]
 ok("execute is only reachable after a preview",
-   "if (!_pendingSale) return;" in HTML,
+   re.search(r"if \(!_pendingSale\)\s*\{?[^}]*return;", _exec_sale) is not None,
    "a stale or cancelled plan must not be placeable")
+ok("...and the refusal happens before anything is sent",
+   _exec_sale.index("_pendingSale") < _exec_sale.index("postGuarded"),
+   "the guard must precede the request, not follow it")
 ok("cancelling clears the pending plan", "_pendingSale=null;" in HTML)
 ok("a successful sale refreshes the page state",
    "refresh();" in HTML and "loadTradingProfile();" in HTML)
