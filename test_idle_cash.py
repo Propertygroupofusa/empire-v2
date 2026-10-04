@@ -173,3 +173,73 @@ def test_a_fleet_too_small_for_the_share_rule_refuses_deliberately():
     p = ic.plan([br("A", 100, open_slices=0)], tr("A"), unclaimed_usd=400)
     assert p["adds"] == []
     assert any(r["reason"] == "WOULD_BREACH_THE_SHARE_RULE" for r in p["refusals"])
+
+
+# ------------------------------------- a branch that only ever lost money
+
+def trp(pid, pnls):
+    """Round trips WITH their P&L. tr() above omits pnl, which reads as 0.0
+    and stays eligible - that is deliberate, so every pre-existing test
+    keeps its meaning."""
+    return [{"product_id": pid, "pnl": p} for p in pnls]
+
+
+def test_a_branch_whose_trips_net_negative_is_refused():
+    """ONDO-USD: 5 completed round trips, -$4.57 net. It cleared the
+    one-trip bar and would have been handed an equal share."""
+    out = ic.plan([br("ONDO-USD", 65.16, open_slices=1)] + pad(),
+                  trp("ONDO-USD", [0.5, -1.2, 0.3, -2.0, -2.17]),
+                  unclaimed_usd=1000.0)
+    assert [a["product_id"] for a in out["adds"]] == []
+    r = [x for x in out["refusals"] if x["product_id"] == "ONDO-USD"]
+    assert r and r[0]["reason"] == "NET_NEGATIVE_SO_FAR"
+    assert r[0]["net_realised_usd"] == -4.57
+    assert r[0]["round_trips"] == 5
+
+
+def test_a_profitable_branch_is_still_funded():
+    out = ic.plan([br("NEAR-USD", 183.89, open_slices=2)] + pad(),
+                  trp("NEAR-USD", [1.2, 0.8, -0.3, 2.0]),
+                  unclaimed_usd=1000.0)
+    assert "NEAR-USD" in [a["product_id"] for a in out["adds"]]
+
+
+def test_a_single_loss_does_not_condemn_a_net_winner():
+    """The test is the NET of the trips, not whether any one lost."""
+    out = ic.plan([br("A-USD", 200.0, open_slices=1)] + pad(),
+                  trp("A-USD", [-5.0, 6.0]), unclaimed_usd=1000.0)
+    assert "A-USD" in [a["product_id"] for a in out["adds"]]
+
+
+def test_breakeven_is_not_refused():
+    """Only strictly negative is withheld; exactly zero stays eligible, so
+    this changes as little of the existing behaviour as possible."""
+    out = ic.plan([br("A-USD", 200.0, open_slices=1)] + pad(),
+                  trp("A-USD", [-2.0, 2.0]), unclaimed_usd=1000.0)
+    assert "A-USD" in [a["product_id"] for a in out["adds"]]
+
+
+def test_the_refusal_never_changes_what_a_winner_receives():
+    """REFUSE-ONLY: withholding from a loser must not re-weight anyone.
+    The winners' shares are identical with and without the loser present."""
+    winners = [br("A-USD", 200.0, open_slices=1),
+               br("B-USD", 200.0, open_slices=1)]
+    good = trp("A-USD", [3.0]) + trp("B-USD", [3.0])
+    without = ic.plan(winners + pad(), good, unclaimed_usd=1000.0)
+    with_loser = ic.plan(winners + [br("C-USD", 200.0, open_slices=1)] + pad(),
+                         good + trp("C-USD", [-9.0]), unclaimed_usd=1000.0)
+    shares = lambda o: {a["product_id"]: a["usd"] for a in o["adds"]}
+    assert shares(without) == shares(with_loser)
+    assert "C-USD" not in shares(with_loser)
+
+
+def test_it_is_not_a_performance_ranking():
+    """Two winners of very different quality still split EQUALLY. The
+    module's refusal to rank is intact - measured Spearman +0.459 on 14
+    coins is under the ~0.544 that sample needs, so ranking stays out."""
+    out = ic.plan([br("A-USD", 200.0, open_slices=1),
+                   br("B-USD", 200.0, open_slices=1)] + pad(),
+                  trp("A-USD", [50.0]) + trp("B-USD", [0.05]),
+                  unclaimed_usd=1000.0)
+    usd = {a["product_id"]: a["usd"] for a in out["adds"]}
+    assert usd["A-USD"] == usd["B-USD"]

@@ -67,10 +67,19 @@ def plan(branches, trades, *, unclaimed_usd, min_add_usd=None,
     reserve = RESERVE_USD if reserve_usd is None else reserve_usd
     max_share = MAX_SHARE_PCT if max_share_pct is None else max_share_pct
 
+    # Trips AND their sign. Counting trips alone treats "has traded" as
+    # "is worth funding", and those are not the same claim: measured
+    # 2026-09-27..10-03, ONDO-USD completed 5 round trips and lost money on
+    # the net of them (-$4.57), then lost again in the following days
+    # (-$2.46 per $100, then -$4.56 per $100). It cleared the one-trip bar
+    # every time and would have been handed an equal share.
     trips = {}
+    net = {}
     for t in (trades or ()):
         if hasattr(t, "get") and t.get("product_id"):
-            trips[t["product_id"]] = trips.get(t["product_id"], 0) + 1
+            pid = t["product_id"]
+            trips[pid] = trips.get(pid, 0) + 1
+            net[pid] = net.get(pid, 0.0) + _f(t.get("pnl"))
 
     rows = [b for b in (branches or ()) if hasattr(b, "get")]
     total_alloc = sum(_f(b.get("allocated_usd")) for b in rows)
@@ -92,6 +101,29 @@ def plan(branches, trades, *, unclaimed_usd, min_add_usd=None,
             continue
         if trips.get(pid, 0) < 1:
             refusals.append({"product_id": pid, "reason": "NO_COMPLETED_ROUND_TRIP_YET"})
+            continue
+        # REFUSE-ONLY, and deliberately NOT a performance ranking.
+        #
+        # This module's own reasoning against weighting by performance
+        # still holds and is not being reversed: a handful of trips cannot
+        # separate a good coin from a lucky one, so the equal split stays.
+        # Tested directly on the fleet's own ledger - ranking branches by
+        # return per dollar in 2026-09-27..09-30 predicted the same ranking
+        # over 09-30..10-04 at Spearman +0.459 across 14 coins, under the
+        # ~0.544 that sample needs for significance. Not good enough to
+        # size a position on.
+        #
+        # Losing money is a different and much coarser question than
+        # ranking winners, and it needs no significance test: a branch
+        # whose completed trips net out NEGATIVE has not yet shown it can
+        # do the one thing the money is for. This withholds from it. It can
+        # only ever refuse - it never adds to anyone's share, never
+        # reorders the split, and a branch that turns positive becomes
+        # eligible again on its own.
+        if net.get(pid, 0.0) < 0:
+            refusals.append({"product_id": pid, "reason": "NET_NEGATIVE_SO_FAR",
+                             "net_realised_usd": round(net.get(pid, 0.0), 2),
+                             "round_trips": trips.get(pid, 0)})
             continue
         eligible.append(b)
 
