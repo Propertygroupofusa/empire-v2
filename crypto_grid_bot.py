@@ -3940,6 +3940,80 @@ MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 # that can still buy is untouched, and keeps the full grid_pct gate.
 GRID_PARKED_MIN_NET_PCT = float(os.getenv("GRID_PARKED_MIN_NET_PCT", "0.010"))
 
+# ---- WHAT YOU ACTUALLY PAID, FOR COIN THE GRID DID NOT BUY ----------------
+# An adopted slice's entry_price is the market price on the day
+# coin_adoption wrote it (see coin_adoption.slice_units - every slice at the
+# same moment at the same price), NOT what the account paid. For ZEC that
+# recorded $1,655 against a real average cost of $1,013.80: a basis overstated
+# by 63%, $641.20 a coin.
+#
+# That is defensible for attributing what the GRID earned, and it is wrong for
+# the sell gate, which asks a different question - "is this position actually
+# in profit" - and gets a 19% loss on a holding that is up 32%. A branch full
+# on its rungs can only leave by the parked route, and the parked route reads
+# the slice's own basis, so an inflated basis strands a real winner forever.
+# ZEC: six slices, zero closed trades, waiting on a price it does not need.
+#
+# The venue's API does not expose an average cost - the retail app computes it
+# from a transaction history that includes buys made outside Advanced Trade -
+# so this cannot be fetched and is NOT guessed. It is declared, per product,
+# by the account owner reading it off that app:
+#
+#     GRID_TRUE_COST_BASIS="ZEC-USD:1013.80,HBAR-USD:0.0987"
+#
+# EMPTY BY DEFAULT. An unlisted product keeps today's behaviour exactly.
+# Used ONLY to decide whether an ADOPTED slice may sell. It never changes a
+# recorded P&L, never relaxes the parked floor, and never touches a slice the
+# grid itself bought - those already carry a basis they really paid.
+def _parse_true_cost_basis(raw: str) -> dict:
+    out = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        pid, _, val = part.partition(":")
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            continue
+        pid = pid.strip().upper()
+        # A blank product id would sit in the map matching nothing while
+        # hiding a typo that was meant to declare a real coin.
+        if pid and v > 0:
+            out[pid] = v
+    return out
+
+
+# The exit reason written when a declared true cost basis is what allowed an
+# adopted slice to sell. Kept out of the grid's own performance record - see
+# the note at the assignment site and get_grid_performance_metrics().
+ADOPTED_EXIT_REASON = "adopted_exit"
+
+GRID_TRUE_COST_BASIS = _parse_true_cost_basis(os.getenv("GRID_TRUE_COST_BASIS", ""))
+
+
+def true_cost_basis_for(product_id) -> float:
+    """What the account really paid per unit, when declared. None otherwise -
+    and None must leave the caller on its existing path, never on a guess."""
+    if not product_id:
+        return None
+    return GRID_TRUE_COST_BASIS.get(str(product_id).strip().upper())
+
+
+def sell_basis_for_slice(slice_row, product_id=None):
+    """The price a SELL decision should measure this slice against.
+
+    The declared true cost, but only for an ADOPTED slice whose recorded
+    entry never was a purchase price. A slice the grid bought keeps its own
+    real entry - it paid that, and overriding it would be inventing a basis.
+    """
+    entry = getattr(slice_row, "entry_price", None)
+    if not slice_paid_no_entry_fee(slice_row):
+        return entry
+    pid = product_id or getattr(slice_row, "product_id", None)
+    true_basis = true_cost_basis_for(pid)
+    return true_basis if true_basis is not None else entry
+
 # The coins the account owner actually wants this fleet trading, selected
 # 2026-09-25 from REAL GRID results and overridable without a deploy.
 #
@@ -5893,9 +5967,19 @@ def _pick_parked_slice_to_sell(slices: list, price: float, round_trip_fee_rate: 
         # not just its percentage.
         if basis < GRID_DUST_SLICE_USD:
             continue
-        net = _grid_slice_net_pnl(s.qty, s.entry_price, price,
+        # AN ADOPTED SLICE IS JUDGED AGAINST WHAT WAS ACTUALLY PAID, when the
+        # owner has declared it. Its entry_price is an adoption-day market
+        # price, not a purchase price, so measuring "may this sell at a
+        # profit" against it answers the wrong question - see
+        # GRID_TRUE_COST_BASIS. Unlisted products, and every slice the grid
+        # bought itself, keep entry_price exactly as before.
+        _sell_basis = sell_basis_for_slice(s, product_id=getattr(s, "product_id", None))
+        _basis_usd = (s.qty or 0) * (_sell_basis or 0)
+        if _basis_usd <= 0:
+            continue
+        net = _grid_slice_net_pnl(s.qty, _sell_basis, price,
                                   _slice_rate(s, round_trip_fee_rate, exit_leg_rate))
-        pct = net / basis
+        pct = net / _basis_usd
         if pct >= floor_pct and (best_pct is None or pct > best_pct):
             best, best_pct = s, pct
     return best, best_pct
@@ -7497,6 +7581,29 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         exit_reason = ("stop_loss" if _stop_slice is not None
                          else "profit_target" if _rise_hit
                          else "parked_sell")
+
+        # AN INHERITED POSITION LEAVING IS NOT ONE OF THE GRID'S ROUND TRIPS.
+        #
+        # When a declared true cost basis is what let an ADOPTED slice sell
+        # (see GRID_TRUE_COST_BASIS), the pnl recorded below is computed
+        # against entry_price - the adoption-day mark - and would read as a
+        # large loss on a sale that pays real cash. Measured on ZEC: six
+        # slices would write -$432.09 into the trade history while +$417.49
+        # landed in the account. Left untagged those rows would drag banked
+        # from +$135.58 to -$296.51 and the win rate from 87.8% to 85.1% -
+        # the grid credited with losing money on coin it never bought and
+        # never chose to sell at that basis.
+        #
+        # So the row is tagged, and get_grid_performance_metrics() leaves this
+        # reason out of the grid's own record. Nothing is hidden: the row is
+        # still written, still visible in the trade history, and still counted
+        # by anything measuring total cash. It is only kept out of the figure
+        # that answers "how well does this grid trade", which is the one
+        # question an inherited position cannot speak to.
+        if (exit_reason == "parked_sell" and oldest is not None
+                and slice_paid_no_entry_fee(oldest)
+                and true_cost_basis_for(branch.product_id) is not None):
+            exit_reason = ADOPTED_EXIT_REASON
 
         # ── SHADOW MODE: Log position closed (fire-and-forget, non-blocking) ────
         if SHADOW_MODE_ENABLED and shadow_manager:
@@ -9683,7 +9790,16 @@ async def get_grid_performance_metrics() -> dict:
     and 1.0 would assert the strategy exactly broke even, which is the
     opposite of a flawless record."""
     async with get_session_factory()() as db:
-        rows = (await db.execute(select(CryptoGridTradeHistory.pnl))).scalars().all()
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory.pnl).where(
+                # An inherited position leaving is not one of this grid's
+                # round trips, and its pnl is booked against an adoption-day
+                # mark rather than a price the grid chose. Including it would
+                # credit the grid with a loss it did not take.
+                (CryptoGridTradeHistory.exit_reason.is_(None))
+                | (CryptoGridTradeHistory.exit_reason != ADOPTED_EXIT_REASON)
+            )
+        )).scalars().all()
     pnls = [float(p) for p in rows if p is not None]
     n = len(pnls)
     if not n:
