@@ -1116,7 +1116,7 @@
                 <div class="tv-sub" id="strip-live-sub"></div>
             </div>
             <div class="tv-cell">
-                <div class="tv-cap">Crypto total</div>
+                <div class="tv-cap" title="Coin the 22 grid branches bought, at market, plus the real USD wallet. This is NOT everything you own: coin no branch bought - a manual buy, anything staked, any coin outside the fleet - is not counted here and never was. Read the Whole account, from the venue panel for the real account total.">Fleet backing</div>
                 <div class="tv-val" id="strip-total">—</div>
                 <div class="tv-sub" id="strip-total-sub"></div>
             </div>
@@ -5669,10 +5669,18 @@ function renderStatusStrip(d, history) {
         renderBackingBanner(d.allocation_backing);
         var bk = d.allocation_backing || {};
         if (bk.backed_usd != null) {
+            // THE TILE SAYS WHAT IT LEAVES OUT, on the page and not in a
+            // tooltip nobody taps on a phone. backed_usd is branch-bought coin
+            // plus the wallet. Coin NO BRANCH bought - a manual buy, anything
+            // staked, anything outside the fleet - was never in it. Measured
+            // 2026-10-04: the tile read $7,705.78 while the venue held
+            // $10,020.73, a $2,324.98 gap, and the cap above it said "Crypto
+            // total", which is the one thing this figure is not.
             document.getElementById('strip-total-sub').textContent =
-                '$' + Number(bk.deployed_coin_usd || 0).toFixed(2) + ' in coin · $'
+                '$' + Number(bk.deployed_coin_usd || 0).toFixed(2) + ' branch coin · $'
                 + Number(bk.wallet_cash_usd || 0).toFixed(2) + ' cash in the wallet'
-                + (unreal ? ' · ' + (unreal < 0 ? '-$' : '+$') + Math.abs(unreal).toFixed(2) + ' open' : '');
+                + (unreal ? ' · ' + (unreal < 0 ? '-$' : '+$') + Math.abs(unreal).toFixed(2) + ' open' : '')
+                + ' · excludes coin no branch bought';
         } else {
             document.getElementById('strip-total-sub').textContent =
                 '$' + cash.toFixed(2) + ' cash · $' + alloc.toFixed(2) + ' working'
