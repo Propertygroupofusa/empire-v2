@@ -10325,6 +10325,64 @@ async def grid_money_check_endpoint():
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/sizing-check")
+async def grid_sizing_check_endpoint(count: int | None = None, amount: float | None = None):
+    """Could N new branches of $X each be created right now? READ-ONLY.
+
+    The manual create-branch / create-multiple-branches / quick-buy paths
+    only check free cash. The automatic path also keeps
+    GRID_CASH_RESERVE_USD back and stays inside the grid's allocator share.
+    This applies all three, lists what flat branches could release, which
+    branches' books claim coin the wallet does not hold, and the record of
+    every coin that traded and has no branch now. See branch_sizing.py.
+
+    ?count=4&amount=70 adds a verdict for that exact plan. Places no order
+    and writes nothing.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+    if (count is None) != (amount is None):
+        raise HTTPException(status_code=400, detail="count and amount go together")
+    if count is not None and (count <= 0 or amount <= 0):
+        raise HTTPException(status_code=400, detail="count and amount must be positive")
+    import branch_sizing
+
+    status = await crypto_grid_bot_module.get_grid_status()
+
+    cash_report = None
+    try:
+        import crypto_cash_allocator as allocator
+        cash_report = allocator.allocation_report(status.get("real_free_cash_usd"))
+    except Exception as exc:
+        log.warning(f"[sizing-check] allocator unreadable: {exc}")
+
+    # Same single balance read /grid-status uses for its backing block.
+    backing = None
+    try:
+        import account_census
+        import slice_backing
+        async with aiohttp.ClientSession() as _s:
+            _bal = await account_census.fetch_balances(_s)
+        if _bal and _bal.get("available"):
+            _avail = dict(_bal.get("available_units") or {})
+            for _cur, _tot in (_bal.get("held_including_zero") or {}).items():
+                _avail.setdefault(_cur, 0.0 if not _tot else _avail.get(_cur, 0.0))
+            backing = slice_backing.assess(status.get("branches") or [], _avail)
+    except Exception as exc:
+        log.warning(f"[sizing-check] backing unreadable: {exc}")
+
+    history = await crypto_grid_bot_module.get_grid_trade_history(
+        limit_recent=crypto_grid_bot_module.GRID_TRADE_HISTORY_MAX_ROWS)
+
+    data = branch_sizing.assess(
+        status, cash_report, history,
+        reserve=crypto_grid_bot_module.GRID_CASH_RESERVE_USD,
+        backing=backing, count=count, amount=amount)
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/harvest-preview")
 async def grid_harvest_preview_endpoint():
     """What the hourly profit harvest would take right now, and why not.
