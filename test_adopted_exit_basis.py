@@ -306,6 +306,45 @@ def test_traded_today_reports_the_grid_s_own_trading():
        "todays.reduce(" not in tile)
 
 
+# ------------------------- 6c. the open mark agrees with the gate that sells
+def test_open_marks_use_the_same_basis_as_the_sell_gate():
+    import ast as _ast
+    tree = _ast.parse(SRC)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.AsyncFunctionDef)
+               and n.name == "get_grid_status"), None)
+    ok("get_grid_status is where the page's marks are built", fn is not None)
+    if fn is None:
+        return
+    body = _ast.unparse(fn)
+
+    ok("the open mark is priced at the slice's sell basis, not its recorded "
+       "entry",
+       "_mark_basis = sell_basis_for_slice(s, product_id=b.product_id)" in body
+       and "_grid_slice_net_pnl(s.qty, _mark_basis, current_price" in body)
+    ok("the percentage uses that same basis, so the dollar and the percent "
+       "cannot disagree",
+       "cost_basis = s.qty * _mark_basis" in body)
+    ok("the page says which basis each mark was taken against",
+       "'marked_against'" in body or '"marked_against"' in body)
+    ok("and flags when that is a declared basis rather than the recorded entry",
+       "marked_against_is_declared" in body)
+
+    # THE SAFETY LIMIT IS NOT LOOSENED AS A SIDE EFFECT.
+    # _grid_branch_real_equity drives the live drawdown breaker and the
+    # peak_equity ratchet. Marking a position higher would make the breaker
+    # LESS likely to trip.
+    eq = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef)
+               and n.name == "_grid_branch_real_equity"), None)
+    ok("the drawdown breaker's equity still measures against the recorded "
+       "entry - a display fix never loosens a circuit breaker",
+       eq is not None and "s.entry_price" in _ast.unparse(eq)
+       and "sell_basis_for_slice" not in _ast.unparse(eq))
+    ok("and the reason is written where the change was made",
+       "THE DRAWDOWN BREAKER IS DELIBERATELY NOT CHANGED" in SRC)
+
+
 # ------------------------------- 7. the tag still keeps it out of the record
 def test_the_grid_s_record_still_excludes_inherited_exits():
     ok("get_grid_performance_metrics still excludes ADOPTED_EXIT_REASON",
@@ -323,6 +362,7 @@ if __name__ == "__main__":
               test_realized_splits_into_two_books,
               test_the_pages_lead_with_the_grid_s_own_book,
               test_traded_today_reports_the_grid_s_own_trading,
+              test_open_marks_use_the_same_basis_as_the_sell_gate,
               test_the_grid_s_record_still_excludes_inherited_exits):
         print(f"\n{t.__name__}")
         t()

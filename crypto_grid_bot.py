@@ -8834,9 +8834,34 @@ async def get_grid_status() -> dict:
                 # exact same function run_grid_branch_cycle()'s real sell
                 # calls, so this hypothetical "if sold now" figure can
                 # never drift from what a real sale would actually book.
-                net_usd = _grid_slice_net_pnl(s.qty, s.entry_price, current_price,
+                # MARKED AGAINST WHAT WAS PAID, SAME AS THE GATE THAT SELLS IT.
+                #
+                # This marked every slice against s.entry_price. For an
+                # ADOPTED slice that is the adoption-day price coin_adoption
+                # wrote, not a purchase - and _pick_parked_slice_to_sell()
+                # has read sell_basis_for_slice() since the declared basis
+                # shipped. So the gate was calling ZEC +30.95% while this
+                # line showed the same three slices at -19.77%, and the
+                # account owner was reading the second number:
+                #
+                #   slice 53  0.07351807   shown -$24.87   really +$22.66
+                #   slice 57  0.26126214   shown -$86.13   really +$80.54
+                #   slice 68  0.04338645   shown -$11.99   really +$13.37
+                #
+                # $239.57 of the headline -$405.90 was this one substitution.
+                #
+                # THE DRAWDOWN BREAKER IS DELIBERATELY NOT CHANGED.
+                # _grid_branch_real_equity() still measures against
+                # s.entry_price, so the breaker and peak_equity ratchet see
+                # exactly what they saw before this. Marking the position
+                # higher would make the breaker LESS likely to trip, and a
+                # safety limit does not get loosened as a side effect of a
+                # display fix. The conservative reading stays on the control;
+                # the honest one goes on the page.
+                _mark_basis = sell_basis_for_slice(s, product_id=b.product_id)
+                net_usd = _grid_slice_net_pnl(s.qty, _mark_basis, current_price,
                                               _slice_rate(s, status_fee_rate, status_exit_leg_rate))
-                cost_basis = s.qty * s.entry_price
+                cost_basis = s.qty * _mark_basis
                 net_pct = (net_usd / cost_basis) if cost_basis else None
                 total_net_usd += net_usd
                 total_cost_basis += cost_basis
@@ -8854,6 +8879,14 @@ async def get_grid_status() -> dict:
                 # order_side, and the same trap caught this.
                 "id": getattr(s, "id", None),
                 "entry_price": s.entry_price, "qty": s.qty,
+                # Which price the mark beside it was measured against, so a
+                # reader never has to guess why entry_price and
+                # unrealized_net_usd disagree. Equal to entry_price for every
+                # slice the grid bought and every product with no declared
+                # basis - which is nearly all of them.
+                "marked_against": round(_mark_basis, 8) if current_price is not None else None,
+                "marked_against_is_declared": (
+                    current_price is not None and _mark_basis != s.entry_price),
                 "opened_at": (s.opened_at.isoformat() + "Z") if s.opened_at else None,
                 "unrealized_net_usd": round(net_usd, 2) if net_usd is not None else None,
                 "unrealized_net_pct": round(net_pct, 4) if net_pct is not None else None,
