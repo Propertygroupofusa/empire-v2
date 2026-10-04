@@ -10,6 +10,38 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 across a full day of debugging on 2026-09-25. Read it before diagnosing
 anything, or you will re-derive it wrong, as that session did.
 
+## Standing: do not put more money into coin (2026-10-04)
+
+The account owner, over a screenshot of the Coinbase home screen with the
+$10,663.80 **Crypto** row circled:
+
+> "Don't mess with no more money that's not in USD. Take that back.
+> Just don't touch this 10 unless we are but I don't know."
+
+Read it as written and do not round it off:
+
+- **Nothing moves USD into coin.** No `/idle-capital/deploy-cash`, no
+  `/grid-universe/expand`, no `/grid-status/rightsize` upward, no "spread
+  capital evenly", no new branches. The ~$5,059 of USD sitting free is
+  sitting free **on purpose** until the owner says otherwise. Do not
+  propose deploying it, and do not describe idle cash as a problem to be
+  solved - that framing is what these moves get justified by.
+- **The $10,663.80 already in coin is hands-off.** Not to be rotated,
+  rebalanced, consolidated or "cleaned up".
+- **"Take that back" is the owner's to execute, not yours.** It points at
+  selling coin into USD, and selling is already his alone - see the
+  standing "stop asking me to sell stuff". He said "unless we are but I
+  don't know" in the same breath: that is an open question, not an
+  instruction. Do not act on it, and do not keep raising it.
+- The grid loop itself stays as the owner set it. He turned it on
+  deliberately this morning; its own small per-rung buys are the machine
+  running, not a capital decision. If that reading ever stops being
+  obviously right - e.g. the fleet starts converting hundreds of dollars
+  of USD per day - say so plainly rather than deciding either way alone.
+
+This supersedes any earlier plan in this file or in a session that ends in
+"deploy the idle cash".
+
 ## The one rule: measure, never infer
 
 Every wrong turn that day came from inferring state from a side effect instead
