@@ -1501,8 +1501,10 @@
             actually happening at that price - a chart sitting still and a chart sitting still with nothing
             trading are the same picture and completely different situations.
             <br><br><strong>These are other people's trades, not yours.</strong> Coinbase publishes every fill
-            on the venue, so this is the whole market's flow on your holdings. This account is not currently
-            placing orders, so a tape of your own fills would be an empty box.</div>
+            on the venue, so this is the whole market's flow on your holdings. Your OWN fills are a separate
+            record and are NOT empty - /fills-by-source read 249 orders and 318 fills across 7 days. This
+            fleet places post-only orders constantly; what it rarely does is get FILLED, which is a different
+            fact and the one worth watching.</div>
         <div id="tape-float" style="position:relative; height:96px; overflow:hidden;
                                     border-bottom:1px solid var(--border); margin-bottom:8px;"></div>
         <div id="tape-summary" style="font-size:0.74em; color:var(--text-dim); margin-bottom:6px;"></div>
