@@ -9241,7 +9241,31 @@ async function loadGridStatus() {
         // The headline "Total Profit" card's REALIZED half is the live
         // grid's ledger - see the comment where lastRealizedProfit is
         // assigned for what it used to be.
-        lastRealizedProfit = history.total_realized_pnl != null ? history.total_realized_pnl : 0;
+        // ONE BASIS FOR BOTH HALVES OF THIS TILE.
+        //
+        // The unrealized half already marks an adopted slice against the
+        // declared true cost - the same basis the gate uses to decide the
+        // sale. The realized half was still the blended booked total, whose
+        // four ZEC rows were priced against the ~$1,650 adoption mark before
+        // the booking fix reached them. So the tile mixed two bases and came
+        // out -$200.17 on a position that is +$408.85 against what was
+        // actually paid.
+        //
+        // own + restated-adopted, when the restatement exists. Never the
+        // restated figure alone, and never silently: the caption below says
+        // which basis produced the number, and realized_adopted_usd stays
+        // published as booked. If no row could be restated this falls back
+        // to the blended total exactly as before.
+        const _ownR = history.realized_own_usd;
+        const _adR = history.realized_adopted_restated_usd;
+        const _restatedRows = Number(history.realized_adopted_restated_count) || 0;
+        lastRealizedIsRestated = (_ownR != null && _adR != null && _restatedRows > 0);
+        lastRealizedProfit = lastRealizedIsRestated
+            ? (_ownR + _adR)
+            : (history.total_realized_pnl != null ? history.total_realized_pnl : 0);
+        lastRealizedOwn = _ownR;
+        lastRealizedAdoptedBooked = history.realized_adopted_usd;
+        lastRealizedRestatedRows = _restatedRows;
         lastUnrealizedProfit = data.total_unrealized_net_usd != null ? data.total_unrealized_net_usd : 0;
         // What the unrealized half is measured AGAINST. Without it the
         // dollar figure has no scale: -$68 reads the same whether it sits
@@ -9836,6 +9860,13 @@ function toggleCoinTrades(i) {
 
 let lastUnrealizedProfit = null;
 let lastRealizedProfit = null;
+// Which basis lastRealizedProfit was built on, and the parts behind it, so
+// the tile can say so rather than present a corrected figure as if it had
+// always read that way.
+let lastRealizedIsRestated = false;
+let lastRealizedOwn = null;
+let lastRealizedAdoptedBooked = null;
+let lastRealizedRestatedRows = 0;
 let lastDeployedCoin = null;
 let lastLockedProfit = null;
 let lastKnownBranches = [];
@@ -9904,11 +9935,30 @@ function renderTotalProfit() {
             ? 'Unrealized'
             : `Unrealized (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% of ${fmtUsd(dep)} of coin)`;
 
+        // SAY WHICH BASIS PRODUCED THE NUMBER. A corrected figure presented
+        // as though it had always read that way is the same fault as the
+        // wrong figure, one step later.
+        const realizedLabel = lastRealizedIsRestated ? 'Realized (at your cost)'
+                                                     : 'Realized';
         breakdownEl.innerHTML = [
-            part('Realized', realized),
+            part(realizedLabel, realized),
             part(unrealLabel, unrealized),
             part('🔒 Locked', locked),
         ].join(' · ')
+        + (lastRealizedIsRestated
+            ? '<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.4;">'
+              + 'Realized is the grid\'s own <strong>' + (lastRealizedOwn >= 0 ? '+' : '-')
+              + fmtUsd(Math.abs(lastRealizedOwn)) + '</strong> plus '
+              + lastRealizedRestatedRows + ' inherited position'
+              + (lastRealizedRestatedRows === 1 ? '' : 's')
+              + ' re-priced at the true cost you declared. Those rows were '
+              + 'booked against the adoption-day mark at <strong>'
+              + (lastRealizedAdoptedBooked >= 0 ? '+' : '-')
+              + fmtUsd(Math.abs(lastRealizedAdoptedBooked))
+              + '</strong> - a price nobody paid - and the stored rows still say so. '
+              + 'The difference is a measurement correction, <strong>not money the grid earned</strong>.'
+              + '</div>'
+            : '')
         + '<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.4;">'
         + 'Realized is banked and only moves on a completed sell. Unrealized marks coin that '
         + 'was already owned - a branch on it reports the price move, it does not add one, so '

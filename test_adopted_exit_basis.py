@@ -283,6 +283,23 @@ def test_the_pages_lead_with_the_grid_s_own_book():
        "quietly replaced",
        "As originally booked" in live)
 
+    # THE HEADLINE TILE MUST NOT MIX BASES.
+    # Its unrealized half marks adopted slices at the declared cost; its
+    # realized half was still the blended booked total. That put -$200.17 on
+    # a position reading +$408.85 against what was actually paid - half
+    # corrected, half not, which is worse than either alone.
+    ok("the headline's realized half is own + restated-adopted",
+       "lastRealizedProfit = lastRealizedIsRestated" in ft
+       and "(_ownR + _adR)" in ft)
+    ok("and falls back to the blended total when nothing was restated",
+       "history.total_realized_pnl != null ? history.total_realized_pnl : 0" in ft)
+    ok("it never shows the restated figure without saying so",
+       "Realized (at your cost)" in ft)
+    ok("the caption still names what was originally booked",
+       "booked against the adoption-day mark" in ft)
+    ok("and refuses to let the correction read as earnings",
+       "not money the grid earned" in ft)
+
     router = (REPO / "routers" / "trading_dashboard.py").read_text()
     ok("the Live Ops headline passes the split through",
        "realized_adopted_trades" in router)
