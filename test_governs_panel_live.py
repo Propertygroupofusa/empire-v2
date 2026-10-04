@@ -109,7 +109,14 @@ ok("and the floor itself is still priced against the WORST reachable leg",
 
 print("\nthe arithmetic the card claims")
 # floor = max(MIN_DYNAMIC_GRID_PCT, TARGET_NET_MARGIN_PCT + maker_leg*2)
-target = float(re.search(r'TARGET_NET_MARGIN_PCT = float\(os\.getenv\("[^"]+", "([^"]+)"\)\)', BOT).group(1))
+# Matches both the old float(os.getenv(..., "0.002")) spelling and the
+# fail-soft env_float(..., 0.002) one that replaced it. The default is what
+# this arithmetic depends on; the helper that reads it is immaterial.
+_tm = re.search(
+    r'TARGET_NET_MARGIN_PCT = (?:float\(os\.getenv\("[^"]+", "([\d.]+)"\)\)'
+    r'|env_float\("[^"]+", ([\d.]+)\))', BOT)
+assert _tm, "TARGET_NET_MARGIN_PCT declaration not found in crypto_grid_bot.py"
+target = float(_tm.group(1) or _tm.group(2))
 mindyn = float(re.search(r'MIN_DYNAMIC_GRID_PCT = ([\d.]+)', BOT).group(1))
 maker_leg = 0.0035
 ok("the live 0.90% floor is reproducible from the constants",

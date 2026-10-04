@@ -43,8 +43,18 @@ CYCLE = ast.get_source_segment(SRC, func("run_grid_branch_cycle")) or ""
 
 
 print("\nthe constant")
-ok("GRID_STOP_LOSS_PCT is env-tunable", 'os.getenv("GRID_STOP_LOSS_PCT"' in SRC)
-m = re.search(r'GRID_STOP_LOSS_PCT = float\(os\.getenv\("GRID_STOP_LOSS_PCT", "([^"]+)"\)\)', SRC)
+# Accept either spelling of the declaration. The knob used to be read with
+# a bare float(os.getenv(...)), which crashes the whole module on a malformed
+# value; it now goes through env_float(), which falls back to this same default
+# and reports the bad value instead of taking the fleet offline. What this test
+# guards is the NUMBER, not which helper reads it, so match both forms.
+ok("GRID_STOP_LOSS_PCT is env-tunable",
+   'os.getenv("GRID_STOP_LOSS_PCT"' in SRC or 'env_float("GRID_STOP_LOSS_PCT"' in SRC)
+m = re.search(
+    r'GRID_STOP_LOSS_PCT = (?:float\(os\.getenv\("GRID_STOP_LOSS_PCT", "([\d.]+)"\)\)'
+    r'|env_float\("GRID_STOP_LOSS_PCT", ([\d.]+)\))', SRC)
+if m:
+    m = re.match(r"([\d.]+)", m.group(1) or m.group(2))
 ok("defaults to 0.08, the swept best", m is not None and m.group(1) == "0.08",
    f"got {m.group(1) if m else None}")
 ok("an out-of-range value fails at import rather than trading",

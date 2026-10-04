@@ -40,6 +40,7 @@ import json
 import logging
 import os
 import zlib
+from env_config import env_float, env_int  # fail-soft numeric env parsing
 from decimal import Decimal as _Decimal, InvalidOperation
 import slice_lifecycle as _sl  # NEVER rebind this name in a function.
 # A `for _sl in slices:` anywhere inside run_grid_branch_cycle makes _sl a
@@ -114,7 +115,7 @@ MIN_TRADE_USD = 5.0
 # eating into every slice at once, without pausing on ordinary grid
 # noise - confirmed against real backtest evidence before shipping (see
 # crypto_selection_backtest.py).
-GRID_DRAWDOWN_BREAKER_PCT = float(os.getenv("GRID_DRAWDOWN_BREAKER_PCT", "0.25"))
+GRID_DRAWDOWN_BREAKER_PCT = env_float("GRID_DRAWDOWN_BREAKER_PCT", 0.25)
 
 # Real, opt-in fee-tier-aware dynamic grid spacing - OFF by default,
 # per the account owner's own explicit "backtest before going live"
@@ -182,7 +183,7 @@ AVG_SWING_LOOKBACK_HOURS = 120
 # Every real adjustment is logged to the Live Activity feed with the
 # exact real numbers that triggered it, so this is auditable, not a
 # silent black box.
-SELF_TUNE_INTERVAL_SECONDS = int(os.getenv("GRID_SELF_TUNE_INTERVAL_SECONDS", str(60 * 60)))
+SELF_TUNE_INTERVAL_SECONDS = env_int("GRID_SELF_TUNE_INTERVAL_SECONDS", 60 * 60)
 # How many of a branch's own most recent REAL closed trades to judge it
 # by - also doubles as the minimum trade count required before acting at
 # all (not enough real evidence yet with fewer than this many).
@@ -275,7 +276,7 @@ GRID_AUTO_ROTATE_MODE_KEY = "crypto_grid_auto_rotate_active"
 # already-eligible move waits to be noticed, from up to 30 minutes to up
 # to 5. The confirmed-live oscillation bug that cooldown was written for
 # stays fixed.
-GRID_AUTO_ROTATE_INTERVAL_SECONDS = int(os.getenv("GRID_AUTO_ROTATE_INTERVAL_SECONDS", str(5 * 60)))
+GRID_AUTO_ROTATE_INTERVAL_SECONDS = env_int("GRID_AUTO_ROTATE_INTERVAL_SECONDS", 5 * 60)
 
 # FLOATING BASE. reference_price already floats on every real fill - buy
 # and sell both write it (see run_grid_branch_cycle). What it cannot do is
@@ -293,7 +294,7 @@ GRID_AUTO_ROTATE_INTERVAL_SECONDS = int(os.getenv("GRID_AUTO_ROTATE_INTERVAL_SEC
 # sells nothing, writes only reference_price, moves it only UPWARD, and
 # skips any branch holding an open slice (where the reference is also the
 # sell trigger). See its own docstring.
-GRID_REANCHOR_INTERVAL_SECONDS = int(os.getenv("GRID_REANCHOR_INTERVAL_SECONDS", str(60 * 60)))
+GRID_REANCHOR_INTERVAL_SECONDS = env_int("GRID_REANCHOR_INTERVAL_SECONDS", 60 * 60)
 _last_grid_reanchor_at = 0.0
 
 
@@ -307,7 +308,7 @@ def auto_reanchor_enabled() -> bool:
 # move - matches the same order-of-magnitude reasoning as MIN_TRADE_USD,
 # just a real notch higher since this is a discretionary optimization
 # move, not a required trade.
-GRID_AUTO_ROTATE_MIN_USD = float(os.getenv("GRID_AUTO_ROTATE_MIN_USD", "10.0"))
+GRID_AUTO_ROTATE_MIN_USD = env_float("GRID_AUTO_ROTATE_MIN_USD", 10.0)
 # In-process throttle only (mirrors crypto_family_tree_bot.py's own
 # _last_auto_backtest_at pattern) - this is a single, long-running
 # coordinator thread, so a plain module-level timestamp is sufficient;
@@ -328,11 +329,11 @@ _last_grid_backtest_refresh_at = 0.0
 # Periodic check of shadow mode learning engine progress - logs status every
 # N seconds during the accumulation phase (30-50 trades). Useful for alerting
 # when validation threshold is reached without spam. 10 minutes = 600 seconds.
-SHADOW_MODE_MONITOR_INTERVAL_SECONDS = int(os.getenv("SHADOW_MODE_MONITOR_INTERVAL_SECONDS", str(10 * 60)))
+SHADOW_MODE_MONITOR_INTERVAL_SECONDS = env_int("SHADOW_MODE_MONITOR_INTERVAL_SECONDS", 10 * 60)
 _last_shadow_monitor_at = 0.0
 
 # Mean Reversion Bot Integration
-MEAN_REVERSION_CYCLE_SECONDS = int(os.getenv("MEAN_REVERSION_CYCLE_SECONDS", str(5 * 60)))  # Run every 5 minutes
+MEAN_REVERSION_CYCLE_SECONDS = env_int("MEAN_REVERSION_CYCLE_SECONDS", 5 * 60)  # Run every 5 minutes
 _last_mean_reversion_at = 0.0
 
 # Real, minimum time a branch's own coin has to have been in place before
@@ -355,7 +356,7 @@ _last_mean_reversion_at = 0.0
 # reasoning as the family tree's own one-cycle coin-sale cooldown, just
 # a real, meaningfully longer window here since a grid branch needs real
 # time to actually catch a dip, not just one cycle.
-GRID_ROTATION_COOLDOWN_SECONDS = int(os.getenv("GRID_ROTATION_COOLDOWN_SECONDS", str(2 * 60 * 60)))
+GRID_ROTATION_COOLDOWN_SECONDS = env_int("GRID_ROTATION_COOLDOWN_SECONDS", 2 * 60 * 60)
 
 # Real, automatic deployment of real UNALLOCATED free cash - the direct
 # follow-up after the account owner pointed out that a manual "Add 3
@@ -380,7 +381,7 @@ GRID_ROTATION_COOLDOWN_SECONDS = int(os.getenv("GRID_ROTATION_COOLDOWN_SECONDS",
 # precisely ON the minimum order size with no room for a price move to
 # push a slice under it. $70 gives the same 10 levels at $7.00 each, far
 # enough clear that a slice cannot round below the floor and stall.
-GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "70.0"))
+GRID_AUTO_DEPLOY_AMOUNT_USD = env_float("GRID_AUTO_DEPLOY_AMOUNT_USD", 70.0)
 
 # Real cash the auto-deployer must always leave behind, never spending the
 # account down to its last dollar.
@@ -393,7 +394,7 @@ GRID_AUTO_DEPLOY_AMOUNT_USD = float(os.getenv("GRID_AUTO_DEPLOY_AMOUNT_USD", "70
 # that exists only because the system ran out of things to buy is not a
 # reserve. $88 is what seven full branches leave of $578, so today this
 # changes nothing and simply stops being luck.
-GRID_CASH_RESERVE_USD = float(os.getenv("GRID_CASH_RESERVE_USD", "88.0"))
+GRID_CASH_RESERVE_USD = env_float("GRID_CASH_RESERVE_USD", 88.0)
 
 
 async def unfunded_deployment_reserve() -> tuple:
@@ -529,7 +530,7 @@ def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None,
 # a USD pair while being far above the $0.14 and $0.00007 actually seen, and
 # well below MIN_TRADE_USD ($5.00), the smallest rung the engine will buy -
 # so no slice this engine created can be mistaken for dust.
-GRID_DUST_SLICE_USD = float(os.getenv("GRID_DUST_SLICE_USD", "1.00"))
+GRID_DUST_SLICE_USD = env_float("GRID_DUST_SLICE_USD", 1.00)
 
 
 def _slice_field(s, name):
@@ -660,7 +661,7 @@ async def _adopted_branch_count() -> int:
 # friction - it is exactly the number of currently-eligible coins, and
 # each branch claims its own coin, so this cannot run away into dozens of
 # tiny branches however much cash appears at once.
-GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP = int(os.getenv("GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", "7"))
+GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP = env_int("GRID_AUTO_DEPLOY_MAX_NEW_BRANCHES_PER_SWEEP", 7)
 
 # Opt-in staged capital fleet. These are activation gates from the
 # operator's proposed sequence, not projected or guaranteed returns.
@@ -711,7 +712,7 @@ ADAPTIVE_FLEET_STAGES = (
 # clear ON TOP of its fees before a spacing is allowed. It cannot be
 # expressed as a difference between two other numbers, because that is what
 # let a fee increase quietly eat it.
-TARGET_NET_MARGIN_PCT = float(os.getenv("GRID_TARGET_NET_MARGIN_PCT", "0.002"))
+TARGET_NET_MARGIN_PCT = env_float("GRID_TARGET_NET_MARGIN_PCT", 0.002)
 
 # A margin of zero or less is not a margin - it makes fee_safe_floor_pct()
 # certify a spacing that exactly pays its own fees and earns nothing, or
@@ -897,7 +898,7 @@ MAKER_ORDERS_MODE_KEY = "grid_maker_orders_mode"
 # How long a real post-only order is left resting before giving up and
 # falling back to a market order. Long enough to be filled in a normally
 # active book, short enough that a real trigger is not missed outright.
-MAKER_ORDER_WAIT_SECONDS = int(os.getenv("GRID_MAKER_ORDER_WAIT_SECONDS", "45"))
+MAKER_ORDER_WAIT_SECONDS = env_int("GRID_MAKER_ORDER_WAIT_SECONDS", 45)
 
 
 async def is_maker_orders_active() -> bool:
@@ -965,7 +966,7 @@ MAKER_ONLY_MODE_KEY = "grid_maker_only_mode"
 # INSTEAD of MAKER_ORDER_WAIT_SECONDS while maker-only is on: long enough
 # to be filled by ordinary book movement, rather than needing to be lucky
 # inside the 45 seconds a pending market fallback allowed.
-MAKER_ONLY_ORDER_WAIT_SECONDS = int(os.getenv("GRID_MAKER_ONLY_WAIT_SECONDS", "240"))
+MAKER_ONLY_ORDER_WAIT_SECONDS = env_int("GRID_MAKER_ONLY_WAIT_SECONDS", 240)
 
 # ---- LEVEL-CAP EXEMPTION ---------------------------------------------------
 # A spacing-override candidate caps EVERY branch at its own level count, and
@@ -1607,17 +1608,17 @@ _EXPIRY_FINAL_SECONDS = _EXPIRY_HORIZONS[-1][0]
 # Resolving costs one book read per product per cycle, so it is capped. The
 # backlog is tiny by construction (this fleet expires a handful of orders a
 # day) and anything not resolved this cycle is resolved on the next one.
-_EXPIRY_RESOLVE_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_RESOLVE_MAX", "8"))
+_EXPIRY_RESOLVE_MAX_PER_CYCLE = env_int("GRID_EXPIRY_RESOLVE_MAX", 8)
 # How many unresolved rows are LOOKED AT per cycle. Larger than the read cap
 # because with a 72h ladder most scanned rows have nothing due yet, and a
 # scan that stops before reaching the fresh ones is how a new expiry loses
 # its 1m reading. Scanning is a cheap indexed read; the book call is what
 # _EXPIRY_RESOLVE_MAX_PER_CYCLE bounds.
-_EXPIRY_SCAN_MAX_PER_CYCLE = int(os.getenv("GRID_EXPIRY_SCAN_MAX", "200"))
+_EXPIRY_SCAN_MAX_PER_CYCLE = env_int("GRID_EXPIRY_SCAN_MAX", 200)
 # Below this a horizon reports "not enough data" rather than a finding. Not
 # derived - chosen so three samples cannot be read as a result, which is how
 # the 50-trade history got misread once already.
-_EXPIRY_MIN_RESOLVED = int(os.getenv("GRID_EXPIRY_MIN_RESOLVED", "20"))
+_EXPIRY_MIN_RESOLVED = env_int("GRID_EXPIRY_MIN_RESOLVED", 20)
 
 
 async def _record_order_not_placed(product_id: str, side: str, bot_name: str = None,
@@ -2163,7 +2164,7 @@ async def worst_case_leg_fee_rate() -> float:
 # absurd spacing. If the required step exceeds the bound the branch keeps
 # refusing, which is the correct outcome - some coins are too expensive to
 # grid at any sane spacing, and that is an answer, not a failure.
-GATE_CLEARING_MAX_PCT = float(os.getenv("GRID_GATE_CLEARING_MAX_PCT", "0.06"))
+GATE_CLEARING_MAX_PCT = env_float("GRID_GATE_CLEARING_MAX_PCT", 0.06)
 AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
 
 # THE FLEET'S MINIMUM STEP, set from measurement rather than from habit.
@@ -2225,7 +2226,7 @@ AUTO_WIDEN_ENV_VAR = "GRID_AUTO_WIDEN"
 # survives (ACH-USD at 3.00%, 16 trips). Every other coin's "best" step rests
 # on 1 to 4 trips in sixty days. Choosing the maximum over ten candidates on
 # a sample that size fits noise, and would have shipped it as a gain.
-FLEET_MIN_STEP_PCT = float(os.getenv("GRID_FLEET_MIN_STEP_PCT", "0.030"))
+FLEET_MIN_STEP_PCT = env_float("GRID_FLEET_MIN_STEP_PCT", 0.030)
 
 # The round-trip fee the table above was priced at. Stated as a CHECKABLE
 # CONSTANT rather than left in the prose, because the prose cannot be
@@ -2285,7 +2286,7 @@ def _swing_ceiling_enabled() -> bool:
 # searching. And the winning window is IDENTICAL at every level, because
 # no stop ever fired there: it costs nothing when things go well and only
 # acts when they do not.
-GRID_STOP_LOSS_PCT = float(os.getenv("GRID_STOP_LOSS_PCT", "0.08"))
+GRID_STOP_LOSS_PCT = env_float("GRID_STOP_LOSS_PCT", 0.08)
 if GRID_STOP_LOSS_PCT < 0 or GRID_STOP_LOSS_PCT >= 1:
     raise ValueError(f"GRID_STOP_LOSS_PCT must be in [0, 1), got {GRID_STOP_LOSS_PCT}")
 
@@ -3944,7 +3945,7 @@ async def _first_ranked_coin_beating_btc(ranked_product_ids: list) -> str:
 # when NOTHING clears it, every one of those paths correctly does
 # nothing this cycle (real capital sits in cash) rather than always
 # finding somewhere, however mediocre, to go.
-MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
+MIN_REQUIRED_ROI_PCT = env_float("GRID_MIN_REQUIRED_ROI_PCT", 20.0)
 
 # A PARKED BRANCH HAS NO SPACING LEFT TO PROTECT.
 #
@@ -3979,7 +3980,7 @@ MIN_REQUIRED_ROI_PCT = float(os.getenv("GRID_MIN_REQUIRED_ROI_PCT", "20.0"))
 #
 # This is NOT the spacing being loosened to manufacture trades. A branch
 # that can still buy is untouched, and keeps the full grid_pct gate.
-GRID_PARKED_MIN_NET_PCT = float(os.getenv("GRID_PARKED_MIN_NET_PCT", "0.010"))
+GRID_PARKED_MIN_NET_PCT = env_float("GRID_PARKED_MIN_NET_PCT", 0.010)
 
 # ---- WHAT YOU ACTUALLY PAID, FOR COIN THE GRID DID NOT BUY ----------------
 # An adopted slice's entry_price is the market price on the day
@@ -7999,7 +8000,7 @@ async def _sweep_orphans_once() -> bool:
 
 
 GRID_LEASE_KEY = "grid_bot_loop_owner"
-GRID_LEASE_STALE_SECONDS = int(os.getenv("GRID_LEASE_STALE_SECONDS", "180"))
+GRID_LEASE_STALE_SECONDS = env_int("GRID_LEASE_STALE_SECONDS", 180)
 
 # --- DB-PERSISTED STRATEGY OVERRIDE ---------------------------------------
 # The strategy mode was the ONLY setting in this system that could be
@@ -9329,7 +9330,7 @@ async def get_realized_edge(days: int = None) -> dict:
 # next one ~37s later, and any horizon not resolved stays pending. So the
 # pass simply stops when the budget is spent. A partial pass is correct; a
 # stalled trading loop is not.
-TELEMETRY_BUDGET_SECONDS = float(os.getenv("GRID_TELEMETRY_BUDGET_SECONDS", "25"))
+TELEMETRY_BUDGET_SECONDS = env_float("GRID_TELEMETRY_BUDGET_SECONDS", 25)
 
 
 async def _score_short_term_opportunities(session, branches, deadline=None):
@@ -9876,7 +9877,7 @@ async def close_all_grid_slices(only_bot_name: str = None,
 # completed trades the window covered 2.5 days and hid 82 of them, while
 # `recent_trades` read like the whole book. The ceiling exists because this is
 # served in a live status payload, not because 50 is meaningful.
-GRID_TRADE_HISTORY_MAX_ROWS = int(os.getenv("GRID_TRADE_HISTORY_MAX_ROWS", "1000"))
+GRID_TRADE_HISTORY_MAX_ROWS = env_int("GRID_TRADE_HISTORY_MAX_ROWS", 1000)
 
 
 async def get_grid_performance_metrics() -> dict:

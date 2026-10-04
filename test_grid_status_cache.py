@@ -46,8 +46,11 @@ print("\n[4] AN ERROR IS NEVER CACHED")
 store = BLOCK.index('_GRID_STATUS_CACHE["payload"] = data')
 ret = BLOCK.index("# Force fresh data on every request")
 ok("the cache is written on the way OUT, not on the way in", store < ret)
+# The guard's detail now runs through _module_unavailable_detail(), which
+# appends the import error so a 500 says WHY the module is missing rather
+# than only that it is. Anchor on the call, not on the old bare string.
 ok("...and after the module-unavailable guard",
-   BLOCK.index("crypto_grid_bot module not available") < store)
+   BLOCK.index('_module_unavailable_detail("crypto_grid_bot")') < store)
 
 print("\n[5] the BROWSER cache decision is untouched")
 ok("no-store headers still sent on the live path",

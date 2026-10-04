@@ -42,6 +42,7 @@ import bisect
 import sys
 sys.path.insert(0, "/home/user/empire-v2")
 import os
+from env_config import env_float, env_int
 os.environ.setdefault("COINBASE_API_KEY_NAME", "unused-public-endpoint-only")
 os.environ.setdefault("COINBASE_API_PRIVATE_KEY", "unused-public-endpoint-only")
 
@@ -1708,7 +1709,7 @@ async def run_exit_distance_and_breaker_sweeps(coins=None, days=90, num_levels=3
 # 0.01% per 8h is the common neutral baseline on major venues; it swings
 # with sentiment and goes AGAINST the crowded side, so a short pays more
 # when shorting is popular - exactly when a short grid would be busiest.
-PERP_FUNDING_RATE_8H = float(os.getenv("PERP_FUNDING_RATE_8H", "0.0001"))
+PERP_FUNDING_RATE_8H = env_float("PERP_FUNDING_RATE_8H", 0.0001)
 
 
 def _replay_grid_bot_short(closes, highs, lows, spend=None,

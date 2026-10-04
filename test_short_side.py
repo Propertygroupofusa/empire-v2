@@ -43,7 +43,11 @@ src = open(os.path.join(HERE, "crypto_selection_backtest.py"), encoding="utf-8")
 # namespace supplies the real taker rate - the worst case an unfilled
 # post-only order actually lands on.
 engine = types.SimpleNamespace(ROUND_TRIP_FEE_RATE=0.010)
+# The exec'd slice now reads its knobs through the fail-soft helpers, so the
+# namespace has to carry them the same way it already carries `os`.
+from env_config import env_float as _env_float, env_int as _env_int
 ns = {"os": os, "engine": engine, "SPEND": 150.0,
+      "env_float": _env_float, "env_int": _env_int,
       "BACKTEST_ROUND_TRIP_FEE_RATE": 0.015,
       "STRATEGY_LAB_GRID_PCT": 0.01, "STRATEGY_LAB_GRID_LEVELS": 10}
 _i = src.index("def _summarize_strategy_trades")

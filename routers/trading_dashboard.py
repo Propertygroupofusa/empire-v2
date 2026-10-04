@@ -47,58 +47,89 @@ if NUM_BOTS <= 0:
 log = logging.getLogger("trading_dashboard")
 router = APIRouter()
 
+# Why a module could not be imported, keyed by module name.
+#
+# A single malformed env var (a value pasted with an arrow in it, a stray space)
+# raises inside a module-level int()/float() and the whole module fails to import.
+# Before this registry the only trace was one WARNING line in the container log:
+# every HTTP reader saw a bare "module not available" with no reason, so an
+# outage with a one-character cause took hours to find. Record the reason here
+# and hand it to every caller.
+MODULE_IMPORT_ERRORS: dict[str, str] = {}
+
+
+def _record_import_error(module_name: str, exc: BaseException) -> None:
+    MODULE_IMPORT_ERRORS[module_name] = f"{type(exc).__name__}: {exc}"
+
+
+def _module_unavailable_detail(module_name: str) -> str:
+    """500 detail that names the module AND why it did not load."""
+    reason = MODULE_IMPORT_ERRORS.get(module_name)
+    if reason:
+        return f"{module_name} module not available: {reason}"
+    return f"{module_name} module not available"
+
 try:
     import prop_bot as prop_bot_module
 except Exception as e:
     log.warning(f"prop_bot not importable, /signals will report unavailable: {e}")
+    _record_import_error('prop_bot', e)
     prop_bot_module = None
 
 try:
     import crypto_coinbase_bot as crypto_coinbase_bot_module
 except Exception as e:
     log.warning(f"crypto_coinbase_bot not importable, /crypto-coinbase-status will report unavailable: {e}")
+    _record_import_error('crypto_coinbase_bot', e)
     crypto_coinbase_bot_module = None
 
 try:
     import crypto_family_tree_bot as crypto_family_tree_bot_module
 except Exception as e:
     log.warning(f"crypto_family_tree_bot not importable, /family-tree-status won't include locked profit: {e}")
+    _record_import_error('crypto_family_tree_bot', e)
     crypto_family_tree_bot_module = None
 
 try:
     import crypto_selection_backtest as crypto_selection_backtest_module
 except Exception as e:
     log.warning(f"crypto_selection_backtest not importable, /crypto-selection-backtest will report unavailable: {e}")
+    _record_import_error('crypto_selection_backtest', e)
     crypto_selection_backtest_module = None
 
 try:
     import alpaca_selection_backtest as alpaca_selection_backtest_module
 except Exception as e:
     log.warning(f"alpaca_selection_backtest not importable, /alpaca-selection-backtest will report unavailable: {e}")
+    _record_import_error('alpaca_selection_backtest', e)
     alpaca_selection_backtest_module = None
 
 try:
     import macro_event_backtest as macro_event_backtest_module
 except Exception as e:
     log.warning(f"macro_event_backtest not importable, /macro-event-backtest will report unavailable: {e}")
+    _record_import_error('macro_event_backtest', e)
     macro_event_backtest_module = None
 
 try:
     import btc_price_projection as btc_price_projection_module
 except Exception as e:
     log.warning(f"btc_price_projection not importable, /family-tree-status/btc-projection will report unavailable: {e}")
+    _record_import_error('btc_price_projection', e)
     btc_price_projection_module = None
 
 try:
     import crypto_grid_bot as crypto_grid_bot_module
 except Exception as e:
     log.warning(f"crypto_grid_bot not importable, /grid-status will report unavailable: {e}")
+    _record_import_error('crypto_grid_bot', e)
     crypto_grid_bot_module = None
 
 try:
     import scaling_coordinator as scaling_coordinator_module
 except Exception as e:
     log.warning(f"scaling_coordinator not importable, /fleet-status will report unavailable: {e}")
+    _record_import_error('scaling_coordinator', e)
     scaling_coordinator_module = None
 
 try:
@@ -106,6 +137,7 @@ try:
 except Exception as e:
     log.warning(f"crypto_btc_compound_bot not importable, /btc-compound/close-position will "
                 f"report unavailable: {e}")
+    _record_import_error('crypto_btc_compound_bot', e)
     crypto_btc_compound_bot_module = None
 
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
@@ -200,6 +232,90 @@ MARGIN_MIN_EQUITY = 2000.0
 
 TICKER_CRYPTO_PRODUCTS = ["BTC-USD", "ETH-USD", "XRP-USD", "DOGE-USD", "SOL-USD"]
 TICKER_STOCK_SYMBOLS = ["SPY", "QQQ"]
+
+
+# Which optional modules loaded, which did not, and WHY. Purely diagnostic -
+# reads no account, moves no money, needs no token.
+_OPTIONAL_MODULES = [
+    ("prop_bot", "/signals"),
+    ("crypto_coinbase_bot", "/crypto-coinbase-status"),
+    ("crypto_family_tree_bot", "/family-tree-status"),
+    ("crypto_selection_backtest", "/crypto-selection-backtest"),
+    ("alpaca_selection_backtest", "/alpaca-selection-backtest"),
+    ("macro_event_backtest", "/macro-event-backtest"),
+    ("btc_price_projection", "/family-tree-status/btc-projection"),
+    ("crypto_grid_bot", "/grid-status, /grid-status/trade-history, /trading-profile"),
+    ("scaling_coordinator", "/fleet-status"),
+    ("crypto_btc_compound_bot", "/btc-compound/close-position"),
+]
+
+
+@router.get("/module-health")
+async def get_module_health():
+    """Why half the dashboard is down, in one request.
+
+    On 2026-10-04 one environment variable set to the literal text
+    "240 -> 3600" stopped crypto_grid_bot from importing. Every affected
+    endpoint answered 500 "crypto_grid_bot module not available" with no
+    reason, and the real cause existed only as a single WARNING line in the
+    container log. This endpoint exists so that never costs hours again.
+
+    Two separate failure modes are reported:
+
+    * ``modules`` - an optional module that did not import at all. Its
+      endpoints are dead until the cause is fixed.
+    * ``env_fallbacks`` - a numeric environment variable that could not be
+      parsed. The module DID load, but it is running on the built-in default,
+      NOT the value that was set. A quiet wrong number is more dangerous than
+      a loud outage, so it is reported just as prominently.
+    """
+    modules = []
+    for name, endpoints in _OPTIONAL_MODULES:
+        error = MODULE_IMPORT_ERRORS.get(name)
+        modules.append({
+            "module": name,
+            "loaded": error is None,
+            "error": error,
+            "endpoints_affected": endpoints if error else None,
+        })
+
+    failed = [m for m in modules if not m["loaded"]]
+
+    try:
+        from env_config import env_fallback_report
+        env_report = env_fallback_report()
+    except Exception as e:  # never let diagnostics be the thing that breaks
+        env_report = {"count": 0, "fallbacks": [], "note": f"unavailable: {e}"}
+
+    if failed:
+        headline = (
+            f"{len(failed)} module(s) failed to import: "
+            + ", ".join(m["module"] for m in failed)
+        )
+        status = "degraded"
+    elif env_report["count"]:
+        headline = (
+            "All modules loaded, but "
+            f"{env_report['count']} environment variable(s) are being ignored - "
+            "the defaults are running instead of the values that were set."
+        )
+        status = "check_env"
+    else:
+        headline = "All optional modules loaded and all numeric env vars parsed."
+        status = "ok"
+
+    return {
+        "status": status,
+        "headline": headline,
+        "modules_total": len(modules),
+        "modules_failed": len(failed),
+        "modules": modules,
+        "env_fallbacks": env_report,
+        "how_to_fix": (
+            "A numeric variable must hold digits only - no arrows, no units, no "
+            "quotes, no trailing spaces. Set it in Railway > Variables and redeploy."
+        ),
+    }
 
 
 @router.get("/ticker")
@@ -1599,14 +1715,34 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     # piece is missing this poll; the caller treats that as "this side
     # is unavailable right now", exactly like a hard failure.
     real_crypto_net_worth_usd = None
-    grid_holdings_value, grid_holdings_complete = 0.0, True
-    if crypto_grid_bot_module is not None:
+    # Start UNKNOWN, not "zero and sure of it".
+    #
+    # This initializer used to read `0.0, True`, and on 2026-10-04 that one
+    # word of optimism printed a lie. crypto_grid_bot failed to import (a
+    # malformed env var), so the `if` below was skipped entirely, the flag
+    # stayed True, and the dashboard reported a CONFIRMED $0.00 for $3,677.83
+    # of coin that was sitting safely in the wallet the whole time. The total
+    # sailed through its all-or-nothing gate and showed $6,011.24 against a
+    # real ~$9.7K - the account owner read it as money lost.
+    #
+    # A reader must never be able to print a zero it did not measure. Absence
+    # of evidence is `None`, and the gate below then correctly refuses to
+    # publish a total at all.
+    grid_holdings_value, grid_holdings_complete = 0.0, False
+    grid_holdings_reason = None
+    if crypto_grid_bot_module is None:
+        grid_holdings_reason = _module_unavailable_detail("crypto_grid_bot")
+        log.warning(f"[dashboard] grid holdings unreadable: {grid_holdings_reason}")
+    else:
         try:
             grid_holdings_value, grid_holdings_complete = (
                 await crypto_grid_bot_module.get_grid_holdings_market_value()
             )
+            if not grid_holdings_complete:
+                grid_holdings_reason = "grid reported an incomplete holdings read this poll"
         except Exception as exc:
             grid_holdings_complete = False
+            grid_holdings_reason = f"{type(exc).__name__}: {exc}"
             log.warning(f"[dashboard] grid holdings market value unavailable this poll: {exc}")
     if real_balance is not None and tree_holdings_complete and grid_holdings_complete:
         real_crypto_net_worth_usd = round(
@@ -1644,6 +1780,9 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             "usd": round(grid_holdings_value, 2) if grid_holdings_complete else None,
             "available": bool(grid_holdings_complete),
             "label": "Coin held by grid branches",
+            # Why it is unreadable, so a blank names its own cause instead of
+            # sending someone to the container log to find out.
+            "reason": grid_holdings_reason,
         },
     }
     real_crypto_net_worth_missing = [
@@ -3067,7 +3206,7 @@ async def get_activity_feed(limit: int = 50):
     _maybe_spawn_child) - the dashboard can never show something
     different from what actually happened. Read-only."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     events = await crypto_family_tree_bot_module.get_activity_feed(limit=limit)
     return {"events": events, "event_count": len(events)}
 
@@ -3271,7 +3410,7 @@ async def get_btc_price_projection():
     so the dashboard never shows a number with no real track record
     attached."""
     if btc_price_projection_module is None:
-        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("btc_price_projection"))
     bpp = btc_price_projection_module
 
     async with AsyncSessionLocal() as db:
@@ -3319,7 +3458,7 @@ async def get_btc_prediction_log(limit: int = 20):
     already run once in this process - closes that gap so this list is
     never stale regardless of poll ordering."""
     if btc_price_projection_module is None:
-        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("btc_price_projection"))
     product_id = btc_price_projection_module.PRODUCT_ID
     await _ensure_btc_prediction_log_dedupe_and_unique_index()
 
@@ -3374,7 +3513,7 @@ async def reset_btc_prediction_log():
     A fresh prediction gets logged again on the very next live poll,
     same as any other cold start."""
     if btc_price_projection_module is None:
-        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("btc_price_projection"))
     product_id = btc_price_projection_module.PRODUCT_ID
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -3457,7 +3596,7 @@ async def get_btc_price_chart():
     prediction_if_due), reused here rather than tracked a second way.
     Read-only, never places an order."""
     if btc_price_projection_module is None:
-        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("btc_price_projection"))
     bpp = btc_price_projection_module
 
     async with aiohttp.ClientSession() as session:
@@ -3560,7 +3699,7 @@ async def run_btc_price_projection_backtest(days: float = 3.0):
     Pulls ~days*1440 real 1-minute candles in paginated real API calls -
     can take a real ~10-40 seconds depending on the window."""
     if btc_price_projection_module is None:
-        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("btc_price_projection"))
     result = await btc_price_projection_module.run_price_projection_backtest(days=days)
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
@@ -3593,7 +3732,7 @@ async def run_btc_directional_signal_backtest(days: float = 3.0):
     price-level backtest above) - this is a one-off diagnostic run on
     demand, not something the live panel's calibration depends on."""
     if btc_price_projection_module is None:
-        raise HTTPException(status_code=500, detail="btc_price_projection module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("btc_price_projection"))
     result = await btc_price_projection_module.run_directional_signal_backtest(days=days)
     if "error" in result:
         raise HTTPException(status_code=502, detail=result["error"])
@@ -3623,7 +3762,7 @@ async def take_root_profit():
     every other branch's manual sell.
     """
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
 
     root_bot_name = crypto_family_tree_bot_module.ROOT_BOT_NAME
     branch = await crypto_family_tree_bot_module.load_branch(root_bot_name)
@@ -3684,7 +3823,7 @@ async def root_partial_sell_endpoint(payload: RootPartialSellRequest):
     full real mechanics (real fee-adjusted proceeds, real trade-history
     record, never strands unsellable dust)."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     try:
         return await crypto_family_tree_bot_module.root_partial_sell(
             payload.amount_usd,
@@ -3770,7 +3909,7 @@ async def add_cash_to_branch(bot_name: str, payload: AddCashRequest, db: AsyncSe
     so this can only ever deploy real money that isn't already working
     somewhere else in the tree."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
     tree = crypto_family_tree_bot_module
@@ -3898,7 +4037,7 @@ async def reallocate_cash_between_branches(payload: ReallocateCashRequest, db: A
     confirmed fill) - no real dollars are ever debited from the source
     without a confirmed destination fill to show for it."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
     tree = crypto_family_tree_bot_module
@@ -4024,7 +4163,7 @@ async def consolidate_family_tree_branches(dry_run: bool = True):
     and want to actually execute it - that pass deletes the merged-away
     branches for real and can't be undone by calling this endpoint again."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     return await crypto_family_tree_bot_module.consolidate_branches_by_coin(dry_run=dry_run)
 
 
@@ -4050,7 +4189,7 @@ async def close_btc_compound_position(dry_run: bool = True):
     current price, touching nothing. Only dry_run=false places the order.
     """
     if crypto_btc_compound_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_btc_compound_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_btc_compound_bot"))
     engine = crypto_btc_compound_bot_module
 
     position = await engine.load_position()
@@ -4127,7 +4266,7 @@ async def resume_crypto_active_trading():
     Returns was_passive so a no-op call is distinguishable from a real
     change - pressing it twice must not read like it worked twice."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
 
     was_passive = await crypto_family_tree_bot_module.is_crypto_passive_mode()
     await crypto_family_tree_bot_module.set_crypto_passive_mode(False)
@@ -4197,7 +4336,7 @@ async def reconcile_asset(currency: str, dry_run: bool = True):
     cached page, a curl from a phone - from getting a 404 that explains
     nothing."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     return await crypto_family_tree_bot_module.reconcile_asset_to_real_balance(currency, dry_run=dry_run)
 
 
@@ -4223,7 +4362,7 @@ async def liquidate_family_tree_and_buy_btc():
     owner can always sell the resulting real BTC holding by hand
     afterward via the normal close endpoint."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     return await crypto_family_tree_bot_module.liquidate_family_tree_and_buy_btc()
 
 
@@ -4246,7 +4385,7 @@ async def close_family_tree_branch(bot_name: str):
     finds nothing left to sell and safely no-ops instead of double-selling.
     """
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
 
     # Per the account owner's explicit request: BTC (the tree's real,
     # permanent root - never any adopted legacy position, see the ROOT
@@ -4327,7 +4466,7 @@ async def emergency_close_family_tree_branch(bot_name: str):
     resolve a stuck/paused branch, or to free idle allocated cash.
     """
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
 
     branch = await crypto_family_tree_bot_module.load_branch(bot_name)
     if branch is None:
@@ -4412,7 +4551,7 @@ async def spawn_family_tree_branch(db: AsyncSession = Depends(get_db)):
     needs to be started here: the coordinator's own scan loop picks up any
     branch row without a running thread within COORDINATOR_SCAN_SECONDS."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
 
@@ -4489,7 +4628,7 @@ async def spawn_family_tree_branch_on_coin(product_id: str, db: AsyncSession = D
     (the coordinator's own per-cycle catch-up check, or a second click)
     instead of making the account owner retry by hand."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         raise HTTPException(status_code=400, detail="STOP_TRADING is set - new capital deployment is paused")
 
@@ -4574,7 +4713,7 @@ async def unlock_locked_profit(payload: UnlockProfitRequest, db: AsyncSession = 
       or losing, any existing branch, per the account owner's explicit
       choice ("all can be an option")."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     tree = crypto_family_tree_bot_module
 
     if payload.amount <= 0:
@@ -4618,7 +4757,7 @@ async def family_tree_coin_watchlist():
     just reporting every coin instead of only the single best pick.
     Read-only, never places an order."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     return await crypto_family_tree_bot_module.get_live_coin_snapshot()
 
 
@@ -4643,7 +4782,7 @@ async def set_family_tree_manual_coin_override(payload: SetManualCoinOverrideReq
     existing position - this only ever changes which coin a FUTURE spawn/
     reinforcement/coin-switch is allowed to pick."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     tree = crypto_family_tree_bot_module
     try:
         await tree.set_manual_coin_override(payload.product_id, payload.excluded)
@@ -4715,7 +4854,7 @@ async def run_crypto_selection_backtest():
     concurrently across ~27 coins - can take 30-90 seconds depending on
     that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_full_backtest()
 
 
@@ -4736,7 +4875,7 @@ async def run_crypto_selection_backtest_real_allocations():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_full_backtest_with_real_allocations()
 
 
@@ -4759,7 +4898,7 @@ async def run_btc_relative_strength_backtest():
     plus one extra fetch for BTC-USD's own history to compare against -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_btc_relative_strength_comparison()
 
 
@@ -4785,7 +4924,7 @@ async def run_combined_live_entry_filters_backtest_endpoint():
     plus one extra fetch for BTC-USD's own history - can take 30-90
     seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_combined_live_entry_filters_backtest()
 
 
@@ -4808,7 +4947,7 @@ async def run_higher_tf_trend_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_higher_tf_trend_comparison()
 
 
@@ -4831,7 +4970,7 @@ async def run_support_resistance_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_support_resistance_comparison()
 
 
@@ -4855,7 +4994,7 @@ async def run_quick_profit_vs_trailing_stop_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_quick_profit_vs_trailing_stop_comparison()
 
 
@@ -4877,7 +5016,7 @@ async def run_partial_exit_vs_full_trail_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_partial_exit_vs_full_trail_comparison()
 
 
@@ -4899,7 +5038,7 @@ async def run_narrow_range_breakout_backtest_endpoint():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_narrow_range_breakout_backtest()
 
 
@@ -4922,7 +5061,7 @@ async def run_opening_bar_breakout_backtest_endpoint():
     synthetic real 2-minute bars) over a deliberately short 5-day window
     - can take 60-180 seconds given the real 1-minute data volume."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
@@ -4937,7 +5076,7 @@ async def run_opening_bar_narrow_state_comparison_endpoint():
     narrow state [is] the 20 a little below the 200." Never places a
     real order."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_opening_bar_narrow_state_comparison()
 
 
@@ -4952,7 +5091,7 @@ async def run_wide_state_contrarian_backtest_endpoint():
     wide_up -> SHORT leg is reported as pure diagnostic information,
     clearly labeled - neither live bot can actually short today."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_wide_state_contrarian_backtest()
 
 
@@ -4969,7 +5108,7 @@ async def run_opening_bar_short_side_backtest_endpoint():
     downside push. Never places a real order - and never could: the
     crypto side has no real short-selling mechanism at all today."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_opening_bar_short_side_backtest()
 
 
@@ -4985,7 +5124,7 @@ async def run_scaled_entry_comparison_backtest_endpoint():
     - so "does scaling in actually help" gets a real, direct answer.
     Never places a real order."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_scaled_entry_comparison_backtest()
 
 
@@ -5001,7 +5140,7 @@ async def run_red_bar_takeout_backtest_endpoint():
     just without requiring bar 1 to be anything special. Never places a
     real order."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
@@ -5016,7 +5155,7 @@ async def run_fib_gold_zone_backtest_endpoint():
     same 1h history. See fib_gold_zone.py for the exact rules.
     Many paginated candle pulls - expect 1-3 minutes."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_fib_gold_zone_backtest()
 
 
@@ -5042,7 +5181,7 @@ async def run_strategy_lab_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_strategy_lab_comparison()
 
 
@@ -5251,7 +5390,7 @@ async def run_market_phase_breakdown_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_market_phase_breakdown_backtest()
 
 
@@ -5273,7 +5412,7 @@ async def run_grid_drawdown_breaker_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_grid_drawdown_breaker_comparison()
 
 
@@ -5297,7 +5436,7 @@ async def run_grid_fee_tier_spacing_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_grid_fee_tier_spacing_comparison()
 
 
@@ -5319,7 +5458,7 @@ async def run_grid_atr_spacing_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_grid_atr_spacing_comparison()
 
 
@@ -5338,7 +5477,7 @@ async def run_grid_level_spacing_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_grid_level_spacing_comparison()
 
 
@@ -5360,7 +5499,7 @@ async def run_grid_higher_tf_trend_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_grid_higher_tf_trend_comparison()
 
 
@@ -5396,7 +5535,7 @@ async def run_short_side_comparison_endpoint(
     Pulls real historical data from Coinbase's public candles endpoint -
     30-90 seconds depending on that endpoint."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_short_side_comparison(
         grid_pct=grid_pct, num_levels=num_levels, funding_8h=funding_8h)
 
@@ -5437,7 +5576,7 @@ async def run_grid_rotation_effectiveness_backtest_endpoint(
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     kwargs = {}
     if grid_pct is not None:
         kwargs["grid_pct"] = grid_pct
@@ -5467,7 +5606,7 @@ async def set_crypto_exit_mode(payload: SetExitModeRequest):
     real-time flag in this codebase (STOP_TRADING, passive mode, the
     Alpaca entry variant)."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     mode = payload.mode.strip().lower()
     if mode not in crypto_family_tree_bot_module.EXIT_MODE_LEVELS:
         raise HTTPException(status_code=400, detail=f"mode must be one of {crypto_family_tree_bot_module.EXIT_MODE_LEVELS}, got {payload.mode!r}")
@@ -5497,7 +5636,7 @@ async def set_crypto_reversal_trade(payload: SetReversalTradeRequest):
     docstring for why this is deliberately scoped to a genuine STOP HIT
     only, never a BRANCH BREACH/EQUITY FLOOR BREACH forced exit."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     await crypto_family_tree_bot_module.set_reversal_trade_active(payload.enabled)
     log.info(f"[dashboard] 🔁 Live crypto STOP-HIT reversal buy {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "reversal_trade_active": payload.enabled}
@@ -5528,7 +5667,7 @@ async def run_trailing_stop_pct_sweep_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     can take 30-90 seconds depending on that endpoint's response time."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_trailing_stop_pct_sweep_comparison()
 
 
@@ -5552,7 +5691,7 @@ async def set_crypto_trailing_stop_pct(payload: SetTrailingStopPctRequest):
     very next cycle for every branch - no restart needed, same as every
     other real-time flag in this codebase."""
     if crypto_family_tree_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_family_tree_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_family_tree_bot"))
     try:
         await crypto_family_tree_bot_module.set_live_trailing_stop_pct(payload.pct)
     except ValueError as e:
@@ -5585,7 +5724,7 @@ async def run_crypto_stop_hit_reversal_backtest():
     Pulls real historical data from Coinbase's public candles endpoint -
     time depends on how many distinct coins have real STOP HIT history."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_stop_hit_reversal_backtest()
 
 
@@ -5606,7 +5745,7 @@ async def run_crypto_forced_exit_reversal_backtest():
     for the full real methodology - identical to the stop-hit version,
     only the source exit_reason filter differs."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_forced_exit_reversal_backtest()
 
 
@@ -5619,7 +5758,7 @@ async def run_alpaca_fib_gold_zone_backtest():
     Alpaca strategy on the same 30 days of 15-minute bars. No commission;
     stop and time-out exits charged 5 bps of slippage."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_fib_gold_zone_backtest()
 
 
@@ -5638,7 +5777,7 @@ async def run_alpaca_selection_backtest():
     Pulls real historical data from Alpaca's market-data API concurrently
     across 11 symbols - can take up to ~60 seconds."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_full_backtest()
 
 
@@ -5654,7 +5793,7 @@ async def run_alpaca_exit_rule_comparison():
     should_exit_position() for every scenario. Returns per-scenario totals
     (summed across every symbol) plus a per-symbol breakdown."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_exit_rule_sensitivity_comparison()
 
 
@@ -5673,7 +5812,7 @@ async def run_alpaca_momentum_comparison():
     Returns totals for both strategies (summed across every symbol) plus
     a per-symbol breakdown."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_comparison()
 
 
@@ -5692,7 +5831,7 @@ async def run_alpaca_momentum_comparison_multi_window(num_windows: int = 3):
     historical 30-day windows (most recent first) and reports how many
     windows each strategy actually won, not just one sample's total."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_momentum_vs_mean_reversion_multi_window(num_windows=num_windows)
 
 
@@ -5712,7 +5851,7 @@ async def run_alpaca_combined_strategy_backtest():
     pool) and a theoretical "unconstrained" ceiling (capital never binds),
     so the honest real effect of combining is directly visible either way."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_combined_dual_strategy_backtest()
 
 
@@ -5730,7 +5869,7 @@ async def run_alpaca_entry_signal_ab_test():
     avg holding time, longest losing streak - not just total P&L) plus a
     per-symbol P&L breakdown across all four."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_entry_signal_ab_test()
 
 
@@ -5749,7 +5888,7 @@ async def run_alpaca_narrow_range_breakout_backtest():
     above/below a narrow state." Reports the real hit rate against an
     honest 50% coin-flip baseline, split by breakout direction."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_narrow_range_breakout_backtest()
 
 
@@ -5764,7 +5903,7 @@ async def run_alpaca_opening_bar_breakout_backtest():
     bar 1's high + $0.01 (never waiting for bar 2 to close); real stop
     at bar 1's own low; real exit once a second "push" confirms."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_opening_bar_breakout_backtest()
 
 
@@ -5778,7 +5917,7 @@ async def run_alpaca_opening_bar_multi_entry_comparison():
     established real trend through every subsequent confirmed pullback/
     breakout leg, on the identical real historical bars."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_opening_bar_multi_entry_comparison()
 
 
@@ -5791,7 +5930,7 @@ async def run_alpaca_opening_bar_narrow_state_comparison():
     percentile-range method, and the account owner's own newly-described
     real 20/200 SMA-convergence method."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_opening_bar_narrow_state_comparison()
 
 
@@ -5807,7 +5946,7 @@ async def run_alpaca_wide_state_contrarian_backtest():
     prop_bot.py's real shorting is a documented, confirmed account-level
     restriction, not a bug in this backtest."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_wide_state_contrarian_backtest()
 
 
@@ -5820,7 +5959,7 @@ async def run_alpaca_opening_bar_short_side_backtest():
     prop_bot.py's real shorting is a documented, confirmed account-level
     restriction, not a bug in this backtest."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_opening_bar_short_side_backtest()
 
 
@@ -5832,7 +5971,7 @@ async def run_alpaca_scaled_entry_comparison_backtest():
     two ways: the existing single-shot entry vs. the account owner's own
     real half-in-then-two-adds scaling mechanic."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_scaled_entry_comparison_backtest()
 
 
@@ -5844,7 +5983,7 @@ async def run_alpaca_red_bar_takeout_backtest():
     an ordinary red bar 1 (not a qualifying Elephant or Tail) whose high
     still gets taken out by a later real bar."""
     if alpaca_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="alpaca_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("alpaca_selection_backtest"))
     return await alpaca_selection_backtest_module.run_red_bar_takeout_backtest()
 
 
@@ -5866,7 +6005,7 @@ async def run_macro_event_backtest_endpoint():
     sample-size caveat (currently just 2 real events - far too few to
     conclude anything from yet)."""
     if macro_event_backtest_module is None:
-        raise HTTPException(status_code=500, detail="macro_event_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("macro_event_backtest"))
     return await macro_event_backtest_module.run_macro_event_backtest()
 
 
@@ -6343,7 +6482,7 @@ async def liquidate_alpaca_and_buy_spy(db: AsyncSession = Depends(get_db)):
     Alpaca positions list already shows it accurately going forward,
     straight from Alpaca itself."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     pb = prop_bot_module
     if not (ALPACA_KEY and ALPACA_SECRET):
         raise HTTPException(status_code=500, detail="Alpaca credentials not configured")
@@ -6449,7 +6588,7 @@ async def resume_alpaca_active_trading():
     cycle will simply resume scanning for new momentum entries and start
     managing whatever they open going forward."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     was_passive = await prop_bot_module.is_alpaca_passive_mode()
     await prop_bot_module.set_alpaca_passive_mode(False)
     log.info("[dashboard] 🔓📉 Alpaca active trading resumed (passive/buy-and-hold-SPY mode turned off)")
@@ -6478,7 +6617,7 @@ async def set_alpaca_entry_variant(payload: SetEntryVariantRequest):
     every other real-time flag in this codebase (STOP_TRADING, passive
     mode)."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     variant = payload.variant.strip().upper()
     if variant not in prop_bot_module.ENTRY_VARIANT_LEVELS:
         raise HTTPException(status_code=400, detail=f"variant must be one of {prop_bot_module.ENTRY_VARIANT_LEVELS}, got {payload.variant!r}")
@@ -6515,7 +6654,7 @@ async def set_alpaca_strategy_family(payload: SetStrategyFamilyRequest):
     combination. Takes effect on prop_bot.py's very next cycle - no
     restart needed, same as every other real-time flag in this codebase."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     family = payload.family.strip().lower()
     if family not in prop_bot_module.STRATEGY_FAMILIES:
         raise HTTPException(status_code=400, detail=f"family must be one of {prop_bot_module.STRATEGY_FAMILIES}, got {payload.family!r}")
@@ -6554,7 +6693,7 @@ async def get_alpaca_branches_status():
     a legacy branch with no `next_unlock_tier` on record yet (a row
     created before this column existed)."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     branches = await prop_bot_module.get_alpaca_branches()
     mode_active = await prop_bot_module.is_alpaca_branch_mode_active()
     rows = []
@@ -6629,7 +6768,7 @@ async def get_alpaca_branch_trade_history_endpoint():
     aggregation, not a second, separately-computed number. Read-only -
     never places an order."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     return await prop_bot_module.get_alpaca_branch_trade_history()
 
 
@@ -6646,7 +6785,7 @@ async def get_alpaca_branch_symbol_rankings():
     actually trade. Read-only - never places an order, never runs a new
     backtest (that's still the separate manual "Run Backtest" button)."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
 
     top_ranked = await prop_bot_module._compute_top_ranked_symbols()
     excluded = await prop_bot_module.get_effective_excluded_symbols()
@@ -6700,7 +6839,7 @@ async def create_alpaca_branch_endpoint(payload: CreateAlpacaBranchRequest):
     isn't a real FUTURES key, or if it's already claimed by another
     active branch."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     if payload.contract not in prop_bot_module.FUTURES:
         raise HTTPException(status_code=400, detail=f"{payload.contract!r} is not a real FUTURES contract. Choose one of: {list(prop_bot_module.FUTURES.keys())}")
     if payload.allocated_usd <= 0:
@@ -6743,7 +6882,7 @@ async def set_alpaca_branch_mode_endpoint(payload: SetAlpacaBranchModeRequest):
     can be created while the mode is off (so they're ready before flipping
     it on), but nothing trades until this is explicitly enabled."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     await prop_bot_module.set_alpaca_branch_mode(payload.enabled)
     log.info(f"[dashboard] 🔀 Alpaca branch mode {'ENABLED - real branch trading is now live' if payload.enabled else 'disabled'}")
     return {"status": "updated", "mode_active": payload.enabled}
@@ -6757,7 +6896,7 @@ async def get_opening_bar_status():
     never places an order. Off by default; a true no-op until explicitly
     enabled here."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     mode_active = await prop_bot_module.is_opening_bar_live_active()
     positions = []
     for contract, pos in prop_bot_module.open_opening_bar_positions.items():
@@ -6791,7 +6930,7 @@ async def set_opening_bar_live_mode_endpoint(payload: SetOpeningBarLiveModeReque
     size_position()/check_margin_safety() every other real entry on this
     account already goes through, once enabled."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     await prop_bot_module.set_opening_bar_live_active(payload.enabled)
     log.info(f"[dashboard] 🐘 Opening-bar live trading {'ENABLED - real orders will be placed' if payload.enabled else 'disabled'}")
     return {"status": "updated", "mode_active": payload.enabled}
@@ -6816,7 +6955,7 @@ async def get_equity_handover_status():
     not be surprised by it afterwards.
     """
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     active = await prop_bot_module.is_market_brain_equities_active()
 
     exposure = ceiling = None
@@ -6872,7 +7011,7 @@ async def set_equity_handover_endpoint(payload: SetEquityHandoverRequest):
          without a redeploy; the runner re-reads this every cycle.
     """
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     await prop_bot_module.set_market_brain_equities_active(payload.enabled)
     what = ("ENABLED - market_brain now trades equities, prop_bot enters none"
             if payload.enabled else
@@ -6897,7 +7036,7 @@ async def set_alpaca_branch_active_endpoint(bot_name: str, payload: SetAlpacaBra
     exit protection until it closes normally, it just won't open a new
     one while paused."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(AlpacaBranch).where(AlpacaBranch.bot_name == bot_name))
         branch = result.scalar_one_or_none()
@@ -6948,7 +7087,7 @@ async def manual_open_prop_position(ticker: str):
     actually execute today (shorting is disabled on the real account -
     see get_account_shorting_enabled)."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     pb = prop_bot_module
     ticker = ticker.upper()
 
@@ -7079,7 +7218,7 @@ async def alpaca_entry_eligibility():
     ineligible with that one shared reason, matching how "Trade this"
     itself would fail identically on every symbol in that state."""
     if prop_bot_module is None:
-        raise HTTPException(status_code=500, detail="prop_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     pb = prop_bot_module
 
     if os.getenv("STOP_TRADING", "false").lower() == "true":
@@ -8489,7 +8628,7 @@ async def capital_mobility():
     source. Nothing here re-derives it.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import trigger_model
 
     try:
@@ -8864,7 +9003,7 @@ async def startup_fix_report_endpoint():
 @router.get("/grid-status")
 async def get_grid_status_endpoint(fresh: int = 0):
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     _now = time.time()
     if (not fresh and _GRID_STATUS_CACHE["payload"] is not None
             and (_now - _GRID_STATUS_CACHE["at"]) < _GRID_STATUS_TTL_SECONDS):
@@ -9081,7 +9220,7 @@ async def get_grid_trade_history_endpoint(limit: int = 50):
     taking any distribution off these rows.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     data = await crypto_grid_bot_module.get_grid_trade_history(limit_recent=limit)
     # Force fresh data on every request - prevent browser caching stale trade history
     return JSONResponse(
@@ -9120,7 +9259,7 @@ async def set_crypto_strategy_override_endpoint(payload: SetCryptoStrategyOverri
     crypto_strategy_config makes, because an unrecognised value must never
     start a substitute that spends real money."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     mode = (payload.mode or "").strip() or None
     try:
         await crypto_grid_bot_module.set_db_strategy_override(mode)
@@ -9136,7 +9275,7 @@ async def get_crypto_strategy_override_endpoint():
     """What the DB-persisted strategy override currently says, and what the
     environment says, so the two can be compared without reading logs."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     db_mode = await crypto_grid_bot_module.get_db_strategy_override()
     return {
         "db_strategy_override": db_mode,
@@ -9157,7 +9296,7 @@ async def set_grid_bot_mode_endpoint(payload: SetGridBotModeRequest):
     enabled - see crypto_grid_bot.is_grid_bot_active's own docstring for
     why it currently defaults to True."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_grid_bot_active(payload.enabled)
     log.info(f"[dashboard] 🔲 Crypto grid bot mode {'ENABLED - real grid branches are now live' if payload.enabled else 'disabled'}")
     return {"status": "updated", "mode_active": payload.enabled}
@@ -9169,7 +9308,7 @@ async def switch_to_scale_bot_endpoint():
     and activates Scale Bot for dynamic capital scaling based on performance.
     Grid Bot branches remain in the database but don't trade until switched back."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
 
     # Disable Grid Bot
     await crypto_grid_bot_module.set_grid_bot_active(False)
@@ -9188,7 +9327,7 @@ async def switch_to_grid_bot_endpoint():
     """Switch from Scale Bot mode back to Grid Bot mode. Disables Scale Bot
     and reactivates Grid Bot for standard grid-trading strategy."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
 
     # Enable Grid Bot
     await crypto_grid_bot_module.set_grid_bot_active(True)
@@ -9216,7 +9355,7 @@ async def set_grid_dynamic_spacing_endpoint(payload: SetGridDynamicSpacingReques
     that should inform whether to turn this on. Takes effect on the live
     bot's very next cycle for every branch, no restart needed."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_dynamic_spacing_active(payload.enabled)
     log.info(f"[dashboard] 🎯 Grid Bot fee-tier-aware dynamic spacing {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "dynamic_spacing_active": payload.enabled}
@@ -9238,7 +9377,7 @@ async def set_grid_avg_swing_spacing_endpoint(payload: SetGridAvgSwingSpacingReq
     to be active. Takes effect on the live bot's very next cycle for
     every branch, no restart needed."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_avg_swing_spacing_active(payload.enabled)
     log.info(f"[dashboard] 📏 Grid Bot average-swing-based dynamic spacing {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "avg_swing_spacing_active": payload.enabled}
@@ -9266,7 +9405,7 @@ async def set_grid_maker_orders_endpoint(payload: SetGridMakerOrdersRequest):
 
     Takes effect on the live bot's very next cycle, no restart needed."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_maker_orders_active(payload.enabled)
     log.info(f"[dashboard] 💸 Grid Bot maker (post-only limit) orders {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "maker_orders_active": payload.enabled}
@@ -9319,7 +9458,7 @@ async def set_adopted_stop_endpoint(payload: SetAdoptedStopRequest):
     the response says so and the effective mode does not change.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_adopted_stop_active(payload.enabled)
 
     mode = await crypto_grid_bot_module.adopted_stop_mode()
@@ -9413,7 +9552,7 @@ async def set_grid_maker_only_endpoint(payload: SetGridMakerOnlyRequest):
     them would mean a bot that cannot trade at all. Takes effect on the
     live bot's very next cycle, no restart needed."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_maker_only_active(payload.enabled)
     floor = await crypto_grid_bot_module.fee_safe_floor_pct()
     log.info(f"[dashboard] 🎯 Grid Bot maker-ONLY mode {'ENABLED - market fallback REMOVED' if payload.enabled else 'disabled - market fallback restored'}; "
@@ -9443,7 +9582,7 @@ async def set_grid_spacing_override_endpoint(payload: SetGridSpacingOverrideRequ
     Takes effect on the live bot's very next cycle for every branch (both
     num_levels and grid_pct), no restart needed."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         await crypto_grid_bot_module.set_live_grid_spacing_override(payload.label)
     except ValueError as e:
@@ -9466,7 +9605,7 @@ async def set_grid_auto_rotate_endpoint(payload: SetGridAutoRotateRequest):
     already live via the $20 Quick Buy button. Takes effect on the live
     bot's very next scheduled sweep, no restart needed."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_grid_auto_rotate_active(payload.enabled)
     log.info(f"[dashboard] 🔁 Grid Bot automatic idle-cash rotation {'ENABLED' if payload.enabled else 'disabled'}")
     return {"status": "updated", "auto_rotate_active": payload.enabled}
@@ -9512,7 +9651,7 @@ async def set_grid_branch_levels_endpoint(payload: SetGridBranchLevelsRequest):
     returns the plan and changes nothing.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     if os.getenv("STOP_TRADING", "false").lower() == "true":
         raise HTTPException(status_code=400,
                             detail="STOP_TRADING is set - configuration changes are paused")
@@ -9612,7 +9751,7 @@ async def create_grid_branch_endpoint(payload: CreateGridBranchRequest):
     reference_price), never a trade by itself. Refuses a non-positive
     amount or a coin already claimed by another active grid branch."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         branch = await crypto_grid_bot_module.create_grid_branch(payload.product_id, payload.allocated_usd)
     except ValueError as e:
@@ -9641,7 +9780,7 @@ async def grid_quick_buy_endpoint(payload: GridQuickBuyRequest):
     market buy; the branch's own first real fill happens on its own next
     cycle, on a genuine 1% dip, same as every other grid branch."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.quick_buy_best_coin(payload.amount_usd)
     except ValueError as e:
@@ -9667,7 +9806,7 @@ async def create_multiple_grid_branches_endpoint(payload: CreateMultipleGridBran
     genuinely managed the moment one real attempt fails, never rolls
     back what already succeeded)."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.create_multiple_grid_branches(payload.count, payload.amount_per_branch)
     except ValueError as e:
@@ -9704,7 +9843,7 @@ async def fund_grid_from_tree_endpoint(payload: FundGridFromTreeRequest):
     destination is funded first; the source is only debited after that
     real fill/bookkeeping succeeds."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.fund_grid_from_tree_branch(
             payload.from_bot_name, payload.amount, product_id=payload.product_id, to_grid_bot_name=payload.to_grid_bot_name,
@@ -9737,7 +9876,7 @@ async def withdraw_grid_branch_endpoint(bot_name: str, payload: WithdrawGridBran
     $0.00 deletes the row outright and releases its coin claim, rather
     than leaving a real empty stub behind."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.withdraw_from_grid_branch(bot_name, payload.amount)
     except ValueError as e:
@@ -9761,7 +9900,7 @@ class ReallocateAdaptiveFleetRequest(BaseModel):
 async def reallocate_adaptive_fleet_endpoint(payload: ReallocateAdaptiveFleetRequest):
     """Atomically split one flat branch reservation across the nine-coin fleet."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         return await crypto_grid_bot_module.reallocate_grid_cash_across_adaptive_fleet(
             payload.from_bot_name, payload.amount,
@@ -9783,7 +9922,7 @@ async def get_spread_plan(target_branches: int = 7):
     Read-only. It never changes anything.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     plan = await crypto_grid_bot_module.spread_capital_evenly(
         target_branches=target_branches, dry_run=True)
 
@@ -9843,7 +9982,7 @@ async def spread_grid_capital_evenly(target_branches: int = 7, dry_run: bool = T
     dry_run=true (the default) returns the exact plan and changes nothing.
     Only FLAT branches are ever touched; nothing is sold."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         return await crypto_grid_bot_module.spread_capital_evenly(
             target_branches=target_branches, dry_run=dry_run)
@@ -9855,7 +9994,7 @@ async def spread_grid_capital_evenly(target_branches: int = 7, dry_run: bool = T
 async def rebalance_flat_grid_branches_endpoint():
     """Retire or rotate flat branches using the live minimum-edge rule."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     return await crypto_grid_bot_module.rebalance_flat_grid_branches_now()
 
 
@@ -9879,7 +10018,7 @@ async def grid_force_buy_endpoint(payload: ForceBuyRequest):
     step above its own entry like any other.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     result = await crypto_grid_bot_module.force_one_buy(payload.bot_name, payload.amount_usd)
     log.warning(f"[dashboard] 🔬 forced buy on {payload.bot_name}: {result.get('status')}")
     return result
@@ -9904,7 +10043,7 @@ async def grid_fee_reality_endpoint(limit: int = 250):
     Read-only.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     engine = crypto_grid_bot_module.engine
     import aiohttp
     async with aiohttp.ClientSession() as session:
@@ -10187,7 +10326,7 @@ async def grid_invariants_endpoint():
     the check ran and has an answer, which is not an HTTP error.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     g = crypto_grid_bot_module
     import invariants as inv
     results = []
@@ -10409,7 +10548,7 @@ async def grid_money_check_endpoint():
     open branches' remaining levels.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     data = await crypto_grid_bot_module.money_check()
     return JSONResponse(content=data, headers={
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
@@ -10440,7 +10579,7 @@ async def grid_harvest_preview_endpoint():
     and rotations together and the harvest never reads it as profit.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import profit_harvest
     data = await profit_harvest.plan(crypto_grid_bot_module, create=False)
     data["read_only"] = True
@@ -10478,7 +10617,7 @@ async def grid_rightsize_preview_endpoint():
     TOTAL ALLOCATED (GRID) and raises deployable cash by the same amount.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import branch_rightsize
     data = await branch_rightsize.plan(crypto_grid_bot_module)
     return JSONResponse(content=data, headers={
@@ -10522,7 +10661,7 @@ async def grid_rightsize_endpoint(payload: RightsizeRequest):
     Write-guarded like every POST on this router.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import branch_rightsize
     log.warning(f"[rightsize] REQUEST bot={payload.bot_name!r} "
                 f"amount={payload.amount_usd} dry_run={payload.dry_run}")
@@ -10541,7 +10680,7 @@ async def get_grid_fill_mix_endpoint():
     it until now, so neither answer could be chosen on evidence.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     return await crypto_grid_bot_module.get_fill_mix()
 
 
@@ -10560,7 +10699,7 @@ async def set_net_edge_gate_endpoint(payload: SetNetEdgeGateRequest):
     such buy is recorded as GATE_DISABLED.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     await crypto_grid_bot_module.set_net_edge_gate_active(payload.enabled)
     log.info(f"[dashboard] 🎯 Net-edge gate {'ENABLED' if payload.enabled else 'DISABLED'}")
     return {"status": "updated", "net_edge_gate_active": payload.enabled}
@@ -10572,7 +10711,7 @@ async def run_exit_distance_and_breaker_endpoint(days: int = 90, num_levels: int
     """SHADOW-MODE. Sweeps the EXIT distance separately from the entry
     distance, and sweeps the drawdown breaker. Places no orders."""
     if crypto_selection_backtest_module is None:
-        raise HTTPException(status_code=500, detail="crypto_selection_backtest module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_selection_backtest"))
     return await crypto_selection_backtest_module.run_exit_distance_and_breaker_sweeps(
         days=days, num_levels=num_levels, buy_pct=buy_pct)
 
@@ -10590,7 +10729,7 @@ async def tune_spacing_per_coin_endpoint(dry_run: bool = True, min_trips: int = 
     dry_run=true (the default) changes nothing and returns the plan.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     return await crypto_grid_bot_module.tune_spacing_per_coin(
         dry_run=dry_run, min_trips=min_trips,
         min_improvement_usd=min_improvement_usd, days=days)
@@ -10608,7 +10747,7 @@ async def reanchor_flat_grid_branches_endpoint():
     but reference_price.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     return await crypto_grid_bot_module.reanchor_flat_grid_branches_now()
 
 
@@ -10628,7 +10767,7 @@ async def move_cash_between_grid_branches_endpoint(payload: MoveCashBetweenGridB
     destination is funded first; the source is only debited after that
     real fill/bookkeeping succeeds."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.move_cash_between_grid_branches(
             payload.from_bot_name, payload.amount, to_bot_name=payload.to_bot_name, product_id=payload.product_id,
@@ -10652,7 +10791,7 @@ async def set_grid_branch_locked_endpoint(bot_name: str, payload: SetGridBranchL
     trading (buying real dips, selling real rises) is completely
     unaffected either way."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.set_grid_branch_locked(bot_name, payload.locked)
     except ValueError as e:
@@ -10671,7 +10810,7 @@ async def get_grid_cash_move_candidates_endpoint(bot_name: str):
     compare against the source branch's own current coin before
     confirming a move. Never moves anything itself."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
         result = await crypto_grid_bot_module.get_grid_cash_move_candidates(bot_name)
     except ValueError as e:
@@ -10694,7 +10833,7 @@ async def set_grid_branch_active_endpoint(bot_name: str, payload: SetGridBranchA
     codebase; existing slices just sit until price naturally reaches
     them, or a real manual close is added later."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     from models import CryptoGridBranch
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
@@ -10724,7 +10863,7 @@ async def close_all_grid_slices_endpoint():
     failure for any branch makes the real total honestly unknown rather
     than a guess, and is refused the same way."""
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     status = await crypto_grid_bot_module.get_grid_status()
     total = status.get("total_unrealized_net_usd")
     if total is None:
@@ -10769,7 +10908,7 @@ async def close_one_grid_branch_endpoint(product_id: str, dry_run: bool = True,
     by anyone holding the URL.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
 
     g = crypto_grid_bot_module
     status = await g.get_grid_status()
@@ -10916,7 +11055,7 @@ async def close_some_grid_slices_endpoint(product_id: str, slice_ids: str = "",
     Write-guarded like every POST on this router.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
 
     g = crypto_grid_bot_module
     status = await g.get_grid_status()
@@ -11095,7 +11234,7 @@ async def rotation_preview_endpoint(release_deployed_idle: bool = False):
     it reads live allocations, and this router's guard is uniform.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import rotation_task
 
     g = crypto_grid_bot_module
@@ -11164,7 +11303,7 @@ async def rotation_execute_endpoint(ticket: str, confirm: bool = False,
     branches; no order reaches the venue.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import rotation_task
 
     g = crypto_grid_bot_module
@@ -11243,7 +11382,7 @@ async def redeploy_freed_cash_endpoint(dry_run: bool = True,
     DRY RUN BY DEFAULT, and write-guarded like every POST here.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import redeploy_freed_cash as rfc
     from models import CryptoGridBranch, TradingBotState
     from sqlalchemy import select
@@ -11759,7 +11898,7 @@ async def free_locked_inventory_endpoint(dry_run: bool = True):
     DRY RUN BY DEFAULT. Write-guarded like every POST on this router.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import account_census
     import aiohttp as _aiohttp
     import free_locked_inventory as fli
@@ -11836,7 +11975,7 @@ async def reconcile_slices_endpoint(product_id: str = None, dry_run: bool = True
     Write-guarded like every POST on this router.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import account_census
     import aiohttp as _aiohttp
     import slice_reconcile
@@ -12307,7 +12446,7 @@ async def get_capital_productivity(hours: float = 48.0):
     noise, and the trade table does not go back far enough for a year.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import capital_productivity
     from models import CryptoGridTradeHistory
 
@@ -12395,7 +12534,7 @@ async def get_growth_model(hours: float = 720.0):
     nothing worth buying.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import growth_model as gmod
     from models import CryptoGridTradeHistory
 
@@ -12463,7 +12602,7 @@ async def get_parked_capital():
     computed twice from two places, is this codebase's recurring bug.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import parked_capital as pc
     import invariants as inv
 
@@ -12744,7 +12883,7 @@ async def mandate_compliance_endpoint(bot_key: str, days: int = 1):
 async def get_fleet_status():
     """Get Scaling Coordinator fleet status - active instances, profit, and scaling progress"""
     if scaling_coordinator_module is None:
-        raise HTTPException(status_code=500, detail="scaling_coordinator module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("scaling_coordinator"))
 
     status = await scaling_coordinator_module.get_fleet_status()
 
@@ -13219,7 +13358,7 @@ async def get_fleet_metrics(window_days: float = 1.0,
     from models import CryptoGridTradeHistory, CryptoActivityEvent
 
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     engine = crypto_grid_bot_module.engine
 
     grid = await crypto_grid_bot_module.get_grid_status()
@@ -14992,7 +15131,7 @@ async def idle_capital_set_armed(payload: SetIdleRotationArmedRequest):
     never out to unallocated cash. Disarmed it only observes.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import idle_rotation_worker
     result = await idle_rotation_worker.set_armed(bool(payload.armed))
     result["env_override"] = idle_rotation_worker.env_mode() or None
@@ -15024,7 +15163,7 @@ async def idle_capital_deploy_cash(dry_run: bool = True):
     past the 20% share rule.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import idle_cash
 
     status = await crypto_grid_bot_module.get_grid_status()
@@ -15079,7 +15218,7 @@ async def idle_capital_rotate(dry_run: bool = True):
     and never out to unallocated cash.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import idle_rotation_worker
     try:
         # require_arm=False: this is a write-guarded request a human made on
@@ -15107,7 +15246,7 @@ async def coin_evidence_report():
     positive result over a rising window has not been shown a falling one.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import coin_evidence
     hist = await crypto_grid_bot_module.get_grid_trade_history()
     trades = hist.get("recent_trades") or []
@@ -15162,7 +15301,7 @@ async def idle_capital_report():
     churned all three.
     """
     if crypto_grid_bot_module is None:
-        raise HTTPException(status_code=500, detail="crypto_grid_bot module not available")
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     import idle_capital
     status = await crypto_grid_bot_module.get_grid_status()
     history = await crypto_grid_bot_module.get_grid_trade_history()
