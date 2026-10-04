@@ -119,3 +119,95 @@ if __name__ == "__main__":
                 fails += 1; print(f"  ERROR {name}: {type(e).__name__}: {e}")
     print(f"\n{fails} failure(s)")
     sys.exit(1 if fails else 0)
+
+
+# --- past the trigger is only a fault if something could have been SOLD ---
+#
+# The trigger is branch-level (price vs the branch's re-anchoring
+# reference); profitability is slice-level (price vs that slice's entry).
+# On a branch that fell and re-anchored they come apart, and this check
+# used to fault the engine for a refusal that was correct.
+
+def Bs(pid, price, ref, slices, step=0.03):
+    """slices: list of dicts, so a test can set entry and net per slice."""
+    return {"product_id": pid, "current_price": price, "reference_price": ref,
+            "grid_pct": step, "slices": slices}
+
+
+def test_the_real_ondo_case_is_not_an_alarm():
+    """Live 2026-10-04. ONDO read +1.70% past its trigger and the fleet
+    reported BROKEN. Its reference had re-anchored to 0.47586 while its
+    only slice was bought at 0.53524, so the sale it was faulted for not
+    making would have LOST $0.98."""
+    r = ts.assess(hours_since_last_fill=19.3, refusals_by_product={},
+                  branches=[Bs("ONDO-USD", 0.49845, 0.47586,
+                               [{"qty": 26.68, "entry_price": 0.53524,
+                                 "unrealized_net_usd": -1.08}])])
+    assert r["past_trigger"] == [], r
+    assert r["verdict"] != "BROKEN", r
+    assert r["alarm"] is False
+
+
+def test_a_genuinely_sellable_slice_past_the_trigger_still_alarms():
+    """The failure this check exists for must still fire."""
+    r = ts.assess(hours_since_last_fill=10.0, refusals_by_product={},
+                  branches=[Bs("QNT-USD", 291.84, 145.0,
+                               [{"qty": 1, "entry_price": 145.0,
+                                 "unrealized_net_usd": 140.0}])])
+    assert r["verdict"] == "BROKEN" and r["alarm"] is True
+    assert r["past_trigger"][0]["product_id"] == "QNT-USD"
+
+
+def test_one_sellable_slice_among_losers_is_enough_to_alarm():
+    r = ts.assess(hours_since_last_fill=10.0,
+                  branches=[Bs("X-USD", 110.0, 100.0,
+                               [{"qty": 1, "entry_price": 200.0,
+                                 "unrealized_net_usd": -90.0},
+                                {"qty": 1, "entry_price": 50.0,
+                                 "unrealized_net_usd": 59.0}])])
+    assert r["past_trigger"][0]["product_id"] == "X-USD"
+    assert r["alarm"] is True
+
+
+def test_a_slice_net_negative_despite_being_gross_positive_is_not_sellable(self=None):
+    """Fees decide it, not the raw price. The engine's own net figure is
+    what gets read, so a slice up on price but down after both fee legs
+    does not count as a missed sale."""
+    r = ts.assess(hours_since_last_fill=10.0,
+                  branches=[Bs("X-USD", 110.0, 100.0,
+                               [{"qty": 1, "entry_price": 109.9,
+                                 "unrealized_net_usd": -0.4}])])
+    assert r["past_trigger"] == []
+
+
+def test_it_falls_back_to_gross_when_net_is_missing():
+    below = ts.assess(hours_since_last_fill=10.0,
+                      branches=[Bs("X-USD", 110.0, 100.0,
+                                   [{"qty": 1, "entry_price": 200.0}])])
+    assert below["past_trigger"] == [], "price under entry: nothing to sell"
+    above = ts.assess(hours_since_last_fill=10.0,
+                      branches=[Bs("X-USD", 110.0, 100.0,
+                                   [{"qty": 1, "entry_price": 50.0}])])
+    assert above["past_trigger"][0]["product_id"] == "X-USD"
+
+
+def test_an_unreadable_slice_still_counts_because_it_fails_toward_alarming():
+    """An unreadable slice is not evidence of health."""
+    r = ts.assess(hours_since_last_fill=10.0,
+                  branches=[Bs("X-USD", 110.0, 100.0, [{"qty": 1}])])
+    assert r["past_trigger"][0]["product_id"] == "X-USD"
+    assert r["alarm"] is True
+
+
+def test_six_underwater_parked_branches_do_not_pin_the_alarm_on():
+    """The state the fleet is actually in. None of these can sell at a
+    profit, so none of them is a missed sale."""
+    under = [Bs(p, 110.0, 100.0,
+                [{"qty": 1, "entry_price": 500.0,
+                  "unrealized_net_usd": -30.0}] * 3)
+             for p in ("ZEC-USD", "XRP-USD", "XLM-USD",
+                       "HBAR-USD", "BCH-USD", "LINK-USD")]
+    r = ts.assess(hours_since_last_fill=19.3, refusals_by_product={},
+                  branches=under)
+    assert r["past_trigger"] == []
+    assert r["verdict"] != "BROKEN", r

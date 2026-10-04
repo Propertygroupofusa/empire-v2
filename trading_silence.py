@@ -79,16 +79,56 @@ def assess(*, hours_since_last_fill, refusals_by_product=None,
     # A branch whose price is already PAST its sell trigger and has not
     # sold is the sharpest possible signal: the decision was made and the
     # order did not happen. QNT sat 39% past its trigger for hours.
+    # PAST THE TRIGGER IS ONLY A FAULT IF SOMETHING COULD HAVE BEEN SOLD.
+    #
+    # The trigger is branch-level: price against the branch's REFERENCE
+    # price, which re-anchors downward on dips. A slice's profitability is
+    # slice-level: price against that slice's own entry. Those come apart
+    # on any branch that fell and re-anchored, and then this check fired on
+    # a refusal that was correct.
+    #
+    # Live 2026-10-04: ONDO-USD read "+1.70% PAST its sell trigger and has
+    # not sold" and the whole fleet reported BROKEN. Its reference had
+    # re-anchored to 0.47586 while its only slice was bought at 0.53524, so
+    # at 0.49845 the sale it was being faulted for not making would have
+    # LOST $0.98. The engine declined, which is the same guard that has kept
+    # profit_target at 70 closes and zero negatives.
+    #
+    # With six underwater parked branches the old reading was not an
+    # occasional false positive, it was permanently on - and an alarm that
+    # is always on is one its owner learns to ignore, which is worse than
+    # no alarm.
+    #
+    # So a branch counts only when at least one slice could sell at a NET
+    # profit now. unrealized_net_usd is the engine's own fee-adjusted
+    # figure, so this asks exactly what the engine asks. It FAILS TOWARD
+    # ALARMING: if no slice carries that figure it falls back to gross
+    # (price above entry), and if neither can be read the branch still
+    # counts, because an unreadable slice is not evidence of health.
     past_trigger = []
     for b in (branches or ()):
         px, ref = _f(b.get("current_price")), _f(b.get("reference_price"))
         step = _f(b.get("grid_pct"))
-        if not (px and ref and step) or not (b.get("slices") or []):
+        slices = b.get("slices") or []
+        if not (px and ref and step) or not slices:
             continue
         over = (px / (ref * (1 + step)) - 1) * 100
-        if over > 0:
-            past_trigger.append({"product_id": b.get("product_id"),
-                                 "pct_past_trigger": round(over, 2)})
+        if over <= 0:
+            continue
+        nets = [_f(s.get("unrealized_net_usd")) for s in slices
+                if hasattr(s, "get")]
+        known = [n for n in nets if n is not None]
+        if known:
+            sellable = any(n > 0 for n in known)
+        else:
+            entries = [_f(s.get("entry_price")) for s in slices
+                       if hasattr(s, "get")]
+            gross = [e for e in entries if e is not None]
+            sellable = any(px > e for e in gross) if gross else True
+        if not sellable:
+            continue
+        past_trigger.append({"product_id": b.get("product_id"),
+                             "pct_past_trigger": round(over, 2)})
     past_trigger.sort(key=lambda r: -r["pct_past_trigger"])
 
     quiet = hrs >= QUIET_HOURS
