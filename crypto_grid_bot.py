@@ -88,6 +88,77 @@ CYCLE_SECONDS = 30
 # uses - below this, a real Coinbase order isn't worth placing.
 MIN_TRADE_USD = 5.0
 
+# THE FLOOR THAT KEEPS A BRANCH ALIVE, AT THE CHOKEPOINT THIS TIME.
+#
+# withdraw_from_grid_branch deletes a branch row it drains below a cent,
+# and a deleted branch takes its coin out of the fleet entirely - no
+# rule sells it, no breaker watches it, and any resting order against it
+# is left standing with nobody managing it.
+#
+# TWO MODULES ALREADY DISCOVERED THIS HAZARD SEPARATELY AND EACH PATCHED
+# ITS OWN SIDE. rotation_task.KEEP_BRANCH_ALIVE_USD = 15.0 exists because
+# a dry run "had this task take 100% of JASMY and TIA - both flat - which
+# would have silently destroyed two branches as a side effect of a
+# rotation... a deletion nobody asked for". profit_harvest.
+# KEEP_BRANCH_ALIVE_USD = 15.0 says the same thing in its own words.
+# Neither floor was ever at the function that does the deleting, so the
+# third caller - POST /grid-status/{bot}/withdraw - had no floor at all.
+#
+# That is the same argument the concentration gate settled on the stocks
+# side: guarding the callers one at a time leaves whichever path nobody
+# thought of. The floor belongs where the row dies.
+#
+# $15.00 is MIN_TRADE_USD x 3 levels - the smallest allocation that can
+# still place a real order, which is what makes a branch a branch rather
+# than a row. NOT A RISK LIMIT and not a cap on anything: it decides when
+# a branch stops existing, nothing else.
+#
+# allow_delete=True is the deliberate exception. Closing a branch on
+# purpose is a real thing the owner asked for by name ("can you make it
+# to where I can pull some money out of this Branch"), so the capability
+# stays - it just cannot happen as a side effect any more.
+GRID_KEEP_BRANCH_ALIVE_USD = MIN_TRADE_USD * 3
+
+
+def _attributed_caller(skip=2):
+    """"module.function <- module.function" for the code that called in.
+
+    WHY THIS EXISTS. On 2026-10-04 the FLOKI-USD branch went flat on a
+    +$0.10 profit_target close and its row was gone inside the hour,
+    taking $63.73 of claim with it and leaving $43.48 of FLOKI in the
+    wallet that no branch owns and 75% of which sits under a resting
+    order nobody manages. The money was all accounted for; the mechanism
+    was not. Every candidate was ruled out from outside - the harvest
+    keeps $15, rightsize floors at $15, auto-rotate reads fully off, and
+    the write guard recorded ZERO HTTP write attempts across a process
+    uptime that predated the deletion - and the answer is still unknown,
+    because nothing recorded who called.
+
+    Same lesson as the anonymous Alpaca orders in prop_bot: "An order
+    that cannot be traced to its caller cannot be debugged." A caller=
+    argument is preferred where one is passed; this is the fallback so
+    that a path nobody updated still leaves a name.
+
+    Best effort by construction. A missing frame costs a diagnostic,
+    never a transaction, so it degrades to "unattributed" rather than
+    raising inside a money path.
+    """
+    try:
+        names = []
+        frame = sys._getframe(skip)
+        while frame is not None and len(names) < 2:
+            mod = frame.f_globals.get("__name__", "?")
+            # Our own frames say nothing, and the event loop's say less -
+            # "asyncio.events._run" was the second name on every line of
+            # the first run of this.
+            if mod != __name__ and not mod.startswith(("asyncio", "concurrent.")):
+                names.append(f"{mod}.{frame.f_code.co_name}")
+            frame = frame.f_back
+        return " <- ".join(names) if names else "unattributed"
+    except Exception:
+        return "unattributed"
+
+
 # Real per-branch drawdown circuit breaker - the direct grid-side
 # counterpart to crypto_family_tree_bot.py's own DRAWDOWN_BREAKER_PCT
 # (see that file's "Real per-branch drawdown circuit breaker, chosen
@@ -3412,7 +3483,8 @@ async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_ca
     return branch
 
 
-async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBranch:
+async def add_cash_to_grid_branch(bot_name: str, amount: float, *,
+                                  caller: str | None = None) -> CryptoGridBranch:
     """Adds real cash to an EXISTING grid branch's own allocation - the
     one real capability this module never had before
     fund_grid_from_tree_branch() below needed it (every prior path only
@@ -3427,6 +3499,7 @@ async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBra
     forward. Refuses a non-positive amount or an unknown bot_name."""
     if amount <= 0:
         raise ValueError("amount must be positive")
+    _who = caller or _attributed_caller()
     async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == bot_name))
         branch = result.scalar_one_or_none()
@@ -3436,11 +3509,13 @@ async def add_cash_to_grid_branch(bot_name: str, amount: float) -> CryptoGridBra
         branch.num_levels = await _effective_num_levels(branch.allocated_usd)
         await db.commit()
         await db.refresh(branch)
-    log.info(f"[GRID] 💰 Added ${amount:.2f} to {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels)")
+    log.info(f"[GRID] 💰 Added ${amount:.2f} to {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels) | called by: {_who}")
     return branch
 
 
-async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
+async def withdraw_from_grid_branch(bot_name: str, amount: float, *,
+                                    allow_delete: bool = False,
+                                    caller: str | None = None) -> dict:
     """Pulls real cash OUT of an existing grid branch's own allocation -
     the reverse of add_cash_to_grid_branch(). Built per the account
     owner's own direct request after seeing a real $994.65 STX-USD
@@ -3494,20 +3569,47 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float) -> dict:
         if amount > branch.allocated_usd + 0.01:
             raise ValueError(f"{bot_name} only has ${branch.allocated_usd:.2f} real allocated - can't withdraw ${amount:.2f}")
 
+        who = caller or _attributed_caller()
+
+        # THE KEEP-ALIVE FLOOR. See GRID_KEEP_BRANCH_ALIVE_USD above for
+        # why it lives here and not in the three callers that each grew
+        # their own copy of it.
+        _remaining = round(branch.allocated_usd - amount, 2)
+        if _remaining < GRID_KEEP_BRANCH_ALIVE_USD and not allow_delete:
+            raise ValueError(
+                f"withdrawing ${amount:,.2f} would leave {bot_name} with "
+                f"${_remaining:,.2f}, under the ${GRID_KEEP_BRANCH_ALIVE_USD:,.2f} "
+                f"keep-alive floor - a branch below it is deleted, and a deleted "
+                f"branch takes its coin out of the fleet with nothing left "
+                f"watching it. Withdraw ${max(0.0, branch.allocated_usd - GRID_KEEP_BRANCH_ALIVE_USD):,.2f} "
+                f"or less, or pass allow_delete=True to close {bot_name} on "
+                f"purpose. Asked for by: {who}"
+            )
+
         branch.allocated_usd -= amount
         deleted = branch.allocated_usd < 0.01
         if deleted:
             product_id = branch.product_id
+            # LOUD, and it names who. A branch disappearing is the one
+            # event here that cannot be undone by writing a number back.
+            log.warning(
+                f"[GRID] 🗑️ DELETING BRANCH {bot_name} ({product_id}) - "
+                f"${amount:,.2f} withdrawn drained it to "
+                f"${branch.allocated_usd:,.2f}. Its coin is now owned by no "
+                f"branch: no grid rule will sell it, no breaker watches it, "
+                f"and any resting order against it stands unmanaged. "
+                f"Called by: {who} (allow_delete={allow_delete})"
+            )
             await db.delete(branch)
             await db.commit()
             log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - fully drained, branch removed and {product_id} released")
-            return {"bot_name": bot_name, "product_id": product_id, "amount": amount, "remaining_allocated_usd": 0.0, "branch_deleted": True}
+            return {"bot_name": bot_name, "product_id": product_id, "amount": amount, "remaining_allocated_usd": 0.0, "branch_deleted": True, "caller": who}
 
         branch.num_levels = await _effective_num_levels(branch.allocated_usd)
         branch.peak_equity = branch.allocated_usd
         await db.commit()
         await db.refresh(branch)
-    log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels), freed back to real spendable cash")
+    log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels), freed back to real spendable cash | called by: {who}")
     return {
         "bot_name": bot_name, "product_id": branch.product_id, "amount": amount,
         "remaining_allocated_usd": round(branch.allocated_usd, 2), "branch_deleted": False,

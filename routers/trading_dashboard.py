@@ -9935,6 +9935,12 @@ async def fund_grid_from_tree_endpoint(payload: FundGridFromTreeRequest):
 
 class WithdrawGridBranchRequest(BaseModel):
     amount: float
+    # Closing a branch on purpose stays possible - it just has to be said
+    # out loud now. withdraw_from_grid_branch refuses to drain a branch
+    # below its keep-alive floor unless this is true, because the floor
+    # was added after a branch vanished with nobody able to say what
+    # deleted it. Defaults to False so no caller deletes one by accident.
+    allow_delete: bool = False
 
 
 @router.post("/grid-status/{bot_name}/withdraw")
@@ -9958,7 +9964,10 @@ async def withdraw_grid_branch_endpoint(bot_name: str, payload: WithdrawGridBran
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
     try:
-        result = await crypto_grid_bot_module.withdraw_from_grid_branch(bot_name, payload.amount)
+        result = await crypto_grid_bot_module.withdraw_from_grid_branch(
+            bot_name, payload.amount,
+            allow_delete=payload.allow_delete,
+            caller="dashboard POST /grid-status/{bot_name}/withdraw")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return result
