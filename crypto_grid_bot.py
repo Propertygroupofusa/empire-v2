@@ -192,6 +192,54 @@ SELF_TUNE_MIN_MULTIPLIER = AVG_SWING_SPACING_MULTIPLIER
 SELF_TUNE_MAX_MULTIPLIER = 3.0
 SELF_TUNE_POOR_WIN_RATE_PCT = 40.0
 SELF_TUNE_GOOD_WIN_RATE_PCT = 60.0
+
+# ---- THE LEARNED MULTIPLIER REACHES A FIXED STEP, ONE WAY ONLY -------------
+# _maybe_self_tune_branch_spacing has been running hourly and writing a real,
+# per-branch self_tuned_multiplier out of that branch's own last five REAL
+# closed trades. Its only consumer sits behind `elif is_avg_swing_spacing_active()`
+# in the spacing chain - and a promoted candidate takes the `if` above it and
+# returns. With grid_spacing_override set to 3_levels_2.5pct, as it is live,
+# that elif is unreachable: the fleet has been learning into a void.
+#
+# Reconnecting it wholesale is not the answer. Full avg-swing spacing sizes a
+# step at multiplier x the coin's own swing with only a fee-safe floor under
+# it (~0.9%), so on a calm coin it can land far BELOW today's ~3.00% step.
+# Narrowing a step is the one thing the account owner has ruled out, in those
+# words, and the measured record backs him: the retired 2.00%-step era lost 19
+# of 82 trades where the current wider one has lost 3 of 114.
+#
+# So the learned multiplier is admitted as a ONE-SIDED FLOOR. Two guards make
+# that structural rather than a matter of care:
+#   1. it is consulted only when the branch has been widened ABOVE the
+#      validated 1.5x default - which _maybe_self_tune_branch_spacing does
+#      only after a genuinely poor real win rate (<40% over 5 closes);
+#   2. it is applied through max(), so the step can only ever move wider.
+# A branch on a good run eases its multiplier back toward 1.5x and this does
+# nothing at all - the fixed step simply stands.
+#
+# This is the ONDO/TON failure mode answered with evidence rather than a new
+# gate. Those three losses were coins that fell 8-15% into a step that did not
+# respect how far they move; a branch that keeps stopping out now widens its
+# own step automatically, from its own record, without anyone watching.
+#
+# OFF BY DEFAULT. Nothing changes until the account owner arms it, because it
+# changes real spacing on real branches.
+SELF_TUNE_WIDENS_FIXED_SPACING = os.getenv(
+    "GRID_SELF_TUNE_WIDENS_FIXED_SPACING", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def self_tune_widening_multiplier(branch) -> float:
+    """The branch's learned multiplier when it has EARNED a widening, else
+    None. Never returns a value at or below the validated default, so a
+    caller cannot use this to narrow anything."""
+    m = getattr(branch, "self_tuned_multiplier", None)
+    if m is None:
+        return None
+    try:
+        m = float(m)
+    except (TypeError, ValueError):
+        return None
+    return m if m > AVG_SWING_SPACING_MULTIPLIER else None
 # In-process throttle only, same pattern as _last_grid_auto_rotate_at
 # right below.
 _last_grid_self_tune_at = 0.0
@@ -6572,6 +6620,21 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     if override_cfg is not None:
         new_grid_pct = override_cfg["grid_pct"]
         spacing_log_note = f"real promoted candidate {grid_spacing_override!r}"
+        # The branch's own learned multiplier, admitted as a FLOOR only. See
+        # SELF_TUNE_WIDENS_FIXED_SPACING. _widen is None unless this branch has
+        # actually been widened above the validated default by its own poor
+        # real record, and max() means the step can never move narrower.
+        _widen = (self_tune_widening_multiplier(branch)
+                  if SELF_TUNE_WIDENS_FIXED_SPACING else None)
+        if _widen is not None:
+            _swing_pct, _avg = await compute_avg_swing_grid_pct(
+                session, branch.product_id, multiplier=_widen)
+            if _swing_pct is not None and _swing_pct > new_grid_pct:
+                spacing_log_note = (
+                    f"{spacing_log_note}, WIDENED to {_swing_pct*100:.3f}% by this "
+                    f"branch's own self-tuned {_widen}x on a {(_avg or 0)*100:.3f}% "
+                    f"avg swing - its own last trades asked for more room")
+                new_grid_pct = max(new_grid_pct, _swing_pct)
     elif await is_avg_swing_spacing_active():
         effective_multiplier = branch.self_tuned_multiplier if branch.self_tuned_multiplier is not None else AVG_SWING_SPACING_MULTIPLIER
         swing_pct, avg_swing_pct = await compute_avg_swing_grid_pct(session, branch.product_id, multiplier=effective_multiplier)
