@@ -23,6 +23,35 @@
 //     BTC is 1.43%, ETH 1.78%, SOL 2.83%. A hardcoded 3% misreports
 //     every one of them.
 //
+// THE TRIGGER IS ONLY HALF THE BOT'S RULE, AND THE OTHER HALF DECIDES.
+//
+// A rise trigger firing does NOT mean a sale happens. The bot then asks
+// whether any open slice would net a real profit, and holds everything if
+// none would - crypto_grid_bot.py, _pick_profitable_slice_to_sell:
+//
+//     for s in slices:
+//         if _grid_slice_net_pnl(s.qty, s.entry_price, price, rate) > 0:
+//             return s
+//     return None          # caller skips selling entirely
+//
+// Modelling only the trigger made this panel promise sales that cannot
+// happen. Measured live 2026-10-04 11:35Z: it showed "2 at or past trigger
+// / should sell on the next cycle" for NEAR and ONDO, while the bot logged
+//
+//     real rise trigger fired ($0.4910 >= $0.4901) but no open slice would
+//     net a real profit at this price - holding every slice
+//
+// ONDO's only slice was -8.98% net of fees and NEAR's two were -5.4% and
+// -8.2%. Zero of the two "READY" branches could sell. The account owner
+// was reading that panel to find out whether the fleet was about to earn.
+//
+// The profit test is NOT recomputed here. Each slice already carries
+// unrealized_net_usd from the server, fee-adjusted and measured against
+// `marked_against` - which is the DECLARED true cost basis on an adopted
+// slice, not the adoption-day mark. Recomputing it in the browser would be
+// an approximation of the exact thing this file's header forbids
+// approximating, and would get every adopted slice wrong.
+//
 // Nothing here places, sizes or cancels an order. It reports distance.
 // ===============================================================
 const FLEET = (function () {
@@ -31,6 +60,20 @@ const FLEET = (function () {
     // A branch that cannot sell what it claims to hold is not "waiting" -
     // it is out of the game until its ledger is reconciled, and lumping
     // it in with the waiting ones hides the one thing that is fixable.
+    // Does any open slice net a real profit at the current price?
+    // true / false / null-for-unknown. Mirrors the bot's own loop: the
+    // FIRST slice that nets anything at all is enough, no floor.
+    function profitableSliceExists(slices) {
+        let sawNumber = false;
+        for (const s of slices || []) {
+            const net = Number(s && s.unrealized_net_usd);
+            if (!isFinite(net)) continue;
+            sawNumber = true;
+            if (net > 0) return true;
+        }
+        return sawNumber ? false : null;
+    }
+
     function readiness(branches, unbackedAssets) {
         const locked = new Set((unbackedAssets || []).map(
             a => String(a).toUpperCase()));
@@ -59,10 +102,16 @@ const FLEET = (function () {
                 const trigger = ref * (1 + gp);
                 row.trigger = trigger;
                 row.gapPct = (cur / trigger - 1) * 100;
+                // Tri-state on purpose. true = at least one slice nets a
+                // real profit, false = none does and the bot will hold,
+                // null = no slice carried a readable figure, so this pass
+                // cannot assert either way and must not pretend to.
+                row.sellable = profitableSliceExists(b.slices);
                 row.state = row.phantom ? 'LOCKED'
                     : slices === 0 ? 'NO_SLICES'
-                    : row.gapPct >= 0 ? 'READY'
-                    : 'WAITING';
+                    : row.gapPct < 0 ? 'WAITING'
+                    : row.sellable === false ? 'NO_PROFIT'
+                    : 'READY';
             }
             out.push(row);
         }
@@ -72,7 +121,7 @@ const FLEET = (function () {
     function summarise(rows) {
         const s = {
             total: rows.length, ready: 0, waiting: 0, locked: 0,
-            noSlices: 0, unreadable: 0,
+            noSlices: 0, unreadable: 0, noProfit: 0, noProfitUsd: 0,
             lockedUsd: 0, within1: 0, within3: 0, further: 0,
             // A branch past its trigger that CANNOT sell is the most
             // expensive row on the page: the move already happened and
@@ -89,6 +138,9 @@ const FLEET = (function () {
                 continue;
             }
             if (r.state === 'NO_SLICES') { s.noSlices++; continue; }
+            if (r.state === 'NO_PROFIT') {
+                s.noProfit++; s.noProfitUsd += r.allocated; continue;
+            }
             if (r.state === 'READY') { s.ready++; continue; }
             s.waiting++;
             if (r.gapPct >= -1) s.within1++;
@@ -111,8 +163,16 @@ const FLEET = (function () {
                  + `The move already happened and was not harvested - this is `
                  + `the only item here that is fixable today.`;
         if (s.ready > 0)
-            return `${s.ready} branch(es) are at or past their trigger and `
-                 + `should sell on the next cycle.`;
+            return `${s.ready} branch(es) are at or past their trigger AND `
+                 + `hold a slice that nets a profit - those should sell on `
+                 + `the next cycle.`;
+        if (s.noProfit > 0)
+            return `${s.noProfit} branch(es) reached their sell trigger, but `
+                 + `not one open slice would net a profit after fees, so the `
+                 + `bot is holding all of them - $${s.noProfitUsd.toFixed(2)} `
+                 + `allocated. The price target was met; the purchase price `
+                 + `is what is binding. This is the no-loss rule working, `
+                 + `not a stall.`;
         if (s.within1 > 0)
             return `Nothing is at its trigger yet; ${s.within1} branch(es) are `
                  + `within 1%. The fleet is waiting on price, not broken.`;

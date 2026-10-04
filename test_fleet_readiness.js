@@ -65,18 +65,93 @@ ok('NO_SLICES, not WAITING', r.state === 'NO_SLICES', r.state);
 ok('and it is not counted as waiting',
    F.summarise([r]).waiting === 0);
 
-console.log('\n[6] the real fleet, from the live payload');
-const live = JSON.parse(require('fs').readFileSync('/tmp/gs2.json','utf8'));
-const rows = F.readiness(live.branches, (live.backing.unbacked||[]).map(u=>u.asset));
+console.log('\n[6] a real payload, from a COMMITTED fixture');
+// This used to read /tmp/gs2.json - a file outside the repo. It was a live
+// snapshot when the assertions were written (23 branches, 8 locked,
+// $987.22); a later poll overwrote it with a different fleet and the
+// numbers stopped matching. On a fresh checkout the file is absent and the
+// whole suite dies on readFileSync. A test whose fixture can be overwritten
+// by unrelated work is not pinning anything.
+const live = JSON.parse(require('fs').readFileSync(
+  path.join(__dirname, 'fixtures', 'grid_status_sample.json'), 'utf8'));
+// OWNED, not AVAILABLE - the same choice loadFleetReadiness makes.
+const rows = F.readiness(live.branches,
+  (live.backing_owned.unbacked || []).map(u => u.asset));
 const S = F.summarise(rows);
-ok('all 23 branches classified', S.total === 23, String(S.total));
-ok('8 locked', S.locked === 8, String(S.locked));
-ok('locked capital is $987.22', near(S.lockedUsd, 987.22, 0.01), String(S.lockedUsd));
-ok('nothing is ready', S.ready === 0, String(S.ready));
+ok('every branch in the fixture is classified',
+   S.total === live.branches.length, `${S.total} of ${live.branches.length}`);
 ok('every row got a state', rows.every(r => r.state));
-ok('QNT is locked AND past trigger',
-   rows.some(r => r.asset === 'QNT' && r.state === 'LOCKED' && r.gapPct > 60),
-   JSON.stringify(rows.find(r => r.asset === 'QNT')));
+// Derived from the fixture, not frozen: a recount cannot silently drift.
+ok('the state counts add up to the total',
+   S.ready + S.noProfit + S.waiting + S.locked + S.noSlices + S.unreadable === S.total,
+   JSON.stringify(S));
+
+console.log('\n[6b] OWNED vs AVAILABLE, the error that cost four hours');
+// backing (AVAILABLE) names five assets; backing_owned (OWNED) names one.
+// SOL, LINK, ALGO and ACH own every unit they claim and are merely sitting
+// under the fleet's own resting sell orders. Classifying those as LOCKED
+// put $541.37 behind a red badge and, in the buy gate, refused four healthy
+// branches for four hours.
+const availNames = (live.backing.unbacked || []).map(u => u.asset).sort();
+const ownedNames = (live.backing_owned.unbacked || []).map(u => u.asset).sort();
+ok('the fixture really does contain the trap (the two lists differ)',
+   availNames.length > ownedNames.length, `${availNames} vs ${ownedNames}`);
+ok('only the genuinely-short asset is LOCKED',
+   rows.filter(r => r.state === 'LOCKED').map(r => r.asset).sort().join(',')
+     === ownedNames.join(','),
+   rows.filter(r => r.state === 'LOCKED').map(r => r.asset).join(','));
+for (const a of availNames.filter(x => !ownedNames.includes(x))) {
+    const r = rows.find(x => x.asset === a);
+    ok(`${a} is owned in full and is NOT locked`, r && r.state !== 'LOCKED',
+       r && r.state);
+}
+
+console.log('\n[6c] A TRIGGER IS NOT A SALE - the bot\'s second gate');
+// The panel used to call a branch READY on the price trigger alone and say
+// "should sell on the next cycle". Live on 2026-10-04 it showed 2 such
+// branches while the bot logged "real rise trigger fired ... but no open
+// slice would net a real profit at this price - holding every slice".
+// Neither could sell: ONDO's only slice was -8.98% net of fees.
+const past = rows.filter(r => r.gapPct !== null && r.gapPct >= 0
+                              && r.state !== 'LOCKED' && r.state !== 'NO_SLICES');
+ok('the fixture has at least one branch past its trigger', past.length > 0,
+   String(past.length));
+for (const r of past) {
+    const b = live.branches.find(x => x.product_id === r.product);
+    const anyGreen = (b.slices || []).some(s => Number(s.unrealized_net_usd) > 0);
+    ok(`${r.asset}: past trigger with ${anyGreen ? 'a' : 'NO'} profitable slice `
+       + `-> ${anyGreen ? 'READY' : 'NO_PROFIT'}`,
+       r.state === (anyGreen ? 'READY' : 'NO_PROFIT'), r.state);
+}
+ok('nothing is called READY unless a slice actually nets a profit',
+   rows.filter(r => r.state === 'READY')
+       .every(r => (live.branches.find(x => x.product_id === r.product).slices || [])
+                     .some(s => Number(s.unrealized_net_usd) > 0)));
+ok('a NO_PROFIT branch is not counted as waiting on price',
+   S.waiting === rows.filter(r => r.state === 'WAITING').length);
+ok('the verdict explains the hold rather than promising a sale',
+   S.noProfit === 0 || /no-loss rule working/.test(F.verdict(S)), F.verdict(S));
+
+console.log('\n[6d] the profit test is tri-state, never assumed');
+const noFigures = F.readiness([{product_id:'X-USD', reference_price:100,
+  current_price:103, grid_pct:0.03, slices:[{qty:1, entry_price:1}]}], [])[0];
+ok('a slice with no net figure reads UNKNOWN, not false',
+   noFigures.sellable === null, String(noFigures.sellable));
+ok('...and an unknown does not get demoted to NO_PROFIT',
+   noFigures.state === 'READY', noFigures.state);
+const oneGreen = F.readiness([{product_id:'Y-USD', reference_price:100,
+  current_price:103, grid_pct:0.03,
+  slices:[{unrealized_net_usd:-5}, {unrealized_net_usd:0.01}]}], [])[0];
+ok('one profitable slice among losers is enough, as in the bot',
+   oneGreen.state === 'READY' && oneGreen.sellable === true, oneGreen.state);
+const allRed = F.readiness([{product_id:'Z-USD', reference_price:100,
+  current_price:103, grid_pct:0.03,
+  slices:[{unrealized_net_usd:-5}, {unrealized_net_usd:-0.01}]}], [])[0];
+ok('all-negative past the trigger is NO_PROFIT, not READY',
+   allRed.state === 'NO_PROFIT' && allRed.sellable === false, allRed.state);
+ok('exactly zero is not a profit (the bot tests > 0)',
+   F.readiness([{product_id:'Q-USD', reference_price:100, current_price:103,
+     grid_pct:0.03, slices:[{unrealized_net_usd:0}]}], [])[0].state === 'NO_PROFIT');
 
 console.log('\n[7] it cannot move money');
 // COMMENTS STRIPPED FIRST. The first version of this check matched the

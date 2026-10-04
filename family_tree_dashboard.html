@@ -7178,7 +7178,8 @@ async function loadFleetReadiness() {
         const bar = `<div style="display:grid;
               grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:9px;
               margin-bottom:11px;">
-            ${pill(s.ready, 'at or past trigger', 'var(--green)')}
+            ${pill(s.ready, 'will sell next cycle', 'var(--green)')}
+            ${s.noProfit ? pill(s.noProfit, 'trigger met, no profit yet', 'var(--gold)') : ''}
             ${pill(s.waiting, 'waiting on price', 'var(--text-dim)')}
             ${pill(s.locked, `locked out \u2014 ${_wUSD(s.lockedUsd)}`, 'var(--red)')}
             ${pill(s.noSlices, 'holding nothing to sell', 'var(--text-dim)')}
@@ -7201,6 +7202,10 @@ async function loadFleetReadiness() {
         const body = rows.map(r => {
             const col = r.state === 'LOCKED' ? 'var(--red)'
                       : r.state === 'READY' ? 'var(--green)'
+                      // Gold, not green and not grey: the price target WAS
+                      // met, so this is not "waiting on price" - but nothing
+                      // is going to sell either, so it must not read green.
+                      : r.state === 'NO_PROFIT' ? 'var(--gold)'
                       : r.state === 'UNREADABLE' ? 'var(--gold)' : 'var(--text-dim)';
             const gap = r.gapPct === null ? 'unreadable'
                       : (r.gapPct >= 0 ? '+' : '') + r.gapPct.toFixed(2) + '%';
@@ -7223,6 +7228,9 @@ async function loadFleetReadiness() {
                      ? 'PAST its trigger and cannot sell \u2014 the move was missed'
                      : 'cannot sell: the ledger claims coin the wallet does not hold')
                   : r.state === 'NO_SLICES' ? 'holds no slices'
+                  : r.state === 'NO_PROFIT'
+                    ? 'trigger reached, but no slice nets a profit after fees '
+                      + '\u2014 the bot is holding, not stalling'
                   : r.state === 'READY' ? 'should sell on the next cycle'
                   : r.state === 'UNREADABLE' ? 'price or step could not be read'
                   : `needs ${Math.abs(r.gapPct).toFixed(2)}% more to reach its trigger`;
