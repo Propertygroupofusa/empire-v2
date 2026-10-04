@@ -78,6 +78,7 @@ def _rows(trades):
             "opened_at": t.get("opened_at"),
             "closed_at": t.get("closed_at"),
             "product_id": t.get("product_id"),
+            "exit_reason": t.get("exit_reason"),
         })
     out.sort(key=lambda r: str(r["closed_at"] or ""))
     return out, skipped
@@ -94,15 +95,53 @@ def _parse(ts):
         return None
 
 
+# AN INHERITED EXIT IS NOT ONE OF THIS STRATEGY'S TRADES, AND HERE IT GATES
+# THE MONEY.
+#
+# net_edge_per_trade_usd is net / n over every row, and bottleneck() returns
+# NO_EDGE the moment it is <= 0. "Where the next dollar should go" then
+# refuses EVERY lever on that verdict, by design: more capital onto a losing
+# strategy is the same loss, larger and sooner.
+#
+# On 2026-10-04 four ZEC closes tagged adopted_exit did exactly that:
+#
+#   net   +$135.58  ->  -$175.66
+#   edge  +$0.6917  ->  -$0.88 per trade
+#   the binding cause flipped LOW_VELOCITY -> NO_EDGE
+#
+# and the allocator locked itself shut on a reading taken from coin the grid
+# never bought, priced against an adoption-day mark nobody paid. That is the
+# one place in this system where a mispriced row stops being a display fault
+# and starts deciding where money goes. The grid's own 196 round trips were
+# unchanged throughout.
+#
+# Same rule as loss_study.analyse and get_grid_performance_metrics: the grid
+# chose neither end of an inherited position, so it cannot be evidence about
+# how the grid trades - in either direction. An inherited GAIN is excluded
+# too, and would otherwise unlock the levers just as falsely.
+#
+# NOT HIDDEN: the count and the booked total are published, and
+# exclude_inherited=False measures the raw book.
+ADOPTED_EXIT_REASON = "adopted_exit"
+
+
 def compute(trades, *, allocated_usd, free_cash_usd=0.0,
-            account_total_usd=None, min_trades=MIN_TRADES_FOR_RATE):
+            account_total_usd=None, min_trades=MIN_TRADES_FOR_RATE,
+            exclude_inherited=True):
     """Every KPI, each with the sample behind it.
 
     `allocated_usd` is the capital the bot actually has, not the account
     total - profit per dollar deployed is meaningless against money that
     was never available to the strategy.
+
+    exclude_inherited drops adopted_exit rows, for the reason above this
+    function. Pass False to measure the raw book including them.
     """
-    rows, skipped = _rows(trades)
+    rows_all, skipped = _rows(trades)
+    inherited = [r for r in rows_all
+                 if (r.get("exit_reason") or "") == ADOPTED_EXIT_REASON]
+    rows = ([r for r in rows_all if r not in inherited]
+            if exclude_inherited else rows_all)
     n = len(rows)
     alloc = _num(allocated_usd)
     free = _num(free_cash_usd) or 0.0
@@ -173,6 +212,20 @@ def compute(trades, *, allocated_usd, free_cash_usd=0.0,
     return {
         "trades": n,
         "unreadable_rows": skipped,
+        # What was set aside before any of these numbers was taken, and the
+        # cash it booked. None of it is hidden; it is simply not evidence
+        # about how this grid trades.
+        "inherited_excluded": len(inherited) if exclude_inherited else 0,
+        "inherited_excluded_usd": (round(sum(r["pnl"] for r in inherited), 2)
+                                   if exclude_inherited and inherited else 0.0),
+        "inherited_note": (
+            (f"{len(inherited)} inherited position(s) closed for "
+             f"${sum(r['pnl'] for r in inherited):,.2f} as booked are excluded "
+             f"from every figure here. The grid chose neither end of them, so "
+             f"they are not evidence about its edge - and net_edge_per_trade_usd "
+             f"is what bottleneck() turns into NO_EDGE, which refuses every "
+             f"capital lever at once.")
+            if (exclude_inherited and inherited) else None),
         "days_span": round(days, 2) if days else None,
 
         "net_usd": net,
