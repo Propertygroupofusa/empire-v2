@@ -512,14 +512,18 @@ function renderMoney(trades){
   // grid doing", which is the question this panel is opened to ask.
   const ownKnown = d.realized_own_usd != null;
   const adoptedN = Number(d.realized_adopted_trades) || 0;
+  const restatedN = Number(d.realized_adopted_restated_count) || 0;
   kv.innerHTML = `
     <div class="k">The grid's own realized P&amp;L<small>round trips this bot chose both ends of${ownKnown ? '' : ' — split unavailable, showing the blended total'}</small></div>
     <div class="v">${signed(ownKnown ? d.realized_own_usd : d.total_realized_pnl)}</div>
     <div class="k">Round trips closed</div>
     <div class="v">${ownKnown ? (d.realized_own_trades ?? '—') : (d.total_trade_count ?? '—')}</div>
     ${adoptedN ? `
-    <div class="k">Inherited positions closed<small>coin the grid did not buy, priced at the declared true cost basis. Real cash, not a measure of the strategy.</small></div>
-    <div class="v">${signed(d.realized_adopted_usd)} <span class="none">· ${adoptedN} exit${adoptedN === 1 ? '' : 's'}</span></div>
+    <div class="k">Inherited positions closed<small>coin the grid did not buy${restatedN ? ', priced at the true cost you declared' : ', priced at the adoption-day mark'}. Real cash, not a measure of the strategy.</small></div>
+    <div class="v">${signed(restatedN ? d.realized_adopted_restated_usd : d.realized_adopted_usd)} <span class="none">· ${adoptedN} exit${adoptedN === 1 ? '' : 's'}</span></div>
+    ${restatedN ? `
+    <div class="k">As originally booked<small>${restatedN} row${restatedN === 1 ? ' was' : 's were'} written before the declared basis reached the booking path. The stored rows are unchanged; the figure above re-prices them.</small></div>
+    <div class="v">${signed(d.realized_adopted_usd)}</div>` : ''}
     <div class="k">All cash taken, both books</div>
     <div class="v">${signed(d.total_realized_pnl)} <span class="none">· ${d.total_trade_count ?? '—'} closes</span></div>` : ''}
     <div class="k">Win rate<small>high by design — a normal exit only sells above entry. A FORCED close ignores that rule and can book a loss.</small></div>

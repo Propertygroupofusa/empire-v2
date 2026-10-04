@@ -9950,17 +9950,59 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
         # So the split is published and the caller picks. ADOPTED_EXIT_REASON
         # is the only reason that marks an inherited exit; NULL is a legacy
         # row from before exit_reason existed and belongs with the grid's own.
-        adopted_result = await db.execute(
-            select(
-                func.count(CryptoGridTradeHistory.id),
-                func.sum(CryptoGridTradeHistory.pnl),
-            ).where(CryptoGridTradeHistory.exit_reason == ADOPTED_EXIT_REASON)
-        )
-        adopted_n, adopted_sum = adopted_result.one()
-        realized_adopted_trades = int(adopted_n or 0)
-        realized_adopted_usd = round(float(adopted_sum or 0.0), 2)
+        adopted_rows = (await db.execute(
+            select(CryptoGridTradeHistory).where(
+                CryptoGridTradeHistory.exit_reason == ADOPTED_EXIT_REASON)
+        )).scalars().all()
+        realized_adopted_trades = len(adopted_rows)
+        _adopted_sum = sum(float(r.pnl or 0.0) for r in adopted_rows)
+        realized_adopted_usd = round(_adopted_sum, 2)
         realized_own_trades = total_trade_count - realized_adopted_trades
-        realized_own_usd = round(total_realized_pnl - float(adopted_sum or 0.0), 2)
+        realized_own_usd = round(total_realized_pnl - _adopted_sum, 2)
+
+        # THE FOUR ROWS WRITTEN BEFORE THE BOOKING FIX DEPLOYED.
+        #
+        # A row booked after that fix already carries the declared basis in
+        # entry_price and needs nothing here. The four ZEC rows written this
+        # morning do not: they were priced against the ~$1,650 adoption mark,
+        # and the account owner's dashboard reads -$311.24 on four sales that
+        # put $1,268.45 of cash in his wallet and gained $297.78 against the
+        # $1,013.80 he really paid.
+        #
+        # Everything needed to restate them is on the row - qty, exit_price,
+        # and a declared basis for the product - so it is computed on READ.
+        # The stored row is never touched: it is the record of what was
+        # booked, and rewriting history to make a number look better is the
+        # opposite of what this whole change is for. Both figures are
+        # published and the caller says which it is showing.
+        #
+        # None, not zero, when no row could be restated - "nothing to
+        # restate" and "restates to $0.00" are different claims.
+        _restated = 0.0
+        _restated_n = 0
+        for r in adopted_rows:
+            basis = true_cost_basis_for(r.product_id)
+            if basis is None or not r.qty or r.exit_price is None:
+                _restated += float(r.pnl or 0.0)
+                continue
+            if r.entry_price is not None and abs(r.entry_price - basis) < 1e-9:
+                # already booked at the declared basis
+                _restated += float(r.pnl or 0.0)
+                continue
+            # An adopted slice placed no buy order, so only its sell leg was
+            # ever charged - the same shape slice_round_trip_fee_rate() gives
+            # it. Derived from the row's own booked fee so this cannot drift
+            # from the rate that sale really paid.
+            _gross_booked = r.qty * (r.exit_price - (r.entry_price or 0.0))
+            _fee = _gross_booked - float(r.pnl or 0.0)
+            _notional_booked = r.qty * ((r.entry_price or 0.0) + r.exit_price) / 2.0
+            _rate = (_fee / _notional_booked) if _notional_booked else 0.0
+            _notional_true = r.qty * (basis + r.exit_price) / 2.0
+            _restated += r.qty * (r.exit_price - basis) - _rate * _notional_true
+            _restated_n += 1
+        realized_adopted_restated_usd = (
+            round(_restated, 2) if _restated_n else None)
+        realized_adopted_restated_count = _restated_n
 
         # Grouped by BRANCH *and* COIN, because a branch outlives the coin it
         # is pointed at. crypto_grid_1 earned its whole +$12.80 over 15 DOGE
@@ -10067,6 +10109,11 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
         "realized_own_trades": realized_own_trades,
         "realized_adopted_usd": realized_adopted_usd,
         "realized_adopted_trades": realized_adopted_trades,
+        # The same inherited exits priced at the declared true cost basis,
+        # for rows booked before that basis reached the booking path. None
+        # when there is nothing to restate. The stored rows are unchanged.
+        "realized_adopted_restated_usd": realized_adopted_restated_usd,
+        "realized_adopted_restated_count": realized_adopted_restated_count,
         "overall_win_rate": overall_win_rate,
     }
 

@@ -9116,13 +9116,20 @@ function renderGridTradeHistory(history) {
         const total = (ownKnown ? history.realized_own_usd : history.total_realized_pnl) || 0;
         const ownTrips = (ownKnown ? history.realized_own_trades : history.total_trade_count) || 0;
         const adoptedN = Number(history.realized_adopted_trades) || 0;
-        const adoptedUsd = history.realized_adopted_usd || 0;
+        // The restated figure when the declared basis could price those
+        // rows, the booked one otherwise. Never silently mixed: the caption
+        // says which it is showing.
+        const adoptedRestated = history.realized_adopted_restated_usd;
+        const adoptedIsRestated = adoptedRestated != null
+            && Number(history.realized_adopted_restated_count) > 0;
+        const adoptedUsd = (adoptedIsRestated ? adoptedRestated
+                                              : history.realized_adopted_usd) || 0;
         wrap.innerHTML = `
             <div style="font-size:0.8em; margin-bottom:8px; font-variant-numeric:tabular-nums;">
                 <strong style="color:${total >= 0 ? 'var(--green)' : 'var(--red)'};">${total >= 0 ? '+' : '-'}${fmtUsd(Math.abs(total))}</strong>
                 realized across <strong>${ownTrips}</strong> completed round trips
                 · <strong>${(history.overall_win_rate || 0).toFixed(1)}%</strong> of them closed green.
-                ${adoptedN ? `<div style="color:var(--text-dim); margin-top:3px;">Plus <strong style="color:${adoptedUsd >= 0 ? 'var(--green)' : 'var(--red)'};">${adoptedUsd >= 0 ? '+' : '-'}${fmtUsd(Math.abs(adoptedUsd))}</strong> on ${adoptedN} inherited position${adoptedN === 1 ? '' : 's'} the grid did not buy — real cash, but not a measure of this strategy.</div>` : ''}
+                ${adoptedN ? `<div style="color:var(--text-dim); margin-top:3px;">Plus <strong style="color:${adoptedUsd >= 0 ? 'var(--green)' : 'var(--red)'};">${adoptedUsd >= 0 ? '+' : '-'}${fmtUsd(Math.abs(adoptedUsd))}</strong> on ${adoptedN} inherited position${adoptedN === 1 ? '' : 's'} the grid did not buy — ${adoptedIsRestated ? 'priced at the true cost you declared' : 'priced at the adoption-day mark'}. Real cash, but not a measure of this strategy.</div>` : ''}
             </div>
             <div class="table-scroll"><table class="coin-history-table">
                 <thead><tr><th>Coin</th><th>Trades</th><th>Win rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr></thead>

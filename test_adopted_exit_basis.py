@@ -250,6 +250,10 @@ def test_realized_splits_into_two_books():
         # The point of the split: a large inherited exit must not move the
         # grid's own figure in EITHER direction. +$143 of inherited gain is
         # as misleading about the strategy as -$149 of phantom loss was.
+        ok("rows already booked at the declared basis are not restated twice",
+           h["realized_adopted_restated_usd"] is None
+           or h["realized_adopted_restated_count"] == 0)
+
         ok("a $143 inherited gain leaves the grid's own +$1.50 untouched",
            h["realized_own_usd"] == 1.50 and h["total_realized_pnl"] > 100)
 
@@ -268,6 +272,16 @@ def test_the_pages_lead_with_the_grid_s_own_book():
     ft = (REPO / "family_tree_dashboard.html").read_text()
     ok("the P&L-by-coin header reads the own book, not every closed row",
        "realized_own_usd" in ft and "realized_own_trades" in ft)
+
+    ok("the pages show the restated figure when the basis could price it",
+       "realized_adopted_restated_usd" in live
+       and "realized_adopted_restated_usd" in ft)
+    ok("and say which basis the number in front of the reader came from",
+       "priced at the adoption-day mark" in live
+       and "priced at the adoption-day mark" in ft)
+    ok("Live Ops still shows what was originally booked, so nothing is "
+       "quietly replaced",
+       "As originally booked" in live)
 
     router = (REPO / "routers" / "trading_dashboard.py").read_text()
     ok("the Live Ops headline passes the split through",
@@ -304,6 +318,76 @@ def test_traded_today_reports_the_grid_s_own_trading():
     # the regression itself: no bare sum over every close
     ok("no reduce over the unsplit list survives",
        "todays.reduce(" not in tile)
+
+
+# ----------------------- 5b. the four rows written before the fix deployed
+def test_pre_fix_rows_restate_on_read():
+    # This runs against the same database the previous test seeded (the
+    # module pins one DATABASE_URL before any import, deliberately - see the
+    # note at the top). So it measures the DELTA these four rows make, not
+    # an absolute, and an absolute assertion here would be reading the
+    # fixture above as much as the code under test.
+    import database
+    import crypto_grid_bot as g
+    from models import CryptoGridTradeHistory
+
+    g.GRID_TRUE_COST_BASIS = g._parse_true_cost_basis("ZEC-USD:1013.80")
+
+    # the four real rows, exactly as the live ledger holds them
+    ROWS = [
+        (0.08036146, 1659.17, 1331.94, -26.72),
+        (0.37816667, 1650.61, 1330.02, -123.21),
+        (0.37816667, 1650.61, 1329.95, -123.24),
+        (0.11690454, 1650.61, 1330.17, -38.07),
+    ]
+
+    async def run():
+        before = await g.get_grid_trade_history(limit_recent=10)
+        async with database.get_session_factory()() as s:
+            s.add_all([
+                CryptoGridTradeHistory(
+                    bot_name="crypto_grid_21", product_id="ZEC-USD",
+                    qty=q, entry_price=e, exit_price=x, pnl=p,
+                    exit_reason=g.ADOPTED_EXIT_REASON)
+                for q, e, x, p in ROWS
+            ])
+            await s.commit()
+        return before, await g.get_grid_trade_history(limit_recent=10)
+
+    before, after = asyncio.run(run())
+
+    d_booked = after["realized_adopted_usd"] - before["realized_adopted_usd"]
+    # When nothing was restatable the restated figure is None - "nothing to
+    # restate", not "$0.00" - and the honest baseline is then the booked sum,
+    # because an un-restated row restates to itself.
+    _base = (before["realized_adopted_restated_usd"]
+             if before["realized_adopted_restated_usd"] is not None
+             else before["realized_adopted_usd"])
+    d_restated = after["realized_adopted_restated_usd"] - _base
+    d_count = (after["realized_adopted_restated_count"]
+               - before["realized_adopted_restated_count"])
+
+    ok(f"all four rows are recognised as restatable (+{d_count})", d_count == 4)
+    ok(f"as booked they add about -$311 (${d_booked:.2f})",
+       abs(d_booked - -311.24) < 0.02)
+    ok(f"restated at what was really paid they ADD money (${d_restated:+.2f})",
+       d_restated > 0)
+    ok("the sign flips - that is the whole point", d_booked < 0 < d_restated)
+    ok(f"the correction is about $609 across the four "
+       f"(${d_restated - d_booked:.2f})",
+       605.0 < (d_restated - d_booked) < 613.0)
+    ok("a row already booked at the declared basis is never restated twice",
+       before["realized_adopted_restated_count"] == 0)
+
+    # The stored rows must still read exactly what was booked. Scoped to the
+    # four this test wrote - the fixture above seeded others.
+    stored = {round(float(r["pnl"]), 2) for r in after["recent_trades"]
+              if r.get("exit_reason") == g.ADOPTED_EXIT_REASON
+              and r.get("exit_price") is not None}
+    ok("the stored rows are untouched - restatement happens on READ",
+       {p for _, _, _, p in ROWS} <= stored)
+    ok("the grid's own book is not moved by any of it",
+       after["realized_own_usd"] == before["realized_own_usd"] == 1.50)
 
 
 # ------------------------- 6c. the open mark agrees with the gate that sells
@@ -360,6 +444,7 @@ if __name__ == "__main__":
               test_the_false_promise_is_gone,
               test_the_two_zec_rows_restate_positive,
               test_realized_splits_into_two_books,
+              test_pre_fix_rows_restate_on_read,
               test_the_pages_lead_with_the_grid_s_own_book,
               test_traded_today_reports_the_grid_s_own_trading,
               test_open_marks_use_the_same_basis_as_the_sell_gate,
