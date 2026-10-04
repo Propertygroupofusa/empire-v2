@@ -1932,6 +1932,47 @@ async def get_maker_expiry_drift() -> dict:
              f"({h['helped']} helped / {h['hurt']} hurt, n={h['n']}) - the fills were "
              f"coming, and {wait_s}s is too short to collect them. This is the evidence "
              f"for lengthening the rest; nothing changes the wait automatically."))
+
+    # WHICH SIDE IS JAMMED, SAID OUT LOUD.
+    #
+    # The buy/sell split was already in this payload and the page printed it
+    # as a parenthetical beside the total, where it reads as bookkeeping. It
+    # is the diagnosis. Measured on the live fleet 2026-10-04:
+    #
+    #   expired orders   3,732  ->     51 buy /  3,681 sell   98.6% sells
+    #   skipped cycles  19,600  ->     65 buy / 19,535 sell   99.7% sells
+    #
+    # This fleet is not failing to buy. It is failing to SELL, and the two
+    # are not independent: the buy gate is
+    # `len(tradeable_slices(slices)) < branch.num_levels`, so a branch that
+    # cannot sell stays full on its rungs and is refused every entry. A
+    # jammed exit presents as a dead entry, and a reader looking at
+    # GATE_PASS 0 goes hunting for a buy-side problem that is not there.
+    #
+    # Silent below the same minimum the verdicts use, and silent when the
+    # split is balanced - this only speaks when one side dominates.
+    _b, _sl = out.get("buy") or 0, out.get("sell") or 0
+    _tot = _b + _sl
+    if _tot >= _EXPIRY_MIN_RESOLVED:
+        _share = max(_b, _sl) / _tot
+        if _share >= 0.80:
+            _side = "SELL" if _sl > _b else "BUY"
+            _other = "buy" if _side == "SELL" else "sell"
+            out["jammed_side"] = _side
+            out["jammed_side_share_pct"] = round(_share * 100, 1)
+            out["jammed_side_note"] = (
+                f"{_share * 100:.1f}% of the orders that expired unfilled were "
+                f"{_side}s ({_sl if _side == 'SELL' else _b} of {_tot}). This is "
+                f"an EXIT problem, not an entry one."
+                if _side == "SELL" else
+                f"{_share * 100:.1f}% of the orders that expired unfilled were "
+                f"{_side}s ({_b} of {_tot}).")
+            if _side == "SELL":
+                out["jammed_side_note"] += (
+                    " They are not independent: the buy gate requires a branch "
+                    "to hold fewer open slices than it has levels, so a branch "
+                    "that cannot sell stays full and is refused every entry. A "
+                    "jammed exit shows up as a dead entry.")
     return out
 
 

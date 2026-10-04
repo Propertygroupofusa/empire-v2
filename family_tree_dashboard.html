@@ -3748,8 +3748,27 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
             🏆 Could not load the real all-time realized total right now - refresh in a moment.
         </div>`;
     }
-    const realized = h.total_realized_pnl;
-    const tradeCount = h.total_trade_count || 0;
+    // ONE BASIS, SAME AS THE TOTAL PROFIT TILE.
+    //
+    // This card headlines "real money, all-time" and was still the blended
+    // booked total while the tile above it had moved to the declared true
+    // cost. So the same account read -$175.68 here and -$198.92 there on the
+    // same instant, and neither matched the +$408.85 the position is worth
+    // against what was actually paid. Two numbers for one thing is the fault
+    // this whole change exists to remove; leaving it on one card and not the
+    // other is that fault with a smaller blast radius, not a smaller fault.
+    //
+    // own + restated-adopted when a restatement exists, the blended total
+    // otherwise, and the caption always says which.
+    const _ownB = h.realized_own_usd;
+    const _adB = h.realized_adopted_restated_usd;
+    const _nB = Number(h.realized_adopted_restated_count) || 0;
+    const restated = (_ownB != null && _adB != null && _nB > 0);
+    const realized = restated ? (_ownB + _adB) : h.total_realized_pnl;
+    // The trade count follows the figure. 200 trades beside a number built
+    // from the grid's own closes counts the inherited exits twice over.
+    const tradeCount = (restated && h.realized_own_trades != null)
+        ? h.realized_own_trades : (h.total_trade_count || 0);
     const winRate = h.overall_win_rate || 0;
     const realizedColor = realized > 0 ? 'var(--green)' : (realized < 0 ? 'var(--red)' : 'var(--text-dim)');
     const unrealized = statusData ? statusData.total_unrealized_net_usd : null;
@@ -3786,10 +3805,19 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
             🏆 Banked — real money, all-time: ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
         </div>
         <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
-            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} across every Grid Bot branch ever run ·
+            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} ${restated ? 'this grid chose both ends of' : 'across every Grid Bot branch ever run'} ·
             ${winRate.toFixed(0)}% win rate — high by design, since a NORMAL exit only sells above its own entry.
             This figure moves only when a trade closes.
         </div>
+        ${restated ? `<div style="font-size:0.8em; color:var(--text-dim); margin-top:6px; line-height:1.45;">
+            The grid's own closes came to <strong>${_ownB >= 0 ? '+' : ''}${fmtUsd(_ownB)}</strong>.
+            ${_nB} inherited position${_nB === 1 ? '' : 's'} the grid did not buy added
+            <strong>${_adB >= 0 ? '+' : ''}${fmtUsd(_adB)}</strong>, priced at the true cost you declared —
+            they were booked against the adoption-day mark at
+            <strong>${h.realized_adopted_usd >= 0 ? '+' : ''}${fmtUsd(h.realized_adopted_usd)}</strong>,
+            a price nobody paid, and the stored rows still say so.
+            The difference is a measurement correction, <strong>not money the grid earned</strong>.
+        </div>` : ''}
         <div style="font-size:0.92em; font-weight:700; margin-top:12px; color:${unrealizedKnown ? (unrealized < 0 ? 'var(--red)' : 'var(--green)') : 'var(--text-dim)'};">
             📉 Still open, marked at today's price: ${unrealizedKnown ? `${unrealized >= 0 ? '+' : ''}${fmtUsd(unrealized)}` : 'unknown right now (a live price fetch failed)'}
         </div>
@@ -5177,6 +5205,16 @@ function renderGridMakerOnlyToggle(data) {
         // The ledger of trades that did NOT happen. The skip count says what
         // maker-only costs; this says whether that cost bought anything.
         // Sign convention: POSITIVE benefit = cancelling helped.
+        // WHICH SIDE IS JAMMED LEADS, because it is the diagnosis and the
+        // buy/sell split below it reads as bookkeeping. 98.6% of this
+        // fleet's expired orders are sells, and a branch that cannot sell
+        // stays full on its rungs and is then refused every buy - so the
+        // dead entry everyone looks at is a symptom of the jammed exit.
+        (drift && drift.available && drift.jammed_side_note
+            ? `<p class="why" style="margin:8px 0 0; padding:8px 10px; border-left:3px solid #ef4444; background:rgba(239,68,68,.07)">` +
+              `<strong>${drift.jammed_side === 'SELL' ? 'The exit is what is jammed' : 'The entry is what is jammed'}.</strong> ` +
+              `${drift.jammed_side_note}</p>`
+            : '') +
         (drift && drift.available
             ? `<p class="why" style="margin:8px 0 0"><strong>After we cancelled</strong> ` +
               `(${drift.expiries} expired order${drift.expiries === 1 ? '' : 's'}: ` +
