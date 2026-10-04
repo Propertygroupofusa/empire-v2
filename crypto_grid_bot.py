@@ -8805,9 +8805,48 @@ async def get_grid_status() -> dict:
         if total_unrealized_known else None
     )
 
+    # TWO BOOKS, AND BLENDING THEM READS AS A FAILURE THAT DID NOT HAPPEN.
+    #
+    # An adopted slice is coin the account ALREADY HELD, written by
+    # coin_adoption_worker at the market price on the day it was adopted -
+    # no order, no commission, and a cost basis set long before by a
+    # decision this grid never made (see slice_paid_no_entry_fee). A slice
+    # the grid BOUGHT is one it chose, at a price its own rules picked.
+    #
+    # Measured live 2026-10-04 across 52 open slices: the 26 adopted ones
+    # carried -$459.13 and the 26 the grid bought carried -$77.34. So 85.6%
+    # of the headline mark belongs to inventory the grid inherited. ZEC is
+    # the whole story on its own - five adopted slices near $1,655 are
+    # -$412.50, while the single slice the grid chose to buy at $1,586.44 is
+    # -$11.53. Against banked profit of +$135.58 the grid's OWN complete
+    # book is +$58.24, not the -$405 the blended figure shows.
+    #
+    # Reported separately, never instead: total_unrealized_net_usd keeps its
+    # exact meaning and value for every existing caller. These two sum to it
+    # whenever both are known.
+    _own = _adopted = 0.0
+    _split_known = total_unrealized_known
+    for _b in branches_with_slices:
+        for _s in (_b.get("slices") or []):
+            _v = _s.get("unrealized_net_usd")
+            if _v is None:
+                _split_known = False
+                continue
+            if _s.get("adopted"):
+                _adopted += float(_v)
+            else:
+                _own += float(_v)
+    unrealized_own_usd = round(_own, 2) if _split_known else None
+    unrealized_adopted_usd = round(_adopted, 2) if _split_known else None
+
     return {
         "fleet_name": "Adaptive Capital Fleet",
         "mode_active": mode_active,
+        # The grid's OWN open inventory, and the coin it merely inherited.
+        # See the comment above total_unrealized_net_usd: these are different
+        # books and only one of them reflects a decision the grid made.
+        "unrealized_own_usd": unrealized_own_usd,
+        "unrealized_adopted_usd": unrealized_adopted_usd,
         # The ONE field that says whether the loop is running, as opposed to
         # running-but-gated or not running at all. Everything else on this
         # dashboard describes state the loop acts on; only this describes the
