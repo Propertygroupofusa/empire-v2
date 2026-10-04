@@ -149,8 +149,15 @@ ok("an uncovered day is marked as a floor, not a total",
    "at least " in strip)
 ok("and the headline carries the same caveat as the subtitle",
    "dayFullyCovered ? '' :" in strip)
-ok("a covered day still reads exactly as before",
-   "' trade' + (todays.length === 1 ? '' : 's') + ' today'" in strip)
+# This pinned the count as `todays.length` - every close in the window. On
+# 2026-10-04 that made the tile read -$311.24 over "4 trades today" when all
+# four were inherited ZEC slices the grid never bought, on a day the account
+# took in $1,268.45 and gained $297.78 against what was really paid. The
+# count now follows the headline, which is the grid's own trading.
+ok("the trade count counts the grid's OWN closes, matching the number above it",
+   "' trade' + (ownToday.length === 1 ? '' : 's') + ' today'" in strip)
+ok("inherited closes are named rather than folded into that count",
+   "inheritedToday" in strip and "the grid did not buy" in strip)
 ok("no trades at all still names the last one",
    "no trades on record" in strip and "last trade " in strip)
 
