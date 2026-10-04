@@ -116,8 +116,13 @@ class TestPureMath(unittest.TestCase):
         self.assertGreaterEqual(round(2271.29 - amount, 2), 2196.76)
 
     def test_floor_is_never_below_the_row_deletion_floor(self):
-        """Tiny coin basis must not let the branch be emptied to zero."""
-        b = D("X-USD", 40.0, 1, [(0.01, 1.0)])
+        """Small coin basis must not let the branch be emptied to zero.
+
+        The slice is $2.00, above the engine's $1.00 dust floor, so it still
+        FILLS the rung - the original fixture used $0.01, which the
+        2026-10-04 dust change correctly reclassified as a remnant that
+        leaves the rung free."""
+        b = D("X-USD", 40.0, 1, [(2.0, 1.0)])
         self.assertEqual(R.floor_for(b), R.MIN_BRANCH_USD)
         amount, _ = R.freeable(b)
         self.assertEqual(amount, 25.0)
@@ -128,6 +133,63 @@ class TestPureMath(unittest.TestCase):
         amount, why = R.freeable(b)
         self.assertEqual(amount, 0.0)
         self.assertIn("minimum", why)
+
+
+class TestAgreesWithTheEngine(unittest.TestCase):
+    """This module and the engine must answer "is this branch full" the same
+    way. For a few hours on 2026-10-04 they did not, and this module offered
+    BCH-USD's $68.21 and LINK-USD's $45.99 as budget they could not spend -
+    moments after the engine had freed them to spend it."""
+
+    def test_the_real_bch_shape_is_no_longer_a_rightsize_target(self):
+        bch = D("BCH-USD", 171.29, 3,
+                [(0.12644109, 339.58), (0.18181268, 330.78), (2.2e-07, 309.32)])
+        amount, why = R.freeable(bch)
+        self.assertEqual(amount, 0.0)
+        self.assertIn("free rung", why)
+        self.assertIn("remnant", why)
+
+    def test_the_real_link_shape_is_no_longer_a_target_either(self):
+        link = D("LINK-USD", 137.04, 3,
+                 [(0.01, 14.343), (2.99, 15.212), (3.1, 14.651)])
+        amount, _ = R.freeable(link)
+        self.assertEqual(amount, 0.0)
+
+    def test_a_branch_full_of_real_slices_is_still_a_target(self):
+        """XRP: 7 real slices on 3 levels. Genuinely stuck, still freeable."""
+        xrp = D("XRP-USD", 2228.05, 3, [(100.0, 0.934)] * 7)
+        amount, why = R.freeable(xrp)
+        self.assertIsNone(why)
+        self.assertGreater(amount, 1500)
+
+    def test_it_frees_nothing_if_the_engine_predicate_cannot_be_imported(self):
+        """Fail CLOSED. Returning the raw list instead would reproduce the
+        very bug this agreement was added to prevent."""
+        import builtins
+        real = builtins.__import__
+
+        def boom(name, *a, **k):
+            if name == "crypto_grid_bot":
+                raise ImportError("simulated")
+            return real(name, *a, **k)
+        xrp = D("XRP-USD", 2228.05, 3, [(100.0, 0.934)] * 7)
+        builtins.__import__ = boom
+        try:
+            amount, why = R.freeable(xrp)
+        finally:
+            builtins.__import__ = real
+        self.assertEqual(amount, 0.0, "must free nothing on an unknown rung count")
+        self.assertIn("free rung", why)
+        # And it still frees normally once the import works again.
+        self.assertGreater(R.freeable(xrp)[0], 1500)
+
+    def test_a_branch_whose_rungs_are_only_dust_is_refused(self):
+        """All three "rungs" are remnants, so the branch has free rungs and
+        will buy - its budget is not stranded."""
+        b = D("X-USD", 500.0, 3, [(1e-07, 1.0)] * 3)
+        amount, why = R.freeable(b)
+        self.assertEqual(amount, 0.0)
+        self.assertIn("free rung", why)
 
 
 class TestApply(unittest.IsolatedAsyncioTestCase):
@@ -205,7 +267,7 @@ class TestApply(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_branch_row_always_survives(self):
         """A drained row gets deleted and takes its coin out of the fleet."""
-        await _seed(self.sf, "b1", "X-USD", 60.0, 1, [(0.001, 1.0)])
+        await _seed(self.sf, "b1", "X-USD", 60.0, 1, [(1.5, 1.0)])
         g = _Grid(self.sf)
         r = await R.apply_one(g, "b1", amount_usd=10_000.0, dry_run=False)
         self.assertTrue(r["ok"])

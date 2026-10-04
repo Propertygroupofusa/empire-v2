@@ -83,6 +83,42 @@ def _slices_of(branch):
     return (branch.get("slices") or []) if isinstance(branch, dict) else []
 
 
+def _tradeable_of(branch):
+    """The slices that actually fill a rung, by the ENGINE's own definition.
+
+    THIS MODULE AND THE ENGINE MUST ANSWER "IS THIS BRANCH FULL" THE SAME
+    WAY, and for a few hours on 2026-10-04 they did not. The engine learned
+    that a slice too small for the venue to sell is not a rung
+    (crypto_grid_bot.tradeable_slices), which freed BCH-USD and LINK-USD to
+    buy again. This module kept counting raw slices, so it still called them
+    parked and still offered their $68.21 and $45.99 as "budget they cannot
+    spend" - money they had just regained the ability to spend. Freeing it
+    would have taken it straight back off them.
+
+    So the engine's own predicate is imported rather than re-implemented. A
+    second copy of this rule is how the two came apart in the first place.
+
+    ON FAILURE IT FREES NOTHING. An empty list makes every non-flat branch
+    report a free rung, so freeable() refuses across the board and this
+    module becomes a no-op until the import works again.
+
+    I had this backwards first: it returned the raw slice list and the
+    docstring claimed that made the module free LESS. The opposite is true.
+    freeable() refuses when the TRADEABLE count is under the level count, so
+    MORE slices counted means FEWER refusals and MORE money freed - and
+    returning the raw list reproduces exactly the pre-dust-fix behaviour that
+    offered BCH-USD's $68.21 and LINK-USD's $45.99 as stranded moments after
+    the engine freed them to spend it. A mutation test caught it; the comment
+    would have misled anyone who trusted it.
+    """
+    slices = _slices_of(branch)
+    try:
+        from crypto_grid_bot import tradeable_slices
+    except Exception:
+        return []
+    return tradeable_slices(slices)
+
+
 def floor_for(branch) -> float:
     """The lowest allocated_usd this branch may be reduced to."""
     return round(max(coin_basis(_slices_of(branch)), MIN_BRANCH_USD), 2)
@@ -94,15 +130,19 @@ def freeable(branch):
     Returns (amount, why_not).
     """
     slices = _slices_of(branch)
+    tradeable = _tradeable_of(branch)
     levels = int(branch.get("num_levels") or 1)
     alloc = round(float(branch.get("allocated_usd") or 0.0), 2)
 
     if not slices:
         return 0.0, ("branch is flat; withdraw_from_grid_branch already "
                      "handles a flat branch and is the tested path")
-    if len(slices) < levels:
-        return 0.0, (f"has a free rung ({len(slices)}/{levels}); its budget is "
-                     f"not stranded - it will buy the next dip")
+    if len(tradeable) < levels:
+        dust = len(slices) - len(tradeable)
+        return 0.0, (f"has a free rung ({len(tradeable)}/{levels} tradeable"
+                     + (f", {dust} remnant(s) discounted" if dust else "")
+                     + "); its budget is not stranded - it will buy the "
+                       "next dip")
 
     fl = floor_for(branch)
     amount = round(alloc - fl, 2)
@@ -132,7 +172,8 @@ async def plan(grid):
             "floor_usd": floor_for(b),
             "slices": len(slices),
             "num_levels": int(b.get("num_levels") or 1),
-            "parked": bool(slices) and len(slices) >= int(b.get("num_levels") or 1),
+            "tradeable_slices": len(_tradeable_of(b)),
+            "parked": bool(slices) and len(_tradeable_of(b)) >= int(b.get("num_levels") or 1),
             "freeable_usd": round(amount, 2),
             "why_not": why_not,
         })
@@ -182,10 +223,18 @@ async def apply_one(grid, bot_name, amount_usd=None, dry_run=True):
                 f"already handles a flat branch and is the tested path")}
 
         levels = int(branch.num_levels or 1)
-        if len(slices) < levels:
+        try:
+            from crypto_grid_bot import tradeable_slices as _tradeable
+            usable = _tradeable(slices)
+        except Exception:
+            # Fail closed, same as _tradeable_of: an empty list reads as a
+            # free rung and refuses the write, rather than guessing.
+            usable = []
+        if len(usable) < levels:
             return {"ok": False, "reason": (
-                f"{bot_name} has a free rung ({len(slices)}/{levels}) - its "
-                f"budget is not stranded and will be spent on the next dip")}
+                f"{bot_name} has a free rung ({len(usable)}/{levels} "
+                f"tradeable) - its budget is not stranded and will be spent "
+                f"on the next dip")}
 
         basis = coin_basis(slices)
         alloc = round(float(branch.allocated_usd or 0.0), 2)
