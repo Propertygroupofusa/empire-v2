@@ -484,13 +484,28 @@ def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None,
 GRID_DUST_SLICE_USD = float(os.getenv("GRID_DUST_SLICE_USD", "1.00"))
 
 
+def _slice_field(s, name):
+    """One slice field, from an ORM row or a dict, without caring which."""
+    if hasattr(s, "get"):
+        return s.get(name)
+    return getattr(s, name, None)
+
+
+def slice_qty(s) -> float:
+    """Units of coin this slice's books claim."""
+    try:
+        return float(_slice_field(s, "qty") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def slice_basis_usd(s) -> float:
     """What a slice really cost: qty x entry. Works on an ORM row or a dict."""
-    if hasattr(s, "get"):
-        qty, entry = s.get("qty"), s.get("entry_price")
-    else:
-        qty, entry = getattr(s, "qty", None), getattr(s, "entry_price", None)
-    return (float(qty or 0.0)) * (float(entry or 0.0))
+    try:
+        entry = float(_slice_field(s, "entry_price") or 0.0)
+    except (TypeError, ValueError):
+        entry = 0.0
+    return slice_qty(s) * entry
 
 
 def slice_is_tradeable(s, min_usd: float = None) -> bool:
@@ -2493,6 +2508,108 @@ async def account_market_book(max_age_seconds=ACCOUNT_BOOK_TTL_SECONDS):
         return None
     _ACCOUNT_BOOK_CACHE.update(book=book, at=now)
     return book
+
+
+_WALLET_UNITS_CACHE = {"units": None, "at": 0.0}
+WALLET_UNITS_TTL_SECONDS = 60.0
+
+
+async def wallet_available_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
+    """{ASSET: units the venue will RELEASE}, or None when unreadable.
+
+    NOT account_market_book(). That book is built from census()'s
+    holdings list, and account_census.wallet_units_for's own docstring
+    records why that is the wrong input to a held-units question: census
+    drops assets it cannot price and rolls anything under the dust
+    threshold into an unnamed count. Its job is "what is this account
+    worth"; it cannot answer "does this account hold X at all". Handing
+    census holdings to this question is a bug this repo already shipped
+    once - QNT's three largest shortfalls were reported as unknown in a
+    footnote while the headline named only the six smaller ones.
+
+    None is load-bearing. The backing gate treats None as UNKNOWN and
+    does NOT refuse, because slice_backing's doctrine is that an
+    unreadable balance is not a shortfall. Returning {} instead would
+    mean "the account holds nothing", which would refuse every buy in
+    the fleet on a rate limit.
+
+    Cached on the same terms, and for the same reason, as
+    _ACCOUNT_BOOK_CACHE: this runs on every buy across a 22-branch
+    fleet, and a per-branch sweep of the accounts endpoint is precisely
+    what got this read rate-limited before - 22 paginated reads a cycle
+    to answer a question whose answer moves on fills, not on cycles.
+    """
+    import time as _t
+    now = _t.time()
+    cached = _WALLET_UNITS_CACHE.get("units")
+    if cached is not None and (now - _WALLET_UNITS_CACHE["at"]) < max_age_seconds:
+        return cached
+    try:
+        import account_census
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession() as _s:
+            _bal = await account_census.fetch_balances(_s)
+        units = account_census.available_units_map(_bal)
+    except Exception as exc:
+        log.warning(f"[GRID] wallet units unreadable ({type(exc).__name__}: {exc}) - "
+                    f"backing not checked this cycle")
+        return None
+    if units is None:
+        return None
+    _WALLET_UNITS_CACHE.update(units=units, at=now)
+    return units
+
+
+async def branch_backing_verdict(product_id, slices, price,
+                                 units=None) -> tuple:
+    """(ok, reason) - False only on a CONFIRMED shortfall.
+
+    THE $45.60 THIS EXISTS TO STOP. On 2026-10-04 at 01:53:19Z the grid
+    bought 3.24 LINK into a branch whose books claimed 9.34 units while
+    the wallet held 3.46 - 37.045% backed, `can_be_sold: false`. The
+    buy gate could not see it: the rung count that opened the gate
+    (tradeable_slices) judges a slice by its DOLLAR BASIS, and an
+    unbacked slice carries a perfectly normal basis. Three other
+    branches were in the same state - SOL 25.0%, ALGO 43.3%, ACH
+    0.000086% - $245.23 of claimed coin not in the wallet.
+
+    Cash spent into a branch that cannot sell what it claims is worse
+    than cash left idle: the branch takes the position and has no exit.
+
+    The verdict comes from slice_backing.assess(), the same function the
+    dashboard's `backing` block and exchange_truth_worker call, on the
+    same units map from account_census.available_units_map(). It is not
+    re-derived here - a gate that computes backing its own way would
+    refuse buys the owner's page calls fine.
+
+    REFUSE-ONLY, and it can never block a sell: the one caller is the
+    buy branch of the gate. UNKNOWN is not a refusal.
+    """
+    import slice_backing
+    if units is None:
+        return True, "wallet units unreadable - backing not checked (UNKNOWN is not a shortfall)"
+    probe = [{
+        "product_id": product_id,
+        # assess() reads qty off each slice and prices the claim; the
+        # unrealized figure only drives its phantom-gain flag, never the
+        # backed verdict, so it is not invented here.
+        "slices": [{"qty": slice_qty(s)} for s in (slices or [])],
+        "current_price": price,
+        "total_unrealized_net_usd": 0.0,
+    }]
+    out = slice_backing.assess(probe, units)
+    for row in (out.get("unbacked") or ()):
+        return False, (
+            f"{row['backed_pct']:.3f}% backed - books claim "
+            f"{row['claimed_units']:.8f} {row['asset']}, wallet holds "
+            f"{row['held_units']:.8f} (short ${row['short_usd']:,.2f}). "
+            f"A sell sizes against what the venue releases, so this branch "
+            f"cannot exit what it already holds. Correcting the books is "
+            f"reconcile-slices, which is the owner's to run."
+        )
+    for row in (out.get("unknown") or ()):
+        return True, f"backing unknown for {row['asset']} - {row['reason']}"
+    return True, "backed"
 
 
 async def fleet_cost_basis_by_product():
@@ -6642,6 +6759,26 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             log.info(f"[GRID] {branch.bot_name}: 🧱 concentration ceiling - {_conc_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id,
                                         "CONCENTRATION", _conc_reason)
+            return
+
+        # DOES THIS BRANCH ACTUALLY HOLD WHAT ITS BOOKS CLAIM?
+        #
+        # The rung count that opened this gate judges a slice by its
+        # dollar basis. An UNBACKED slice - one whose coin is not in the
+        # wallet - carries a perfectly ordinary basis, so the rung count
+        # is structurally blind to it, and on 2026-10-04 that blindness
+        # put $45.60 into LINK at 37.045% backed. See
+        # branch_backing_verdict for the full measurement.
+        #
+        # Refuse-only, and UNKNOWN is not a refusal: an unreadable
+        # balance leaves the buy exactly where it was before this check
+        # existed, rather than freezing the fleet on a rate limit.
+        _back_ok, _back_reason = await branch_backing_verdict(
+            branch.product_id, slices, price, await wallet_available_units())
+        if not _back_ok:
+            log.warning(f"[GRID] {branch.bot_name}: 🧾 UNBACKED - no buy. {_back_reason}")
+            await _record_gate_decision(branch.bot_name, branch.product_id,
+                                        "UNBACKED", _back_reason)
             return
 
         # THE EXECUTION GATE. Called here so no buy path can reach the venue

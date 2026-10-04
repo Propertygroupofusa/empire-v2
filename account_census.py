@@ -160,6 +160,39 @@ async def fetch_balances(session) -> dict:
             "pages": pages, "accounts_seen": len(accounts)}
 
 
+def available_units_map(balances):
+    """{ASSET: units the venue will RELEASE}, or None when unreadable.
+
+    THE ONE PLACE THIS NORMALIZATION LIVES. Three callers need the same
+    map - the dashboard's `backing` block, exchange_truth_worker, and the
+    grid's own buy gate - and each had its own copy of these three lines.
+    A backing gate that normalizes even slightly differently from the
+    page the owner reads is worse than no gate: it refuses buys the page
+    says are fine, or allows ones it says are not. Same failure as a
+    module re-implementing tradeable_slices instead of importing it.
+
+    TWO MAPS, BECAUSE NEITHER IS SUFFICIENT ALONE.
+      `available_units` is what an order is actually sized against, but
+      fetch_balances filters it on `total > 0`, so an asset the venue
+      lists at exactly 0.0 is MISSING from it - and a confirmed zero is
+      the largest shortfall a branch can have.
+      `held_including_zero` lists every account including the zeros, but
+      it is available+hold, which counts coin the venue will not release.
+
+    So: start from available_units, and add a 0.0 only for an asset the
+    zero-inclusive map confirms is empty. setdefault never lowers a
+    figure already present. An asset in NEITHER map stays ABSENT, so
+    slice_backing reports it UNKNOWN rather than inventing a shortfall
+    out of a rate limit.
+    """
+    if not balances or not balances.get("available"):
+        return None
+    out = dict(balances.get("available_units") or {})
+    for cur, total in (balances.get("held_including_zero") or {}).items():
+        out.setdefault(cur, 0.0 if not total else out.get(cur, 0.0))
+    return out
+
+
 def wallet_units_for(balances, assets, direct=None):
     """A units map for exactly the assets asked about, with ZERO and UNKNOWN
     kept apart. Pure - the caller does the I/O.
