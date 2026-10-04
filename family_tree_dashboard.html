@@ -3710,9 +3710,19 @@ async function renderScaleBotStatus(data) {
         document.getElementById('scale-drawdown').textContent = `${drawdown.toFixed(1)}%`;
 
         // Update performance metrics
-        document.getElementById('scale-win-rate').textContent = `${(metrics.win_rate || 0).toFixed(1)}%`;
-        document.getElementById('scale-profit-factor').textContent = `${(metrics.profit_factor || 0).toFixed(2)}x`;
-        document.getElementById('scale-expectancy').textContent = `$${(metrics.expectancy_per_trade || 0).toFixed(2)}/trade`;
+        // "No completed trades" and "a 0% win rate" are different claims.
+        // get_grid_performance_metrics() returns null - never 0 - when there
+        // is nothing to measure, and profit_factor is null specifically when
+        // there are NO LOSSES AT ALL, because the ratio is undefined. The
+        // `|| 0` that used to be here turned a flawless record into "0.00x",
+        // the worst reading on the scale. An em-dash says what is true.
+        const stat = (v, fn) => (typeof v === 'number' && isFinite(v) ? fn(v) : '\u2014');
+        document.getElementById('scale-win-rate').textContent =
+            stat(metrics.win_rate, v => `${v.toFixed(1)}%`);
+        document.getElementById('scale-profit-factor').textContent =
+            stat(metrics.profit_factor, v => `${v.toFixed(2)}x`);
+        document.getElementById('scale-expectancy').textContent =
+            stat(metrics.expectancy_per_trade, v => `$${v.toFixed(2)}/trade`);
 
         // Render the chart
         const chartContainer = document.getElementById('scale-bot-chart');
@@ -5934,13 +5944,44 @@ function renderMoneyCheck(d) {
     const wrap = document.getElementById('money-check-wrap');
     if (!wrap) return;
     try {
-        const findings = d.findings || [];
-        const actionable = findings.filter(f => f.action);
-        const idle = findings.filter(f => !f.action);
+        // A FINDING WITH NO BUTTON IS NOT A FINDING WITH NOTHING WRONG.
+        //
+        // The headline used to read off actionable.length alone, so the
+        // green "every dollar that can be working, is" fired on three
+        // states where money was demonstrably NOT working - each of them
+        // a finding money_check() raises with action: null:
+        //
+        //   paused_with_capital  "N paused branch(es) still hold $X ...
+        //                         that capital is idle by choice"
+        //   nothing_deployed     "every branch is flat, so nothing is
+        //                         invested in any coin right now"
+        //   cash_overdrawn       "branch reserves exceed the wallet by $X"
+        //
+        // and on cash_unknown, where the server says in so many words that
+        // idle cash "cannot be judged". The cash_overdrawn comment in
+        // crypto_grid_bot.money_check already records that an earlier
+        // version "printed a calm green tick over it"; the finding was
+        // fixed there and the headline above it kept doing exactly that.
+        //
+        // severity decides, not action. 'ok' is the only all-clear, and a
+        // finding that carries NO severity has not claimed to be one -
+        // paused_with_capital is precisely that shape, so absence must
+        // fail closed, not open.
+        const findings = Array.isArray(d.findings) ? d.findings : null;
+        const actionable = (findings || []).filter(f => f.action);
+        const idle = (findings || []).filter(f => !f.action);
+        const unresolved = idle.filter(f => !f || f.severity !== 'ok');
 
-        const head = actionable.length
+        const head = !findings || !findings.length
+            // No list at all is not an all-clear either. Nothing was measured.
+            ? `<div style="font-size:0.95em; font-weight:700; color:var(--text-dim); margin-bottom:8px;">
+                 — Nothing was measured - the check returned no findings.</div>`
+            : actionable.length
             ? `<div style="font-size:0.95em; font-weight:700; color:var(--gold); margin-bottom:8px;">
                  ⚡ ${actionable.length} thing${actionable.length === 1 ? '' : 's'} worth doing right now</div>`
+            : unresolved.length
+            ? `<div style="font-size:0.95em; font-weight:700; color:var(--gold); margin-bottom:8px;">
+                 ⚠️ ${unresolved.length} thing${unresolved.length === 1 ? ' is' : 's are'} sitting still that no button here can fix.</div>`
             : `<div style="font-size:0.95em; font-weight:700; color:var(--green); margin-bottom:8px;">
                  ✅ Nothing is sitting still - every dollar that can be working, is.</div>`;
 
@@ -5990,7 +6031,11 @@ function moneyIcon(f, actionable) {
     if (f && f.severity === 'bad') return '\u26a0\ufe0f';
     if (actionable) return '\u26a1';
     if (f && f.severity === 'warn') return '\u2139\ufe0f';
-    return '\u2705';
+    // Only an explicit 'ok' earns the tick. paused_with_capital carries no
+    // severity at all and used to fall through to one, so a card reading
+    // "that capital is idle by choice" was headed by a green check.
+    if (f && f.severity === 'ok') return '\u2705';
+    return '\u2022';
 }
 
 // Runs one whitelisted, non-spending fix, then re-runs the check so the

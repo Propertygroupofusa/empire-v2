@@ -142,8 +142,21 @@ class PanelIcons(unittest.TestCase):
     def test_an_actionable_finding_is_a_bolt(self):
         self.assertEqual(self.icon({"severity": "warn"}, True), "⚡")
 
-    def test_a_finding_with_no_severity_from_an_older_server_still_renders(self):
-        self.assertEqual(self.icon({}, False), "✅")
+    def test_a_finding_with_no_severity_renders_but_does_not_tick(self):
+        """A missing severity is not an all-clear, and it is not hypothetical.
+
+        This test used to assert the no-severity case renders "✅", on the
+        premise that it only arises from "an older server". It does not:
+        money_check() ships paused_with_capital with no severity key at all
+        today, and its own detail text reads "A paused branch never buys, so
+        that capital is idle by choice". That card was headed by a green
+        tick. The requirement the name states - that it still RENDERS - is
+        kept; the tick is not, because absence of a severity has to fail
+        closed. Only an explicit "ok" earns the tick (see
+        test_an_ok_finding_still_ticks above).
+        """
+        self.assertTrue(self.icon({}, False), "it must still render something")
+        self.assertNotEqual(self.icon({}, False), "✅")
         self.assertEqual(self.icon({}, True), "⚡")
 
 

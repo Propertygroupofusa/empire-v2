@@ -1852,11 +1852,23 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
             # failure mode the rolling_expectancy note below records.
             log.warning(f"[dashboard] grid performance metrics unavailable: {type(e).__name__}: {e}")
     _grid_perf = _grid_perf or {}
+    #
+    # NONE IS CARRIED THROUGH, NOT COLLAPSED TO ZERO. The three lines that
+    # used to sit here read "the fallbacks keep the old numeric shape for
+    # the existing consumers rather than letting a None reach .toFixed()",
+    # and in doing so they undid the distinction the paragraph above exists
+    # to make. profit_factor is None specifically when there are NO LOSSES
+    # AT ALL - the ratio is undefined - and 0.0 renders in the panel as
+    # "0.00x", the worst reading on the scale, for a flawless record. The
+    # only consumer is the Scale panel's three stat lines, which now render
+    # an em-dash for None (see renderScaleBotStatus).
     win_rate = _grid_perf.get("win_rate_pct")
-    win_rate = win_rate if win_rate is not None else (
-        (total_wins / total_trades * 100) if total_trades > 0 else 0)
+    if win_rate is None and total_trades > 0:
+        win_rate = total_wins / total_trades * 100
     profit_factor = _grid_perf.get("profit_factor")
-    profit_factor = profit_factor if profit_factor is not None else 0.0
+    _expectancy = _grid_perf.get("expectancy_per_trade_usd")
+    if _expectancy is None:
+        _expectancy = (rolling_expectancy or {}).get("expectancy")
 
     # Calculate net P&L and drawdown using equity metrics
     net_pnl = total_unrealized
@@ -1877,8 +1889,8 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "capital_allocated_pct": round((real_balance or 0) / (real_crypto_net_worth_usd or 1) * 100, 1) if real_crypto_net_worth_usd else 0,
         "growth_rate_pct": round(((net_pnl / real_crypto_net_worth_usd * 100) if real_crypto_net_worth_usd else 0), 2),
         "drawdown_pct": round(drawdown_pct, 2),
-        "win_rate": round(win_rate, 1),
-        "profit_factor": round(profit_factor, 2),
+        "win_rate": round(win_rate, 1) if win_rate is not None else None,
+        "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
         # get_rolling_expectancy() returns a DICT (expectancy, num_trades,
         # win_count, ...), not a bare number - see the "rolling_expectancy"
         # passthrough below, whose consumer reads sub-keys off it. round() on
@@ -1894,10 +1906,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # rolling_expectancy read that used to sit here belongs to the
         # family-tree bot and is still passed through under its own key
         # below for the consumers that genuinely want it.
-        "expectancy_per_trade": round(
-            _grid_perf.get("expectancy_per_trade_usd")
-            if _grid_perf.get("expectancy_per_trade_usd") is not None
-            else ((rolling_expectancy or {}).get("expectancy") or 0), 2),
+        "expectancy_per_trade": round(_expectancy, 2) if _expectancy is not None else None,
         # The full, unrounded picture behind those three, so a reader can see
         # what the percentages were computed from rather than trusting them.
         "grid_performance": _grid_perf or None,
