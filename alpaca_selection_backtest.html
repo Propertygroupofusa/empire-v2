@@ -206,15 +206,30 @@
 
 <script>
 const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashboard';
+// THE "Enter admin key:" PROMPT GATED NOTHING.
+//
+// This page asked for a second credential and sent it as X-Admin-Key on
+// every call. routers/trading_dashboard.py does not read that header
+// anywhere - require_admin_key guards /clients, /subscriptions, /admin and
+// /revenue-automation, none of which this page touches. So the prompt
+// stopped the person using the page and stopped nobody else, while the
+// credential these endpoints DO require - the x-dashboard-token the lock
+// bar holds - was never sent at all. That is why unlocking at the top of
+// the screen changed nothing here.
+//
+// It also parked a secret in localStorage, which survives browser restarts
+// indefinitely. The lock bar deliberately uses sessionStorage so the token
+// dies with the tab. Any value left behind by the old prompt is cleared.
 const KEY_STORAGE = 'bmb_admin_key';
-let adminKey = localStorage.getItem(KEY_STORAGE) || '';
+try { localStorage.removeItem(KEY_STORAGE); } catch (e) { /* private mode */ }
+
+// The one credential this deployment actually checks, read from the same
+// place the lock bar writes it. No prompt: an empty string means locked,
+// and the guard's own 401/403 says so.
+const TOKEN_KEY = 'empire_write_token';
 
 function getAdminKey() {
-    if (!adminKey) {
-        adminKey = prompt('Enter admin key:') || '';
-        if (adminKey) localStorage.setItem(KEY_STORAGE, adminKey);
-    }
-    return adminKey;
+    try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
 }
 
 function fmtUsd(n) {
@@ -236,11 +251,11 @@ async function runBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -306,7 +321,7 @@ async function loadEligibility() {
     try {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview/entry-eligibility', {
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -380,11 +395,11 @@ async function runFibGoldZone() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/fib-gold-zone', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         const data = await res.json();
@@ -414,11 +429,11 @@ async function runExitRuleComparison() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/exit-rule-comparison', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -490,11 +505,11 @@ async function runMomentumComparison() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/momentum-comparison', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -564,11 +579,11 @@ async function runMultiWindowComparison() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/momentum-comparison-multi-window', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -646,11 +661,11 @@ async function runCombinedComparison() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/combined-strategy', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -729,7 +744,7 @@ async function loadLiveEntryVariant() {
     try {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview', {
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -764,13 +779,13 @@ async function runEntrySignalAbTest() {
         const [res] = await Promise.all([
             fetch(API_BASE + '/alpaca-selection-backtest/entry-signal-ab-test', {
                 method: 'POST',
-                headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+                headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
             }),
             loadLiveEntryVariant(),
         ]);
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -799,7 +814,7 @@ async function promoteEntryVariant(variant, btn) {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview/set-entry-variant', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ variant }),
         });
         const data = await res.json();
@@ -835,7 +850,7 @@ async function loadLiveStrategyFamily() {
     try {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview', {
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -875,7 +890,7 @@ async function promoteStrategyFamily(family, btn) {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview/set-strategy-family', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ family }),
         });
         const data = await res.json();
@@ -993,7 +1008,7 @@ async function tradeThisStock(ticker, btn) {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview/trade-this/' + encodeURIComponent(ticker), {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         const data = await res.json();
         if (!res.ok) {
@@ -1034,11 +1049,11 @@ async function runNarrowRangeBreakoutBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/narrow-range-breakout', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1123,11 +1138,11 @@ async function runOpeningBarBreakoutBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-breakout', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1195,11 +1210,11 @@ async function runOpeningBarMultiEntryComparison() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-multi-entry-comparison', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1278,11 +1293,11 @@ async function runOpeningBarNarrowStateComparison() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-narrow-state-comparison', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1352,11 +1367,11 @@ async function runWideStateContrarianBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/wide-state-contrarian', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1420,11 +1435,11 @@ async function runOpeningBarShortSideBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/opening-bar-short-side', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1495,11 +1510,11 @@ async function runScaledEntryComparisonBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/scaled-entry-comparison', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1561,11 +1576,11 @@ async function runRedBarTakeoutBacktest() {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-selection-backtest/red-bar-takeout', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (res.status === 401 || res.status === 403) {
-            localStorage.removeItem(KEY_STORAGE);
-            adminKey = '';
+            /* the lock bar owns the token; clearing it here would
+               silently log the page out mid-run */
             throw new Error('Admin key rejected - reload the page to re-enter it');
         }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1625,7 +1640,7 @@ async function loadOpeningBarLiveStatus() {
     try {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview/opening-bar-status', {
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -1656,7 +1671,7 @@ async function toggleOpeningBarLive(enable) {
         const key = getAdminKey();
         const res = await fetch(API_BASE + '/alpaca-overview/opening-bar-mode', {
             method: 'POST',
-            headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+            headers: { 'x-dashboard-token': key, 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable }),
         });
         const data = await res.json();
