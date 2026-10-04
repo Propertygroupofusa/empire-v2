@@ -2524,11 +2524,33 @@ function branchCardHtml(b) {
     // for every branch so "how far below its own peak" is always
     // visible, not just at the moment it trips - the breach note only
     // appears once it actually pauses new entries.
-    const drawdownHtml = (b.drawdown_pct != null && b.drawdown_pct > 0.5)
-        ? `<div class="row"><span class="k">Peak / drawdown</span><span class="v">${fmtUsd(b.peak_equity)} <span style="color:${b.drawdown_breached ? 'var(--red)' : 'var(--text-dim)'}">(&minus;${b.drawdown_pct.toFixed(0)}%)</span></span></div>`
+    // drawdown_pct AND drawdown_breaker_pct ARE FRACTIONS, NOT PERCENTAGES.
+    //
+    // QNT live on 2026-10-04: drawdown_pct 0.4371, peak_equity 285.40,
+    // drawdown_breaker_pct 0.25 - and the bot's own log for that same branch
+    // reads "real equity $160.65 is down 44% from its own $285.40 peak
+    // (breaker at 25%)". (285.40-160.65)/285.40 = 0.4371, so the field is a
+    // fraction and 0.4371 means 43.71%.
+    //
+    // Read as percentages they produced three lies at once:
+    //   * the guard `> 0.5` was meant as "show once past 0.5%", but against
+    //     a fraction it means "past 50%" - so a branch down 43.71% rendered
+    //     NOTHING. The row the comment above calls "always visible" was
+    //     hidden exactly when it mattered.
+    //   * .toFixed(0) on 0.4371 printed "0%", so the breach note read
+    //     "Paused: down 0% from its own $285.40 peak".
+    //   * the breaker printed "0.25%" instead of 25%.
+    //
+    // A notice saying a branch is down 0% against a breaker of 0.25%
+    // describes nothing that could ever happen.
+    const _ddPct = b.drawdown_pct != null ? b.drawdown_pct * 100 : null;
+    const _ddBreaker = b.drawdown_breaker_pct != null
+                     ? b.drawdown_breaker_pct * 100 : null;
+    const drawdownHtml = (_ddPct != null && _ddPct > 0.5)
+        ? `<div class="row"><span class="k">Peak / drawdown</span><span class="v">${fmtUsd(b.peak_equity)} <span style="color:${b.drawdown_breached ? 'var(--red)' : 'var(--text-dim)'}">(&minus;${_ddPct.toFixed(0)}%)</span></span></div>`
         : '';
     const drawdownBreachHtml = b.drawdown_breached
-        ? `<div class="order-error-note">🛑 Paused: down ${b.drawdown_pct.toFixed(0)}% from its own ${fmtUsd(b.peak_equity)} peak (breaker at ${b.drawdown_breaker_pct}%) - needs manual cash to resume</div>`
+        ? `<div class="order-error-note">🛑 Paused: down ${_ddPct != null ? _ddPct.toFixed(0) : '?'}% from its own ${fmtUsd(b.peak_equity)} peak (breaker at ${_ddBreaker != null ? _ddBreaker.toFixed(0) : '?'}%) - needs manual cash to resume</div>`
         : '';
 
     return `
