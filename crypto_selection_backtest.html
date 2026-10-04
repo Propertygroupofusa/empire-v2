@@ -560,7 +560,7 @@ function renderWatchlist(data) {
             <td>${bullishHtml}</td>
             <td>${retHtml}</td>
             <td>${rsiHtml}</td>
-            <td>${c.atr_pct != null ? c.atr_pct.toFixed(2) + '%' : '—'}</td>
+            <td>${c.atr_pct != null ? (c.atr_pct * 100).toFixed(2) + '%' : '—'}</td>
             <td>${alphaHtml}</td>
             <td><div class="wl-status-cell">${badge}${toggleHtml}</div></td>
         </tr>`;
