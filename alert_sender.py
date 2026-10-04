@@ -664,6 +664,7 @@ def send_email(subject: str, body: str) -> tuple:
     if key:
         try:
             import urllib.request
+            import urllib.error
             payload = json.dumps({
                 "personalizations": [{"to": [{"email": to}]}],
                 "from": {"email": sender},
@@ -674,14 +675,39 @@ def send_email(subject: str, body: str) -> tuple:
                 "https://api.sendgrid.com/v3/mail/send", data=payload,
                 headers={"Authorization": f"Bearer {key}",
                          "Content-Type": "application/json"}, method="POST")
+            def _named():
+                return ("" if key_var == "SENDGRID_API_KEY"
+                        else f" (read from the variable named {key_var!r} - "
+                             f"note the stray whitespace in its name)")
             with urllib.request.urlopen(req, timeout=30) as r:
                 if 200 <= r.status < 300:
                     return True, None
-                tried.append(
-                    f"sendgrid: HTTP {r.status}"
-                    + ("" if key_var == "SENDGRID_API_KEY"
-                       else f" (read from the variable named {key_var!r} - "
-                            f"note the stray whitespace in its name)"))
+                tried.append(f"sendgrid: HTTP {r.status}" + _named())
+        # THE STATUS CODE, BECAUSE THE CODES NEED OPPOSITE ACTIONS.
+        #
+        # urllib RAISES HTTPError for every 4xx and 5xx, so the branch above
+        # that reports r.status was unreachable and this fell to the generic
+        # handler, which prints the exception TYPE only. The queue therefore
+        # read "sendgrid: HTTPError" for 106 held alerts - true, and useless:
+        # 401 is a key SendGrid no longer accepts, 403 is a from-address that
+        # is not a verified sender, 400 is a malformed payload. Three
+        # different jobs, one word.
+        #
+        # SendGrid's error body is JSON from an HTTPS API and never echoes
+        # the Authorization header, so its own messages are safe to surface -
+        # but only the `errors[].message` fields, bounded, never the raw
+        # body. The SMTP handlers below keep reporting the type alone, for
+        # the reason stated there: their text can echo the login line.
+        except urllib.error.HTTPError as he:
+            detail = ""
+            try:
+                raw = he.read().decode("utf-8", "replace")[:1000]
+                msgs = [str(m.get("message")) for m in
+                        (json.loads(raw).get("errors") or []) if m.get("message")]
+                detail = (" - " + "; ".join(msgs)[:300]) if msgs else ""
+            except Exception:
+                detail = ""
+            tried.append(f"sendgrid: HTTP {he.code}{detail}" + _named())
         except Exception as e:
             tried.append(f"sendgrid: {type(e).__name__}")
     else:
