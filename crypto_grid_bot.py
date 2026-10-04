@@ -919,6 +919,53 @@ MAKER_ONLY_MODE_KEY = "grid_maker_only_mode"
 # inside the 45 seconds a pending market fallback allowed.
 MAKER_ONLY_ORDER_WAIT_SECONDS = int(os.getenv("GRID_MAKER_ONLY_WAIT_SECONDS", "240"))
 
+# ---- LEVEL-CAP EXEMPTION ---------------------------------------------------
+# A spacing-override candidate caps EVERY branch at its own level count, and
+# _effective_num_levels applies that cap live each cycle - including to a
+# branch that already holds MORE slices than the new ceiling. The buy check is
+# `len(tradeable_slices(slices)) < branch.num_levels`, so such a branch can
+# never open another rung until it sells back under the cap. It can only sell.
+#
+# Measured on the live fleet 2026-10-04 under the 3_levels_2.5pct override:
+# six branches held 3-7 slices against a 3-level ceiling, and $5,844.04 -
+# 68.6% of the fleet's $8,516.95 - could not buy at any price. The sixteen
+# branches that could still buy were returning 2.97% against those six at
+# 0.96%, so the frozen share was both the larger and the slower half.
+#
+# This names the coins that keep their own allocation-derived level count
+# instead of being capped down by an override. EMPTY BY DEFAULT, and an empty
+# list is byte-for-byte today's behaviour - nothing changes until the account
+# owner names a coin, which is deliberate: unfreezing a branch lets it buy
+# dips again, and that is a real spend of real money on a real position.
+#
+# IT IS A CEILING EXEMPTION, NOT A FLOOR OVERRIDE. The allocation-derived
+# count (_safe_num_levels_for_allocation) still applies, so an exempt branch
+# can never exceed what its own capital supports, and every other gate - the
+# cash reserve, concentration, the backing check, the drawdown breaker - is
+# untouched and still runs first.
+#
+# WHY THIS IS NOT "just set the override back to live_default": that lifts the
+# cap on EVERY branch at once, including the one the code already warns about
+# by name at the ADOPTED HEADROOM note below - "raising the level count
+# without the sizing change is what would have let ZEC spend 68.5% of the
+# wallet averaging down its own worst position." ZEC holds the fleet's single
+# largest allocation ($2,271.29) and has completed zero trades in 196. Naming
+# coins one at a time is what keeps that branch capped while the five earners
+# beside it go back to work.
+GRID_LEVEL_CAP_EXEMPT = frozenset(
+    p.strip().upper() for p in os.getenv("GRID_LEVEL_CAP_EXEMPT", "").split(",")
+    if p.strip()
+)
+
+
+def branch_is_level_cap_exempt(product_id) -> bool:
+    """True when this coin keeps its allocation-derived level count instead of
+    an override's lower ceiling. Unknown/blank product_id is never exempt:
+    the safe answer to 'should this branch be allowed to buy more' is no."""
+    if not product_id:
+        return False
+    return str(product_id).strip().upper() in GRID_LEVEL_CAP_EXEMPT
+
 # How often a cycle passed rather than paying taker. Counted, because the
 # cost of this mode is missed trades and an uncounted cost is an assumed one.
 GRID_MAKER_ONLY_SKIP_BUY_KEY = "grid_maker_only_skipped_buy"
@@ -6472,6 +6519,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     override_cfg = GRID_LEVEL_SPACING_CANDIDATES.get(grid_spacing_override)
     if override_cfg is not None:
         real_effective_levels = max(1, min(_safe_num_levels_for_allocation(branch.allocated_usd), override_cfg["num_levels"]))
+        # An exempt coin keeps its own allocation-derived count: the override's
+        # ceiling simply does not apply to it. Still bounded by what its real
+        # capital supports, so this can only ever restore levels the branch
+        # would have had with no override at all - never invent new ones.
+        if branch_is_level_cap_exempt(branch.product_id):
+            real_effective_levels = _safe_num_levels_for_allocation(branch.allocated_usd)
         # ---- ADOPTED HEADROOM ----------------------------------------
         # An adopted branch is written FULL on purpose: coin_adoption_worker
         # sets num_levels to the slice count so the grid cannot double down
