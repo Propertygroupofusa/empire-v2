@@ -13789,3 +13789,47 @@ endpoint sends; the snapshot writer only sets columns the table has.
 - **Stripe docs:** https://stripe.com/docs/api/checkout/sessions
 - **HeyGen docs:** https://docs.heygen.com/
 - **FastAPI docs:** http://localhost:8000/docs (when running locally)
+
+
+---
+
+## Standing instruction: the $5,000 cash floor (2026-10-04)
+
+> "Do not let that $5,000 go lower than that."
+
+The Coinbase USD wallet was $5,029.45 when this was said. It is a floor on
+the CASH leg, and it is the owner's to enforce - the knob is
+`GRID_CASH_RESERVE_USD` (currently $88.00), a Railway variable, and setting
+it is his call, never mine. Never lower it to free up buying power.
+
+What must be said plainly whenever this comes up, because it is the whole
+difficulty: a grid converts cash into coin and back. Every buy lowers the
+cash number before the matching sell raises it past where it started. A
+literal $5,000 cash floor therefore stops essentially all buying - only
+$29.45 of the balance sits above it - and a fleet that cannot buy cannot
+complete a round trip, which is the only thing that has ever added to
+BANKED (+$433.36 over 196 trades, 86% win rate, never once gone backwards).
+
+So the two readings diverge, and the difference is worth money:
+
+* Cash never below $5,000  -> protects the number, ends the compounding.
+* Total never below $5,000 -> cash plus coin. Cash dipping because it
+  became inventory is not a loss; it is the machine working.
+
+Never quietly pick one. State which is being protected.
+
+## Standing instruction: an env var must never be able to kill an import
+
+A Railway variable set to the literal text `240 -> 3600` (a recommendation
+of mine, pasted verbatim with the arrow) stopped `crypto_grid_bot` from
+importing and took the fleet off the air - stop layer included. Two rules
+came out of it:
+
+1. Numeric env vars are read through `env_config.env_int` / `env_float`,
+   never a bare `int(os.getenv(...))` at module level. Fail soft to the
+   default, log loudly, and record it in `ENV_PARSE_FALLBACKS` so
+   `/module-health` can show that the set value is NOT in effect.
+2. When telling the owner to set a variable, give the VALUE ALONE on its
+   own line - digits only, no arrow, no "from X to Y", nothing that is
+   wrong if pasted whole. The instruction has to be safe to paste, because
+   it will be.
