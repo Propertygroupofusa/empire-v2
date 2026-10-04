@@ -7590,55 +7590,7 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 return
         fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
-            # "DID NOT FILL" AND "WAS NEVER PLACED" ARE DIFFERENT FAULTS.
-            #
-            # grid_sell returns None for both, so this said "did not fill"
-            # either way - and that one word sent this session's diagnosis
-            # down the wrong road for an hour. ZEC logged
-            #
-            #   NO MAKER SELL PLACED - available_quantity=0.0
-            #   requested_quantity=0.0735  decision=DUST
-            #   reason=BELOW_BASE_INCREMENT
-            #
-            # immediately above "real grid sell of ZEC-USD did not fill",
-            # and the second line is the one a reader believes. "Did not
-            # fill" means an order rested on the book and nobody crossed it:
-            # the fix is to let it rest longer. Nothing rested here. The
-            # wallet had 0.0 available against a slice claiming 0.37816665,
-            # and the fix for that is reconciling the claim, which is a
-            # different job entirely.
-            #
-            # So the wallet is read and the two are named apart. READ-ONLY
-            # and fully wrapped: this runs after the sale has already been
-            # attempted and must never be able to affect it.
-            _avail_note = ""
-            try:
-                import account_census as _ac
-                _bal = await _ac.fetch_balances(session)
-                _av = _ac.available_units_map(_bal)
-                if _av is not None:
-                    _have = float(_av.get(
-                        str(branch.product_id).split("-")[0].upper(), 0.0) or 0.0)
-                    if _have + 1e-12 < (oldest.qty or 0.0):
-                        _avail_note = (
-                            f" NO ORDER WAS PLACED: the venue has {_have:.8f} "
-                            f"available against a slice claiming "
-                            f"{oldest.qty:.8f}. This is a CLAIM that outruns "
-                            f"the wallet, not an order waiting to be filled - "
-                            f"resting longer cannot help it, and reconciling "
-                            f"the slice can.")
-                    else:
-                        _avail_note = (
-                            f" The order was placed against {_have:.8f} "
-                            f"available and really did go unfilled.")
-            except Exception as _exc:
-                _avail_note = (f" (could not read available units to tell a "
-                               f"missing order from an unfilled one: "
-                               f"{type(_exc).__name__})")
-            log.warning(
-                f"[GRID] {branch.bot_name}: real grid sell of "
-                f"{branch.product_id} did not complete - will retry next "
-                f"cycle.{_avail_note}")
+            log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")
             # A parked branch that cannot fill its escape sell is stuck in a
             # retry loop: the gate passes every cycle, the order does not
             # fill, and the cycle returns here having done nothing. That is
@@ -7648,8 +7600,8 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                                   branch.product_id):
                 await _record_gate_decision(
                     branch.bot_name, branch.product_id, "PARKED_SELL_NOFILL",
-                    f"escape sell of {oldest.qty:g} did not complete - "
-                    f"branch stays full on its rungs." + _avail_note)
+                    f"escape sell of {oldest.qty:g} did not fill - branch "
+                    f"stays full on its rungs")
             return
         filled_qty, filled_price, sell_leg_fee = fill
         # THE BASIS THAT DECIDED THE SALE IS THE BASIS THAT PRICES IT.
