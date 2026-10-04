@@ -97,18 +97,36 @@ ok("lowercase input is normalised", parse_env("sol-usd,link-usd") == ["SOL-USD",
 ok("stray whitespace is tolerated", parse_env(" SOL-USD , LINK-USD ") == ["SOL-USD", "LINK-USD"])
 ok("empty entries are dropped", parse_env("SOL-USD,,LINK-USD,") == ["SOL-USD", "LINK-USD"])
 
-# --- no chosen coin may sit on the hardcoded blocklist -------------------
+# --- no chosen coin may sit on the blocklist ------------------------------
+#
+# This parsed the set literal out of the source, which stopped matching when
+# the blocklist became GRID_MANUAL_EXCLUDED_COINS - operator-controlled,
+# defaulting to the same seven. The source spelling was never what this test
+# cared about; the EFFECTIVE set is. So it imports the module and reads the
+# value, which is what every caller actually sees and what keeps being true
+# however the default is expressed.
 treesrc = open(os.path.join(HERE, "crypto_family_tree_bot.py"), encoding="utf-8").read()
-blocked = set(
-    re.search(r"MANUAL_EXCLUDED_COINS = \{([^}]+)\}", treesrc)
-    .group(1).replace('"', "").replace("'", "").split(", ")
-)
-ok("the hardcoded blocklist is still found (guards this test's own premise)",
+_saved_excl = os.environ.pop("GRID_MANUAL_EXCLUDED_COINS", None)
+import importlib
+import crypto_family_tree_bot as _tree
+importlib.reload(_tree)
+blocked = set(_tree.MANUAL_EXCLUDED_COINS)
+if _saved_excl is not None:
+    os.environ["GRID_MANUAL_EXCLUDED_COINS"] = _saved_excl
+
+ok("the blocklist is still found (guards this test's own premise)",
    len(blocked) >= 5)
-ok("no chosen coin is hardcoded-blocked", not (set(CHOSEN) & blocked))
+ok("no chosen coin is blocked by default", not (set(CHOSEN) & blocked))
 # The blocklist still has to BLOCK things - this is not a licence to empty it.
-ok("the blocklist still blocks UNI and POL (real live evidence)",
+ok("the default still blocks UNI and POL (real live evidence)",
    "UNI-USD" in blocked and "POL-USD" in blocked)
+# And the operator must be able to reach it without a deploy - the whole
+# point of moving it. A list that can only change by editing this repo is
+# the hardcoded veto under a different name.
+ok("the list is reachable from the environment",
+   "GRID_MANUAL_EXCLUDED_COINS" in treesrc)
+ok("with the default unchanged when the variable is unset",
+   "_MANUAL_EXCLUDED_RAW is None" in treesrc)
 
 # --- the eligibility rule -------------------------------------------------
 fn = [n for n in ast.walk(ast.parse(src))
