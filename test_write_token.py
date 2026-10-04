@@ -97,8 +97,18 @@ ok("a 503 from the guard explains the deployment has none set",
 ok("and names the Railway restart requirement",
    "only injects" in HTML and "container starts" in HTML,
    "an existing container never picks up a new variable")
-ok("a 401/403 says the token was refused instead",
-   "The token was refused" in HTML)
+# This section's own heading is "A MISSING TOKEN AND A WRONG TOKEN SAY
+# DIFFERENT THINGS", and until now it asserted the opposite: one message,
+# "The token was refused. Check it matches DASHBOARD_WRITE_TOKEN exactly.",
+# served both 401 and 403. They are different faults with different fixes -
+# a 401 means the server received NO token, so re-reading the value in
+# Railway is the wrong trip entirely. Each now says what happened.
+ok("a 401 says the server received no token, not that the value is wrong",
+   "received NO token" in HTML and "not the problem" in HTML)
+ok("a 403 says a token DID arrive and did not match",
+   "A token WAS received" in HTML and "does not match" in HTML)
+ok("...and the two messages are genuinely different text",
+   HTML.count("received NO token") == 1 and HTML.count("A token WAS received") == 1)
 ok("the locked state explains what the token IS",
    "not a link" in HTML and "password you invent" in HTML,
    "the operator asked what link to paste - it is not a link")

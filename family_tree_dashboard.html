@@ -6657,8 +6657,28 @@ async function postGuarded(url, body) {
             + 'Set it in Railway on this service and redeploy - Railway only injects '
             + 'variables when a container starts.');
     }
-    if (res.status === 401 || res.status === 403) {
-        throw new Error('The token was refused. Check it matches DASHBOARD_WRITE_TOKEN exactly.');
+    // 401 AND 403 ARE DIFFERENT FAULTS AND HAD THE SAME MESSAGE.
+    //
+    // Both said "check it matches DASHBOARD_WRITE_TOKEN exactly", which sends
+    // you to re-read the value in Railway. For a 401 the value is not the
+    // problem at all - the server received no token - so that advice wastes
+    // the trip. Each now says what actually happened and what to do about it.
+    if (res.status === 401) {
+        throw new Error('The server received NO token with this request, so the '
+            + 'value in Railway is not the problem. The tab holds something that '
+            + 'is blank once trimmed - usually a stray newline picked up when the '
+            + 'token was copied. Open the \u{1F512} lock bar, clear the box, and '
+            + 'type or paste the token with no leading or trailing blank space.');
+    }
+    if (res.status === 403) {
+        throw new Error('A token WAS received and it does not match this '
+            + 'deployment\'s DASHBOARD_WRITE_TOKEN. Nothing changed. Compare the '
+            + 'value in the lock bar against Railway > Variables on this service, '
+            + 'character for character - and remember Railway only injects a new '
+            + 'value when the container restarts, so a value changed without a '
+            + 'redeploy is not the one the server is checking against. '
+            + 'GET /api/trading-dashboard/write-guard shows what the last 40 '
+            + 'attempts actually did, without revealing any token.');
     }
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     return data;

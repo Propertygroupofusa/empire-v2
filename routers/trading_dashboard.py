@@ -1095,6 +1095,33 @@ async def get_write_guard_status():
         "note": ("Reads are NOT protected. /account-census and "
                  "/coinbase/balances still return full holdings to anyone "
                  "with the URL."),
+        # WHAT ACTUALLY HAPPENED ON THE LAST 40 WRITE ATTEMPTS.
+        #
+        # write_guard.record_attempt() has been collecting this all along -
+        # its own comment says it exists so nobody has to read logs on a
+        # phone, and that it "settles the three cases instantly". Nothing
+        # ever served it. So the account owner has been reading one generic
+        # line, "The token was refused. Check it matches DASHBOARD_WRITE_TOKEN
+        # exactly.", for three genuinely different faults with three
+        # different fixes:
+        #
+        #   503  the server has no token at all   -> set it in Railway
+        #   401  nothing arrived with the request -> the browser did not
+        #                                            send it; re-enter it
+        #   403  a token arrived and did not match -> the value is wrong
+        #
+        # Every one of those tells him to go check the value, and in two of
+        # the three the value is not the problem. It carries no credential
+        # material by construction: presence and verdict, never the token,
+        # nor any prefix, length or hash of it.
+        "recent_write_attempts": write_guard.recent_attempts(),
+        "how_to_read_recent_attempts": (
+            "Empty means no write request ever reached this server - the "
+            "click did not leave the browser. guard_status 401 with "
+            "token_was_present false means the request arrived carrying no "
+            "token. 403 means a token arrived and did not match. null means "
+            "the guard allowed it through and anything that went wrong after "
+            "that happened inside the endpoint, not here."),
     }
 
 
