@@ -142,19 +142,26 @@ AI SUPPORT INBOX (conversations grouped by status):
 """
 
 
-def _generate_summary(trading: dict, notary: dict, support: dict) -> str:
+def _generate_summary(trading: dict, notary: dict, support: dict) -> tuple:
+    """Returns (text, generated). The flag is the point.
+
+    This used to return a placeholder string on failure and nothing else,
+    so the caller could not tell a real summary from the words "summary
+    generation failed" and reported success either way. See the log triple
+    this was found by, in generate_and_send_brief."""
     if not CLAUDE_KEY:
-        return "(ANTHROPIC_API_KEY not configured - raw numbers only below, no summary generated.)"
+        return ("(ANTHROPIC_API_KEY not configured - raw numbers only below, "
+                "no summary generated.)"), False
     try:
         response = _claude.messages.create(
             model=TEXT_MODEL,
             max_tokens=400,
             messages=[{"role": "user", "content": _format_brief_prompt(trading, notary, support)}],
         )
-        return response.content[0].text.strip()
+        return response.content[0].text.strip(), True
     except Exception as e:
         log.error(f"Claude call failed generating daily brief: {e}")
-        return "(Summary generation failed - raw numbers only below.)"
+        return "(Summary generation failed - raw numbers only below.)", False
 
 
 def _send_brief_email(subject: str, body: str):
@@ -175,6 +182,7 @@ def _send_brief_email(subject: str, body: str):
         log.info(f"📧 Daily brief emailed: {subject}")
     else:
         log.warning(f"Daily brief NOT delivered ({err}): {subject}")
+    return bool(ok)
 
 
 async def generate_and_send_brief():
@@ -183,7 +191,7 @@ async def generate_and_send_brief():
         notary = await _fetch_notary_snapshot(db)
         support = await _fetch_support_snapshot(db)
 
-    summary = _generate_summary(trading, notary, support)
+    summary, summary_ok = _generate_summary(trading, notary, support)
 
     # Persisted before sending, not after - so the history record exists
     # even if the email step fails (missing GMAIL_EMAIL/PASSWORD, SMTP
@@ -203,8 +211,27 @@ async def generate_and_send_brief():
         f"Support conversations: {support}\n\n"
         f"Dashboard: https://empire-v2-production.up.railway.app/trading-dashboard"
     )
-    _send_brief_email(f"☀️ Del Ventures Brief — {today}", body)
-    log.info("Daily brief generated, persisted, and sent")
+    sent_ok = _send_brief_email(f"☀️ Del Ventures Brief — {today}", body)
+
+    # THIS LINE USED TO SAY "generated, persisted, and sent" UNCONDITIONALLY.
+    #
+    # On 2026-10-04 07:00 the log read, three lines in a row:
+    #
+    #   [ERROR]   Claude call failed generating daily brief: 404 ... model
+    #   [WARNING] Daily brief NOT delivered (...)
+    #   [INFO]    Daily brief generated, persisted, and sent
+    #
+    # The third line contradicted the two above it, and it is the reason a
+    # retired model id survived in this codebase for months: anyone
+    # skimming for "did the brief run?" found a success line and stopped.
+    # Only the persist is unconditionally true here - the DB row is written
+    # before either of the other two steps - so only the persist is claimed
+    # without checking.
+    log.info(
+        "Daily brief persisted; summary %s; delivery %s",
+        "generated" if summary_ok else "FAILED (raw numbers only)",
+        "sent" if sent_ok else "FAILED (nothing was delivered)",
+    )
 
 
 _scheduler = BackgroundScheduler()
