@@ -642,7 +642,48 @@ COIN_FAMILY_TREE = [
 # Same contestable/self-healing rule as every other coin here - it
 # becomes tradable again the instant a real backtest run shows it
 # genuinely positive.
-MANUAL_EXCLUDED_COINS = {"STX-USD", "BLUR-USD", "UNI-USD", "DOT-USD", "PEPE-USD", "WIF-USD", "POL-USD"}
+#
+# NOW THE OPERATOR'S, NOT THE SOURCE FILE'S.
+#
+# This was a hardcoded set, and crypto_grid_bot's own coin-selection note
+# already named it as one of three filters that stacked into a total shutout:
+# "a hardcoded set that blocks UNI, the #1 ranked coin, and STX, which earned
+# real money in September." Its closing rule there is the one this breaks:
+# "An automated filter may rank a deliberate choice lower; it may not veto it
+# outright."
+#
+# It vetoes three coins whose own closed round trips in THIS fleet's ledger
+# are green, measured 2026-10-04 over every trade ever recorded:
+#
+#   STX   +$1.78   13 trips   85% won
+#   PEPE  +$2.23    4 trips  100% won
+#   WIF   +$1.06   12 trips   67% won
+#
+# Not one retired coin is negative: 8 of them, 64 round trips, +$19.13 in
+# total. They were cut by a directional ranking this file's own history says
+# was close to the inverse of the right answer for a grid - DOGE went out at
+# -23.8% directional while earning +$22.81 on the grid.
+#
+# THE DEFAULT IS UNCHANGED, DELIBERATELY. Reading the list from the
+# environment does not reopen anything by itself: with the variable unset
+# this is byte-for-byte the set that was hardcoded, and the fleet behaves
+# exactly as it did. What changes is who holds the switch. Opening a coin
+# spends real money on a real position, so it stays the account owner's
+# decision - it just no longer needs a deploy, and a coin he un-excludes on
+# the dashboard is no longer silently re-vetoed from a constant in here.
+#
+# GRID_MANUAL_EXCLUDED_COINS="" opens all seven. A comma-separated list
+# keeps exactly the ones named. POL-USD is the one with a real case for
+# staying: 79 trades, 14% win rate, -$337.96 - worse than every other coin's
+# loss combined, and the note above explains why.
+_MANUAL_EXCLUDED_DEFAULT = "STX-USD,BLUR-USD,UNI-USD,DOT-USD,PEPE-USD,WIF-USD,POL-USD"
+_MANUAL_EXCLUDED_RAW = os.getenv("GRID_MANUAL_EXCLUDED_COINS")
+MANUAL_EXCLUDED_COINS = {
+    c.strip().upper()
+    for c in (_MANUAL_EXCLUDED_DEFAULT if _MANUAL_EXCLUDED_RAW is None
+              else _MANUAL_EXCLUDED_RAW).split(",")
+    if c.strip()
+}
 
 # Per the account owner's explicit choice: the coordinator (see run()'s
 # _scan()) now re-runs the real backtest on its own every
