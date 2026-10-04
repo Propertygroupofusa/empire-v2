@@ -276,6 +276,36 @@ def test_the_pages_lead_with_the_grid_s_own_book():
        "never backfilled with the blended figure" in router)
 
 
+# ------------------------------------------- 6b. the TRADED TODAY tile
+# The tile the account owner circled. It read -$311.24 over "4 trades today"
+# on a day the account took in $1,268.45 of cash and gained $297.78 against
+# what was really paid. Every one of the four was an inherited ZEC slice.
+def test_traded_today_reports_the_grid_s_own_trading():
+    ft = (REPO / "family_tree_dashboard.html").read_text()
+    i = ft.index("var el = document.getElementById('strip-today')")
+    j = ft.index("var branches = (d && d.branches) || []", i)
+    tile = ft[i:j]
+
+    ok("the tile splits today's closes on exit_reason",
+       "exit_reason !== 'adopted_exit'" in tile
+       and "exit_reason === 'adopted_exit'" in tile)
+    ok("the headline number is the grid's own trading",
+       "var net = sumPnl(ownToday);" in tile)
+    ok("the inherited closes are still shown, not dropped",
+       "inheritedToday.length" in tile and "plus " in tile)
+    ok("and are labelled as coin the grid did not buy",
+       "the grid did not buy" in tile)
+    ok("a day with only inherited closes says the grid placed none of its own",
+       "the grid placed no round trip of its own today" in tile)
+    ok("zero is not painted green - a flat day is flat",
+       "net > 0 ? TV_GREEN" in tile)
+    ok("the incomplete-window warning still wraps the whole line",
+       "window starts inside today" in tile)
+    # the regression itself: no bare sum over every close
+    ok("no reduce over the unsplit list survives",
+       "todays.reduce(" not in tile)
+
+
 # ------------------------------- 7. the tag still keeps it out of the record
 def test_the_grid_s_record_still_excludes_inherited_exits():
     ok("get_grid_performance_metrics still excludes ADOPTED_EXIT_REASON",
@@ -292,6 +322,7 @@ if __name__ == "__main__":
               test_the_two_zec_rows_restate_positive,
               test_realized_splits_into_two_books,
               test_the_pages_lead_with_the_grid_s_own_book,
+              test_traded_today_reports_the_grid_s_own_trading,
               test_the_grid_s_record_still_excludes_inherited_exits):
         print(f"\n{t.__name__}")
         t()

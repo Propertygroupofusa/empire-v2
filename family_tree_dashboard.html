@@ -5640,16 +5640,47 @@ function renderStatusStrip(d, history) {
 
         var el = document.getElementById('strip-today');
         var sub = document.getElementById('strip-today-sub');
+        // WHAT THIS TILE IS ALLOWED TO SAY THE BOT DID TODAY.
+        //
+        // It summed every close, and on 2026-10-04 it read -$311.24 over "4
+        // trades today" - all four of them ZEC slices the grid never bought,
+        // priced against a $1,650 adoption-day mark nobody ever paid. Against
+        // the $1,013.80 really paid those same four sales made +$297.78 and
+        // put $1,268.45 of cash in the wallet. The tile announced a $311 loss
+        // on the day the account gained. The account owner read it and asked
+        // not to be shown his money being sucked away - which is exactly what
+        // the tile said had happened, and had not.
+        //
+        // So the headline is the grid's OWN trading, and inherited exits are
+        // named underneath as what they are. Nothing is hidden and nothing is
+        // netted off: a reader gets both numbers or neither.
+        var ownToday = todays.filter(function (t) { return t.exit_reason !== 'adopted_exit'; });
+        var inheritedToday = todays.filter(function (t) { return t.exit_reason === 'adopted_exit'; });
+        var sumPnl = function (rows) {
+            return rows.reduce(function (a, t) { return a + Number(t.pnl || 0); }, 0);
+        };
         if (todays.length) {
-            var net = todays.reduce(function (a, t) { return a + Number(t.pnl || 0); }, 0);
+            var net = sumPnl(ownToday);
             el.textContent = (dayFullyCovered ? '' : '\u2265 ')
                 + (net < 0 ? '-$' : '+$') + Math.abs(net).toFixed(2);
-            el.style.color = net < 0 ? TV_RED : TV_GREEN;
-            sub.textContent = dayFullyCovered
-                ? (todays.length + ' trade' + (todays.length === 1 ? '' : 's') + ' today')
-                : ('at least ' + todays.length + ' trades today \u2014 the '
-                   + trades.length + '-row window starts inside today, so older '
-                   + 'closes are not counted here');
+            el.style.color = net < 0 ? TV_RED : (net > 0 ? TV_GREEN : 'var(--tv-dim)');
+            var line = ownToday.length
+                ? (ownToday.length + ' trade' + (ownToday.length === 1 ? '' : 's') + ' today')
+                : 'the grid placed no round trip of its own today';
+            if (inheritedToday.length) {
+                var inh = sumPnl(inheritedToday);
+                line += ' \u00b7 plus ' + inheritedToday.length + ' inherited position'
+                      + (inheritedToday.length === 1 ? '' : 's') + ' closed at '
+                      + (inh < 0 ? '-$' : '+$') + Math.abs(inh).toFixed(2)
+                      + ' against the adoption mark \u2014 coin the grid did not buy, '
+                      + 'and not a measure of its trading';
+            }
+            if (!dayFullyCovered) {
+                line = 'at least ' + line + ' \u2014 the ' + trades.length
+                     + '-row window starts inside today, so older closes are not '
+                     + 'counted here';
+            }
+            sub.textContent = line;
         } else {
             el.textContent = 'none';
             el.style.color = 'var(--tv-dim)';
