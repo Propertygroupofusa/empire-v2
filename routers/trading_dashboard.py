@@ -2397,14 +2397,31 @@ async def get_trading_profile_status():
     try:
         from models import CryptoGridTradeHistory
         from database import get_session_factory
+        import crypto_grid_bot as _g
         async with get_session_factory()() as _db:
             _rows = (await _db.execute(
-                select(CryptoGridTradeHistory.pnl, CryptoGridTradeHistory.closed_at)
+                select(CryptoGridTradeHistory.pnl,
+                       CryptoGridTradeHistory.closed_at,
+                       CryptoGridTradeHistory.exit_reason)
                 .where(CryptoGridTradeHistory.closed_at != None)  # noqa: E711
                 .order_by(CryptoGridTradeHistory.closed_at.asc()))).all()
-        _pnl = [float(r.pnl or 0) for r in _rows]
+        # THIS TILE IS THE ONE THE SWITCH IS JUDGED ON, so it has to be the
+        # grid's own trading.
+        #
+        # It summed every closed row, and on 2026-10-04 four ZEC closes
+        # tagged adopted_exit took it from +$135.58 to -$175.66 - inherited
+        # inventory the grid never bought, priced against an adoption-day
+        # mark nobody paid. Printed beside "-$86.83 at the old 1.50% tier"
+        # it reads as maker-only having made things worse, which is the
+        # opposite of what those 196 round trips measured. Same rule as
+        # get_grid_performance_metrics, loss_study and capital_kpis.
+        _own = [r for r in _rows
+                if (r.exit_reason or "") != _g.ADOPTED_EXIT_REASON]
+        _inh = [r for r in _rows
+                if (r.exit_reason or "") == _g.ADOPTED_EXIT_REASON]
+        _pnl = [float(r.pnl or 0) for r in _own]
         if _pnl:
-            _days = sorted({str(r.closed_at)[:10] for r in _rows if r.closed_at})
+            _days = sorted({str(r.closed_at)[:10] for r in _own if r.closed_at})
             out["since_then"] = {
                 "readable": True,
                 "trades": len(_pnl),
@@ -2413,10 +2430,19 @@ async def get_trading_profile_status():
                 "first_day": _days[0] if _days else None,
                 "last_day": _days[-1] if _days else None,
                 "fee_basis": "0.70% maker round trip",
+                # Published, not hidden - the tile can say what it set aside.
+                "inherited_excluded": len(_inh),
+                "inherited_excluded_usd": round(
+                    sum(float(r.pnl or 0) for r in _inh), 2) if _inh else 0.0,
                 "note": ("What the fleet has actually realized on today's fee "
                          "tier. The window in measured_basis is a CLOSED "
                          "period at the old 1.50% taker rate, kept only to "
-                         "show why maker-only was turned on."),
+                         "show why maker-only was turned on."
+                         + (f" {len(_inh)} inherited position(s) closing for "
+                            f"${sum(float(r.pnl or 0) for r in _inh):,.2f} as "
+                            f"booked are excluded: the grid chose neither end "
+                            f"of them, so they cannot speak to whether this "
+                            f"fee tier is working." if _inh else "")),
             }
     except Exception as exc:
         log.warning(f"[profile] since_then unreadable: {type(exc).__name__}: {exc}")

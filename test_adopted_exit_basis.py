@@ -306,6 +306,31 @@ def test_the_pages_lead_with_the_grid_s_own_book():
     ok("and an unavailable split is never backfilled with the blend",
        "never backfilled with the blended figure" in router)
 
+    # THE TRADING-PROFILE TILE. It is the figure the maker-only switch is
+    # judged on, printed beside "-$86.83 at the old 1.50% tier". Blended, it
+    # read -$175.66 and made maker-only look like it had made things worse -
+    # the opposite of what those 196 round trips measured.
+    # Bounded by the next function rather than by a brace: the note is a
+    # multi-line expression, so the first "}" after it lands mid-literal and
+    # cut the phrase this asserts on out of the slice.
+    i = router.index("THIS TILE IS THE ONE THE SWITCH IS JUDGED ON")
+    k = router.index("except Exception as exc:", i)
+    tile = router[i:k]
+    ok("the profile tile sums the grid's own closes",
+       "_g.ADOPTED_EXIT_REASON" in tile and "_own" in tile)
+    ok("and its trade count follows the same rows it summed",
+       '"trades": len(_pnl)' in tile
+       and "_pnl = [float(r.pnl or 0) for r in _own]" in tile)
+    ok("the excluded rows are published rather than dropped",
+       "inherited_excluded_usd" in tile)
+    # Matched on the JOINED text: the note is built from adjacent f-string
+    # literals, so the sentence never appears contiguously in the source and
+    # a plain substring search fails on prose that is really there.
+    import re as _re
+    joined = " ".join(_re.sub(r'"\s*\n\s*f?"', "", tile).split())
+    ok("and the note says why they cannot speak to the fee tier",
+       "cannot speak to whether this fee tier is working" in joined)
+
 
 # ------------------------------------------- 6b. the TRADED TODAY tile
 # The tile the account owner circled. It read -$311.24 over "4 trades today"
