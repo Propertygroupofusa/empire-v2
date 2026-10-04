@@ -39,6 +39,45 @@ Read it as written and do not round it off:
   obviously right - e.g. the fleet starts converting hundreds of dollars
   of USD per day - say so plainly rather than deciding either way alone.
 
+### The BTC carve-out, and why it has not been needed (2026-10-04)
+
+> "I don't want to sale btc the rest is what ever we can use 500 of btc to
+> keep the system running right"
+
+Standing permission for **up to $500 of BTC** to fund operations if the
+system ever needs cash. It is permission, not a plan, and it is the owner's
+to execute - selling is his alone.
+
+It has not been needed and should not be raised as though it were:
+
+- `real_usd_balance` $5,059.65. The account is not short of cash.
+- The grid tracks **0.00044447 BTC (~$38)** of the owner's 0.01837 BTC
+  ($1,561.98) - branch `crypto_grid_1`, 2 slices, $55.82 allocated. About
+  **$1,524 of BTC belongs to no branch at all**. The grid cannot sell what
+  it does not track.
+
+So the answer to "can we use $500 of BTC" is that nothing needs it. Say
+that rather than planning a sale.
+
+### $4,558 of USD is already committed to becoming coin
+
+The number that actually matters to the rule above, and it is not a sale:
+
+```
+real_usd_balance   $5,059.65
+free_cash_usd        $501.66     locked_usd 0.00, flat-branch cash 0.00
+```
+
+The whole $4,558 gap is `get_grid_undeployed_reserve_total()` - every grid
+branch's unfilled rungs, USD reserved to buy coin the moment that branch's
+coin drops one step. Nothing is spent and no order is resting, but nobody
+has to do anything for it to become coin.
+
+The only lever that stops it is the grid master switch
+(`is_grid_bot_active()`, `mode_active`). **Report its state; never flip
+it.** Do not quietly treat the undeployed reserve as "idle cash" either -
+it is the opposite of idle.
+
 This supersedes any earlier plan in this file or in a session that ends in
 "deploy the idle cash".
 
