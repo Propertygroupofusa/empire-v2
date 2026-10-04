@@ -63,9 +63,28 @@ class PureTests(unittest.TestCase):
         self.assertEqual(take, 40.0)
         self.assertIsNone(why)
 
-    def test_it_is_also_capped_by_the_keep_alive_floor(self):
-        # $60 earned, but only $20 - $15 = $5 of room. Under the minimum.
+    def test_the_keep_alive_floor_caps_the_take_and_is_never_breached(self):
+        # $60 earned but only $20 - $15 = $5 of room, so $5 comes out and
+        # the branch is left at exactly the $15 floor. Under the old $10
+        # minimum this refused outright; $5 of real profit stayed on the
+        # table for no reason. The floor itself is what must hold, and it
+        # does - this asserts the remainder, not just the take.
         take, why = H.harvestable(br("b", "X", 20), 60.0, 0.0)
+        self.assertEqual(take, 5.0)
+        self.assertIsNone(why)
+        self.assertEqual(20 - take, H.KEEP_BRANCH_ALIVE_USD)
+
+    def test_room_under_the_minimum_is_still_refused(self):
+        # $15.20 allocated leaves $0.20 of room, under the $0.50 minimum.
+        # Churning allocated_usd for 20 cents is not worth a row.
+        take, why = H.harvestable(br("b", "X", 15.20), 60.0, 0.0)
+        self.assertEqual(take, 0.0)
+        self.assertIn("keep-alive", why)
+
+    def test_a_branch_at_the_floor_is_refused_not_emptied(self):
+        # Exactly $15.00: zero room. A drained row gets DELETED by
+        # withdraw, taking its coin out of the fleet, so this must refuse.
+        take, why = H.harvestable(br("b", "X", 15.0), 60.0, 0.0)
         self.assertEqual(take, 0.0)
         self.assertIn("keep-alive", why)
 
@@ -73,10 +92,24 @@ class PureTests(unittest.TestCase):
         take, _ = H.harvestable(br("b", "X", 50), 1000.0, 0.0)
         self.assertEqual(take, 35.0)   # 50 - 15, not 1000
 
-    def test_small_profit_is_left_alone(self):
-        take, why = H.harvestable(br("b", "X", 500), 9.99, 0.0)
+    def test_profit_under_the_measured_minimum_is_left_alone(self):
+        take, why = H.harvestable(br("b", "X", 500), 0.49, 0.0)
         self.assertEqual(take, 0.0)
         self.assertIn("minimum", why)
+
+    def test_a_typical_winning_trade_now_clears_the_minimum(self):
+        # The point of the change. $0.68 is the MEASURED median winning
+        # trade over 2026-09-27..10-03 (109 winners). Under the old $10.00
+        # floor, zero of those 109 trades cleared it.
+        take, why = H.harvestable(br("b", "X", 500), 0.68, 0.0)
+        self.assertEqual(take, 0.68)
+        self.assertIsNone(why)
+
+    def test_the_minimum_is_the_measured_value(self):
+        # A guard on the constant itself: a future edit that walks it back
+        # toward $10 would silently stop the harvest firing at all.
+        self.assertEqual(H.MIN_HARVEST_USD, 0.50)
+        self.assertEqual(H.KEEP_BRANCH_ALIVE_USD, 15.0)
 
     def test_a_losing_branch_is_never_harvested(self):
         take, why = H.harvestable(br("b", "X", 500), -40.0, 0.0)

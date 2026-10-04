@@ -45,9 +45,30 @@ BASELINE_PREFIX = "harvest_base:"
 # fleet entirely - the same floor the idle rotation keeps.
 KEEP_BRANCH_ALIVE_USD = 15.0
 
-# Below this, harvesting costs more attention than it returns and churns
-# allocated_usd for pennies.
-MIN_HARVEST_USD = 10.0
+# The smallest profit worth taking off the table.
+#
+# MEASURED, not chosen. This was $10.00 for its first few hours, which was
+# wrong by more than an order of magnitude: across the fleet's busiest week
+# (2026-09-27 to 10-03, 113 closes, 109 of them winners, $116 of realised
+# profit) NOT ONE closed trade cleared $10.00, and only 2 of 55
+# branch-days did. A harvest with that floor would have sat at $0.00
+# through the best run the system has ever had, which is the opposite of
+# "hurry up and take the profit off".
+#
+# The real scale of a win on this fleet:
+#   median winning trade      $0.68
+#   median branch-day         $1.01
+#   $0.50 is cleared by 61.5% of individual winners and 72.7% of
+#   branch-days, so a typical single round trip is enough to bank.
+#
+# Not lower than this: winners run down to $0.01, and taking those would
+# churn allocated_usd for pennies and bury the activity feed.
+#
+# THIS IS NOT A RISK LIMIT. It decides when realised profit moves from
+# allocated_usd into cash. It places no order, sells no coin, and cannot
+# reach capital. The floor that protects the branch is KEEP_BRANCH_ALIVE_USD
+# above, which is unchanged at $15.00.
+MIN_HARVEST_USD = 0.50
 
 
 async def realised_by_branch(session_factory):

@@ -176,8 +176,18 @@ class TestPreviewReadsTruthfully(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(p["branches"][0]["harvest_usd"], 0.0)
         self.assertIn("flat", p["branches"][0]["why_not"])
 
-    async def test_preview_respects_the_keep_alive_floor(self):
+    async def test_preview_caps_the_take_at_the_keep_alive_floor(self):
+        """$20 allocated, $42 earned: $5 comes out, $15.00 stays."""
         g = _Grid(self.sf, [_flat("crypto_grid_1", "A-USD", 20.0)])
+        await ph._baseline(self.sf, "crypto_grid_1", 0.0)
+        await _add_trade(self.sf, "crypto_grid_1", "A-USD", 42.0)
+        p = await ph.plan(g, create=False)
+        r = p["branches"][0]
+        self.assertEqual(r["harvest_usd"], 5.0)
+        self.assertEqual(r["allocated_usd"] - r["harvest_usd"], 15.0)
+
+    async def test_preview_refuses_a_branch_sitting_at_the_floor(self):
+        g = _Grid(self.sf, [_flat("crypto_grid_1", "A-USD", 15.0)])
         await ph._baseline(self.sf, "crypto_grid_1", 0.0)
         await _add_trade(self.sf, "crypto_grid_1", "A-USD", 42.0)
         p = await ph.plan(g, create=False)
