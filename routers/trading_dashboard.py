@@ -1662,9 +1662,35 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     total_trades = sum(b.get("total_trades", 0) for b in out if isinstance(b, dict))
     total_wins = sum(b.get("trades_won", 0) for b in out if isinstance(b, dict))
 
-    # Safe calculation with fallbacks
-    win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
-    profit_factor = 1.0  # Neutral default
+    # THESE THREE DESCRIBE THE GRID, NOT THE FAMILY TREE.
+    #
+    # They used to be computed off `out` - the family-tree branches, two of
+    # them, dormant, nothing allocated - while profit_factor was the literal
+    # 1.0 below and was never computed at all. The expectancy underneath came
+    # from crypto_family_tree_bot.get_rolling_expectancy() and read
+    # -$5.29/trade. Meanwhile the very same card's "Primary Profit" showed
+    # the GRID's +$135.58, so one panel described two different bots and gave
+    # the performance box to the dead one.
+    #
+    # get_grid_performance_metrics() computes all three from the grid's own
+    # real completed trades. It returns None - never 0 - when there is
+    # nothing to measure, because "no trades yet" and "a 0% win rate" are
+    # different claims; the fallbacks below keep the old numeric shape for
+    # the existing consumers rather than letting a None reach .toFixed().
+    _grid_perf = None
+    if crypto_grid_bot_module is not None:
+        try:
+            _grid_perf = await crypto_grid_bot_module.get_grid_performance_metrics()
+        except Exception as e:
+            # A metrics panel must never take the page down - the exact
+            # failure mode the rolling_expectancy note below records.
+            log.warning(f"[dashboard] grid performance metrics unavailable: {type(e).__name__}: {e}")
+    _grid_perf = _grid_perf or {}
+    win_rate = _grid_perf.get("win_rate_pct")
+    win_rate = win_rate if win_rate is not None else (
+        (total_wins / total_trades * 100) if total_trades > 0 else 0)
+    profit_factor = _grid_perf.get("profit_factor")
+    profit_factor = profit_factor if profit_factor is not None else 0.0
 
     # Calculate net P&L and drawdown using equity metrics
     net_pnl = total_unrealized
@@ -1698,7 +1724,17 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # it. Read the per-trade average off its own key; "expectancy" is
         # None until ROLLING_EXPECTANCY_MIN_TRADES real trades exist, which
         # "or 0" does handle correctly.
-        "expectancy_per_trade": round((rolling_expectancy or {}).get("expectancy") or 0, 2),
+        # The GRID's expectancy over its own real closed trades. The
+        # rolling_expectancy read that used to sit here belongs to the
+        # family-tree bot and is still passed through under its own key
+        # below for the consumers that genuinely want it.
+        "expectancy_per_trade": round(
+            _grid_perf.get("expectancy_per_trade_usd")
+            if _grid_perf.get("expectancy_per_trade_usd") is not None
+            else ((rolling_expectancy or {}).get("expectancy") or 0), 2),
+        # The full, unrounded picture behind those three, so a reader can see
+        # what the percentages were computed from rather than trusting them.
+        "grid_performance": _grid_perf or None,
         "branch_count": len(out),
         "locked_usd": locked_usd,
     }

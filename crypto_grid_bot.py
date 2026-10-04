@@ -9656,6 +9656,58 @@ async def close_all_grid_slices(only_bot_name: str = None,
 GRID_TRADE_HISTORY_MAX_ROWS = int(os.getenv("GRID_TRADE_HISTORY_MAX_ROWS", "1000"))
 
 
+async def get_grid_performance_metrics() -> dict:
+    """Win rate, profit factor and expectancy over the grid's own REAL
+    completed trades. Read-only, one query.
+
+    WHY THIS EXISTS. The Scale Bot panel's "Performance Tracking" box read
+    its three numbers from somewhere else entirely: win_rate was summed off
+    the FAMILY-TREE branches (2 of them, dormant, nothing allocated),
+    expectancy came from crypto_family_tree_bot.get_rolling_expectancy()
+    (-$5.29/trade), and profit_factor was the literal `profit_factor = 1.0
+    # Neutral default` - never computed at all. The same panel's "Primary
+    Profit" beside it already showed the GRID's $135.58, so one card was
+    describing two different bots and the three stats belonged to the dead
+    one.
+
+    Measured over the grid's real 196 closed trades at the time this was
+    written: 172 wins / 22 losses / 2 flat, +$156.00 gross win against
+    $20.42 gross loss - 87.8% win rate, 7.64 profit factor, $0.6917
+    expectancy.
+
+    NONE, NEVER ZERO, when there is nothing to measure. "No completed
+    trades" and "a 0% win rate" are different claims and must not render
+    alike - the same doctrine get_rolling_expectancy already follows by
+    returning expectancy None below its own minimum. profit_factor is
+    likewise None when there are no losses at all: the ratio is undefined,
+    and 1.0 would assert the strategy exactly broke even, which is the
+    opposite of a flawless record."""
+    async with get_session_factory()() as db:
+        rows = (await db.execute(select(CryptoGridTradeHistory.pnl))).scalars().all()
+    pnls = [float(p) for p in rows if p is not None]
+    n = len(pnls)
+    if not n:
+        return {"trades": 0, "wins": 0, "losses": 0, "flat": 0,
+                "gross_win_usd": 0.0, "gross_loss_usd": 0.0,
+                "win_rate_pct": None, "profit_factor": None,
+                "expectancy_per_trade_usd": None}
+    wins = [x for x in pnls if x > 0]
+    losses = [x for x in pnls if x < 0]
+    gross_win = sum(wins)
+    gross_loss = abs(sum(losses))
+    return {
+        "trades": n,
+        "wins": len(wins),
+        "losses": len(losses),
+        "flat": n - len(wins) - len(losses),
+        "gross_win_usd": round(gross_win, 2),
+        "gross_loss_usd": round(gross_loss, 2),
+        "win_rate_pct": round(len(wins) / n * 100, 1),
+        "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
+        "expectancy_per_trade_usd": round(sum(pnls) / n, 4),
+    }
+
+
 async def get_grid_trade_history(limit_recent: int = 50) -> dict:
     """Real, per-branch trade-history aggregation - the direct grid-side
     counterpart to crypto_family_tree_bot.get_coin_trade_history() /
