@@ -13385,6 +13385,13 @@ def _live_ops_headline(trades_section, grid_section):
     liquidation - ignores the sell-above-entry rule entirely, so realized
     P&L CAN go negative and the trade log must actually be read rather
     than assumed clean.
+
+    A second route to negative realized, found on 2026-10-04: an ADOPTED
+    position leaving. It is not a round trip the grid chose both ends of,
+    and it dragged this figure from +$135.58 to -$14.35 in two closes while
+    the grid's own 196 trips had not moved. So the realized leg carries its
+    own/adopted split through to the page - the total stays the total, and
+    "Taken" stops being read as the grid's record when half of it is not.
     """
     import crypto_fleet_metrics as metrics
 
@@ -13398,6 +13405,11 @@ def _live_ops_headline(trades_section, grid_section):
     trips, _ = _leg(trades_section, "total_trade_count")
 
     data = metrics.total_pnl_stats(realized, unrealized, round_trips=trips)
+    # The realized leg's two books, passed through unchanged. None when the
+    # trades section failed - never backfilled with the blended figure.
+    for _k in ("realized_own_usd", "realized_own_trades",
+               "realized_adopted_usd", "realized_adopted_trades"):
+        data[_k] = _leg(trades_section, _k)[0]
     data["sources"] = {
         "realized": realized_err or "grid trade history",
         "unrealized": unrealized_err or "grid status, marked at the current price",

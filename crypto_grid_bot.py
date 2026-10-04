@@ -3961,10 +3961,18 @@ GRID_PARKED_MIN_NET_PCT = float(os.getenv("GRID_PARKED_MIN_NET_PCT", "0.010"))
 #
 #     GRID_TRUE_COST_BASIS="ZEC-USD:1013.80,HBAR-USD:0.0987"
 #
-# EMPTY BY DEFAULT. An unlisted product keeps today's behaviour exactly.
-# Used ONLY to decide whether an ADOPTED slice may sell. It never changes a
-# recorded P&L, never relaxes the parked floor, and never touches a slice the
-# grid itself bought - those already carry a basis they really paid.
+# EMPTY BY DEFAULT. An unlisted product keeps today's behaviour exactly. It
+# never relaxes the parked floor and never touches a slice the grid itself
+# bought - that one carries a basis it really paid.
+#
+# IT DOES PRICE THE SALE IT AUTHORISES. This said "never changes a recorded
+# P&L", which sounded like the conservative choice and was not one: the gate
+# cleared two ZEC slices at +30.95% on the declared basis while the ledger
+# booked them at -$149.93 against the adoption mark, and allocated_usd - which
+# moves by that pnl and nothing else - lost the same $149.93 of working
+# capital. A basis trusted to decide a sale and distrusted to price it leaves
+# two contradictory numbers for one event and persists the wrong one. See the
+# booking site in run_grid_branch_cycle().
 def _parse_true_cost_basis(raw: str) -> dict:
     out = {}
     for part in (raw or "").split(","):
@@ -7555,9 +7563,36 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                     f"stays full on its rungs")
             return
         filled_qty, filled_price, sell_leg_fee = fill
+        # THE BASIS THAT DECIDED THE SALE IS THE BASIS THAT PRICES IT.
+        #
+        # This read `oldest.entry_price`, and the note at GRID_TRUE_COST_BASIS
+        # promised the declared basis "never changes a recorded P&L". That
+        # promise was wrong, and ZEC is what it cost. _pick_parked_slice_to_sell
+        # authorised these two sales on the declared $1,013.80 - the gate log
+        # says "+30.95% net on $133.33 of basis" - and then this line booked
+        # them against the adoption-day mark of ~$1,655:
+        #
+        #   id 197  0.08036146 @ 1331.94   booked -$26.72   really +$25.23
+        #   id 198  0.37816667 @ 1330.02   booked -$123.21  really +$118.04
+        #
+        # One sale, two contradictory numbers, and the wrong one persisted.
+        # $293.20 of it. That is not only a display fault: allocated_usd moves
+        # by `pnl` and by nothing else (there is no decrement on the buy), so
+        # the phantom loss took $149.93 of working capital off crypto_grid_21 -
+        # and _safe_num_levels_for_allocation() sizes the ladder off
+        # allocated_usd, so a measurement error was shrinking the real ladder.
+        # Banked read -$14.35 across 198 trades on a book that had taken
+        # +$278.85.
+        #
+        # sell_basis_for_slice() returns entry_price for every slice the grid
+        # itself bought and for every product with no declared basis, so this
+        # is a no-op everywhere except the case it exists for. The fee was
+        # already right: slice_round_trip_fee_rate() charges an adopted slice
+        # for its sell leg only, because no buy order was ever placed.
+        _booked_basis = sell_basis_for_slice(oldest, product_id=branch.product_id)
         # Priced with the rate THIS slice's buy leg really paid plus the rate
         # its sell leg really paid - not one assumed rate for both.
-        pnl = _grid_slice_net_pnl(filled_qty, oldest.entry_price, filled_price,
+        pnl = _grid_slice_net_pnl(filled_qty, _booked_basis, filled_price,
                                   await slice_round_trip_fee_rate(oldest, sell_leg_fee))
         new_balance = branch.allocated_usd + pnl
 
@@ -7584,22 +7619,20 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
 
         # AN INHERITED POSITION LEAVING IS NOT ONE OF THE GRID'S ROUND TRIPS.
         #
-        # When a declared true cost basis is what let an ADOPTED slice sell
-        # (see GRID_TRUE_COST_BASIS), the pnl recorded below is computed
-        # against entry_price - the adoption-day mark - and would read as a
-        # large loss on a sale that pays real cash. Measured on ZEC: six
-        # slices would write -$432.09 into the trade history while +$417.49
-        # landed in the account. Left untagged those rows would drag banked
-        # from +$135.58 to -$296.51 and the win rate from 87.8% to 85.1% -
-        # the grid credited with losing money on coin it never bought and
-        # never chose to sell at that basis.
+        # The pnl above is now correct - priced at the basis that authorised
+        # the sale - and it still is not a measure of how well this grid
+        # trades. The grid did not choose the entry: coin_adoption handed it
+        # a position already open, at a price set by whoever bought it. Its
+        # outcome is the account owner's old decision resolving, not a round
+        # trip the strategy picked both ends of, so counting it in the win
+        # rate or the expectancy answers a question it cannot speak to - in
+        # either direction. ZEC exiting at +$143 would have lifted the win
+        # rate on the strength of a buy made before this bot existed.
         #
         # So the row is tagged, and get_grid_performance_metrics() leaves this
         # reason out of the grid's own record. Nothing is hidden: the row is
         # still written, still visible in the trade history, and still counted
-        # by anything measuring total cash. It is only kept out of the figure
-        # that answers "how well does this grid trade", which is the one
-        # question an inherited position cannot speak to.
+        # by everything measuring real cash taken.
         if (exit_reason == "parked_sell" and oldest is not None
                 and slice_paid_no_entry_fee(oldest)
                 and true_cost_basis_for(branch.product_id) is not None):
@@ -7610,7 +7643,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             try:
                 order_id = f"{branch.bot_name}_{oldest.id}_{int(time.time()*1000)}"
                 hold_time_minutes = int((time.time() - oldest.opened_at.timestamp()) / 60) if oldest.opened_at else 0
-                gross_pnl = filled_qty * (filled_price - oldest.entry_price)
+                # Same basis as the booked pnl below it, or
+                # `fees_paid = gross_pnl - pnl` stops being a fee at all.
+                gross_pnl = filled_qty * (filled_price - _booked_basis)
                 # THE FEE IS DERIVED, NOT RE-DERIVED.
                 #
                 # This read:
@@ -7747,7 +7782,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 f"{_residual:.8f} rather than being retired whole, so tracked units "
                 f"still match the coin actually held."
             )
-        await _log_grid_trade(branch.bot_name, branch.product_id, oldest.entry_price,
+        # The basis the P&L was priced at, so qty, entry, exit and pnl on the
+        # stored row agree. Writing the adoption mark beside a pnl computed
+        # off the declared basis is the same contradiction one layer down,
+        # and every reader that recomputes gross from the row would disagree
+        # with the pnl sitting next to it.
+        await _log_grid_trade(branch.bot_name, branch.product_id, _booked_basis,
                               filled_price, filled_qty, pnl, oldest.opened_at,
                               entry_expected_price=oldest.entry_expected_price,
                               exit_expected_price=price,
@@ -7786,7 +7826,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             f"{'📈' if pnl >= 0 else '📉'} {branch.bot_name} GRID SELL: sold "
             f"{'the oldest' if is_true_oldest else 'the oldest PROFITABLE (skipped a stuck older)'} "
             f"real slice of {branch.product_id} @ ${filled_price:,.2f} "
-            f"(entry ${oldest.entry_price:,.2f}) | P&L: {'+' if pnl >= 0 else ''}${pnl:.2f} after est. fees | branch now ${new_balance:.2f}"
+            f"(basis ${_booked_basis:,.2f}"
+            f"{'' if _booked_basis == oldest.entry_price else f' declared - recorded entry ${oldest.entry_price:,.2f}'})"
+            f" | P&L: {'+' if pnl >= 0 else ''}${pnl:.2f} after est. fees | branch now ${new_balance:.2f}"
         )
         log.info(f"[GRID] {msg}")
         await _log_activity_safe(branch.bot_name, branch.product_id, "SELL", msg)
@@ -9861,6 +9903,32 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
             total_wins += wins or 0
         branches.sort(key=lambda b: b["total_pnl"], reverse=True)
 
+        # TWO BOOKS, NOT ONE HEADLINE - the realized counterpart to
+        # get_grid_status()'s unrealized_own_usd / unrealized_adopted_usd.
+        #
+        # total_realized_pnl below is every closed row summed, which is the
+        # right answer to "how much cash has this fleet taken" and the wrong
+        # one to "how is the grid doing" - the only question the dashboard's
+        # "Taken" tile was ever read as asking. Those were the same number
+        # until an inherited position closed, and then they were not: two ZEC
+        # adopted_exits took the tile from +$135.58 to -$14.35 while the
+        # grid's own 196 round trips had not changed at all.
+        #
+        # So the split is published and the caller picks. ADOPTED_EXIT_REASON
+        # is the only reason that marks an inherited exit; NULL is a legacy
+        # row from before exit_reason existed and belongs with the grid's own.
+        adopted_result = await db.execute(
+            select(
+                func.count(CryptoGridTradeHistory.id),
+                func.sum(CryptoGridTradeHistory.pnl),
+            ).where(CryptoGridTradeHistory.exit_reason == ADOPTED_EXIT_REASON)
+        )
+        adopted_n, adopted_sum = adopted_result.one()
+        realized_adopted_trades = int(adopted_n or 0)
+        realized_adopted_usd = round(float(adopted_sum or 0.0), 2)
+        realized_own_trades = total_trade_count - realized_adopted_trades
+        realized_own_usd = round(total_realized_pnl - float(adopted_sum or 0.0), 2)
+
         # Grouped by BRANCH *and* COIN, because a branch outlives the coin it
         # is pointed at. crypto_grid_1 earned its whole +$12.80 over 15 DOGE
         # round trips and was later repointed at BTC-USD; the branch-level
@@ -9958,6 +10026,14 @@ async def get_grid_trade_history(limit_recent: int = 50) -> dict:
                         f"reading any distribution off these rows.")),
         "total_trade_count": total_trade_count,
         "total_realized_pnl": round(total_realized_pnl, 2),
+        # The two books behind that single figure - see the note above.
+        # own = round trips this grid chose both ends of.
+        # adopted = inherited positions resolving, priced at the declared
+        # true cost basis that authorised the exit.
+        "realized_own_usd": realized_own_usd,
+        "realized_own_trades": realized_own_trades,
+        "realized_adopted_usd": realized_adopted_usd,
+        "realized_adopted_trades": realized_adopted_trades,
         "overall_win_rate": overall_win_rate,
     }
 

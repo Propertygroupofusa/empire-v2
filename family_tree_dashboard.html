@@ -9072,12 +9072,26 @@ function renderGridTradeHistory(history) {
                 </tr>`;
         }).join('');
 
-        const total = history.total_realized_pnl || 0;
+        // THE GRID'S OWN BOOK LEADS THIS LINE.
+        //
+        // It read total_realized_pnl across total_trade_count, which is every
+        // closed row - including an ADOPTED position leaving, which is not a
+        // round trip this grid chose both ends of. On 2026-10-04 two ZEC
+        // adopted_exits moved that figure from +$135.58 to -$14.35 and this
+        // line reported the strategy as having lost money, over a day the
+        // grid's own 196 trips had not changed at all. The inherited book is
+        // named separately when it exists, and not mentioned when it does not.
+        const ownKnown = history.realized_own_usd != null;
+        const total = (ownKnown ? history.realized_own_usd : history.total_realized_pnl) || 0;
+        const ownTrips = (ownKnown ? history.realized_own_trades : history.total_trade_count) || 0;
+        const adoptedN = Number(history.realized_adopted_trades) || 0;
+        const adoptedUsd = history.realized_adopted_usd || 0;
         wrap.innerHTML = `
             <div style="font-size:0.8em; margin-bottom:8px; font-variant-numeric:tabular-nums;">
                 <strong style="color:${total >= 0 ? 'var(--green)' : 'var(--red)'};">${total >= 0 ? '+' : '-'}${fmtUsd(Math.abs(total))}</strong>
-                realized across <strong>${history.total_trade_count || 0}</strong> completed round trips
+                realized across <strong>${ownTrips}</strong> completed round trips
                 · <strong>${(history.overall_win_rate || 0).toFixed(1)}%</strong> of them closed green.
+                ${adoptedN ? `<div style="color:var(--text-dim); margin-top:3px;">Plus <strong style="color:${adoptedUsd >= 0 ? 'var(--green)' : 'var(--red)'};">${adoptedUsd >= 0 ? '+' : '-'}${fmtUsd(Math.abs(adoptedUsd))}</strong> on ${adoptedN} inherited position${adoptedN === 1 ? '' : 's'} the grid did not buy — real cash, but not a measure of this strategy.</div>` : ''}
             </div>
             <div class="table-scroll"><table class="coin-history-table">
                 <thead><tr><th>Coin</th><th>Trades</th><th>Win rate</th><th>Avg P&amp;L</th><th>Total P&amp;L</th></tr></thead>

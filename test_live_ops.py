@@ -228,9 +228,26 @@ ok("an unmeasurable total says so rather than showing a number",
    "not measurable" in page)
 ok("the total is never backfilled from the realized half",
    "d.measurable ? signed(d.total_usd)" in page)
-ok("realized is captioned as a component of the total, not the headline",
-   'the &quot;taken&quot; half of the total above' in page
-   or 'the "taken" half of the total above' in page)
+# The caption this used to assert - realized as "the taken half of the total
+# above" - stopped being true on 2026-10-04. Realized is itself two books:
+# round trips this grid chose both ends of, and inherited positions
+# resolving. Two ZEC adopted_exits took the blended figure from +$135.58 to
+# -$14.35 while the grid's own 196 trips had not moved, so the panel now
+# leads with the own book and names the rest rather than presenting one
+# number as "what the grid took".
+ok("the money panel leads with the GRID'S OWN realized figure",
+   "The grid&#39;s own realized P&amp;L" in page
+   or "The grid's own realized P&amp;L" in page)
+ok("and reads the own book rather than every closed row",
+   "realized_own_usd" in page and "realized_own_trades" in page)
+ok("the inherited book is named as cash, explicitly not as a measure of "
+   "the strategy",
+   "not a measure of the strategy" in page)
+ok("the blended cash total is still shown, under its own honest label",
+   "All cash taken, both books" in page)
+ok("a server that omits the split falls back to the blend and says so, "
+   "rather than rendering a blank",
+   "split unavailable, showing the blended total" in page)
 ok("the win rate caption explains WHY it is high, without overclaiming",
    "high by design" in page)
 ok("and warns that a FORCED close can still book a loss",

@@ -440,9 +440,27 @@ function renderCash(cash){
 
 // The headline. TOTAL leads; realized and unrealized are the two halves of
 // it, shown underneath at component size. Realized used to be the big
-// number here, which is exactly backwards: a grid slice only sells above
-// its own entry, so realized cannot go negative and therefore cannot warn
-// about anything. TOTAL is the number that can.
+// number here, which is exactly backwards: it is the flattering half, so
+// it is the worst candidate for the one number that has to be able to warn.
+//
+// It said realized "cannot go negative", which was wrong twice over - a
+// FORCED close ignores the sell-above-entry rule, and an ADOPTED position
+// leaving is not that rule's subject at all. On 2026-10-04 two ZEC
+// adopted_exits took it from +$135.58 to -$14.35. So the Taken leg now
+// names its own two books rather than presenting the blend as the grid's.
+// Taken is two books: round trips this grid chose both ends of, and
+// inherited positions resolving. They were the same number until the first
+// adopted exit closed, and then one -$123.21 row spoke for a grid that had
+// not traded that day. Silent when there are no adopted exits - most of the
+// time there are none and a zero would be noise. Silent too when the split
+// is unavailable, which is never filled in with the blend.
+function takenSplit(d){
+  const a = d.realized_adopted_usd, o = d.realized_own_usd;
+  if (a == null || o == null || Number(a) === 0) return '';
+  const an = Number(d.realized_adopted_trades) || 0;
+  return ` — grid's own ${signed(o)}, ${an} inherited exit${an === 1 ? '' : 's'} ${signed(a)}`;
+}
+
 function renderHeadline(head){
   const big = document.getElementById('hero-total');
   const read = document.getElementById('hero-read');
@@ -466,7 +484,7 @@ function renderHeadline(head){
   legs.innerHTML = `
     <div class="leg">
       <div class="lv">${signed(d.realized_usd)}</div>
-      <div class="ln">Taken<small>${d.round_trips ?? 0} closed round trip${d.round_trips === 1 ? '' : 's'}</small></div>
+      <div class="ln">Taken<small>${d.round_trips ?? 0} closed round trip${d.round_trips === 1 ? '' : 's'}${takenSplit(d)}</small></div>
     </div>
     <div class="leg">
       <div class="lv">${signed(d.unrealized_usd)}</div>
@@ -486,10 +504,24 @@ function renderMoney(trades){
   // deliberately captioned rather than left bare: a grid slice only sells
   // above its own entry, so a high win rate here is a property of the
   // mechanism, not evidence that the strategy works.
+  //
+  // The grid's own figure leads and the blended cash total sits under it.
+  // The other way round is what let two inherited ZEC exits read as the
+  // strategy losing money: the all-time total is the right answer to "how
+  // much cash has this taken" and has never been the answer to "how is the
+  // grid doing", which is the question this panel is opened to ask.
+  const ownKnown = d.realized_own_usd != null;
+  const adoptedN = Number(d.realized_adopted_trades) || 0;
   kv.innerHTML = `
-    <div class="k">Realized P&amp;L, all time<small>the "taken" half of the total above — closed round trips only</small></div>
-    <div class="v">${signed(d.total_realized_pnl)}</div>
-    <div class="k">Round trips closed</div><div class="v">${d.total_trade_count ?? '—'}</div>
+    <div class="k">The grid's own realized P&amp;L<small>round trips this bot chose both ends of${ownKnown ? '' : ' — split unavailable, showing the blended total'}</small></div>
+    <div class="v">${signed(ownKnown ? d.realized_own_usd : d.total_realized_pnl)}</div>
+    <div class="k">Round trips closed</div>
+    <div class="v">${ownKnown ? (d.realized_own_trades ?? '—') : (d.total_trade_count ?? '—')}</div>
+    ${adoptedN ? `
+    <div class="k">Inherited positions closed<small>coin the grid did not buy, priced at the declared true cost basis. Real cash, not a measure of the strategy.</small></div>
+    <div class="v">${signed(d.realized_adopted_usd)} <span class="none">· ${adoptedN} exit${adoptedN === 1 ? '' : 's'}</span></div>
+    <div class="k">All cash taken, both books</div>
+    <div class="v">${signed(d.total_realized_pnl)} <span class="none">· ${d.total_trade_count ?? '—'} closes</span></div>` : ''}
     <div class="k">Win rate<small>high by design — a normal exit only sells above entry. A FORCED close ignores that rule and can book a loss.</small></div>
     <div class="v">${d.overall_win_rate == null ? '<span class="none">—</span>' : Number(d.overall_win_rate).toFixed(1)+'%'}</div>`;
 
