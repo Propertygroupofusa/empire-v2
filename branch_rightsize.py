@@ -284,6 +284,16 @@ async def apply_one(grid, bot_name, amount_usd=None, dry_run=True):
             return result
 
         branch.allocated_usd = new_alloc
+        # Freeing budget a branch cannot spend is not a drawdown. The
+        # grid's breaker measures peak_equity against allocated_usd, so
+        # without this a right-size freezes the branch's buys outright -
+        # LTC-USD measured 10.08% before and would have read 66.63%
+        # after, straight past the 25% breaker. See
+        # crypto_grid_bot.peak_after_withdrawal for the full reasoning.
+        _new_peak = grid.peak_after_withdrawal(branch.peak_equity, alloc, new_alloc)
+        if _new_peak is not None:
+            branch.peak_equity = _new_peak
+            result["peak_equity_after"] = _new_peak
         await db.commit()
 
     log.warning(f"[rightsize] {result['product_id']}: freed ${take:,.2f}, "

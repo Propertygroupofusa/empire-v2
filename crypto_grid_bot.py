@@ -3835,7 +3835,16 @@ async def reallocate_grid_cash_across_adaptive_fleet(from_bot_name: str, amount:
                     destination.num_levels = levels_for(destination.allocated_usd)
                 destination_rows.append((destination, allocation))
 
+            _alloc_before = source.allocated_usd
             source.allocated_usd = round(source.allocated_usd - amount, 2)
+            # Money moved out on purpose is not a drawdown. Without this
+            # the breaker reads the rotation as a crash and freezes the
+            # branch it just took capital from - which is exactly what
+            # happened to QNT-USD on 2026-10-03.
+            _new_peak = peak_after_withdrawal(source.peak_equity, _alloc_before,
+                                              source.allocated_usd)
+            if _new_peak is not None:
+                source.peak_equity = _new_peak
             source.num_levels = levels_for(source.allocated_usd)
             await db.flush()
             source_remaining = source.allocated_usd
@@ -6137,6 +6146,137 @@ def _pick_parked_slice_to_sell(slices: list, price: float, round_trip_fee_rate: 
     return best, best_pct
 
 
+def peak_after_withdrawal(peak_equity, allocated_before, allocated_after):
+    """The branch's high-water mark after money is deliberately taken OUT.
+
+    THE BUG THIS EXISTS FOR, 2026-10-05. The drawdown breaker measures
+    `(peak_equity - equity) / peak_equity` where equity is
+    `allocated_usd + unrealized` (see _grid_branch_real_equity). But
+    allocated_usd is ALSO what a right-size, a concentration rotation or
+    a fleet re-scale debits. peak_equity was a pure one-way ratchet, so
+    every one of those withdrawals showed up as drawdown - the breaker
+    read "this branch crashed" when what really happened was "money was
+    moved out of this branch on purpose".
+
+    Measured on the live fleet the day this was written: across 21
+    branches the gap between peak and current equity was $1,285.56, and
+    $1,085.22 of it - 84.4% - was withdrawn claim rather than market
+    loss. QNT-USD was the clean proof: peak $285.40, allocated $142.43,
+    ZERO open slices, breaker reading 50.09% and buys frozen. A branch
+    holding no coin cannot be down 50%. Its whole fall was one rotation
+    that moved $142.97 out of its books, of which only $1.19 had ever
+    been a trade.
+
+    withdraw_from_grid_branch (the harvest's path) already did the right
+    thing - it ends with `peak_equity = allocated_usd`. It could afford
+    the blunt version because it refuses to run on a branch that is not
+    FLAT, so there is no unrealized term to preserve. The three paths
+    fixed alongside this helper all CAN run on a branch holding coin, so
+    they need the subtraction instead of the assignment: lowering peak by
+    exactly what left keeps the dollar gap `peak - equity`, which is the
+    real market loss, and simply expresses it against a smaller branch.
+
+    Returns the new peak, or None to leave the column alone. None in
+    means None out: a NULL peak is "not yet initialized" everywhere else
+    in this file and the read path self-heals it to current equity, so
+    writing a number here would invent a high-water mark that never
+    happened. A deposit or a no-op (allocated_after >= allocated_before)
+    also returns None - peak must keep ratcheting UP on its own, and
+    raising it here would hand the branch a peak it never actually
+    reached.
+
+    Floors at 0.0 rather than at the remaining equity on purpose. If the
+    subtraction undershoots current equity the ratchet in
+    run_grid_branch_cycle lifts it straight back up on the next pass,
+    which is the same self-healing path a NULL takes - one place that
+    decides what a peak may be, not two.
+    """
+    if peak_equity is None or allocated_before is None or allocated_after is None:
+        return None
+    withdrawn = float(allocated_before) - float(allocated_after)
+    if withdrawn <= 0:
+        return None
+    return max(0.0, round(float(peak_equity) - withdrawn, 2))
+
+
+def peak_for_flat_branch(peak_equity, allocated_usd, slices):
+    """A branch with no open slice cannot be in drawdown. Clamp it.
+
+    REPAIR, not prevention. peak_after_withdrawal above stops the fault
+    from recurring, but it cannot undo a peak that is already wrong in
+    the database - and on the live fleet QNT-USD's $285.40 already was,
+    which is the whole reason its buys were frozen.
+
+    This is the one case where the damage can be undone from first
+    principles rather than guessed at. Drawdown is a statement about a
+    POSITION losing value. A branch with zero open slices holds no
+    position, has no mark, and therefore has a drawdown of exactly zero
+    whatever its history. So peak may not exceed allocated_usd, and
+    clamping it costs no safety at all: there is nothing to protect.
+
+    It is also the invariant withdraw_from_grid_branch has always
+    enforced on its own flat-only path (`peak_equity = allocated_usd`).
+    This just makes it hold everywhere instead of on one path.
+
+    Deliberately does NOTHING to a branch that still holds slices. There
+    the gap between peak and equity mixes withdrawn claim with genuine
+    market loss, and nothing stored can separate them after the fact.
+    Guessing would be inventing data; ZEC-USD stays frozen on its real
+    25.72% rather than be handed a number I cannot derive. Returns None
+    when there is nothing to change.
+    """
+    if slices:
+        return None
+    if peak_equity is None or allocated_usd is None:
+        return None
+    if float(peak_equity) <= float(allocated_usd):
+        return None
+    return round(float(allocated_usd), 2)
+
+
+def effective_peak_equity(peak_equity, allocated_usd, slices, equity):
+    """The high-water mark the drawdown breaker should measure against.
+
+    One place decides what a peak may be, so there is one place to test.
+    The three rules, in this order and no other:
+
+      1. A NULL peak means "not yet initialized" - self-heal to this
+         branch's own current equity, giving 0% drawdown on first read
+         rather than a false 100%.
+      2. A FLAT branch cannot be in drawdown, so its peak may not exceed
+         its allocation - see peak_for_flat_branch. This repairs a peak
+         left too high by a withdrawal that predates
+         peak_after_withdrawal.
+      3. Ratchet UP to current equity.
+
+    Rules 2 and 3 commute, and an earlier draft of this docstring claimed
+    they did not. They cannot disagree: rule 2 only fires when there are
+    no slices, and with no slices equity IS allocated_usd (see
+    _grid_branch_real_equity), so the clamp and the ratchet are reaching
+    for the same number. Swapping them was tried as a mutation and
+    changed no result, which is why the order is written for reading
+    rather than defended as load-bearing.
+
+    What IS load-bearing is that the clamp reads the SAME equity the
+    breaker will divide by. The first version of this code lived inline
+    in run_grid_branch_cycle and compared against a separately computed
+    value; folding it into one function with equity passed in is what
+    removes that chance of disagreement.
+
+    Returns (peak, clamped_from). clamped_from carries the old peak when
+    rule 2 fired, so the caller can log a branch being repaired, and is
+    None otherwise.
+    """
+    peak = peak_equity if peak_equity else equity
+    clamped_from = None
+    flat = peak_for_flat_branch(peak, allocated_usd, slices)
+    if flat is not None:
+        clamped_from, peak = peak, flat
+    if equity > peak:
+        peak = equity
+    return peak, clamped_from
+
+
 def _grid_branch_real_equity(branch: CryptoGridBranch, slices: list, price: float) -> float:
     """Real live equity for one grid branch right now - allocated_usd is
     a cost-basis figure (see the model's own docstring: it only ever
@@ -6775,9 +6915,16 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     # first read, same "treat uninitialized as today's real number"
     # pattern used codebase-wide for every added-later column.
     equity = _grid_branch_real_equity(branch, slices, price)
-    stored_peak_equity = branch.peak_equity if branch.peak_equity else equity
-    if equity > stored_peak_equity:
-        stored_peak_equity = equity
+    stored_peak_equity, _clamped_from = effective_peak_equity(
+        branch.peak_equity, branch.allocated_usd, slices, equity)
+    if _clamped_from is not None:
+        log.info(
+            f"[GRID] {branch.bot_name}: flat branch - peak equity "
+            f"${_clamped_from:,.2f} clamped to its ${stored_peak_equity:,.2f} "
+            f"allocation. No open slice means no position and no drawdown; "
+            f"the old peak was left behind by money withdrawn from this "
+            f"branch, not by a loss."
+        )
     if stored_peak_equity != branch.peak_equity:
         async with get_session_factory()() as db:
             result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
@@ -10378,9 +10525,15 @@ async def scale_grid_bot_capital(scale_factor: float = 1.25, dry_run: bool = Fal
             }
             updates.append(update_rec)
 
-            # SAFETY: Only modify allocated_usd, nothing else
+            # SAFETY: only allocated_usd and, when this SHRINKS a branch,
+            # its drawdown high-water mark - see peak_after_withdrawal.
+            # Scaling a branch down is not a loss, and leaving peak alone
+            # would let a re-scale freeze the branch's buys.
             if not dry_run:
                 branch.allocated_usd = new_usd
+                _new_peak = peak_after_withdrawal(branch.peak_equity, old_usd, new_usd)
+                if _new_peak is not None:
+                    branch.peak_equity = _new_peak
 
         if not updates:
             return {"error": "No valid branches to scale (all inactive or zero allocation)", "status": "failed"}

@@ -24,6 +24,15 @@ class _Grid:
     async def _log_activity_safe(self, *a, **k):
         self.logged.append(a)
 
+    # Delegates to the real implementation rather than reimplementing it.
+    # A stub that carries its own copy of a pure function is a stub that
+    # drifts from the module it is standing in for, and this one decides
+    # whether a right-sized branch can still buy.
+    @staticmethod
+    def peak_after_withdrawal(*a, **k):
+        import crypto_grid_bot
+        return crypto_grid_bot.peak_after_withdrawal(*a, **k)
+
 
 async def _db():
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -264,6 +273,73 @@ class TestApply(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(r["ok"])
         self.assertIn("no branch", r["reason"])
         self.assertIsNone(await _alloc(self.sf, "nope"))
+
+    async def test_it_lowers_the_drawdown_peak_so_the_branch_can_still_buy(self):
+        """Right-sizing must not freeze the branch it just tidied up.
+
+        The grid breaker measures peak_equity against allocated_usd, and
+        a right-size lowers allocated_usd. Before this, freeing stranded
+        budget pushed the branch straight through the 25% breaker and
+        stopped its buys - LTC-USD measured 10.08% before and would have
+        read 66.63% after. End to end against a real row here, because
+        the bug was that the write happened and the peak did not move.
+        """
+        import crypto_grid_bot as grid_mod
+        from models import CryptoGridBranch
+        from sqlalchemy import select
+
+        sf, _ = await _db()
+        # LTC's real shape: $197.82 allocated, $74.24 of coin basis,
+        # every rung full, peak $218.53.
+        await _seed(sf, "b1", "LTC-USD", 197.82, 3,
+                    [(0.3535, 70.0), (0.3535, 70.0), (0.3535, 70.0)])
+        async with sf()() as db:
+            row = (await db.execute(select(CryptoGridBranch)
+                                    .where(CryptoGridBranch.bot_name == "b1"))).scalar_one()
+            row.peak_equity = 218.53
+            await db.commit()
+
+        g = _Grid(sf)
+        r = await R.apply_one(g, "b1", dry_run=False)
+        self.assertTrue(r["ok"], r)
+
+        async with sf()() as db:
+            row = (await db.execute(select(CryptoGridBranch)
+                                    .where(CryptoGridBranch.bot_name == "b1"))).scalar_one()
+            freed = 197.82 - row.allocated_usd
+            self.assertGreater(freed, 0, "nothing was freed, so this proves nothing")
+            # the peak fell by exactly what left the branch
+            self.assertAlmostEqual(row.peak_equity, 218.53 - freed, places=2)
+            # and the breaker, reading that row, lets the branch buy
+            equity = row.allocated_usd      # marked at entry, so no unrealized
+            peak, _ = grid_mod.effective_peak_equity(
+                row.peak_equity, row.allocated_usd, [1, 2, 3], equity)
+            dd = (peak - equity) / peak
+            self.assertLess(dd, grid_mod.GRID_DRAWDOWN_BREAKER_PCT,
+                            f"right-sizing froze the branch: drawdown reads {dd:.2%}")
+
+    async def test_a_dry_run_leaves_the_peak_alone(self):
+        """The preview must not move the high-water mark either."""
+        from models import CryptoGridBranch
+        from sqlalchemy import select
+
+        sf, _ = await _db()
+        await _seed(sf, "b1", "LTC-USD", 197.82, 3,
+                    [(0.3535, 70.0), (0.3535, 70.0), (0.3535, 70.0)])
+        async with sf()() as db:
+            row = (await db.execute(select(CryptoGridBranch)
+                                    .where(CryptoGridBranch.bot_name == "b1"))).scalar_one()
+            row.peak_equity = 218.53
+            await db.commit()
+
+        g = _Grid(sf)
+        r = await R.apply_one(g, "b1", dry_run=True)
+        self.assertTrue(r["ok"], r)
+        async with sf()() as db:
+            row = (await db.execute(select(CryptoGridBranch)
+                                    .where(CryptoGridBranch.bot_name == "b1"))).scalar_one()
+            self.assertAlmostEqual(row.peak_equity, 218.53, places=2)
+            self.assertAlmostEqual(row.allocated_usd, 197.82, places=2)
 
     async def test_the_branch_row_always_survives(self):
         """A drained row gets deleted and takes its coin out of the fleet."""
