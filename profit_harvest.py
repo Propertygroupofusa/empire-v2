@@ -210,10 +210,40 @@ async def plan(grid, create=True):
         rows.append(row)
         total += take
     rows.sort(key=lambda r: -r["harvest_usd"])
+    # WHETHER THE MONEY-MOVING BEHAVIOURS ARE ARMED, on the read-only path.
+    #
+    # Both flags were shipped 2026-10-05 and switched on the same evening,
+    # and NOTHING exposed their state: run() reports redirect_active, but
+    # returns before that on dry_run, which is the only path the preview
+    # endpoint uses. So the owner had turned on two behaviours that move
+    # money and had no way to see that they were on.
+    #
+    # This module's own docstring already named that fault: "A live
+    # money-moving loop that cannot be observed read-only is
+    # indistinguishable from one that is not running." Reported here, where
+    # the preview already looks.
+    import coin_quality
+    import harvest_redirect
+    _rd, _cq = harvest_redirect.enabled(), coin_quality.enabled()
     return {"branches": rows, "total_harvest_usd": round(total, 2),
             "ready": round(total, 2) >= MIN_HARVEST_USD,
             "unwatched_branches": unwatched,
-            "loop_has_run": bool(rows) and unwatched < len(rows)}
+            "loop_has_run": bool(rows) and unwatched < len(rows),
+            "redirect_active": _rd,
+            "coin_quality_active": _cq,
+            "max_coin_share_pct": round(coin_quality.MAX_COIN_SHARE * 100.0, 2),
+            "armed_is": (
+                f"{harvest_redirect.ENV_FLAG}="
+                f"{'ON' if _rd else 'OFF'}: harvested profit "
+                + ("goes to the branch that can soonest turn it into a rung, "
+                   "never back to its own source."
+                   if _rd else "stays as unallocated cash.")
+                + f" {coin_quality.ENV_FLAG}={'ON' if _cq else 'OFF'}: the "
+                + ("selector's four gates rank which branch that is, with a "
+                   f"{coin_quality.MAX_COIN_SHARE * 100:.0f}% per-coin cap "
+                   "applied BEFORE quality."
+                   if _cq else "ranking falls back to distance-to-buy-line.")
+                + " Reading this placed no order and moved no dollar.")}
 
 
 async def run(grid, dry_run=True):

@@ -210,6 +210,58 @@ PH = "\n".join(l for l in open("profit_harvest.py").read().splitlines()
 ok("the harvest still creates no branch", "create_grid_branch" not in PH)
 ok("and still places no order", "place_order" not in PH and "place_market_buy" not in PH)
 
+# --- the arming state must be visible WITHOUT running anything ----------
+# Shipped the same evening both flags were switched on, because nothing
+# reported whether they were. run() carries redirect_active but returns
+# before it on dry_run, and the preview endpoint only ever uses dry_run.
+import asyncio as _aio
+
+
+class PlanGrid:
+    """Just enough for plan() to reach its return."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def get_grid_status(self):
+        return {"branches": [], "total_allocated_usd": 0.0}
+
+    def get_session_factory(self):
+        return None
+
+
+def read_plan():
+    async def _go():
+        real = ph.realised_by_branch
+        async def fake(_sf):
+            return {}
+        ph.realised_by_branch = fake
+        try:
+            return await ph.plan(PlanGrid(), create=False)
+        finally:
+            ph.realised_by_branch = real
+    return _aio.run(_go())
+
+
+import coin_quality as _cq
+for flag, key in ((hr.ENV_FLAG, "redirect_active"), (_cq.ENV_FLAG, "coin_quality_active")):
+    os.environ.pop(hr.ENV_FLAG, None); os.environ.pop(_cq.ENV_FLAG, None)
+    off = read_plan()
+    ok(f"{key} reads False on the read-only path when the flag is unset",
+       off.get(key) is False)
+    os.environ[flag] = "true"
+    on = read_plan()
+    ok(f"{key} reads True once the flag is set", on.get(key) is True)
+    ok(f"and {key} is present at all, not missing", key in on)
+    os.environ.pop(flag, None)
+
+p_ = read_plan()
+ok("the cap is reported as a percent", isinstance(p_.get("max_coin_share_pct"), float))
+ok("and a plain sentence says what is armed", "OFF" in (p_.get("armed_is") or ""))
+ok("which names both flags",
+   hr.ENV_FLAG in p_["armed_is"] and _cq.ENV_FLAG in p_["armed_is"])
+ok("and says reading it moved nothing", "moved no dollar" in p_["armed_is"])
+
 failed_checks = [l for l, c in checks if not c]
 for l, c in checks:
     print(f"  {'PASS' if c else 'FAIL'}  {l}")
