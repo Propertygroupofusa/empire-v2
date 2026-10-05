@@ -495,20 +495,40 @@ async def _alpaca_realized_record(session: aiohttp.ClientSession) -> dict:
                 "avg_per_trade": None,
                 "note": "No closed round trip in the fetched order window."}
     net = t["realised_pnl"]
+    # HOW OFTEN THIS ACCOUNT ACTUALLY TRADED, and how often it won.
+    #
+    # `round_trips` counts LOT rows: FIFO splits one sell across every open
+    # lot it consumes, so a single exit can become a dozen rows. Measured
+    # here 2026-10-05, 294 lot rows came from 181 real sells, and this
+    # endpoint was publishing "294 round trips, 34.0% win rate" for an
+    # account that had completed 181 sells at 47.0%. Both counts are now
+    # published, and the headline win rate is the one computed on real
+    # sell orders. See closed_trades.pair_round_trips for the full note.
+    sells = t.get("completed_sells")
     return {
         "readable": True,
         "round_trips": n,
+        "completed_sells": sells,
+        "sells_split_across_lots": t.get("sells_split_across_lots"),
         "net_pnl": round(net, 2),
         "winners": t["winners"],
         "losers": t["losers"],
-        "win_rate_pct": round(t["winners"] / n * 100, 1),
-        "avg_per_trade": round(net / n, 4),
+        "lot_win_rate_pct": round(t["winners"] / n * 100, 1),
+        "win_rate_pct": t.get("sell_win_rate_pct"),
+        "sell_winners": t.get("sell_winners"),
+        "sell_losers": t.get("sell_losers"),
+        "avg_per_trade": round(net / sells, 4) if sells else round(net / n, 4),
         "is_losing": net < 0,
         "orders_scanned": len(orders) if isinstance(orders, list) else 0,
+        "which_count_is_which": t.get("which_count_is_which"),
         "note": ("This is what the trading EARNED. The per-bot 'profit' "
                  "field below is a capital-bucket delta floored at zero, "
                  "so it reads 0.00 for a bucket that is down - it is not "
-                 "this number and never was."),
+                 "this number and never was. win_rate_pct and "
+                 "avg_per_trade are computed on REAL SELL ORDERS; "
+                 "lot_win_rate_pct is the old lot-level figure, kept so a "
+                 "reader comparing against an older screenshot can see "
+                 "which is which."),
     }
 
 

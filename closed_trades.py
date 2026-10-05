@@ -152,17 +152,79 @@ def pair_round_trips(orders, known_sources=()):
 
     trades.sort(key=lambda t: str(t["exit_at"]), reverse=True)
     realised = sum(t["pnl"] for t in trades)
+
+    # ONE SELL ORDER IS ONE TRADE. A LOT IS NOT.
+    #
+    # FIFO splits a single sell across however many open lots it consumes,
+    # and each slice becomes a row above. That is RIGHT for P&L - the lots
+    # had different entry prices and the arithmetic has to respect that -
+    # but it is WRONG as a count of how often this account traded, and the
+    # win rate computed over those rows is wrong too.
+    #
+    # Measured on the live Alpaca book, 2026-10-05: 294 lot rows came from
+    # 181 real sell orders. Eleven sells had been split across lots, and
+    # those eleven alone produced 124 of the rows. The dashboard reported
+    # "294 round trips, 34.0% win rate"; the account had actually completed
+    # 181 sells at a 47.0% win rate. The count was inflated by 62% and the
+    # win rate understated by 13 points.
+    #
+    # It also manufactured phantom dust: 107 rows came out under $5 of
+    # notional and 87 of them - 81% - were slivers of a larger sell, not
+    # small orders. Reading those as real trades leads straight to "this
+    # bot is making 107 pointless $1 trades", which it is not. That
+    # conclusion was drawn from this data before this block existed, and
+    # it was wrong.
+    #
+    # Both views are published. realised_pnl is identical either way: the
+    # money is the money, and no regrouping may change it.
+    by_exit = {}
+    for t in trades:
+        by_exit.setdefault(t.get("exit_order_id"), []).append(t)
+    orders = []
+    for eid, legs in by_exit.items():
+        pnl = sum(x["pnl"] for x in legs)
+        notional = sum(x["qty"] * x["entry_price"] for x in legs)
+        orders.append({
+            "exit_order_id": eid,
+            "symbol": legs[0]["symbol"],
+            "exit_at": legs[0]["exit_at"],
+            "exit_price": legs[0]["exit_price"],
+            "qty": sum(x["qty"] for x in legs),
+            "lots_consumed": len(legs),
+            "entry_notional_usd": round(notional, 4),
+            "pnl": round(pnl, 4),
+            "pnl_pct": round(pnl / notional * 100.0, 4) if notional else None,
+        })
+    orders.sort(key=lambda o: str(o["exit_at"]), reverse=True)
+    o_win = len([o for o in orders if o["pnl"] > 0])
+    o_loss = len([o for o in orders if o["pnl"] < 0])
+
     return {
         "trades": trades,
+        "orders": orders,
         "open_lots": still_open,
         "unmatched_sells": unmatched,
         "totals": {
+            # Lot-level. Kept because the P&L arithmetic is built on it.
             "round_trips": len(trades),
             "realised_pnl": round(realised, 2),
             "winners": len([t for t in trades if t["pnl"] > 0]),
             "losers": len([t for t in trades if t["pnl"] < 0]),
             "open_lots": len(still_open),
             "unmatched_sells": len(unmatched),
+            # Order-level. THIS is how often the account actually traded.
+            "completed_sells": len(orders),
+            "sell_winners": o_win,
+            "sell_losers": o_loss,
+            "sell_win_rate_pct": round(o_win / len(orders) * 100.0, 1) if orders else None,
+            "sells_split_across_lots": len([v for v in by_exit.values() if len(v) > 1]),
+            "which_count_is_which": (
+                "round_trips counts LOT rows and will exceed the number of "
+                "sells whenever one sell consumed several lots. "
+                "completed_sells counts real sell orders and is the honest "
+                "answer to 'how many times did this account close a trade'. "
+                "Judge a strategy on sell_win_rate_pct, never on the lot-level "
+                "winners/losers."),
         },
         "caveats": {
             "unmatched_sells": (
