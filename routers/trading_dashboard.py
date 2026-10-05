@@ -10437,6 +10437,30 @@ async def grid_invariants_endpoint():
         # A blind check is worse than a failing one: it looks like silence.
         measured_leg = None
         blind_because = None
+        # BOUND BEFORE THE TRY, BOTH OF THEM.
+        #
+        # _maker_only used to be assigned only inside the
+        # `enough_to_conclude` branch, and `fills` only after the request
+        # returned. A STARVED SAMPLE takes the else branch, so neither was
+        # bound - and the maker_only_holds block below then raised
+        # UnboundLocalError and reported itself as "could not be checked".
+        #
+        # Live 2026-10-05: the fills feed stopped labelling maker/taker,
+        # which correctly sent fee_rate_agreement and
+        # spacing_evidence_current to UNKNOWN with a cause - and then
+        # turned the third check into a Python error instead of the same
+        # honest "not enough labelled fills". One missing label blinded
+        # three checks and only two of them could say why.
+        #
+        # The mode is read here because it is a DB flag, not something the
+        # fills sample knows: whether maker-only is armed is answerable
+        # even when no fill carries a label, and that is exactly the case
+        # where the reader most needs to know it.
+        fills = {}
+        try:
+            _maker_only = await g.is_maker_only_active()
+        except Exception:
+            _maker_only = False
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
@@ -10450,10 +10474,6 @@ async def grid_invariants_endpoint():
                 # 0.006137 only because pure-taker fills (XRP and XYO at
                 # 0.0075, ARB at 0.0062) are mixed in. The blend is still the
                 # right number when the fallback exists, so the mode picks.
-                try:
-                    _maker_only = await g.is_maker_only_active()
-                except Exception:
-                    _maker_only = False
                 if _maker_only and fills.get("maker_leg_fee_rate") is not None:
                     measured_leg = fills.get("maker_leg_fee_rate")
                     blind_because = None
@@ -10461,9 +10481,19 @@ async def grid_invariants_endpoint():
                     measured_leg = fills.get("real_leg_fee_rate")
             else:
                 # A starved sample is UNKNOWN, not a pass - and it says so.
+                # A MISSING COUNT IS NOT A COUNT. This read "only None spot
+                # fills carried a maker/taker label" whenever the feed
+                # omitted the field entirely, which is a different fault
+                # from a real but thin sample and should not wear the same
+                # sentence.
+                _classified = fills.get("classified_fills")
                 blind_because = (
-                    f"only {fills.get('classified_fills')} spot fills carried a "
-                    f"maker/taker label, under the sample this concludes from")
+                    f"only {_classified} spot fill{'' if _classified == 1 else 's'} "
+                    f"carried a maker/taker label, under the sample this "
+                    f"concludes from"
+                    if isinstance(_classified, int)
+                    else "the fills feed did not report how many fills carried a "
+                         "maker/taker label, so the sample size is unknown")
         except Exception as e:
             blind_because = f"{type(e).__name__}: {e}"
         r1 = inv.fee_rate_agreement(floor_leg, reported_leg, measured_leg)
