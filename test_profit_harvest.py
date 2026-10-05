@@ -12,6 +12,7 @@ Real SQLite, real models: the baseline IS a database row and the realised
 total IS the ledger, so a fake would only prove the fake works.
 """
 import os
+import re
 import tempfile
 import unittest
 from datetime import datetime
@@ -242,10 +243,45 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(40 - g.withdrawn[0][1], H.KEEP_BRANCH_ALIVE_USD)
 
     async def test_it_places_no_order_and_sells_no_coin(self):
+        """The four that touch COIN stay forbidden, permanently.
+
+        add_cash_to_grid_branch was the fifth entry on this list until
+        2026-10-05, on the reasoning in this module's own docstring:
+        "putting it straight back on would be the thing being replaced."
+
+        The owner then asked for exactly that: "every branch once it fills,
+        I want the money to go into the weakest branch and help it build
+        up." So the entry moved rather than being deleted, and what
+        replaces it is narrower, not absent - the harvest may move CLAIM
+        between two existing branches, and still may not touch coin.
+        """
         src = open("profit_harvest.py").read()
         for forbidden in ("place_market_sell", "place_market_buy", "_submit_order",
-                          "close_all_grid_slices", "add_cash_to_grid_branch"):
+                          "close_all_grid_slices", "create_grid_branch"):
             self.assertNotIn(forbidden, src)
+
+    async def test_the_only_deposits_are_the_redirect_and_its_rollback(self):
+        """Claim may move, and only along the two paths that balance.
+
+        Every add_cash_to_grid_branch in this module must name itself, so a
+        later reader can tell a deliberate transfer from a stray one, and
+        so crypto_grid_bot's caller attribution records which it was.
+        """
+        src = open("profit_harvest.py").read()
+        callers = re.findall(r'caller="(profit_harvest\.[a-z_]+)"', src)
+        self.assertEqual(sorted(set(callers)),
+                         ["profit_harvest.redirect",
+                          "profit_harvest.redirect_rollback"])
+        self.assertEqual(src.count("add_cash_to_grid_branch"), len(callers),
+                         "an add_cash call with no caller tag")
+
+    async def test_the_redirect_is_off_unless_the_flag_says_otherwise(self):
+        """A money-moving behaviour nobody switched on must not run."""
+        import harvest_redirect
+        os.environ.pop(harvest_redirect.ENV_FLAG, None)
+        self.assertFalse(harvest_redirect.enabled())
+        src = open("profit_harvest.py").read()
+        self.assertIn("harvest_redirect.enabled()", src)
 
 
 if __name__ == "__main__":

@@ -28,8 +28,21 @@ harvest happens at the moments a branch empties out, which is the only time
 the money is cash at all.
 
 WHERE IT GOES. Out of allocated_usd, which leaves it as unallocated cash in
-the wallet. It is not re-deployed anywhere. Taking profit off the table is
-the point; putting it straight back on would be the thing being replaced.
+the wallet. Taking profit off the table is the point.
+
+AMENDED 2026-10-05, at the owner's instruction: "every branch once it fills,
+I want the money to go into the weakest branch and help it build up." With
+GRID_HARVEST_REDIRECT=true the harvested claim is handed to the branch that
+can soonest turn it into a rung (see harvest_redirect) instead of stopping
+as cash. This paragraph used to end "putting it straight back on would be
+the thing being replaced", and that is no longer the standing instruction -
+it is recorded here rather than deleted, because the reasoning behind it
+still holds whenever the flag is off, which is the default.
+
+The withdrawal and the deposit are the same amount and the deposit is the
+only thing that can follow a successful withdrawal: if it fails the money
+goes back and the baseline does not advance. No dollar is ever left
+nowhere.
 
 NOTHING HERE PLACES AN ORDER OR SELLS ANY COIN.
 """
@@ -215,7 +228,30 @@ async def run(grid, dry_run=True):
                             f"${p['total_harvest_usd']:,.2f} of realised profit "
                             f"is sitting in flat branches."))
 
-    taken, failed = [], []
+    # WHERE THE MONEY GOES AFTER IT COMES OUT.
+    #
+    # Default: nowhere - it becomes unallocated cash, exactly as before.
+    # With GRID_HARVEST_REDIRECT=true it is handed to the branch that can
+    # soonest turn it into a rung. See harvest_redirect for why that is not
+    # the same as "the weakest branch", and for the closed-loop bug the
+    # family tree hit when it sent money back to its own source.
+    import harvest_redirect
+    _redirect = harvest_redirect.enabled()
+    _fleet = None
+    if _redirect:
+        try:
+            _status = await grid.get_grid_status()
+            _all_branches = _status.get("branches") or []
+            _fleet = _status.get("total_allocated_usd")
+        except Exception as e:
+            # Fail CLOSED on the redirect only: an unreadable fleet means
+            # no target can be chosen, so the money stays cash. It must
+            # never mean the harvest stops - the profit still comes off.
+            log.warning(f"[harvest] fleet unreadable, redirect skipped this "
+                        f"run: {type(e).__name__}: {e}")
+            _redirect, _all_branches = False, []
+
+    taken, failed, moved = [], [], []
     for r in p["branches"]:
         if r["harvest_usd"] < MIN_HARVEST_USD:
             continue
@@ -225,6 +261,45 @@ async def run(grid, dry_run=True):
             failed.append({**r, "error": f"{type(e).__name__}: {e}"})
             log.warning(f"[harvest] {r['product_id']} refused: {e}")
             continue
+
+        # THE MONEY IS OUT OF THE SOURCE AND NOT YET ANYWHERE. Every path
+        # below either lands it in a target or puts it back. There is no
+        # branch of this code where a withdrawn dollar is left nowhere.
+        if _redirect:
+            _target, _why = harvest_redirect.pick_target(
+                _all_branches, exclude_bot_name=r["bot_name"],
+                amount_usd=r["harvest_usd"], fleet_allocated_usd=_fleet)
+            if _target:
+                try:
+                    await grid.add_cash_to_grid_branch(
+                        _target, r["harvest_usd"], caller="profit_harvest.redirect")
+                except Exception as e:
+                    # PUT IT BACK. A failed deposit must not delete capital,
+                    # and the baseline must NOT advance - the profit is still
+                    # in the source branch, so the next run retries it.
+                    try:
+                        await grid.add_cash_to_grid_branch(
+                            r["bot_name"], r["harvest_usd"],
+                            caller="profit_harvest.redirect_rollback")
+                        _rolled = "returned to its own branch"
+                    except Exception as e2:
+                        _rolled = (f"COULD NOT BE RETURNED: {type(e2).__name__}: {e2}")
+                        log.error(f"[harvest] ${r['harvest_usd']:,.2f} left "
+                                  f"{r['product_id']} and landed nowhere - {_rolled}")
+                    failed.append({**r, "error": (
+                        f"deposit into {_target} failed ({type(e).__name__}: {e}) "
+                        f"- {_rolled}")})
+                    continue
+                moved.append({**r, "to_bot_name": _target,
+                              "why": _why.get("reason")})
+                log.warning(f"[harvest] moved ${r['harvest_usd']:,.2f} from "
+                            f"{r['product_id']} into {_target} "
+                            f"({_why.get('reason')})")
+            else:
+                log.info(f"[harvest] ${r['harvest_usd']:,.2f} from "
+                         f"{r['product_id']} stays as cash: "
+                         f"{_why.get('reason')}")
+
         # Advance the mark ONLY after the withdrawal succeeded. Advancing
         # first would forget profit that is still sitting in the branch.
         await _advance_baseline(grid.get_session_factory, r["bot_name"],
@@ -241,9 +316,20 @@ async def run(grid, dry_run=True):
         except Exception:
             pass
     total = round(sum(r["harvest_usd"] for r in taken), 2)
+    _moved_usd = round(sum(r["harvest_usd"] for r in moved), 2)
     return {"ran": bool(taken), "harvested_usd": total,
             "branches": taken, "failed": failed or None,
             "rows_written": len(taken),
+            "redirect_active": _redirect,
+            "redirected_usd": _moved_usd,
+            "redirected": moved or None,
+            "redirect_is": (
+                "Harvested profit was moved into the branch that can soonest "
+                "turn it into a rung, never back into its own source. Claim "
+                "only - no order was placed and no coin was bought or sold."
+                if _redirect else
+                f"OFF ({harvest_redirect.ENV_FLAG} is not true) - harvested "
+                f"profit stayed as unallocated cash, as it always has."),
             "detail": (f"${total:,.2f} of profit taken out of {len(taken)} "
                        f"branch(es)." if taken else
                        "Nothing was harvested - no flat branch had "
