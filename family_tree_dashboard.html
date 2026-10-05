@@ -5226,6 +5226,38 @@ function renderGridMakerOnlyToggle(data) {
                  ? ''
                  : `<p class="why" style="margin:8px 0 0"><strong>This configuration has completed no cycles.</strong> ` +
                    `The theoretical +${net.toFixed(2)}% above is arithmetic, not a result.</p>`) +
+              // INHERITED EXITS, SHOWN BUT NOT COUNTED.
+              //
+              // realized_edge.current is now the cycles this grid both
+              // opened and closed. An adopted_exit closes a position it
+              // never opened, priced against an adoption mark nobody paid,
+              // so it says nothing about what a round trip of this step
+              // earns - in either direction.
+              //
+              // It is still REAL MONEY and it is still on the books, so it
+              // gets a line of its own rather than disappearing. On
+              // 2026-10-05 this was four ZEC exits at -$311.24, which made
+              // the pooled figure read -2.07% while the grid own 122 cycles
+              // were about +1.67%. Dropping it silently would trade one
+              // misleading number for another.
+              ((re.current_inherited && re.current_inherited.trades)
+                 ? `<p class="why" style="margin:8px 0 0; padding:8px 10px; ` +
+                   `border-left:3px solid #f59e0b; background:rgba(245,158,11,.07)">` +
+                   `<strong>Not counted above: ${re.current_inherited.trades} inherited exit` +
+                   `${re.current_inherited.trades === 1 ? '' : 's'}, ` +
+                   `<span style="color:${re.current_inherited.net_usd >= 0 ? '#10b981' : '#ef4444'}">` +
+                   `${re.current_inherited.net_usd >= 0 ? '+' : '-'}$` +
+                   `${Math.abs(re.current_inherited.net_usd).toFixed(2)}</span>.</strong> ` +
+                   `Positions the grid did not open, closed against the mark they were adopted at. ` +
+                   `Real money, really booked - but not evidence about how this step trades, so they are ` +
+                   `out of the figure above. A gain would be excluded the same way. ` +
+                   `Including them the book reads ` +
+                   `${re.current_including_inherited && re.current_including_inherited.trades
+                       ? (re.current_including_inherited.net_pct >= 0 ? '+' : '') +
+                         re.current_including_inherited.net_pct.toFixed(2) + '% over ' +
+                         re.current_including_inherited.trades + ' cycles'
+                       : 'the same'}.</p>`
+                 : '') +
               `<p class="why" style="margin:8px 0 0; opacity:.7">` +
               `<strong>RETIRED configuration</strong> (before ${re.config_epoch}): ` +
               `${re.retired.trades} cycles, ` +

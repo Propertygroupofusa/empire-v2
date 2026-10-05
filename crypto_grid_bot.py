@@ -9382,6 +9382,12 @@ async def get_realized_edge(days: int = None) -> dict:
     out of this table entirely. That is why days_since_last_close sits beside
     the margin and not underneath it: this fleet realised +1.95% a cycle at
     6.25 closes a day for eight days, then closed nothing for seventeen.
+
+    And it does not count a position the grid never opened. adopted_exit
+    rows go to `current_inherited`; the pooled book stays available under
+    `current_including_inherited`. See the note at the split for the four
+    ZEC exits that made `current` read -2.068% while the grid's own 122
+    cycles were positive.
     """
     since = datetime.utcnow() - timedelta(days=days) if days else None
     try:
@@ -9396,13 +9402,67 @@ async def get_realized_edge(days: int = None) -> dict:
     epoch = _config_epoch()
     current = [r for r in rows if r.closed_at and r.closed_at >= epoch]
     retired = [r for r in rows if not r.closed_at or r.closed_at < epoch]
-    cur = _edge_cohort(current)
+
+    # INHERITED EXITS ARE NOT THIS CONFIGURATION'S EVIDENCE.
+    #
+    # An adopted_exit closes a position the grid never opened. Its entry
+    # price is the adoption mark - a number nobody paid and no step chose -
+    # so its gross and net describe the inherited position's history, not
+    # what a round trip of THIS configuration earns. Pooling the two
+    # answers a question nobody asked with a number that looks like the
+    # answer to the one they did.
+    #
+    # Live on 2026-10-05, this cohort read 126 cycles at -2.068% net,
+    # -$186.78, and was read as evidence that the step was too tight.
+    # Four ZEC adopted_exits inside the window booked -$311.24 between
+    # them. The other 122 cycles are +$124.46 on $7,459 of notional,
+    # about +1.67% - which is the +1.636% this same metric reported on 114
+    # trips before those four landed. Nothing about the step had changed.
+    # The grid's own rules have never closed a negative: 78 profit_target
+    # and 41 parked_sell, zero, ever. The only negatives this fleet has
+    # booked are 3 stop_loss closes and the untagged pre-epoch era.
+    #
+    # THIS IS THE FOURTH PLACE THIS RULE WAS NEEDED and the first three
+    # already had it: loss_study.analyse, capital_kpis.compute and
+    # get_grid_performance_metrics all drop adopted_exit for exactly this
+    # reason, and ADOPTED_EXIT_REASON's own comment says the rows are
+    # "kept out of the grid's own performance record". This function was
+    # the record that kept them. Same shape as the keep-alive floor: the
+    # callers each solved it and the shared path did not.
+    #
+    # NOT HIDDEN, and the exclusion cuts both ways. An inherited GAIN is
+    # dropped too - it would flatter this number exactly as falsely.
+    # The inherited rows get their own cohort, the pooled figure stays
+    # published under its own name, and the two always sum.
+    inherited = [r for r in current
+                 if (r.exit_reason or "") == ADOPTED_EXIT_REASON]
+    own = [r for r in current if r not in inherited]
+
+    cur = _edge_cohort(own)
+    inh = _edge_cohort(inherited)
     return {
         "available": True,
         "config_epoch": GRID_CONFIG_EPOCH,
-        # The cohort that describes what is running. Everything a decision
-        # should be based on comes from here.
+        # The cohort that describes what is running: cycles THIS grid both
+        # opened and closed. Everything a decision should be based on comes
+        # from here.
         "current": cur,
+        # Positions the grid inherited and exited. Real money, really
+        # booked - just not evidence about how this configuration trades.
+        "current_inherited": inh,
+        # What this function used to return as "current". Kept so the raw
+        # book is still one read away, and so the split can be audited:
+        # whenever both cohorts have trades, their net_usd sum to this one.
+        # An EMPTY cohort is {"trades": 0} with no percentages - absence,
+        # not a measured 0.00%, which would read as "no edge" rather than
+        # "nothing to measure". Read net_usd with .get() and treat a
+        # missing value as unmeasured.
+        "current_including_inherited": _edge_cohort(current),
+        "inherited_is": (
+            "adopted_exit rows - positions the grid did not open, priced "
+            "against an adoption mark nobody paid. Excluded from `current` "
+            "in both directions, gains included. See `current_including_"
+            "inherited` for the pooled book."),
         # Kept, because it is real evidence about grids in general. Labelled,
         # because it is not evidence about this one.
         "retired": _edge_cohort(retired),
@@ -9410,6 +9470,9 @@ async def get_realized_edge(days: int = None) -> dict:
         "headline": (
             f"current configuration: {cur['trades']} completed cycle"
             f"{'' if cur['trades'] == 1 else 's'}"
+            + (f", plus {inh['trades']} inherited exit"
+               f"{'' if inh['trades'] == 1 else 's'} shown separately"
+               if inh["trades"] else "")
             + (" - no baseline yet, nothing here describes what this fleet earns"
                if cur["trades"] < 20 else "")),
         "survivorship_warning": (
