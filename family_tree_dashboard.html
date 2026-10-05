@@ -30,6 +30,19 @@
         --red-bg: rgba(255,82,82,0.10);
         --gold: #f0b429;
         --gold-bg: rgba(240,180,41,0.10);
+        /* The two tokens this block was missing. Every tinted panel had a
+           theme-aware background EXCEPT the blue one, which was hardcoded
+           #eef2fa - so an .obs-row.info painted var(--text) (#ffffff in
+           this default dark theme) onto a near-white panel and the row
+           was invisible. Same reason --track exists: three bar tracks
+           were hardcoded #eef1f6 and read as white slabs on a black page. */
+        --blue-bg: rgba(0,82,255,0.12);
+        /* A bar track has to be VISIBLE as the unfilled part of the bar.
+           The first attempt at this used #1b1e24 and measured 1.18:1
+           against the #0a0b0d panel it sits in - which is a track you
+           cannot see, the same fault in the other direction. #343842 is
+           the page's own recessed grey and reads 1.68:1. */
+        --track: #343842;
         --amber: #f0b429;
         --navy: #0052ff;
         --shadow: none;
@@ -46,6 +59,7 @@
         --red: #d6455a;   --red-bg: #fbe9ec;
         --gold: #c9860a;  --gold-bg: #fbf1de;  --amber: #c9860a;
         --navy: #1f3864;  --blue: #1f3864;
+        --blue-bg: #eef2fa;  --track: #eef1f6;
         --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 2px 8px rgba(16,24,40,0.06);
     }
 
@@ -384,8 +398,8 @@
     .combined-observations { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
     .obs-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; font-size: 0.83em; line-height: 1.4; }
     .obs-row.warn { background: var(--gold-bg); border: 1px solid var(--gold); color: var(--text); }
-    .obs-row.info { background: #eef2fa; border: 1px solid #cdd8ee; color: var(--text); }
-    .obs-row.good { background: var(--green-bg); border: 1px solid #b7e4c7; color: var(--text); }
+    .obs-row.info { background: var(--blue-bg); border: 1px solid var(--blue-dim); color: var(--text); }
+    .obs-row.good { background: var(--green-bg); border: 1px solid var(--green); color: var(--text); }
     .obs-row .obs-icon { flex-shrink: 0; }
     @media (max-width: 700px) { .combined-progress-layout { flex-direction: column; } }
 
@@ -444,7 +458,7 @@
         }
     }
     .bar-row .bar-label { color: var(--text-dim); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .bar-track { background: #eef1f6; border-radius: 5px; height: 16px; overflow: hidden; position: relative; }
+    .bar-track { background: var(--track); border-radius: 5px; height: 16px; overflow: hidden; position: relative; }
     .bar-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #ffcf5e, var(--gold)); }
     .bar-spawn-pct { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 0.72em; font-weight: 800; letter-spacing: 0.2px; text-shadow: 0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; white-space: nowrap; }
     .bar-row .bar-value { text-align: right; font-weight: 700; color: var(--navy); }
@@ -498,7 +512,7 @@
     .progress-wrap { margin-top: 10px; }
     .progress-label { display: flex; justify-content: space-between; font-size: 0.72em; color: var(--text-dim); margin-bottom: 3px; }
     .progress-bar-bg {
-        width: 100%; height: 9px; background: #eef1f6;
+        width: 100%; height: 9px; background: var(--track);
         border-radius: 5px; overflow: hidden;
     }
     .progress-bar-fill {
@@ -772,7 +786,7 @@
             padding: 12px 12px;
         }
     }
-    .mode-btn.selected { border-color: var(--navy); background: #eef2fb; color: var(--navy); }
+    .mode-btn.selected { border-color: var(--blue); background: var(--blue-bg); color: var(--text); }
     .branch-pick-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
     .branch-pick-btn {
         font-family: inherit; text-align: left; padding: 9px 12px; border-radius: 8px;
@@ -1060,7 +1074,7 @@
     .cp-kpi .sub { font-size:0.72em; color:var(--text-dim); margin-top:2px; }
     .cp-kpi.stale .val { color:var(--text-dim); }
     .cp-kpi.stale .sub { color:var(--gold); font-weight:600; }
-    .cp-bar { height:6px; border-radius:3px; background:#eef1f6; margin-top:8px; overflow:hidden; }
+    .cp-bar { height:6px; border-radius:3px; background:var(--track); margin-top:8px; overflow:hidden; }
     .cp-bar > i { display:block; height:100%; background:linear-gradient(90deg,#00a650,#009845); border-radius:3px; min-width:2px; }
     .cp-chart { margin-top:12px; border:1px solid var(--border); border-radius:10px; padding:10px 8px 4px; }
     .cp-chart svg { width:100%; height:auto; display:block; }
