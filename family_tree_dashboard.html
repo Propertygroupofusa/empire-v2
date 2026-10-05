@@ -7284,7 +7284,10 @@ async function loadFleetReadiness() {
         renderTabLock();
         renderEnvRejected();
         renderOutOfReach(d.out_of_reach);
-        renderGridReconcile(d.backing);
+        // OWNED, NOT AVAILABLE - this banner makes a claim about coin
+        // EXISTING, so it must read the block that measures existence.
+        // See renderGridReconcile for what it was saying before.
+        renderGridReconcile(d.backing_owned || null, d.backing || null);
         renderGridRotation(d.branches || []);
         renderGridHarvest();
         renderGridFreeCash();
@@ -8154,7 +8157,32 @@ function renderOutOfReach(oor) {
 // success.
 let _gridReconcileSeenUnbacked = null;
 
-function renderGridReconcile(bk) {
+// THIS BANNER READS backing_owned, AND THAT IS THE WHOLE POINT OF IT.
+//
+// It said "5 branch(es) claim coin the wallet does not hold" over
+// $743.71 on 2026-10-05. FOUR OF THE FIVE OWNED EVERY UNIT THEY
+// CLAIMED. It was reading `backing`, which measures AVAILABLE units -
+// correct for "can this branch sell right now", wrong for "does this
+// coin exist" - and this banner asks the second question in its own
+// headline. ALGO held 1347.646389 units against a 492.70 claim and was
+// named as short.
+//
+// The same misread, in a buy gate, refused four healthy branches for
+// four hours on 2026-10-04, and the retraction of it is the headline of
+// that day's report. The server has published `backing_owned` beside
+// `backing` ever since, precisely so a claim about existence has a
+// block to come from. This banner was still on the other one.
+//
+// Measured the moment this changed: 5 branches / $743.71 -> 1 branch /
+// $497.87, ZEC alone, which is the branch that genuinely holds nothing.
+//
+// FALLS BACK TO NOTHING, NEVER TO `backing`. If backing_owned is absent
+// - an unreadable census yields no owned map and the server omits the
+// key - this banner stays hidden and the available figure is shown
+// below as what it is. Rendering the available number under an
+// existence headline is the bug; doing it only "when the good one is
+// missing" is the same bug with a worse trigger.
+function renderGridReconcile(bk, avail) {
     const wrap = document.getElementById('grid-reconcile-wrap');
     if (!wrap) return;
     _gridReconcileSeenUnbacked = (bk && bk.readable === true
@@ -8190,10 +8218,26 @@ function renderGridReconcile(bk) {
         </div>
         <div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
                     line-height:1.45;">
-          A branch cannot sell what it does not hold, so these sit refusing
-          every sell order. Correcting the books is not a loss: the coin was
-          already sold and the cash is already in the wallet.
+          Measured against units the account <strong>owns</strong>, which
+          includes coin on hold and staked. A branch cannot sell what it does
+          not hold, so these sit refusing every sell order. Correcting the
+          books is not a loss: the coin was already sold and the cash is
+          already in the wallet.
         </div>
+        ${(avail && avail.readable === true
+           && isFinite(Number(avail.unbacked_branches))
+           && Number(avail.unbacked_branches) > Number(n))
+          ? `<div style="margin-top:8px; font-size:0.78em; color:var(--text-dim);
+                      line-height:1.45; padding-top:8px;
+                      border-top:1px solid rgba(128,128,128,.25);">
+              Separately, <strong>${Number(avail.unbacked_branches)}</strong>
+              branch(es) totalling <strong>${fmtUsd(Number(avail.not_in_wallet_usd))}</strong>
+              cannot sell <em>right now</em> because their coin is under a
+              resting order or staked. <strong>That coin is owned and is not
+              missing</strong> &mdash; it is not part of the figure above and
+              reconcile will not touch it.
+             </div>`
+          : ''}
         <button class="unlock-btn" style="margin-top:10px;"
                 onclick="previewGridReconcile()">🔍 Preview the fix (changes nothing)</button>
         <div id="grid-reconcile-status" style="margin-top:8px; font-size:0.82em;

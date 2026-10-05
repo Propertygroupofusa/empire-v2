@@ -121,12 +121,29 @@ ok('skipped product ids are escaped', /escText\(x\.product_id\)/.test(fnPrev));
 // ---- wiring --------------------------------------------------------
 console.log('\n[8] wiring');
 ok('the container exists', /id="grid-reconcile-wrap"/.test(src));
-ok('it is fed d.backing', /renderGridReconcile\(d\.backing\)/.test(src));
+// FED THE OWNED BLOCK, NOT THE AVAILABLE ONE. This asserted
+// renderGridReconcile(d.backing) until 2026-10-05, which is what let the
+// banner print "5 branch(es) claim coin the wallet does not hold" while
+// four of the five owned every unit they claimed. `backing` measures
+// AVAILABLE units - right for "can this sell now", wrong for the
+// existence claim in the banner's own headline. The available block is
+// still passed, second, for the on-hold line.
+ok('it is fed d.backing_owned as the primary',
+   /renderGridReconcile\(\s*d\.backing_owned\s*\|\|\s*null\s*,/.test(src));
+ok('and d.backing only as the secondary',
+   /renderGridReconcile\(\s*d\.backing_owned[^)]*d\.backing\s*\|\|\s*null\s*\)/.test(src));
+ok('it is NOT fed d.backing as the primary',
+   !/renderGridReconcile\(\s*d\.backing\s*[,)]/.test(src));
 const fnStart = src.indexOf('async function loadFleetReadiness()');
 const body = src.slice(fnStart, src.indexOf('\nasync function ', fnStart + 10));
+// The property that matters here is ONE fetch, not the argument spelling -
+// the argument is checked above. Matching on the old literal meant this
+// check failed for a reason that had nothing to do with fetches.
 ok('the call rides the grid-status fetch the page already makes',
-   body.includes('renderGridReconcile(d.backing)')
+   /renderGridReconcile\(\s*d\.backing_owned/.test(body)
    && (body.match(/apiGet\('\/grid-status'\)/g) || []).length === 1);
+ok('both blocks come off that same response, not a second call',
+   /renderGridReconcile\([^)]*d\.backing_owned[^)]*d\.backing[^)]*\)/.test(body));
 ok('the panel adds no fetch of its own', !/apiGet|XMLHttpRequest/.test(fnRender));
 
 // NO VERDICT HERE. The async blocks below are part of this suite, and an

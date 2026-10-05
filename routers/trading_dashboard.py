@@ -9163,7 +9163,7 @@ async def get_grid_status_endpoint(fresh: int = 0):
             _owned = account_census.owned_units_map(_bal)
             if _owned:
                 data["backing_owned"] = slice_backing.assess(
-                    data.get("branches") or [], _owned)
+                    data.get("branches") or [], _owned, units_are="owned")
 
             # AND THE MONEY THIS KEY CANNOT SEE AT ALL. Measured
             # 2026-10-02: the Coinbase app showed $13,912.19 of crypto

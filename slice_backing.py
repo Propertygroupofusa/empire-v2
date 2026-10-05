@@ -45,16 +45,37 @@ def _f(v, default=0.0):
     return out if out == out else default          # NaN -> default
 
 
-def assess(branches, held_units_by_asset, *, unreadable_assets=()):
+def assess(branches, held_units_by_asset, *, unreadable_assets=(),
+           units_are="available"):
     """Per-branch backing, plus the fleet total.
 
     `branches` are grid-status branch dicts (product_id, slices with qty
     and entry_price, current_price, total_unrealized_net_usd).
-    `held_units_by_asset` maps BASE ASSET -> units the venue reports
-    AVAILABLE, which is the figure an order is actually sized against.
+    `held_units_by_asset` maps BASE ASSET -> units held. WHICH units is
+    the caller's choice and it changes what the answer MEANS, so
+    `units_are` records it and the note says so.
     `unreadable_assets` are assets whose balance could not be read at
     all - reported as UNKNOWN, never folded into the shortfall.
+
+    units_are="available"  -> "can this branch place a sell right now",
+        the figure an order is sized against. Excludes coin under a
+        resting order and staked balances.
+    units_are="owned"      -> "does this coin exist at all". Includes
+        coin on hold and staked.
+
+    WHY THIS ARGUMENT EXISTS. This function is called twice per status
+    pass with two different maps, and it was writing the SAME note both
+    times: "held units are what the venue reports AVAILABLE". So
+    `backing_owned` - the block that exists precisely because available
+    was the wrong question - carried a note saying it had used
+    available. A reader checking which measurement they were looking at
+    got the wrong answer from the field put there to tell them.
+
+    That is the same owned-vs-available confusion this whole pair of
+    blocks was added to end, surviving in the prose after it had been
+    fixed in the numbers.
     """
+    _units_are = "owned" if str(units_are).lower().strip() == "owned" else "available"
     held = {str(k).upper(): _f(v) for k, v in (held_units_by_asset or {}).items()}
     unreadable = {str(a).upper() for a in (unreadable_assets or ())}
 
@@ -136,9 +157,20 @@ def assess(branches, held_units_by_asset, *, unreadable_assets=()):
         "unknown": unknown,
         "unknown_count": len(unknown),
         "is_a_measurement_not_a_change": True,
+        "units_are": _units_are,
+        "measures": (
+            "can this branch place a sell RIGHT NOW" if _units_are == "available"
+            else "does this coin EXIST at all"),
         "note": ("Claimed units come from open slice rows; held units are what the "
-                 "venue reports AVAILABLE, which is what an order is sized against. "
-                 "A branch under "
+                 + ("venue reports AVAILABLE, which is what an order is sized "
+                    "against - coin under a resting order and staked coin are "
+                    "excluded, so a branch can read short here while owning every "
+                    "unit it claims. "
+                    if _units_are == "available" else
+                    "account OWNS, including coin on hold under a resting order "
+                    "and staked coin. A shortfall here is coin that is genuinely "
+                    "not there. ")
+                 + "A branch under "
                  f"{BACKED_ENOUGH_PCT:.0f}% cannot sell what its books claim, so any "
                  "gain it reports is not money. Correcting the books is "
                  "reconcile-slices - write-guarded, and not done here."),
