@@ -12668,15 +12668,64 @@ async def get_growth_model(hours: float = 720.0):
         )).scalars().all()
 
     trades = [{"entry_price": r.entry_price, "qty": r.qty, "pnl": r.pnl,
-               "closed_at": r.closed_at} for r in rows]
+               "closed_at": r.closed_at, "exit_reason": r.exit_reason} for r in rows]
+
+    # A POSITION THE GRID NEVER OPENED IS NOT THIS CONFIGURATION'S EDGE.
+    #
+    # An adopted_exit closes a position the grid did not open. Its entry
+    # price is the ADOPTION MARK - a number nobody paid and no step
+    # chose - so its gross and net describe the inherited position's
+    # history, not what a round trip of this configuration earns.
+    #
+    # Live 2026-10-05 this endpoint reported:
+    #
+    #   blended_net_pct  -1.8103%   median_net_pct  +1.4341%
+    #   win_rate_pct      93.4%     total_pnl_usd   -$172.82
+    #   monthly_pct      -2.2736%   36-month ladder  $7,714 -> $3,370
+    #
+    # Those first three cannot describe one healthy distribution. Four
+    # ZEC closes tagged adopted_exit sat in the sample and booked
+    # -$311.24 on $1,574.71 of cost basis. The other 133 round trips are
+    # +$138.42, about +1.74% blended and +1.82% a month. The compounding
+    # ladder was projecting a loss off four rows that cannot recur -
+    # ZEC holds zero coin, so there is nothing left for it to exit.
+    #
+    # THE RULE ALREADY EXISTED IN FOUR PLACES. loss_study.analyse,
+    # capital_kpis.compute, get_grid_performance_metrics and (since
+    # 985f759) get_realized_edge all drop adopted_exit, and
+    # ADOPTED_EXIT_REASON's own comment says such rows are "kept out of
+    # the grid's own performance record". This endpoint was the fifth,
+    # and the only one whose number the dashboard puts on the front page.
+    #
+    # It could not have told them apart before this commit: exit_reason
+    # was not carried into the trade dicts at all.
+    #
+    # NOT HIDDEN, and the exclusion cuts both ways - an inherited GAIN is
+    # dropped too, since it would flatter the rate exactly as falsely.
+    # The inherited rows get their own edge and their own rate, and the
+    # pooled figures stay published under their own names.
+    _INHERITED = getattr(crypto_grid_bot_module, "ADOPTED_EXIT_REASON", "adopted_exit")
+    inherited_trades = [t for t in trades if (t.get("exit_reason") or "") == _INHERITED]
+    own_trades = [t for t in trades if (t.get("exit_reason") or "") != _INHERITED]
 
     # The span is what the TRADES cover, not what was asked for. Asking
     # for 720h of a fleet that is 26 days old and dividing by 30 would
     # understate the rate on a denominator no data supports.
-    stamps = [t["closed_at"] for t in trades if t["closed_at"] is not None]
-    span_days = ((max(stamps) - min(stamps)).total_seconds() / 86400.0) if len(stamps) > 1 else 0.0
+    #
+    # Measured per cohort, deliberately: the own rate is own profit over
+    # the span the OWN trades cover. Dividing own profit by a span that
+    # four inherited closes helped define would be a second, quieter
+    # version of the same contamination.
+    def _span(ts):
+        st = [t["closed_at"] for t in ts if t["closed_at"] is not None]
+        return ((max(st) - min(st)).total_seconds() / 86400.0) if len(st) > 1 else 0.0
 
-    edge = gmod.measure_edge(trades)
+    span_days = _span(own_trades)
+    span_days_all = _span(trades)
+
+    edge = gmod.measure_edge(own_trades)
+    edge_inherited = gmod.measure_edge(inherited_trades)
+    edge_all = gmod.measure_edge(trades)
     capital = gmod.measure_capital(
         status.get("branches") or [],
         free_cash_usd=status.get("real_free_cash_usd") or 0.0)
@@ -12684,9 +12733,13 @@ async def get_growth_model(hours: float = 720.0):
     realised = edge.get("total_pnl_usd") if edge.get("readable") else None
     total_capital = capital.get("total_capital_usd") if capital.get("readable") else None
     rate = gmod.project(realised, total_capital, span_days)
+    rate_all = gmod.project(
+        edge_all.get("total_pnl_usd") if edge_all.get("readable") else None,
+        total_capital, span_days_all)
 
     # The working rate is measured on the capital that CAN buy, which is
-    # the only half with evidence behind it.
+    # the only half with evidence behind it - and on the grid's own
+    # cycles, which is the only half this configuration produced.
     working = None
     if capital.get("readable") and rate.get("readable"):
         working = rate.get("monthly_pct")
@@ -12695,9 +12748,24 @@ async def get_growth_model(hours: float = 720.0):
 
     return JSONResponse(content={
         "window_hours_requested": window,
+        # The grid's own completed cycles - what this configuration earns.
+        # Everything a decision should rest on comes from here.
         "edge": edge,
         "capital": capital,
         "rate": rate,
+        # Positions the grid inherited and exited. Real money, really
+        # booked, and not evidence about how this configuration trades.
+        "edge_inherited": edge_inherited,
+        # What this endpoint returned as `edge`/`rate` before 2026-10-05.
+        # Kept so the raw book is one read away and the split is auditable.
+        "edge_including_inherited": edge_all,
+        "rate_including_inherited": rate_all,
+        "inherited_is": (
+            "adopted_exit rows - positions the grid did not open, priced "
+            "against an adoption mark nobody paid. Excluded from `edge` and "
+            "`rate` in BOTH directions, gains included. The span is measured "
+            "per cohort, so the own rate divides own profit by the span the "
+            "own trades cover."),
         "ceiling": ceiling,
         "as_of": _get_utc_timestamp(),
     }, headers={"Cache-Control": "no-store"})
