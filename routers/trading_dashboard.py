@@ -14379,6 +14379,16 @@ async def cost_truth():
     }
 
 
+def _num_or_none(v):
+    """float(v), or None. None and 0.0 are different claims about a ledger
+    and the whole point of this endpoint is to keep them apart."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
 @router.get("/is-it-growing")
 async def is_it_growing():
     """The only number on this dashboard that is actually growth.
@@ -14409,12 +14419,56 @@ async def is_it_growing():
 
     realized = trades = win_rate = None
     first_at = last_at = None
+    inherited = inherited_trades = inherited_restated = None
+
+    # THE KEYWORD WAS WRONG AND THE FAILURE WAS SILENT.
+    #
+    # This called get_grid_trade_history(limit=500). The parameter is named
+    # limit_recent, so every call raised TypeError, the bare except below
+    # swallowed it, and the function fell through to the raw SUM(pnl) that
+    # follows - for as long as this endpoint has existed. Nothing logged,
+    # because an unreadable ledger and an uncalled provider look identical
+    # from here.
+    #
+    # WHAT THAT COST. The provider already splits the book into the grid's
+    # OWN trading and rows tagged adopted_exit - positions the grid did not
+    # open, priced against an adoption mark nobody paid. The fallback sums
+    # pnl across every row with no such filter. So on 2026-10-05 this
+    # endpoint published -$165.29 under the field name
+    # "is_the_only_growth_figure_here", when the grid's own 207 round trips
+    # had earned +$145.95 and the four inherited ZEC exits that dragged it
+    # negative had actually put $1,268.45 of cash in the wallet, gaining
+    # $297.78 against the basis really paid.
+    #
+    # The exception is logged now. A provider that cannot be called is a
+    # bug, and a bug that falls back silently is the one that lasts.
     try:
-        hist = await grid.get_grid_trade_history(limit=500) \
+        hist = await grid.get_grid_trade_history(limit_recent=500) \
             if hasattr(grid, "get_grid_trade_history") else None
-    except Exception:
+    except Exception as exc:
+        log.warning("[growing] trade-history provider failed, falling back to "
+                    f"the pooled ledger sum: {type(exc).__name__}: {exc}")
         hist = None
-    if hist is None:
+
+    if hist is not None:
+        # OWN TRADING IS THE ANSWER TO "IS IT GROWING". The inherited rows
+        # are published beside it, never added into it and never dropped -
+        # they are real money, they are just not this fleet's work.
+        realized = _num_or_none(hist.get("realized_own_usd"))
+        trades = hist.get("realized_own_trades")
+        inherited = _num_or_none(hist.get("realized_adopted_usd"))
+        inherited_trades = hist.get("realized_adopted_trades")
+        inherited_restated = _num_or_none(hist.get("realized_adopted_restated_usd"))
+        _rt = hist.get("recent_trades") or []
+        _own = [t for t in _rt
+                if (t.get("exit_reason") or "") != "adopted_exit"]
+        _wins = len([t for t in _own if (t.get("pnl") or 0) > 0])
+        win_rate = round(_wins / len(_own) * 100, 1) if _own else None
+        _closed = sorted(t.get("closed_at") for t in _own if t.get("closed_at"))
+        if _closed:
+            first_at, last_at = _closed[0], _closed[-1]
+
+    if realized is None:
         try:
             from models import CryptoGridTradeHistory
             from database import get_session_factory
@@ -14442,16 +14496,57 @@ async def is_it_growing():
     except Exception:
         deployed = None
 
+    # first_at/last_at arrive as ISO strings from the provider and as
+    # datetimes from the DB fallback. Both are handled rather than one being
+    # assumed, because picking either would make the OTHER path silently
+    # produce no rate at all - which is the exact failure this fix is for.
     days = None
-    if first_at and last_at:
-        days = max((last_at - first_at).days, 1)
+    try:
+        _a, _b = first_at, last_at
+        if isinstance(_a, str):
+            _a = datetime.fromisoformat(_a.replace("Z", "+00:00"))
+        if isinstance(_b, str):
+            _b = datetime.fromisoformat(_b.replace("Z", "+00:00"))
+        if _a and _b:
+            days = max((_b - _a).days, 1)
+    except (TypeError, ValueError) as exc:
+        log.warning(f"[growing] span unreadable, no per-day rate: {exc}")
+        days = None
 
     per_day = round(realized / days, 4) if (realized is not None and days) else None
     per_hour = round(per_day / 24, 4) if per_day is not None else None
 
+    _head = (f"${realized:,.2f} earned across {trades} closed round trips"
+             + (f" over {days} days - ${per_day:,.4f} a day, "
+                f"${per_hour:,.4f} an hour" if per_day is not None else "")
+             if realized is not None else
+             "The trade ledger could not be read, so no growth figure "
+             "can be given.")
+    if inherited is not None and inherited_trades:
+        _head += (f" - and, separately, {inherited_trades} inherited exit(s) "
+                  f"booked ${inherited:,.2f} against an adoption mark"
+                  + (f", ${inherited_restated:,.2f} against the basis really "
+                     f"paid" if inherited_restated is not None else "")
+                  + ". That is not this fleet's trading either way.")
+
     return {
         "is_the_only_growth_figure_here": True,
+        "this_figure_is": (
+            "the grid's OWN closed round trips. Rows tagged adopted_exit are "
+            "NOT in it: those close positions the grid never opened, priced "
+            "against an adoption mark nobody paid, so adding them answers a "
+            "different question than 'is the bot earning'. They are published "
+            "below instead of being hidden or blended."),
         "realized_usd": realized,
+        "inherited_realized_usd": inherited,
+        "inherited_trades": inherited_trades,
+        "inherited_restated_usd": inherited_restated,
+        "inherited_is": (
+            "positions the grid adopted rather than bought. inherited_realized_usd "
+            "is what the ledger booked against the adoption mark; "
+            "inherited_restated_usd is the same sales measured against the cost "
+            "basis the account owner declared. Both are shown because the stored "
+            "row is never rewritten to make a number look better."),
         "unrealized_usd": unrealized,
         "trades": trades,
         "win_rate_pct": win_rate,
@@ -14459,12 +14554,7 @@ async def is_it_growing():
         "realized_per_day_usd": per_day,
         "realized_per_hour_usd": per_hour,
         "capital_behind_it_usd": deployed,
-        "headline": (
-            f"${realized:,.2f} earned across {trades} closed round trips"
-            + (f" over {days} days - ${per_day:,.4f} a day, ${per_hour:,.4f} an hour"
-               if per_day is not None else "")
-            if realized is not None else
-            "The trade ledger could not be read, so no growth figure can be given."),
+        "headline": _head,
         "what_this_excludes": (
             "Price drift. The coins moved $4,706 over 90 days on their own; none of that "
             "is here, because none of it was earned by a bot. It also excludes every "
