@@ -32,7 +32,12 @@ def _fn(name):
     return "\n".join(SRC.splitlines()[fn.lineno - 1:fn.end_lineno])
 
 
-OBS = _fn("_build_progress_observations")
+# _build_progress_observations was SPLIT on 2026-10-05 into
+# _crypto_observations and _alpaca_observations, because the two
+# accounts are no longer combined anywhere. The tree banner this
+# file guards is a Coinbase-side observation, so it lives in the
+# crypto half.
+OBS = _fn("_crypto_observations")
 
 ok("the server side reads whether the tree loop is actually running",
    'crypto_data.get("family_tree_loop_running")' in OBS)

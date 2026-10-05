@@ -36,7 +36,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db, get_session_factory
-from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, CombinedEquitySnapshot, AlpacaBacktestRun, GridMakerExpiry, GridOrderNotPlaced
+from models import TradingBotState, WithdrawalRequest, CryptoTreeBranch, BotPosition, Payment, CryptoCoinTradeHistory, PricePredictionCalibration, PricePredictionLog, BtcTickerWindowAnchor, AlpacaBranch, AlpacaBacktestRun, GridMakerExpiry, GridOrderNotPlaced
 
 AsyncSessionLocal = get_session_factory()
 
@@ -1551,21 +1551,12 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         except Exception as e:
             log.warning(f"[dashboard] Coinbase API call failed (prices/balances unavailable): {e}")
 
-    # Fetch real Alpaca equity for the dashboard header
-    alpaca_equity = None
-    if ALPACA_KEY and ALPACA_SECRET:
-        try:
-            async with aiohttp.ClientSession() as alpaca_session:
-                async with alpaca_session.get(
-                    f"{ALPACA_BASE_URL}/v2/account",
-                    headers=ALPACA_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    if resp.status == 200:
-                        alpaca_data = await resp.json()
-                        alpaca_equity = float(alpaca_data.get('equity', 0))
-        except Exception as e:
-            log.warning(f"[dashboard] Alpaca equity fetch failed: {e}")
+    # The Alpaca equity fetch that used to sit here was REMOVED 2026-10-05.
+    # This is the Coinbase endpoint; it reached into the stock account to
+    # publish an "alpaca_equity" field in a crypto payload. Per the
+    # owner: the two are separate, everything is separate. Alpaca equity
+    # is served by GET /alpaca-overview, which is the only place that
+    # should be asking Alpaca anything.
 
     # Fetched ONCE per request (a real DB read), not per-branch inside the
     # loop below - the same real, live, dashboard-switchable trailing-stop
@@ -1929,7 +1920,7 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
     # Get actual grid bot active state
     grid_bot_active = await crypto_grid_bot_module.is_grid_bot_active() if crypto_grid_bot_module else True
 
-    return {
+    _payload = {
         "branches": out,
         "branch_count": len(out),
         "total_allocated_usd": round(sum(b["allocated_usd"] for b in out), 2),
@@ -1938,14 +1929,13 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         # same equity_now formula run_branch_cycle()'s own drawdown-breach
         # check uses) plus locked_usd - real money already skimmed off a
         # winning sell, still very much part of the account's real net
-        # worth, just earmarked out of the compounding loop. Backs the
-        # combined $1M-goal tracker (see get_combined_equity_progress
-        # below) - a real, useful aggregate on its own, not built solely
-        # for that feature.
+        # worth, just earmarked out of the compounding loop. A real,
+        # useful aggregate on its own - it used to back a combined
+        # Alpaca+Coinbase tracker, which was removed 2026-10-05.
         "total_equity_usd": round(total_equity_now + locked_usd, 2),
         # Real total Coinbase net worth (cash + every coin actually held,
-        # tree AND Grid Bot) - see the block above. This, NOT
-        # total_equity_usd, is what the combined $1M tracker uses.
+        # tree AND Grid Bot) - see the block above. COINBASE ONLY; this
+        # figure is never added to an Alpaca one.
         "real_crypto_net_worth_usd": real_crypto_net_worth_usd,
         # Present whether or not the total resolved, so a blank total can
         # always be explained rather than just observed.
@@ -1994,434 +1984,183 @@ async def get_family_tree_status(db: AsyncSession = Depends(get_db)):
         "reversal_trade_active": reversal_trade_active,
         "real_usd_balance": round(real_balance, 2) if real_balance is not None else None,
         "real_usdc_balance": round(real_usdc_balance, 2) if real_usdc_balance is not None else None,
-        "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
         "scale_bot_metrics": scale_bot_metrics,
         "grid_bot_active": grid_bot_active,
     }
+    # The Coinbase side's own observations, served from the Coinbase
+    # endpoint. They used to be built for a combined panel out of a
+    # function that read both accounts; now each account builds its own
+    # from its own data and nothing crosses over. See
+    # _crypto_observations.
+    _payload["observations"] = _crypto_observations(_payload)
+    return _payload
 
 
-COMBINED_GOAL_USD = 1_000_000.0
-# Which real definition of the crypto side today's snapshots are written
-# under - see CombinedEquitySnapshot.formula_version in models.py. Bump
-# this ONLY when the meaning of crypto_equity genuinely changes, so the
-# chart never compares two rows that were never measuring the same thing.
-COMBINED_EQUITY_FORMULA_VERSION = 2
-# Throttles how often a real CombinedEquitySnapshot row is written -
-# hourly is plenty of real resolution for the account owner's own stated
-# use ("visualize monthly down the line how close we can get to it"),
-# and keeps a month of real history to a small, cheap table (~720 rows)
-# rather than growing unbounded from every dashboard poll.
-COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES = float(os.getenv("COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES", "60"))
+def _crypto_observations(crypto_data):
+    """What is helping or hurting the COINBASE side right now.
 
+    SPLIT OUT of _build_progress_observations on 2026-10-05. That function
+    took alpaca_data and crypto_data together and returned one mixed list
+    for a combined panel. The account owner ruled that out: "Alpaca and
+    Coinbase are two different things... They are separate within their
+    own." The content was never really combined - it was two independent
+    sets of per-account notes sharing a list - so splitting loses nothing
+    and the row this builds (the idle-cash prompt) is one he actively
+    uses.
 
-async def _log_combined_equity_snapshot_if_due(db: AsyncSession, alpaca_equity, crypto_equity, combined_equity):
-    """Best-effort, throttled snapshot write - piggybacks on whichever
-    dashboard happens to poll /combined-equity-progress next, the same
-    "log if due" pattern already validated by the BTC 15-minute
-    prediction log (_log_new_btc_prediction_if_due). Wrapped in its own
-    try/except so a real logging hiccup can never break the live numbers
-    this same endpoint also returns."""
-    try:
-        result = await db.execute(
-            select(CombinedEquitySnapshot)
-            .where(CombinedEquitySnapshot.formula_version == COMBINED_EQUITY_FORMULA_VERSION)
-            .order_by(CombinedEquitySnapshot.created_at.desc()).limit(1)
-        )
-        last = result.scalar_one_or_none()
-        if last is not None:
-            elapsed_minutes = (datetime.utcnow() - last.created_at).total_seconds() / 60.0
-            if elapsed_minutes < COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES:
-                return
-        db.add(CombinedEquitySnapshot(
-            alpaca_equity=alpaca_equity, crypto_equity=crypto_equity, combined_equity=combined_equity,
-            formula_version=COMBINED_EQUITY_FORMULA_VERSION,
-        ))
-        await db.commit()
-    except Exception as exc:
-        log.warning(f"[dashboard] combined-equity snapshot logging failed (non-fatal): {exc}")
-
-
-def _project_years_to_goal(history_rows, combined_equity: float, goal: float):
-    """Real, honest linear extrapolation from the same real momentum the
-    dashboard's own momentum line already shows - "at this pace, how long
-    to $1M" - per the account owner's explicit request for a report that
-    "makes sense of this" and "let us know how to move forward." NOT a
-    promise or a trading-performance grade: the real delta between the
-    first and last real snapshot reflects everything that happened in
-    that window, real trading gains AND any new cash added - the caller
-    is expected to caveat it that way.
-
-    Returns (years, basis_days) - years is None when there isn't enough
-    real history yet (fewer than 2 snapshots) OR when the real recent
-    trend is flat/negative (extrapolating a falling or flat line to a
-    HIGHER goal is meaningless - reported as None, not a nonsensical
-    negative or infinite number). basis_days is returned even when years
-    is None so the caller can still say how much real history the "no
-    projection yet" verdict itself is based on."""
-    if not history_rows or len(history_rows) < 2:
-        return None, None
-    first, last = history_rows[0], history_rows[-1]
-    span_days = (last.created_at - first.created_at).total_seconds() / 86400.0
-    if span_days <= 0:
-        return None, None
-    delta = last.combined_equity - first.combined_equity
-    if delta <= 0:
-        return None, round(span_days, 2)
-    daily_rate = delta / span_days
-    remaining = goal - combined_equity
-    if remaining <= 0:
-        return 0.0, round(span_days, 2)
-    years = (remaining / daily_rate) / 365.25
-    return round(years, 1), round(span_days, 2)
-
-
-def _decompose_combined_delta(history_rows):
-    """Split the headline delta into what was EARNED and what merely ARRIVED.
-
-    THE CARD SAID +$7,613.50 (+370.71%) IN GREEN WITH AN UP ARROW, and the
-    owner read it as a month's profit and asked to project $800k from it.
-    It is not profit. Over that window the combined figure went $2,053.78 ->
-    $9,667.28, and $5,175.35 of it landed in ONE snapshot interval at
-    2026-09-27T13:11:11, with a further $1,796.06 at 14:21:15 - the moment
-    coin the owner already held in his Coinbase wallet was adopted into the
-    fleet and therefore into this measure. His net worth did not move. The
-    scope of the measurement did.
-
-    Realised trading profit over the same window was $82.72: 1.1% of the
-    headline. _project_years_to_goal's own docstring says the delta
-    "reflects everything that happened in that window, real trading gains
-    AND any new cash added - the caller is expected to caveat it that way",
-    and the caller did not. This returns the figures that caveat is made of.
-
-    A single-interval step is flagged at $400 because that is far above any
-    move this fleet's trading has ever produced in one poll (its best FULL
-    DAY of closes is $41.62), so a step that size is arrival, not earnings.
+    Built entirely from data get_family_tree_status already computed this
+    poll - no new live API calls. Never fabricates a prediction or a
+    dollar-amount promise; only reports verified system state and points
+    at levers that already exist. Returns a list of {icon, tone, text}.
     """
-    if not history_rows or len(history_rows) < 2:
-        return None
-    steps = []
-    prev = None
-    for r in history_rows:
-        c = r.combined_equity
-        if c is None:
-            continue
-        if prev is not None and abs(c - prev[1]) >= 400.0:
-            steps.append({
-                "at": prev[0].isoformat() if hasattr(prev[0], "isoformat") else str(prev[0]),
-                "to_at": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") else str(r.created_at),
-                "from_usd": round(prev[1], 2),
-                "to_usd": round(c, 2),
-                "step_usd": round(c - prev[1], 2),
-            })
-        prev = (r.created_at, c)
-    up = round(sum(s["step_usd"] for s in steps if s["step_usd"] > 0), 2)
-    down = round(sum(s["step_usd"] for s in steps if s["step_usd"] < 0), 2)
-    jump_total = round(up + down, 2)
-    delta = round((history_rows[-1].combined_equity or 0)
-                  - (history_rows[0].combined_equity or 0), 2)
-    # THE SHARE CAN EXCEED 100%, AND THAT IS A FINDING RATHER THAN A BUG.
-    # Live it read 116.2%: the steps netted +$8,849.81 against a total change
-    # of +$7,613.50, which means everything BETWEEN the steps went DOWN by
-    # about $1,236. Left as a bare percentage it just looks broken, so the
-    # drift is computed and named instead of the reader having to infer it.
-    drift = round(delta - jump_total, 2)
-    return {
-        "delta_usd": delta,
-        "single_interval_steps": steps,
-        "steps_up_usd": up,
-        "steps_down_usd": down,
-        "sum_of_steps_usd": jump_total,
-        "between_the_steps_usd": drift,
-        "step_share_of_delta_pct": (round(100.0 * jump_total / delta, 1)
-                                    if delta else None),
-        "why_the_share_can_exceed_100_pct": (
-            "steps run both ways, so their net can be larger than the total "
-            "change. When it is, everything BETWEEN the steps moved the other "
-            "way - see between_the_steps_usd, which is the part of the change "
-            "that did NOT arrive in a jump. A negative figure there means the "
-            "account drifted down between the arrivals."),
-        "what_a_step_is": (
-            "a move of $400+ between two consecutive polls. This fleet's best "
-            "FULL DAY of closed trades is $41.62, so a step that size is money "
-            "ARRIVING in the measure - coin adopted into the fleet, or cash "
-            "moved in - not money earned."),
-        "read_this_before_projecting": (
-            "Do NOT extrapolate the headline delta. It includes every dollar "
-            "that entered the measurement, not just what trading earned. The "
-            "earned figure is realised P&L from the closed book and is the "
-            "only one of the two a projection may use."),
-    }
-
-
-def _build_progress_observations(alpaca_data, crypto_data):
-    """Real, concrete observations about what's currently helping or
-    hurting progress toward the combined goal - per the account owner's
-    explicit ask for "how we can get there and keep moving forward."
-    Built entirely from data alpaca_data/crypto_data already computed
-    this same poll (get_alpaca_overview/get_family_tree_status, no new
-    live API calls) - never fabricates a prediction or a dollar-amount
-    promise, only reports real, already-verified system state and points
-    at real, already-built levers (a paused branch, idle cash, a paused
-    rolling-expectancy gate) the account owner can actually act on right
-    now. Returns a list of {icon, tone, text} - tone is 'warn' (orange),
-    'info' (navy), or 'good' (green), for the dashboard to color-code."""
     observations = []
+    if not crypto_data:
+        return observations
+    crypto_retired = bool(crypto_data.get("crypto_passive_mode"))
 
-    if crypto_data:
-        crypto_retired = bool(crypto_data.get("crypto_passive_mode"))
+    # A BRAKE ON A CAR WITH NO ENGINE.
+    #
+    # Both gates below live ONLY in the family-tree bot; the grid never
+    # reads either one. This deploy runs grid_fleet, so that loop is
+    # never started and nothing was going to enter regardless - which
+    # makes "entries are tree-wide paused" describe a restraint on
+    # something that cannot move, printed on a page whose live numbers
+    # come from the grid.
+    #
+    # It is worse than noise. The figures behind it come from
+    # CryptoCoinTradeHistory, the RETIRED tree's ledger: 167 trades,
+    # -$508.44, newest 2026-09-09 - eighteen days stale when this was
+    # written. So the banner announced a 35% win rate and -$105.70
+    # directly above a live grid running 87 trades at 77% and +$25.82,
+    # and read as a verdict on the engine that is actually running.
+    #
+    # The client-side copy of this banner was already gated on this
+    # exact flag (renderRollingExpectancyBanner). This server-side copy
+    # was not, so the fix only ever covered one of the two places the
+    # same sentence is produced - which is why it kept appearing.
+    tree_loop_live = crypto_data.get("family_tree_loop_running") is not False
+    tree_gates_apply = (not crypto_retired) and tree_loop_live
 
-        # A BRAKE ON A CAR WITH NO ENGINE.
-        #
-        # Both gates below live ONLY in the family-tree bot; the grid never
-        # reads either one. This deploy runs grid_fleet, so that loop is
-        # never started and nothing was going to enter regardless - which
-        # makes "entries are tree-wide paused" describe a restraint on
-        # something that cannot move, printed on a page whose live numbers
-        # come from the grid.
-        #
-        # It is worse than noise. The figures behind it come from
-        # CryptoCoinTradeHistory, the RETIRED tree's ledger: 167 trades,
-        # -$508.44, newest 2026-09-09 - eighteen days stale when this was
-        # written. So the banner announced a 35% win rate and -$105.70
-        # directly above a live grid running 87 trades at 77% and +$25.82,
-        # and read as a verdict on the engine that is actually running.
-        #
-        # The client-side copy of this banner was already gated on this
-        # exact flag (renderRollingExpectancyBanner). This server-side copy
-        # was not, so the fix only ever covered one of the two places the
-        # same sentence is produced - which is why it kept appearing.
-        tree_loop_live = crypto_data.get("family_tree_loop_running") is not False
-        tree_gates_apply = (not crypto_retired) and tree_loop_live
-
-        if crypto_retired:
-            observations.append({
-                "icon": "🔒", "tone": "warn",
-                "text": "Crypto family tree is retired (passive mode) - no new entries or exits are happening on that side at all.",
-            })
-        # Once retired, no branch can ever open a new position for ANY
-        # reason - the rolling-expectancy pause and the drawdown-breach
-        # pause both become moot real explanations for something that's
-        # already fully explained by retirement. Showing them anyway is
-        # genuinely confusing, not informative - a real bug the account
-        # owner's own screenshot surfaced (three banners, two of them
-        # giving different reasons for the same already-explained fact).
-        rolling = crypto_data.get("rolling_expectancy")
-        if tree_gates_apply and rolling and rolling.get("negative"):
-            win_rate = rolling.get("win_rate")
-            win_count = rolling.get("win_count")
-            loss_count = rolling.get("loss_count")
-            avg_win = rolling.get("avg_win")
-            avg_loss = rolling.get("avg_loss")
-            total_pnl = rolling.get("total_pnl")
-            breakdown = ""
-            if win_rate is not None:
-                breakdown = (
-                    f" Breakdown: {win_count} win(s) averaging ${avg_win:.2f} each, {loss_count} loss(es) "
-                    f"averaging ${avg_loss:.2f} each ({win_rate:.1f}% win rate) - real total across the window: "
-                    f"${total_pnl:.2f}. A high win rate can still add up to a real net loss when the losses run "
-                    f"bigger on average than the wins do, which is what's happening here."
-                )
-            total_text = f" (a real total of ${total_pnl:.2f} across the window, not just ${rolling['expectancy']:.2f})" if total_pnl is not None else ""
-            observations.append({
-                "icon": "🐢", "tone": "warn",
-                "text": (
-                    f"Crypto entries are tree-wide paused - the last {rolling['num_trades']} real trades "
-                    f"averaged ${rolling['expectancy']:.2f} each{total_text}.{breakdown} Clears automatically "
-                    f"once real recent wins bring the average back positive - no action needed, just something worth knowing about."
-                ),
-            })
-        branches = crypto_data.get("branches") or []
-        paused_dd = [b for b in branches if b.get("drawdown_breached")]
-        if tree_gates_apply and paused_dd:
-            names = ", ".join(
-                b["bot_name"].replace("crypto_tree_", "").replace("_usd", "").upper() for b in paused_dd[:4]
+    if crypto_retired:
+        observations.append({
+            "icon": "🔒", "tone": "warn",
+            "text": "Crypto family tree is retired (passive mode) - no new entries or exits are happening on that side at all.",
+        })
+    # Once retired, no branch can ever open a new position for ANY
+    # reason - the rolling-expectancy pause and the drawdown-breach
+    # pause both become moot real explanations for something that's
+    # already fully explained by retirement. Showing them anyway is
+    # genuinely confusing, not informative - a real bug the account
+    # owner's own screenshot surfaced (three banners, two of them
+    # giving different reasons for the same already-explained fact).
+    rolling = crypto_data.get("rolling_expectancy")
+    if tree_gates_apply and rolling and rolling.get("negative"):
+        win_rate = rolling.get("win_rate")
+        win_count = rolling.get("win_count")
+        loss_count = rolling.get("loss_count")
+        avg_win = rolling.get("avg_win")
+        avg_loss = rolling.get("avg_loss")
+        total_pnl = rolling.get("total_pnl")
+        breakdown = ""
+        if win_rate is not None:
+            breakdown = (
+                f" Breakdown: {win_count} win(s) averaging ${avg_win:.2f} each, {loss_count} loss(es) "
+                f"averaging ${avg_loss:.2f} each ({win_rate:.1f}% win rate) - real total across the window: "
+                f"${total_pnl:.2f}. A high win rate can still add up to a real net loss when the losses run "
+                f"bigger on average than the wins do, which is what's happening here."
             )
-            more = f" (+{len(paused_dd) - 4} more)" if len(paused_dd) > 4 else ""
-            observations.append({
-                "icon": "🛑", "tone": "warn",
-                "text": f"{len(paused_dd)} branch(es) paused by the drawdown breaker - {names}{more}. Add real cash to resume, or leave them paused on purpose.",
-            })
-        spendable = crypto_data.get("spendable_for_spawn")
-        if spendable is not None and spendable >= 25:
-            observations.append({
-                "icon": "💵", "tone": "info",
-                "text": f"${spendable:,.2f} of real free crypto cash isn't deployed anywhere in the tree right now - Move Cash Between Branches or Add Cash can put it to work.",
-            })
-
-    if alpaca_data:
-        if alpaca_data.get("alpaca_passive_mode"):
-            observations.append({
-                "icon": "🔒", "tone": "warn",
-                "text": "Alpaca active trading is retired (passive mode) - only the held SPY position moves with the market, nothing new is being traded.",
-            })
-        elif alpaca_data.get("cash") is not None and alpaca_data["cash"] >= 25:
-            observations.append({
-                "icon": "💵", "tone": "info",
-                "text": f"${alpaca_data['cash']:,.2f} of real Alpaca cash is sitting uninvested right now.",
-            })
+        total_text = f" (a real total of ${total_pnl:.2f} across the window, not just ${rolling['expectancy']:.2f})" if total_pnl is not None else ""
+        observations.append({
+            "icon": "🐢", "tone": "warn",
+            "text": (
+                f"Crypto entries are tree-wide paused - the last {rolling['num_trades']} real trades "
+                f"averaged ${rolling['expectancy']:.2f} each{total_text}.{breakdown} Clears automatically "
+                f"once real recent wins bring the average back positive - no action needed, just something worth knowing about."
+            ),
+        })
+    branches = crypto_data.get("branches") or []
+    paused_dd = [b for b in branches if b.get("drawdown_breached")]
+    if tree_gates_apply and paused_dd:
+        names = ", ".join(
+            b["bot_name"].replace("crypto_tree_", "").replace("_usd", "").upper() for b in paused_dd[:4]
+        )
+        more = f" (+{len(paused_dd) - 4} more)" if len(paused_dd) > 4 else ""
+        observations.append({
+            "icon": "🛑", "tone": "warn",
+            "text": f"{len(paused_dd)} branch(es) paused by the drawdown breaker - {names}{more}. Add real cash to resume, or leave them paused on purpose.",
+        })
+    spendable = crypto_data.get("spendable_for_spawn")
+    if spendable is not None and spendable >= 25:
+        observations.append({
+            "icon": "💵", "tone": "info",
+            "text": f"${spendable:,.2f} of real free crypto cash isn't deployed anywhere in the tree right now - Move Cash Between Branches or Add Cash can put it to work.",
+        })
 
     if not observations:
         observations.append({
-            "icon": "✅", "tone": "good",
-            "text": "Nothing is currently paused or sitting idle on either side - both systems are actively working with what they have.",
+            "icon": "\u2705", "tone": "good",
+            "text": "Nothing is paused or sitting idle on the Coinbase side - the fleet is working with what it has.",
         })
-
     return observations
 
 
-def combine_equity(alpaca_equity, crypto_equity, goal_usd):
-    """The combined total, its progress percent, and - when there isn't
-    one - why. Returns (combined, pct, unavailable_reason).
+def _alpaca_observations(alpaca_data):
+    """What is helping or hurting the ALPACA side right now.
 
-    A gap is not a zero. This used to be written inline as
-    `(alpaca_equity or 0.0) + (crypto_equity or 0.0)`, which silently
-    substituted $0.00 for a side that could not be read and then showed
-    the SURVIVING leg alone as if it were the combined total. Seen live
-    on 2026-09-28: a Coinbase read failed, the legend correctly said
-    "unavailable", and the gauge right beside it read "$1,007.47 of
-    $1,000,000 - 0.10%" against a real combined balance near $11,800.
-    The history WRITE was already guarded against exactly this; the
-    number on the screen was not.
-
-    Both real sides present, or there is no total. Lives out here as a
-    plain function so the rule is testable on its own rather than only
-    reachable through a live endpoint with two network reads behind it.
+    The other half of the old _build_progress_observations - see
+    _crypto_observations above for why they are two functions. This one
+    never reads anything from Coinbase and never will.
     """
-    if alpaca_equity is None or crypto_equity is None:
-        missing = "Alpaca" if alpaca_equity is None else "Coinbase"
-        return None, None, (
-            f"{missing} could not be read this poll, so there is no combined "
-            f"total to show - the other side on its own is not it. The last "
-            f"good figure stays on the chart and this fills back in on the "
-            f"next successful read."
-        )
-    combined = alpaca_equity + crypto_equity
-    pct = round(min(100.0, (combined / goal_usd) * 100), 4)
-    return combined, pct, None
+    observations = []
+    if not alpaca_data:
+        return observations
+    if alpaca_data.get("alpaca_passive_mode"):
+        observations.append({
+            "icon": "🔒", "tone": "warn",
+            "text": "Alpaca active trading is retired (passive mode) - only the held SPY position moves with the market, nothing new is being traded.",
+        })
+    elif alpaca_data.get("cash") is not None and alpaca_data["cash"] >= 25:
+        observations.append({
+            "icon": "💵", "tone": "info",
+            "text": f"${alpaca_data['cash']:,.2f} of real Alpaca cash is sitting uninvested right now.",
+        })
+
+    if not observations:
+        observations.append({
+            "icon": "\u2705", "tone": "good",
+            "text": "Nothing is paused or sitting idle on the Alpaca side - the account is working with what it has.",
+        })
+    return observations
 
 
-@router.get("/combined-equity-progress")
-async def get_combined_equity_progress(db: AsyncSession = Depends(get_db)):
-    """Real, combined progress toward the account owner's own $1,000,000
-    goal across BOTH real trading systems at once - per their explicit
-    request: "link the coinbase percentage with that too... I just want
-    to visualize it on one thing... [and] visualize monthly down the
-    line how close we can get to it." The existing goal gauge on
-    alpaca_dashboard.html only ever tracked Alpaca's own equity; this
-    adds Coinbase's real total (see total_equity_usd on
-    get_family_tree_status above) into one combined figure, plus a real,
-    accumulating history so the combined number's own MOMENTUM (not just
-    where it stands right now) becomes visible over time.
+# THE COMBINED ALPACA + COINBASE TRACKER WAS REMOVED HERE, 2026-10-05.
+#
+# The account owner's instruction, in his own words: "Alpaca and Coinbase
+# are two different things. I don't want anything that has to do with them
+# combined. Make sure nowhere in the codes or nowhere anywhere Coinbase and
+# Alpaca is combined. There are never to combine those, never to combine
+# the codes. They are separate within their own. They have their own,
+# everything is separate."
+#
+# What used to live here: COMBINED_GOAL_USD, COMBINED_EQUITY_FORMULA_VERSION,
+# COMBINED_EQUITY_SNAPSHOT_INTERVAL_MINUTES, _log_combined_equity_snapshot_if_due,
+# _project_years_to_goal, _decompose_combined_delta, _build_progress_observations,
+# combine_equity and the GET /combined-equity-progress endpoint - a single
+# figure that added a stock account and a crypto account together and
+# projected one $1M date from the sum.
+#
+# Each side keeps its own tracking, which already existed and is untouched:
+#   Alpaca   - GET /alpaca-overview carries equity, goal and
+#              progress_to_goal_pct for the stock account alone.
+#   Coinbase - GET /growth-model carries realised, capital and the
+#              compounding ladder for the crypto fleet alone.
+#
+# The combined_equity_snapshots TABLE is deliberately NOT dropped. Nothing
+# reads or writes it any more, but this codebase does not destroy recorded
+# history, and dropping it would delete rows irreversibly to no benefit.
+# models.CombinedEquitySnapshot is marked RETIRED where it is defined.
 
-    Reuses the exact same real, already-validated functions the two
-    individual dashboards already call (get_alpaca_overview,
-    get_family_tree_status) rather than re-deriving either number a
-    second way - this can never show a different reality than either
-    dashboard's own live figures. Each side is fetched independently and
-    fails OPEN on its own (a real Alpaca or Coinbase hiccup degrades that
-    one side to null/0 rather than taking down the whole combined view) -
-    never silently reports 0 as if that were a real, confirmed balance."""
-    alpaca_data = None
-    alpaca_equity = None
-    alpaca_error = None
-    try:
-        alpaca_data = await get_alpaca_overview(db)
-        alpaca_equity = alpaca_data["equity"]
-    except Exception as exc:
-        alpaca_error = str(exc)
-        log.warning(f"[dashboard] combined-equity: Alpaca side unavailable this poll: {exc}")
 
-    crypto_data = None
-    crypto_equity = None
-    crypto_error = None
-    try:
-        crypto_data = await get_family_tree_status(db)
-        # Real total Coinbase net worth - real USD wallet balance plus the
-        # live market value of every coin actually held, across BOTH the
-        # family tree and Grid Bot. Deliberately NOT total_equity_usd,
-        # which only ever counted the tree's own bookkeeping: with the
-        # tree retired and every real dollar since moved into Grid Bot,
-        # that figure reads $0.00 and made a pure internal transfer look
-        # like the account had lost half its money. Never falls back to
-        # it either - a tree-only number mixed into this same history
-        # would recreate exactly that phantom crash.
-        crypto_equity = crypto_data["real_crypto_net_worth_usd"]
-        if crypto_equity is None:
-            missing = crypto_data.get("real_crypto_net_worth_missing") or []
-            crypto_error = (
-                ("Could not read: " + ", ".join(missing) + ". ") if missing else ""
-            ) + ("The Coinbase total is skipped this poll rather than shown "
-                 "as a partial number.")
-    except Exception as exc:
-        crypto_error = str(exc)
-        log.warning(f"[dashboard] combined-equity: crypto side unavailable this poll: {exc}")
-
-    combined_equity, combined_progress_pct, combined_unavailable_reason = combine_equity(
-        alpaca_equity, crypto_equity, COMBINED_GOAL_USD
-    )
-
-    # Only ever logs a real snapshot when BOTH real sides are actually
-    # available this poll - a snapshot with one side silently zeroed out
-    # (a real Alpaca or Coinbase outage) would permanently understate
-    # that moment in the real history forever; better to skip the write
-    # and simply catch it on the next successful poll instead.
-    if alpaca_equity is not None and crypto_equity is not None:
-        await _log_combined_equity_snapshot_if_due(db, alpaca_equity, crypto_equity, combined_equity)
-
-    # Only rows written under the CURRENT real definition of the crypto
-    # side are comparable to each other. Older rows are kept forever
-    # (real history is never rewritten in this codebase) but are never
-    # charted alongside newer ones: mixing the two definitions is what
-    # produced the phantom -53% crash in the first place, and blindly
-    # switching over would just produce the mirror image of it - a
-    # phantom overnight JUMP the account never actually earned.
-    history_result = await db.execute(
-        select(CombinedEquitySnapshot)
-        .where(CombinedEquitySnapshot.formula_version == COMBINED_EQUITY_FORMULA_VERSION)
-        .order_by(CombinedEquitySnapshot.created_at.desc())
-        .limit(800)
-    )
-    history = list(reversed(history_result.scalars().all()))
-
-    legacy_count_result = await db.execute(
-        select(func.count()).select_from(CombinedEquitySnapshot)
-        .where(
-            or_(
-                CombinedEquitySnapshot.formula_version.is_(None),
-                CombinedEquitySnapshot.formula_version != COMBINED_EQUITY_FORMULA_VERSION,
-            )
-        )
-    )
-    excluded_legacy_snapshots = int(legacy_count_result.scalar() or 0)
-
-    # No current total, no pace: projecting a run-rate off a partial
-    # combined figure would report a crash the account never had.
-    if combined_equity is None:
-        projected_years_to_goal, projection_basis_days = None, None
-    else:
-        projected_years_to_goal, projection_basis_days = _project_years_to_goal(history, combined_equity, COMBINED_GOAL_USD)
-    observations = _build_progress_observations(alpaca_data, crypto_data)
-
-    return {
-        "alpaca_equity": round(alpaca_equity, 2) if alpaca_equity is not None else None,
-        "alpaca_error": alpaca_error,
-        "crypto_equity": round(crypto_equity, 2) if crypto_equity is not None else None,
-        "crypto_error": crypto_error,
-        "combined_equity": round(combined_equity, 2) if combined_equity is not None else None,
-        "goal": COMBINED_GOAL_USD,
-        "combined_progress_pct": combined_progress_pct,
-        "combined_unavailable_reason": combined_unavailable_reason,
-        "history": [h.to_dict() for h in history],
-        "excluded_legacy_snapshots": excluded_legacy_snapshots,
-        "projected_years_to_goal": projected_years_to_goal,
-        "projection_basis_days": projection_basis_days,
-        "delta_decomposition": _decompose_combined_delta(history),
-        "projected_years_to_goal_is_not_a_trading_figure": (
-            "It extrapolates the total change in combined equity, which "
-            "includes coin adopted into the fleet and any cash added. See "
-            "delta_decomposition before quoting it."),
-        "observations": observations,
-    }
 
 
 async def _load_coin_history_rows(db):
@@ -6173,7 +5912,7 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
     entry_variant = await prop_bot_module.get_live_entry_variant() if prop_bot_module else "A"
     strategy_family = await prop_bot_module.get_live_strategy_family() if prop_bot_module else "momentum"
 
-    return {
+    _out = {
         "equity": round(equity, 2),
         "alpaca_passive_mode": alpaca_passive_mode,
         "entry_variant": entry_variant,
@@ -6238,6 +5977,10 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         # disagree about whether Alpaca is refusing orders right now.
         **_alpaca_order_block_state(account),
     }
+    # The Alpaca side's own observations, served from the Alpaca endpoint
+    # and built only from Alpaca data. See _alpaca_observations.
+    _out["observations"] = _alpaca_observations(_out)
+    return _out
 
 
 @router.post("/alpaca-overview/close/{symbol}")
@@ -13119,7 +12862,8 @@ async def get_capital_census(json: bool = False):
     if unknown:
         log.warning(f"[dashboard] capital census INCOMPLETE - no answer from: {', '.join(unknown)}")
     else:
-        log.info(f"[dashboard] capital census: ${data['verified_usd_cash']:,.2f} verified USD cash, every venue answered")
+        _per_venue = ", ".join(f"{k} ${v:,.2f}" for k, v in data["verified_usd_cash_by_venue"].items())
+        log.info(f"[dashboard] capital census: {_per_venue} verified USD cash, every venue answered")
 
     if json:
         return data

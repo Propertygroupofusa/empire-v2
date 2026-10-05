@@ -359,8 +359,14 @@ def collect():
     return {
         "venues": venues,
         "phantom_capital": find_phantom_capital(),
-        "verified_usd_cash": round(
-            sum(v.get("usd_cash", 0.0) for v in venues if v["status"] == "OK"), 2),
+        # verified_usd_cash USED TO BE one number summing cash across both
+        # venues. Removed 2026-10-05: "Alpaca and Coinbase are two
+        # different things... everything is separate." Each venue now
+        # reports its own verified cash under its own name, and nothing
+        # adds them together.
+        "verified_usd_cash_by_venue": {
+            v["venue"]: round(v.get("usd_cash", 0.0), 2)
+            for v in venues if v["status"] == "OK"},
         "venues_unknown": [v["venue"] for v in unknown],
     }
 
@@ -371,7 +377,7 @@ def build_report(data) -> str:
     p = out.append
     venues = data["venues"]
     phantom = data["phantom_capital"]
-    verified = data["verified_usd_cash"]
+    verified = data["verified_usd_cash_by_venue"]
     unknown = [v for v in venues if v["status"] == "UNKNOWN"]
 
     p("=" * 72)
@@ -423,13 +429,16 @@ def build_report(data) -> str:
             p(f"    {v['reason']}")
 
     p("\n" + "-" * 72)
-    p(f"VERIFIED USD CASH: ${verified:,.2f}")
+    # One line per venue, never a total. These are two separate accounts
+    # and adding their cash together describes a pot that does not exist.
+    p("VERIFIED USD CASH, PER VENUE:")
+    for name, cash in verified.items():
+        p(f"    {name:<24} ${cash:>12,.2f}")
     if unknown:
         p(f"INCOMPLETE - could not read: {', '.join(v['venue'] for v in unknown)}")
-        p("The total above is a floor, not the answer. A venue that did not")
-        p("answer is not the same as a venue holding zero.")
+        p("A venue that did not answer is not the same as a venue holding zero.")
     else:
-        p("Every venue answered. This is the whole picture.")
+        p("Every venue answered. Each figure above stands on its own.")
 
     if phantom:
         p("\n" + "-" * 72)

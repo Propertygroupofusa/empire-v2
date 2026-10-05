@@ -128,17 +128,17 @@ async def get_race_data():
         bot["gap_to_target"] = bot["target"] - bot["balance"]
         bot["daily_roi_pct"] = (bot["daily_pnl"] / bot["balance"] * 100) if bot["balance"] > 0 else 0.0
 
-    # Determine leader
-    alpaca_balance = BOT_STATE["alpaca"]["balance"]
-    crypto_balance = BOT_STATE["crypto"]["balance"]
-
+    # combined_balance, leader and spread were REMOVED 2026-10-05.
+    #
+    # They added the two accounts together and ranked one against the
+    # other, which is the same "these are one pot" framing the account
+    # owner has ruled out: "Alpaca and Coinbase are two different things...
+    # They are separate within their own." Each account's own block below
+    # is returned untouched; nothing here measures them against each other.
     return {
         "timestamp": datetime.utcnow().isoformat(),
         "alpaca": BOT_STATE["alpaca"],
         "crypto": BOT_STATE["crypto"],
-        "leader": "alpaca" if alpaca_balance > crypto_balance else "crypto",
-        "spread": abs(alpaca_balance - crypto_balance),
-        "combined_balance": alpaca_balance + crypto_balance,
     }
 
 
@@ -170,10 +170,11 @@ async def get_leaderboard():
             "win_rate": f"{data['win_rate']*100:.1f}%",
         })
 
+    # combined_balance removed 2026-10-05 - see the note in race_status().
+    # Each row carries its own account's figures; nothing is totalled.
     return {
         "timestamp": datetime.utcnow().isoformat(),
         "leaderboard": leaderboard,
-        "combined_balance": race["combined_balance"],
     }
 
 

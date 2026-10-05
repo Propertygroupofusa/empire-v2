@@ -345,21 +345,14 @@
             <!-- Will be populated by JavaScript -->
         </div>
 
+        <!-- "Total Capital (Both)", "Average Progress" and "Alpaca vs
+             Crypto Lead" were REMOVED 2026-10-05. All three added or
+             averaged a stock account and a crypto account together, or
+             ranked one against the other. The owner's instruction:
+             "Alpaca and Coinbase are two different things... They are
+             separate within their own." Each account's own card above
+             still shows its own balance, progress and P&L. -->
         <div class="summary">
-            <div class="summary-grid">
-                <div class="summary-box">
-                    <div class="summary-label">Total Capital (Both)</div>
-                    <div class="summary-value" id="combined-balance">$1,700.81</div>
-                </div>
-                <div class="summary-box">
-                    <div class="summary-label">Average Progress to $2K</div>
-                    <div class="summary-value" id="combined-progress">42.5%</div>
-                </div>
-                <div class="summary-box">
-                    <div class="summary-label">Alpaca vs Crypto Lead</div>
-                    <div class="summary-value" id="gap">$300.79</div>
-                </div>
-            </div>
             <div class="timestamp">
                 Last updated: <span id="update-time">--:--:-- UTC</span> | Refresh rate: 10s
             </div>
@@ -429,15 +422,15 @@
         function updateDashboard(data) {
             const alpaca = data.alpaca;
             const crypto = data.crypto;
-            const leader = data.leader;
+            // data.leader removed 2026-10-05 - the two accounts are not
+            // ranked against each other any more. See the note below the cards.
 
             // Update race cards
             const raceContainer = document.getElementById('race-container');
             raceContainer.innerHTML = `
-                <div class="bot-card ${leader === 'alpaca' ? 'leading' : ''}">
+                <div class="bot-card">
                     <div class="bot-header">
                         <div class="bot-name alpaca">📈 Alpaca</div>
-                        ${leader === 'alpaca' ? '<div class="leader-badge">🥇 LEADING</div>' : ''}
                     </div>
 
                     <div class="metric">
@@ -473,10 +466,9 @@
                     </div>
                 </div>
 
-                <div class="bot-card ${leader === 'crypto' ? 'leading' : ''}">
+                <div class="bot-card">
                     <div class="bot-header">
                         <div class="bot-name crypto">🪙 Coinbase</div>
-                        ${leader === 'crypto' ? '<div class="leader-badge">🥇 LEADING</div>' : ''}
                     </div>
 
                     <div class="metric">
@@ -549,11 +541,8 @@
             document.getElementById('leaderboard-container').innerHTML = leaderboardHTML;
 
             // Update summary
-            document.getElementById('combined-balance').textContent = `$${data.combined_balance.toFixed(2)}`;
             // Each bot racing to $2,000 separately, not combined
             const avgProgress = ((alpaca.progress_pct + crypto.progress_pct) / 2);
-            document.getElementById('combined-progress').textContent = `${avgProgress.toFixed(1)}% avg`;
-            document.getElementById('gap').textContent = `$${data.spread.toFixed(2)}`;
             document.getElementById('update-time').textContent = new Date().toLocaleTimeString() + ' UTC';
         }
 

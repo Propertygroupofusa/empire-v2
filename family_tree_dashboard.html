@@ -393,9 +393,7 @@
     .combined-split .swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
     .combined-split .num { color: var(--text); font-weight: 700; }
     .combined-chart-empty { text-align: center; color: var(--text-dim); font-size: 0.82em; padding: 30px 0; }
-    .combined-projection { font-size: 0.82em; color: var(--text-dim); text-align: center; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px dashed var(--border); }
-    .combined-projection .years { font-weight: 700; color: var(--navy); }
-    .combined-observations { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+    .account-observations { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
     .obs-row { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 8px; font-size: 0.83em; line-height: 1.4; }
     .obs-row.warn { background: var(--gold-bg); border: 1px solid var(--gold); color: var(--text); }
     .obs-row.info { background: var(--blue-bg); border: 1px solid var(--blue-dim); color: var(--text); }
@@ -1056,38 +1054,13 @@
 @media (max-width:420px) {
     #status-strip.tv .tv-cells { grid-template-columns:1fr; }
 }
-    /* Combined progress - redesigned panel (identical on both dashboards) */
-    .cp-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; }
-    .cp-pill { display:inline-flex; align-items:center; gap:6px; font-size:0.72em; font-weight:700; letter-spacing:.04em;
-               text-transform:uppercase; padding:4px 10px; border-radius:999px; border:1px solid var(--border); color:var(--text-dim); }
-    .cp-pill .dot { width:7px; height:7px; border-radius:50%; background:var(--green); }
-    .cp-pill.stale .dot { background:var(--gold); }
-    .cp-pill.live { color:var(--green); border-color:rgba(0,152,69,.35); background:var(--green-bg); }
-    .cp-pill.stale { color:var(--gold); border-color:rgba(201,134,10,.35); background:var(--gold-bg); }
-    .cp-kpis { display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:10px; margin:14px 0 6px; }
-    .cp-kpi { border:1px solid var(--border); border-radius:10px; padding:12px 14px; background:var(--panel); min-width:0; }
-    .cp-kpi .lbl { font-size:0.7em; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--text-dim);
-                   display:flex; align-items:center; gap:6px; }
-    .cp-kpi .sw { width:8px; height:8px; border-radius:2px; display:inline-block; }
-    .cp-kpi .val { font-size:1.35em; font-weight:800; color:var(--text); margin-top:4px; font-variant-numeric:tabular-nums;
-                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .cp-kpi .sub { font-size:0.72em; color:var(--text-dim); margin-top:2px; }
-    .cp-kpi.stale .val { color:var(--text-dim); }
-    .cp-kpi.stale .sub { color:var(--gold); font-weight:600; }
-    .cp-bar { height:6px; border-radius:3px; background:var(--track); margin-top:8px; overflow:hidden; }
-    .cp-bar > i { display:block; height:100%; background:linear-gradient(90deg,#00a650,#009845); border-radius:3px; min-width:2px; }
-    .cp-chart { margin-top:12px; border:1px solid var(--border); border-radius:10px; padding:10px 8px 4px; }
-    .cp-chart svg { width:100%; height:auto; display:block; }
-    .cp-legend { display:flex; gap:16px; justify-content:flex-end; flex-wrap:wrap; font-size:0.72em; color:var(--text-dim); padding:0 6px 6px; }
-    .cp-legend span { display:inline-flex; align-items:center; gap:5px; }
-    .cp-legend i { width:14px; height:3px; border-radius:2px; display:inline-block; }
-    .cp-foot { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
-    .cp-foot > div { font-size:0.8em; color:var(--text-dim); line-height:1.5; }
-    .cp-foot .t { font-size:0.7em; font-weight:700; letter-spacing:.06em; text-transform:uppercase; margin-bottom:3px; }
-    @media (max-width: 700px) {
-        .cp-kpis { grid-template-columns:repeat(2, minmax(0,1fr)); }
-        .cp-foot { grid-template-columns:1fr; }
-    }
+    /* The Combined progress panel's CSS was REMOVED here, 2026-10-05,
+       along with the panel itself. See the note where the panel used to
+       sit in the body. An earlier pass at this removal deleted the first
+       line of several multi-line rules and left their closing braces
+       behind, which unbalanced the stylesheet - caught by
+       test_dashboard_governs' brace check, and the reason this removal
+       is now one contiguous block rather than a line-by-line regex. */
 </style>
 </head>
 <body>
@@ -1289,25 +1262,24 @@
         <div id="adv-error" class="adv-error" hidden></div>
     </div>
 
-    <div class="panel" id="combined-progress-panel">
-        <div class="cp-head"><div class="panel-title">🎯 Combined Progress to $1,000,000</div><span id="combined-status" class="cp-pill"><span class="dot"></span>Loading</span></div>
-        <div class="panel-sub">Real Alpaca + Coinbase equity combined, tracked over time — the same real total shows on the <a href="/alpaca-dashboard" style="color:inherit;">Alpaca dashboard</a> too. Refreshes every 60s.</div>
-        <div id="combined-kpis" class="cp-kpis"></div>
-        <div class="cp-chart">
-            <div class="cp-legend">
-                <span><i style="background:#009845"></i>Combined</span>
-                <span><i style="background:#e8752c"></i>Coinbase</span>
-                <span><i style="background:#1f3864"></i>Alpaca</span>
-                <span><i style="background:#c9860a; height:9px; width:2px;"></i>Money moved in (not earned)</span>
-            </div>
-            <div id="combined-chart-wrap"></div>
-        </div>
-        <div class="cp-foot">
-            <div><div class="t">Change over window</div><div id="combined-momentum">—</div></div>
-            <div><div class="t">Pace to $1M</div><div id="combined-projection"></div></div>
-        </div>
-        <div id="combined-split" style="display:none"></div>
-        <div class="combined-observations" id="combined-observations"></div>
+    <!-- THE COMBINED PROGRESS PANEL WAS REMOVED HERE, 2026-10-05.
+     It charted Alpaca equity + Coinbase equity as one line
+     against one $1,000,000 goal, and projected one date from
+     the sum. The account owner's instruction: "Alpaca and
+     Coinbase are two different things. I don't want anything
+     that has to do with them combined... They are separate
+     within their own. They have their own, everything is
+     separate."
+     Each account keeps its own tracking, untouched:
+       Alpaca   - its own equity, goal and progress gauge,
+                  from GET /alpaca-overview.
+       Coinbase - its own realised figure and compounding
+                  ladder, from GET /growth-model. -->
+
+    <div class="panel">
+        <div class="panel-title">📌 Coinbase — what is helping or holding this account back</div>
+        <div class="panel-sub">This account only. Nothing here reads or totals the other one.</div>
+        <div class="account-observations" id="account-observations"></div>
     </div>
 
     <div class="panel">
@@ -5684,9 +5656,9 @@ function renderStatusStrip(d, history) {
             // fails intermittently (seen live 2026-09-28), and blanking the
             // headline for one bad poll trained the eye to distrust a
             // number that was correct. Show the last REAL figure, say how
-            // old it is, and never pass it off as current. Same reasoning
-            // as loadCombinedProgress, which already refuses to destroy a
-            // built-up chart over one transient failure.
+            // old it is, and never pass it off as current. (This used to
+            // cite loadCombinedProgress for the same reasoning; that
+            // function went with the combined tracker on 2026-10-05.)
             var ageSec = Math.round((Date.now() - window.__lastBackedAt) / 1000);
             stripTotal.textContent = '$' + window.__lastBackedUsd.toFixed(2);
             stripTotal.title = 'STALE - the venue balance could not be read this poll. This '
@@ -10315,10 +10287,27 @@ function renderTotalProfit() {
     }
 }
 
+
+// Each account's own observations, rendered on its own page from its own
+// endpoint. This used to be one shared renderer fed by a combined panel;
+// the panel and the mixed server-side builder were removed 2026-10-05
+// because the two accounts are not to be combined. The rows themselves
+// were always per-account notes, so they survive unchanged - including
+// the idle-cash prompt, which is the one the account owner reads.
+function renderAccountObservations(observations) {
+    const el = document.getElementById('account-observations');
+    if (!el) { return; }
+    if (!observations || observations.length === 0) { el.innerHTML = ''; return; }
+    el.innerHTML = observations.map(o =>
+        `<div class="obs-row ${o.tone}"><span class="obs-icon">${o.icon}</span><span>${o.text}</span></div>`
+    ).join('');
+}
+
 async function refresh() {
     const statusEl = document.getElementById('status');
     try {
         const data = await apiGet('/family-tree-status');
+        renderAccountObservations(data.observations);
 
         // THESE TWO TILES WERE READING A SYSTEM THAT IS NOT RUNNING.
         //
@@ -11247,159 +11236,23 @@ function _cpCompactUsd(v) {
     if (a >= 1e3) return '$' + (v / 1e3).toFixed(2) + 'k';
     return '$' + v.toFixed(0);
 }
-function _cpNiceTicks(lo, hi, n) {
-    const span = hi - lo || 1;
-    const raw = span / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
-    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= n) || 10 * mag;
-    const out = [];
-    let v = Math.floor(lo / step) * step;
-    out.push(v);
-    while (v < hi - step * 1e-6) { v += step; out.push(v); }   // last tick is >= hi, never below it
-    return out;
-}
-function buildCombinedEquitySparklineSvg(history, widthPx) {
-    // Drawn at the container's real pixel width so labels are the same size on a phone and a monitor.
-    const W = Math.max(300, Math.round(widthPx || 640)), H = W < 500 ? 200 : 240, L = 54, R = 10, T = 12, B = 26;
-    const all = history.flatMap(h => [h.combined_equity, h.alpaca_equity, h.crypto_equity]).filter(v => v != null);
-    let lo = Math.min(0, ...all), hi = Math.max(...all);
-    const ticks = _cpNiceTicks(lo, hi, 4);
-    lo = ticks[0]; hi = ticks[ticks.length - 1];
-    if (hi === lo) hi = lo + 1;
-    const t0 = new Date(history[0].created_at).getTime();
-    const t1 = new Date(history[history.length - 1].created_at).getTime();
-    const span = Math.max(t1 - t0, 1);
-    const x = (h) => L + ((new Date(h.created_at).getTime() - t0) / span) * (W - L - R);
-    const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
-    const pts = (key) => history.filter(h => h[key] != null).map(h => `${x(h).toFixed(1)},${y(h[key]).toFixed(1)}`);
-    const grid = ticks.map(v => `
-        <line x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="#eef1f6" stroke-width="1"/>
-        <text x="${L - 8}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="#6b7488">${_cpCompactUsd(v)}</text>`).join('');
-    const fmtD = (h) => new Date(h.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    const xl = [history[0], history[Math.floor(history.length / 2)], history[history.length - 1]];
-    const xLabels = xl.map((h, i) => `<text x="${x(h).toFixed(1)}" y="${H - 8}" font-size="11" fill="#6b7488"
-        text-anchor="${i === 0 ? 'start' : i === 2 ? 'end' : 'middle'}">${fmtD(h)}</text>`).join('');
-    let steps = '';
-    for (let i = 1; i < history.length; i++) {
-        const a = history[i - 1].combined_equity, b = history[i].combined_equity;
-        if (a == null || b == null || Math.abs(b - a) < 400) continue;
-        const sx = x(history[i]).toFixed(1);
-        steps += `<line x1="${sx}" x2="${sx}" y1="${T}" y2="${H - B}" stroke="#c9860a" stroke-width="1.2" stroke-dasharray="3 3">
-            <title>${(b - a) >= 0 ? '+' : '-'}${fmtUsd(Math.abs(b - a))} moved in on ${fmtD(history[i])} - not earned</title></line>`;
-    }
-    const comb = pts('combined_equity');
-    const area = comb.length
-        ? `<polygon points="${comb[0].split(',')[0]},${y(lo).toFixed(1)} ${comb.join(' ')} ${comb[comb.length - 1].split(',')[0]},${y(lo).toFixed(1)}" fill="url(#cpFill)"/>`
-        : '';
-    const last = history[history.length - 1];
-    const dot = last.combined_equity != null
-        ? `<circle cx="${x(last).toFixed(1)}" cy="${y(last.combined_equity).toFixed(1)}" r="4.5" fill="#009845" stroke="#fff" stroke-width="2"/>` : '';
-    return `
-        <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Combined equity over time">
-            <defs><linearGradient id="cpFill" x1="0" x2="0" y1="0" y2="1">
-                <stop offset="0%" stop-color="#009845" stop-opacity="0.18"/>
-                <stop offset="100%" stop-color="#009845" stop-opacity="0"/></linearGradient></defs>
-            ${grid}${steps}${area}
-            <polyline points="${pts('alpaca_equity').join(' ')}" fill="none" stroke="#1f3864" stroke-width="1.6" stroke-linejoin="round"/>
-            <polyline points="${pts('crypto_equity').join(' ')}" fill="none" stroke="#e8752c" stroke-width="1.6" stroke-linejoin="round"/>
-            <polyline points="${comb.join(' ')}" fill="none" stroke="#009845" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>
-            ${dot}${xLabels}
-        </svg>`;
-}
 
-function fmtCombinedMomentum(history) {
-    if (!history || history.length < 2) return null;
-    const first = history[0], last = history[history.length - 1];
-    const deltaUsd = last.combined_equity - first.combined_equity;
-    const deltaPct = first.combined_equity > 0 ? (deltaUsd / first.combined_equity) * 100 : 0;
-    const spanDays = (new Date(last.created_at) - new Date(first.created_at)) / (1000 * 60 * 60 * 24);
-    const spanStr = spanDays >= 1
-        ? `${spanDays.toFixed(1)} day${spanDays >= 2 ? 's' : ''}`
-        : `${(spanDays * 24).toFixed(1)} hour${spanDays * 24 >= 2 ? 's' : ''}`;
-    const cls = deltaUsd >= 0 ? 'up' : 'down';
-    const arrow = deltaUsd >= 0 ? '▲' : '▼';
-    const sign = deltaUsd >= 0 ? '+' : '-';
-    // WHAT AROSE vs WHAT WAS EARNED. Rendered green with an up arrow, this
-    // line reads as a month's profit, and it was read that way: +$7,613.50
-    // (+370.71%) prompted a plan to project $800k from it. It is not profit.
-    // $5,175.35 of it landed in ONE poll interval on 2026-09-27 when coin the
-    // owner already held was adopted into the fleet, with $1,796.06 more an
-    // hour later. His net worth did not move; the scope of this measure did.
-    // Realised trading over the same window was $82.72 - 1.1% of the headline.
-    //
-    // So any single-poll step of $400+ is named right here. The fleet's best
-    // FULL DAY of closed trades is $41.62, so a step that size is money
-    // ARRIVING in the measure, never money earned.
-    let stepNote = '';
-    let stepSum = 0, stepCount = 0, biggest = null;
-    for (let i = 1; i < history.length; i++) {
-        const a = history[i - 1].combined_equity, b = history[i].combined_equity;
-        if (a == null || b == null) continue;
-        if (Math.abs(b - a) >= 400) {
-            stepSum += (b - a); stepCount++;
-            if (!biggest || Math.abs(b - a) > Math.abs(biggest.d)) {
-                biggest = {d: b - a, at: history[i].created_at};
-            }
-        }
-    }
-    if (stepCount > 0 && deltaUsd > 0) {
-        const pct = deltaUsd ? (stepSum / deltaUsd) * 100 : 0;
-        stepNote = `<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.5;
-                       border-left:3px solid var(--amber, #f0b429); padding-left:10px;">
-             <strong>This is not a profit figure.</strong> ${stepCount} single-poll step(s) totalling
-             ${fmtUsd(stepSum)} &mdash; ${pct.toFixed(0)}% of it &mdash; arrived in this window,
-             the largest ${fmtUsd(biggest.d)} on ${String(biggest.at).slice(0, 10)}.
-             A step that size is coin adopted into the fleet or cash moved in, not money earned:
-             the best FULL DAY of closed trades this fleet has ever had is $41.62.
-             What trading actually earned is the realised figure in the Grid Trade History below.
-             <strong>Do not project from this line.</strong></div>`;
-    }
-    return `<span class="${cls}">${arrow} ${sign}${fmtUsd(Math.abs(deltaUsd))} (${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%)</span> over the last ${spanStr} of real tracking`
-        + stepNote
-        + (deltaUsd < 0
-            ? `<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.5;">
-                 This window still contains the retired family tree, which closed <strong>-$508.44</strong> across
-                 167 trades and stopped trading on 2026-09-09. That loss is booked and closed - it is not the live
-                 grid's pace, and the grid is not trying to win it back. What the live engine has actually done is
-                 in <strong>Grid Trade History</strong> below.</div>`
-            : '');
-}
+
+
+
 
 // Real, honest "at this pace" projection - per the account owner's
 // explicit request for "what the outcome is going to be... percentage
 // wise or money wise." Never a promise - the confidence caveat scales
 // with how much real history the estimate is actually drawn from.
-function fmtProjection(data) {
-    // No current total means no pace. Projecting off a partial combined
-    // figure reports a crash the account never had.
-    if (data.combined_unavailable_reason) { return data.combined_unavailable_reason; }
-    if (data.projected_years_to_goal == null) {
-        if (data.projection_basis_days == null) {
-            return 'Not enough real history yet for a pace estimate - check back once a few real snapshots have logged.';
-        }
-        return `Real recent pace over the last ${data.projection_basis_days.toFixed(1)} day(s) is flat or negative - at the current path, $1M isn't projected. More real capital or a stronger real edge would move this.`;
-    }
-    const years = data.projected_years_to_goal;
-    const basisDays = data.projection_basis_days;
-    let confidence = '';
-    if (basisDays < 7) confidence = ' (based on well under a week of real tracking - a very rough, early estimate that will sharpen over time)';
-    else if (basisDays < 30) confidence = ' (based on under a month of real tracking - still an early estimate)';
-    const yearsStr = years < 1 ? `${Math.round(years * 12)} month(s)` : `${years.toFixed(1)} year(s)`;
-    const spanStr = basisDays < 1 ? `${(basisDays * 24).toFixed(1)} hour(s)` : `${basisDays.toFixed(1)} day(s)`;
-    return `At the real pace of the last ${spanStr}, reaching $1,000,000 would take roughly <span class="years">${yearsStr}</span> if nothing changes${confidence}. This reflects any real trading gains AND any new cash added during that window - not trading performance alone.`;
-}
+
 
 // Real, concrete "what's currently helping or hurting" bullets - per the
 // account owner's explicit ask for "how we can get there and keep moving
 // forward." Built entirely from real system state the backend already
 // computed (see _build_progress_observations in
 // routers/trading_dashboard.py) - never a fabricated suggestion.
-function renderObservations(observations) {
-    const el = document.getElementById('combined-observations');
-    if (!observations || observations.length === 0) { el.innerHTML = ''; return; }
-    el.innerHTML = observations.map(o => `
-        <div class="obs-row ${o.tone}"><span class="obs-icon">${o.icon}</span><span>${o.text}</span></div>
-    `).join('');
-}
+
 
 // LAST KNOWN, WITH ITS AGE - never a blank, never a zero.
 //
@@ -11416,146 +11269,27 @@ function renderObservations(observations) {
 // Nothing is kept for a field that has never once been read.
 const _lastGood = { combined: null, alpaca: null, crypto: null };
 
-function _remember(key, value) {
-    if (value != null && isFinite(value)) {
-        _lastGood[key] = { value: value, at: Date.now() };
-    }
-    return _lastGood[key];
-}
 
-function _fmtAge(ms) {
-    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-    if (s < 60) return s + 's ago';
-    if (s < 3600) return Math.round(s / 60) + 'm ago';
-    if (s < 86400) return Math.round(s / 3600) + 'h ago';
-    return Math.round(s / 86400) + 'd ago';
-}
+
+
 
 // The whole rule in one place: a real reading, else the last real
 // reading with its age, else an honest gap. Never 0, never invented.
-function _lastKnownStr(key, live) {
-    const seen = _remember(key, live);
-    if (live != null && isFinite(live)) return fmtUsd(live);
-    if (seen) return fmtUsd(seen.value) + ' \u00b7 as of ' + _fmtAge(seen.at);
-    return null;
-}
+
 
 // The last value each side actually read, from the logged history. Shown
 // (clearly marked with its time) when a live read fails, so one failed
 // Coinbase call no longer blanks the whole panel. It is never mixed into a
 // fresh total: the combined tile is either live, or the last logged total.
-function _cpLastKnown(history, key) {
-    for (let i = (history || []).length - 1; i >= 0; i--) {
-        if (history[i][key] != null) return history[i];
-    }
-    return null;
-}
-function _cpTime(iso) {
-    const d = new Date(iso);
-    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-}
 
-function renderCombinedProgress(data) {
-    // No combined total when either real side failed to read - the
-    // surviving leg alone is not the combined number and must never be
-    // captioned as if it were. What CAN be shown is the last real figure,
-    // plainly marked as stale: this page's own last good read first (it is
-    // seconds old), else the last logged snapshot, else an honest gap.
-    const hist = data.history || [];
-    // Called for every field on every poll: remembering is a side effect of
-    // the read, so a field that succeeds now is fresh for the next failure.
-    _lastKnownStr('combined', data.combined_equity);
-    _lastKnownStr('alpaca', data.alpaca_equity);
-    _lastKnownStr('crypto', data.crypto_equity);
-    const tile = (label, swatch, live, field, key, err, neverRead) => {
-        if (live != null) {
-            return { html: `<div class="cp-kpi"><div class="lbl">${swatch}${label}</div>
-                <div class="val">${fmtUsd(live)}</div><div class="sub">live</div></div>`, stale: false };
-        }
-        const mem = _lastGood[field];
-        const lk = _cpLastKnown(hist, key);
-        const val = mem ? fmtUsd(mem.value) : (lk ? fmtUsd(lk[key]) : '\u2014');
-        const sub = mem ? 'last good read, this poll failed \u00b7 ' + _fmtAge(mem.at)
-            : (lk ? 'last logged ' + _cpTime(lk.created_at) : neverRead);
-        const why = err ? ' title="' + String(err).replace(/"/g, '&quot;') + '"' : '';
-        return { html: `<div class="cp-kpi stale"${why}><div class="lbl">${swatch}${label}</div>
-            <div class="val">${val}</div><div class="sub">${sub}</div></div>`, stale: true };
-    };
-    const sw = c => `<i class="sw" style="background:${c}"></i>`;
-    const comb = tile('Combined', sw('#009845'), data.combined_equity, 'combined', 'combined_equity',
-                      data.combined_unavailable_reason, 'not read yet');
-    const alp = tile('Alpaca', sw('#1f3864'), data.alpaca_equity, 'alpaca', 'alpaca_equity',
-                     data.alpaca_error, data.alpaca_error ? 'unavailable' : 'not read yet');
-    const cb = tile('Coinbase', sw('#e8752c'), data.crypto_equity, 'crypto', 'crypto_equity',
-                    data.crypto_error, data.crypto_error ? 'unavailable' : 'not read yet');
 
-    const goal = data.goal || 1000000;
-    const basis = data.combined_equity != null ? data.combined_equity
-        : ((_cpLastKnown(hist, 'combined_equity') || {}).combined_equity);
-    const pct = basis != null ? Math.max(0, Math.min(100, basis / goal * 100)) : null;
-    const goalTile = `<div class="cp-kpi"><div class="lbl">To ${_cpCompactUsd(goal)}</div>
-        <div class="val">${basis != null ? fmtUsd(Math.max(goal - basis, 0)) : '—'}</div>
-        <div class="sub">${pct != null ? pct.toFixed(2) + '% of the way' : '—'}</div>
-        <div class="cp-bar"><i style="width:${pct != null ? pct : 0}%"></i></div></div>`;
-    document.getElementById('combined-kpis').innerHTML = comb.html + alp.html + cb.html + goalTile;
 
-    const pill = document.getElementById('combined-status');
-    if (pill) {
-        const staleSides = [alp.stale && 'Alpaca', cb.stale && 'Coinbase'].filter(Boolean);
-        pill.className = 'cp-pill ' + (staleSides.length ? 'stale' : 'live');
-        pill.innerHTML = '<span class="dot"></span>' + (staleSides.length
-            ? staleSides.join(' + ') + ' stale · last good shown'
-            : 'Live · updated ' + new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }));
-        pill.title = [data.alpaca_error, data.crypto_error].filter(Boolean).join(' | ');
-    }
 
-    const legacy = data.excluded_legacy_snapshots || 0;
-    document.getElementById('combined-momentum').innerHTML = fmtCombinedMomentum(hist) || (legacy > 0
-        ? 'Tracking restarted when the Coinbase figure was corrected; ' + legacy + ' older snapshot(s) are kept but not charted. A snapshot logs about once an hour.'
-        : 'A snapshot logs about once an hour - the change shows once two exist.');
-    document.getElementById('combined-projection').innerHTML = data.combined_unavailable_reason
-        ? 'Held until both sides read live again - a pace from a partial total would be wrong.'
-        : fmtProjection(data);
 
-    const chartWrap = document.getElementById('combined-chart-wrap');
-    chartWrap.innerHTML = hist.length >= 2
-        ? buildCombinedEquitySparklineSvg(hist, chartWrap.clientWidth)
-        : '<div class="combined-chart-empty">The chart fills in as hourly snapshots accumulate.</div>';
-
-    renderObservations(data.observations);
-}
-async function loadCombinedProgress(isRetry) {
-    try {
-        const data = await apiGet('/combined-equity-progress');
-        renderCombinedProgress(data);
-    } catch (e) {
-        // Real fix for a real, confirmed-live symptom: a single fetch
-        // failure (a dropped mobile connection, the page backgrounded and
-        // resumed) used to immediately wipe the whole real equity chart -
-        // built from potentially hours of accumulated real history - and
-        // replace it with a bare error message, then wait the full 60s
-        // before trying again. Now retries once, quickly, before giving
-        // up; and even on a second real failure, the existing chart (and
-        // gauge/legend/momentum, which were never touched by a failure
-        // here to begin with - see renderCombinedProgress) is left alone
-        // rather than being destroyed, so a real transient blip never
-        // costs the account owner a real chart they'd already built up.
-        if (!isRetry) {
-            setTimeout(() => loadCombinedProgress(true), 3000);
-            return;
-        }
-        const chartWrap = document.getElementById('combined-chart-wrap');
-        const hasRealChart = chartWrap.querySelector('svg');
-        if (!hasRealChart) {
-            chartWrap.innerHTML = '<div class="combined-chart-empty">Could not load combined progress right now - will retry automatically.</div>';
-        }
-    }
-}
 
 refresh();
 loadTicker();
 loadActivityFeed();
-loadCombinedProgress();
 // The alarm's own health loads itself - unlike the two button panels above
 // it costs one cheap DB read, and an alarm you have to remember to check is
 // the thing this whole section exists to replace.
@@ -11605,7 +11339,6 @@ pollEvery(loadTicker, 15000);
 // 5s -> 15s. The feed is a list of things that already happened; three
 // reads a minute of it is not journalism, it is bandwidth.
 pollEvery(loadActivityFeed, 15000);
-pollEvery(loadCombinedProgress, 60000);
 pollEvery(loadAlertQueue, 60000);
 pollEvery(loadTradingProfile, 60000);
 // The tape is the one panel that must actually move - 6s -> 12s, still

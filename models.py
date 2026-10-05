@@ -2799,7 +2799,30 @@ class BtcTickerWindowAnchor(Base):
 
 
 class CombinedEquitySnapshot(Base):
-    """A real, periodic snapshot of total account equity across BOTH real
+    """RETIRED 2026-10-05. NOTHING READS OR WRITES THIS ANY MORE.
+
+    The account owner ruled out combining the two accounts, in his own
+    words: "Alpaca and Coinbase are two different things. I don't want
+    anything that has to do with them combined. Make sure nowhere in the
+    codes or nowhere anywhere Coinbase and Alpaca is combined. There are
+    never to combine those, never to combine the codes. They are separate
+    within their own. They have their own, everything is separate."
+
+    Every writer and reader was removed on that date - combine_equity(),
+    _log_combined_equity_snapshot_if_due(), GET /combined-equity-progress
+    and the panel on both dashboards.
+
+    The CLASS and its TABLE are deliberately left in place rather than
+    deleted. The rows already written are a real record of what the
+    accounts held at those moments, and this codebase does not rewrite or
+    destroy recorded history. Dropping the table would delete them
+    irreversibly for no benefit; an unused table costs nothing.
+
+    DO NOT start writing to it again, and do not build anything new on it.
+
+    What it used to be, kept for context:
+
+    A real, periodic snapshot of total account equity across BOTH real
     trading systems - Alpaca (stocks/futures/ETFs) and Coinbase (the
     crypto family tree) - toward the account owner's own explicit
     long-standing $1,000,000 goal (already tracked separately on the

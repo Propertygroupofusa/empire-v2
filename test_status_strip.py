@@ -42,8 +42,11 @@ def ok(label, cond):
 
 # --- it exists, and it is FIRST ------------------------------------------
 ok("the page has a status strip", 'id="status-strip"' in page)
-ok("the strip is above the combined-progress panel",
-   page.index('id="status-strip"') < page.index('id="combined-progress-panel"'))
+# The combined-progress panel was removed 2026-10-05 (the two accounts are
+# not combined any more). The strip is now ordered against the per-account
+# observations panel that took its place in the layout.
+ok("the strip is above the account observations panel",
+   page.index('id="status-strip"') < page.index('id="account-observations"'))
 ok("and above the KPI row", page.index('id="status-strip"') < page.index('id="stat-profit-card"'))
 ok("and above every conditional banner",
    page.index('id="status-strip"') < page.index('id="crypto-passive-mode-banner"'))

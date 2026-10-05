@@ -104,7 +104,9 @@ def test_build_report_prints_unknown_not_a_dollar_total():
     v = dict(_holdings({"ZEC-USD": "HTTP 429"}, ZEC=1.5),
              venue="Coinbase", status="OK", usd_cash=1691.20)
     txt = cc.build_report({"venues": [v], "phantom_capital": {},
-                           "verified_usd_cash": 1691.20, "venues_unknown": []})
+                           # verified_usd_cash became verified_usd_cash_by_venue on 2026-10-05:
+    # the census no longer adds the two venues' cash into one total.
+    "verified_usd_cash_by_venue": {"Coinbase": 1691.20}, "venues_unknown": []})
     coins = [l for l in txt.splitlines() if "coins held" in l]
     total = [l for l in txt.splitlines() if "venue total" in l]
     assert coins and "UNKNOWN" in coins[0] and "$0.00" not in coins[0], coins
