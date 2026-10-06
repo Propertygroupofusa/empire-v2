@@ -14389,6 +14389,87 @@ def _num_or_none(v):
     return None if f != f else f
 
 
+@router.get("/portfolio-plan")
+async def portfolio_plan(days: int = 10, split_days: int = 5):
+    """The re-ranking loop, on demand, so a schedule can drive it.
+
+    THE OWNER'S INSTRUCTION, 2026-10-06: "Close the loop, make the
+    re-ranking run on a schedule."
+
+    Until this existed the cycle - measure outcomes, re-rank capital, act,
+    measure again - was closed ONCE by hand on 2026-10-05, and the ranking
+    built that day would have aged into a frozen opinion about branches
+    that have since changed.
+
+    THE REFUSAL IS THE POINT. Every call re-tests the claim the ranking
+    rests on (that a branch's net % per close predicts its own next window)
+    against the CURRENT ledger, and publishes no ordering at all when that
+    test fails. A scheduled ranker that always ranks is worse than none: it
+    launders a stale ordering as a fresh finding, on a timer, with
+    accumulating authority.
+
+    READ-ONLY. It places no order, sells no coin, moves no dollar and
+    writes nothing. It returns a plan for a person to run.
+    """
+    try:
+        import crypto_grid_bot as grid
+        import portfolio_plan as planner
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"unavailable: {exc}")
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt.now(_tz.utc)
+    since = (now - _td(days=max(1, days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    split_at = (now - _td(days=max(1, split_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        hist = await grid.get_grid_trade_history(limit_recent=5000)
+        status = await grid.get_grid_status()
+    except Exception as exc:
+        log.warning(f"[plan] unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503, detail=f"ledger unreadable: {exc}")
+
+    # The coin cost basis per branch comes from the right-size preview,
+    # which is the module that already knows a branch's floor. Recomputing
+    # it here would be a second implementation of the one number that keeps
+    # this from proposing a sale.
+    # branch_rightsize.coin_basis() is THE definition of a branch's floor in
+    # this codebase. Calling it rather than recomputing the number here is
+    # deliberate: that floor is the single line separating "scaling" from
+    # "selling", and a second implementation of it would be a second place
+    # for it to drift. An unreadable basis leaves sources EMPTY - never a
+    # zero, which would read as "this branch has nothing backing it" and
+    # make its whole allocation look releasable.
+    rs_rows = []
+    try:
+        import branch_rightsize as _rsz
+        for _b in (status.get("branches") or []):
+            if not _b.get("bot_name"):
+                continue
+            rs_rows.append({
+                "bot_name": _b.get("bot_name"),
+                "coin_basis_usd": _rsz.coin_basis(_rsz._slices_of(_b)),
+            })
+    except Exception as exc:
+        rs_rows = []
+        log.warning(f"[plan] coin basis unreadable, sources will be empty "
+                    f"rather than guessed: {type(exc).__name__}: {exc}")
+
+    out = planner.build(
+        trades=hist.get("recent_trades") or [],
+        branches=status.get("branches") or [],
+        rightsize_rows=rs_rows,
+        loose_cash_usd=float(status.get("real_free_cash_usd") or 0.0),
+        fleet_allocated_usd=float(status.get("total_allocated_usd") or 0.0),
+        split_at=split_at, since=since)
+    out["window_days"] = days
+    out["split_days"] = split_days
+    out["as_of"] = now.isoformat()
+    out["read_only"] = True
+    out["coin_basis_readable"] = bool(rs_rows)
+    return out
+
+
 @router.get("/is-it-growing")
 async def is_it_growing():
     """The only number on this dashboard that is actually growth.
