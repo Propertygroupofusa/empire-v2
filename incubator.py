@@ -204,3 +204,232 @@ def incubate(bars, armed_at_epoch, step, levels=3, alloc=1000.0,
             "fitted number a second life as a 'forward result'."),
         "placed_nothing": True,
     }
+
+
+# The live fleet's maker wait, in seconds. A rung is placed post-only and
+# cancelled unfilled after this long. 3739 orders have expired against it.
+LIVE_MAKER_WAIT_SECONDS = 3600
+
+
+def _wait_bars(wait_seconds, gran_seconds):
+    """How many bars an order may rest for, INCLUDING the bar it was placed on.
+
+    Counting the placement bar is what makes a one-bar wait identical to the
+    step engine's same-bar fill, which is the property test_incubator.py
+    asserts. Without it the two engines would disagree by construction and
+    every wait comparison would be measuring the change in model rather than
+    the change in the rule.
+    """
+    if not gran_seconds or gran_seconds <= 0:
+        return 1
+    return max(1, int(round((wait_seconds or 0) / float(gran_seconds))))
+
+
+def simulate_wait(bars, step, levels=3, alloc=1000.0, wait_seconds=None,
+                  gran_seconds=900):
+    """The same grid, with a post-only order that can rest for `wait_seconds`.
+
+    WHAT CHANGES, AND ONLY THIS. The step engine fills a rung the instant a
+    bar's range covers the price - a same-bar fill, which is the most
+    generous assumption available. Here an order is PLACED when the cycle
+    condition fires and then has to be crossed by some bar inside its
+    lifetime; if no bar crosses it, it is cancelled and the cycle passes,
+    exactly as the live fleet cancels a post-only rung it could not get
+    filled. Nothing else differs: the same reference, the same re-anchor,
+    the same fee floor on the sell, the same one-close-per-bar rule.
+
+    WHY A LONGER WAIT IS NOT OBVIOUSLY BETTER. It collects fills the short
+    wait gave up on, and the dashboard measures that at 1.2367% per expiry
+    over 72h on n=53. It also holds a rung open through moves that keep
+    going against it, which is where adverse selection lives - and the same
+    panel measures adverse selection at -0.083% on a sample that never saw a
+    falling market. Those two numbers point opposite ways on small samples,
+    which is the entire reason this is a candidate to incubate rather than a
+    change to make.
+
+    With wait_seconds <= one bar this reduces EXACTLY to simulate().
+    """
+    if not bars:
+        return None
+    if wait_seconds is None:
+        wait_seconds = LIVE_MAKER_WAIT_SECONDS
+    span = _wait_bars(wait_seconds, gran_seconds)
+    slice_usd = alloc / levels
+    ref = bars[0][3]
+    open_slices, closed = [], []
+    expired_buys = expired_sells = 0
+    # PLACEMENTS, counted. The live panel reports "attempted" beside
+    # "filled" and "expired" for exactly this reason: without it, a rule
+    # that refuses to place is indistinguishable from one that places and
+    # never fills. It is also the only way to observe the fee floor at
+    # PLACEMENT - mutation testing removed that floor and no assertion
+    # noticed, because the fill-time check silently covered for it.
+    placed_buys = placed_sells = 0
+    # One resting order at a time, which is what the live fleet does: the
+    # cycle is sequential and a branch places its next rung only after the
+    # last one resolved.
+    resting = None            # {"side","price","bars_left","slice"}
+    for _t, low, high, close in bars:
+        # ---- PLACE only once the TRIGGER has been reached ----
+        #
+        # This matches the live bot, which does not rest a rung at a price
+        # the market has not come to: run_grid_branch_cycle places a sell
+        # only after price >= reference x (1 + step), and a buy only once
+        # price <= the trigger. The order is then POST-ONLY at the bid or
+        # ask, and what expires it is not "price never arrived" - it is
+        # "price arrived and nobody crossed me". The live expiry rows say
+        # exactly that: "the order rested at the ask and no buyer crossed".
+        #
+        # TWO EARLIER DRAFTS OF THIS FUNCTION WERE WRONG, in opposite
+        # directions, and both are worth leaving written down.
+        #   1. The first consumed the placement bar and checked the fill
+        #      only from the next one. 593 of 1200 random tapes then
+        #      disagreed with the step engine on a one-bar wait.
+        #   2. The second placed a resting order every bar regardless of
+        #      the trigger, which made the rung a standing order the live
+        #      fleet never places. It expired constantly and blocked its
+        #      own branch's buys.
+        # The second draft also produced the tell that caught it: three
+        # different coins returned an identical 6 round trips and $46.00 at
+        # every wait from 15 minutes to 12 hours.
+        if resting is None:
+            if not open_slices:
+                ref = close
+            if open_slices:
+                best = min(open_slices, key=lambda s: s["entry"])
+                target = best["entry"] * (1 + step)
+                if (target / best["entry"] - 1.0) - FEE_ROUND_TRIP > 0 and high > target:
+                    resting = {"side": "sell", "price": target,
+                               "bars_left": span, "slice": best}
+                    placed_sells += 1
+            if resting is None:
+                trigger = ref * (1 - step)
+                if len(open_slices) < levels and low < trigger:
+                    resting = {"side": "buy", "price": trigger,
+                               "bars_left": span, "slice": None}
+                    placed_buys += 1
+            # The placement bar is NOT a fill. At the moment of placing,
+            # price was AT the level and a post-only order there sits behind
+            # everything already resting. It has to be crossed by a LATER
+            # bar. This is where this engine is deliberately stricter than
+            # simulate(), which fills on the same bar - so the two do NOT
+            # agree at a one-bar wait, and must not be expected to. The
+            # comparison this engine exists for is candidate wait against
+            # LIVE wait on identical bars, where the engine is the same on
+            # both sides and cancels out.
+            continue
+
+        # ---- RESOLVE, on every bar of the order's remaining lifetime ----
+        crossed = (low < resting["price"]) if resting["side"] == "buy" \
+                  else (high > resting["price"])
+        if crossed:
+            if resting["side"] == "buy":
+                open_slices.append({"entry": resting["price"], "usd": slice_usd})
+                ref = resting["price"]
+            else:
+                sl = resting["slice"]
+                net = (resting["price"] / sl["entry"] - 1.0) - FEE_ROUND_TRIP
+                # UNREACHABLE BY CONSTRUCTION, and kept deliberately.
+                #
+                # The resting price is entry x (1 + step), fixed at
+                # placement, and placement already requires that to clear
+                # both fee legs - so net is a constant and this branch
+                # cannot currently be false. A comment here used to claim it
+                # protected "a rung that rested through a fall", which was
+                # wrong: the rung's price does not move, so a fall cannot
+                # reach it. Mutation testing caught it - deleting the check
+                # changed no test, because no tape can exercise it.
+                #
+                # It stays as a guard against the obvious next change: the
+                # moment a resting sell is RE-PRICED to the live ask rather
+                # than held at the target, this becomes reachable and is the
+                # only thing standing between a rested order and a booked
+                # loss. The floor that does the work today is at placement.
+                if net > 0:
+                    closed.append(net * sl["usd"])
+                    if sl in open_slices:
+                        open_slices.remove(sl)
+                    ref = resting["price"]
+            resting = None
+            continue
+        resting["bars_left"] -= 1
+        if resting["bars_left"] <= 0:
+            if resting["side"] == "buy":
+                expired_buys += 1
+            else:
+                expired_sells += 1
+            resting = None
+    return {
+        "round_trips": len(closed),
+        "net_usd": round(sum(closed), 2),
+        "open_at_end": len(open_slices),
+        "net_pct_of_alloc": round(100.0 * sum(closed) / alloc, 3),
+        "expired_buys": expired_buys,
+        "expired_sells": expired_sells,
+        "placed_buys": placed_buys,
+        "placed_sells": placed_sells,
+        "wait_seconds": wait_seconds,
+        "wait_bars": span,
+    }
+
+
+def incubate_wait(bars, armed_at_epoch, wait_seconds, step, levels=3,
+                  alloc=1000.0, gran_seconds=900, min_live_trips=20,
+                  baseline_wait_seconds=None):
+    """A longer rest, scored forward, AGAINST THE LIVE WAIT ON THE SAME BARS.
+
+    This candidate differs from a step candidate in what it is compared to.
+    A step candidate's backtest window is the same rule on older bars. A
+    wait candidate's real question is "would a longer rest have done better
+    THAN THE ONE WE RUN", so the live wait is simulated on the identical
+    bars and the difference between them is the answer. Comparing a long
+    wait on new bars against a long wait on old bars would measure the
+    market, not the rule.
+    """
+    if baseline_wait_seconds is None:
+        baseline_wait_seconds = LIVE_MAKER_WAIT_SECONDS
+    before, after = split_bars(bars, armed_at_epoch)
+    cand_live = simulate_wait(after, step, levels, alloc, wait_seconds, gran_seconds)
+    base_live = simulate_wait(after, step, levels, alloc, baseline_wait_seconds,
+                              gran_seconds)
+    cand_back = simulate_wait(before, step, levels, alloc, wait_seconds, gran_seconds)
+    base_back = simulate_wait(before, step, levels, alloc, baseline_wait_seconds,
+                              gran_seconds)
+
+    def per_day(rec, window):
+        if not rec or not window:
+            return None
+        days = (len(window) * gran_seconds) / 86400.0
+        return (rec["net_usd"] / days) if days > 0 else None
+
+    trips = cand_live["round_trips"] if cand_live else 0
+    enough = trips >= min_live_trips
+    cl, bl = per_day(cand_live, after), per_day(base_live, after)
+    edge = None if (cl is None or bl is None) else round(cl - bl, 4)
+    return {
+        "candidate": "maker_wait",
+        "armed_at_epoch": armed_at_epoch,
+        "wait_seconds": wait_seconds,
+        "baseline_wait_seconds": baseline_wait_seconds,
+        "step": step, "levels": levels, "alloc_usd": alloc,
+        "live": {
+            "bars": len(after),
+            "span_days": round((len(after) * gran_seconds) / 86400.0, 2),
+            "candidate": cand_live, "live_wait": base_live,
+            "candidate_usd_per_day": round(cl, 4) if cl is not None else None,
+            "live_wait_usd_per_day": round(bl, 4) if bl is not None else None,
+        },
+        "backtest": {
+            "bars": len(before),
+            "span_days": round((len(before) * gran_seconds) / 86400.0, 2),
+            "candidate": cand_back, "live_wait": base_back,
+        },
+        "edge_usd_per_day": edge,
+        "verdict": "READABLE" if enough else "TOO EARLY",
+        "closed_trips_needed": min_live_trips,
+        "compared_against": ("the LIVE wait on the IDENTICAL bars, not the same "
+                             "candidate on older bars. The question is whether a "
+                             "longer rest beats the one we run; comparing new bars "
+                             "to old ones would measure the market instead."),
+        "placed_nothing": True,
+    }
