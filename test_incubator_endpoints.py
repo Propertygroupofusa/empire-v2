@@ -61,8 +61,20 @@ ok("both routes say in the payload that they placed nothing",
    '"placed_nothing": True' in read and '"placed_nothing": True' in arm)
 
 section("[4] a parameter with no engine behind it is REFUSED, not stored")
-ok("the arm route rejects anything but a step",
-   re.search(r'if param != "step":[\s\S]{0,400}HTTPException', arm) is not None)
+# The build now carries two engines - a step candidate and a maker-wait
+# candidate - so the gate is a whitelist rather than one name. What must
+# stay true is that it is a WHITELIST: anything outside it is refused at
+# the door, because a cohort that can never be scored is worse than none.
+ok("the arm route accepts only the parameters that have an engine",
+   re.search(r'if param not in \("step", "wait"\):[\s\S]{0,500}HTTPException', arm)
+   is not None)
+ok("a step is validated as a fraction",
+   re.search(r'param == "step"[\s\S]{0,200}HTTPException', arm) is not None)
+ok("a wait is validated as SECONDS, with both ends bounded",
+   re.search(r'param == "wait"[\s\S]{0,600}60\.0 <= payload\.value <= 604800\.0', arm)
+   is not None)
+ok("and the live wait is named in the refusal, so nobody guesses it",
+   "The live" in arm and "3600" in arm)
 ok("and says why - a stored cohort that can never be scored is worse than none",
    "can never be scored" in arm)
 ok("the read route reports an unscorable cohort as UNKNOWN rather than zero",

@@ -10755,6 +10755,14 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
         "Pragma": "no-cache", "Expires": "0"})
 
 
+def _live_step_for(branch_steps, product_id):
+    """That branch's own live spacing, or None. Never a default: a wait
+    candidate run at a spacing the branch does not trade would be testing
+    two changes and reporting them as one."""
+    v = (branch_steps or {}).get(product_id)
+    return v if (v and v > 0) else None
+
+
 async def _incubator_candles(product_id, gran, days, pause=0.25):
     """Oldest-first (t, low, high, close) from Coinbase's PUBLIC tape.
 
@@ -10840,6 +10848,15 @@ async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
                 TradingBotState.bot_name.like(inc.COHORT_PREFIX + "%"))
         )).scalars().all()
 
+    # READ from the running fleet, never assumed. A wait candidate is only
+    # meaningful against the wait actually in force, and the live step is
+    # what the branch really trades - a hardcoded 3600 here would quietly
+    # compare against a number the fleet had moved off.
+    status = await g.get_grid_status()
+    branch_steps = {b.get("product_id"): b.get("grid_pct")
+                    for b in (status.get("branches") or [])}
+    live_wait = status.get("maker_order_wait_seconds") or inc.LIVE_MAKER_WAIT_SECONDS
+
     cohorts, unreadable = [], []
     for row in rows:
         spec = inc.parse_cohort_key(row.bot_name)
@@ -10854,18 +10871,38 @@ async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
                             "verdict": "UNKNOWN", "unknown_reason": err,
                             "placed_nothing": True})
             continue
-        step = spec["value"] if spec["param"] == "step" else None
-        if step is None:
+        if spec["param"] == "step":
+            result = inc.incubate(bars, armed_at, step=spec["value"],
+                                  gran_seconds=granularity,
+                                  min_live_trips=min_live_trips)
+        elif spec["param"] == "wait":
+            # A wait candidate is scored against the LIVE wait on the same
+            # bars, so it needs a step to run the grid at. The branch's own
+            # live step is the honest choice - testing the wait at some
+            # other spacing would change two things at once.
+            live_step = _live_step_for(branch_steps, spec["product_id"])
+            if live_step is None:
+                cohorts.append({"key": row.bot_name, **spec,
+                                "armed_at_epoch": armed_at, "verdict": "UNKNOWN",
+                                "unknown_reason": (f"{spec['product_id']} has no live "
+                                                   "branch, so there is no step to run "
+                                                   "the wait at. Guessing one would "
+                                                   "change two things at once."),
+                                "placed_nothing": True})
+                continue
+            result = inc.incubate_wait(bars, armed_at, wait_seconds=spec["value"],
+                                       step=live_step, gran_seconds=granularity,
+                                       min_live_trips=min_live_trips,
+                                       baseline_wait_seconds=live_wait)
+            result["live_step_used"] = live_step
+        else:
             cohorts.append({"key": row.bot_name, **spec, "armed_at_epoch": armed_at,
                             "verdict": "UNKNOWN",
-                            "unknown_reason": (f"this build can incubate a 'step' "
-                                               f"candidate; '{spec['param']}' has no "
-                                               f"engine here yet, and guessing one "
-                                               f"would score a rule nobody wrote"),
+                            "unknown_reason": (f"'{spec['param']}' has no engine here "
+                                               f"yet, and guessing one would score a "
+                                               f"rule nobody wrote"),
                             "placed_nothing": True})
             continue
-        result = inc.incubate(bars, armed_at, step=step, gran_seconds=granularity,
-                              min_live_trips=min_live_trips)
         result.update({"key": row.bot_name, "product_id": spec["product_id"],
                        "param": spec["param"],
                        "armed_at": datetime.utcfromtimestamp(armed_at).isoformat() + "Z",
@@ -10879,6 +10916,7 @@ async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
         "cohort_count": len(cohorts),
         "unreadable_rows": unreadable or None,
         "granularity_seconds": granularity,
+        "live_wait_seconds": live_wait,
         "window_days_requested": days,
         "read_only": True,
         "holds_no_position": ("An incubating candidate places no order, creates no "
@@ -10928,15 +10966,24 @@ async def arm_incubator_endpoint(payload: ArmIncubatorRequest):
     if not product_id or "-" not in product_id:
         raise HTTPException(status_code=400,
                             detail="product_id must look like BTC-USD")
-    if param != "step":
+    if param not in ("step", "wait"):
         raise HTTPException(
             status_code=400,
-            detail=("this build can incubate a 'step' candidate only. Storing a "
-                    "parameter with no engine behind it would create a cohort "
-                    "that can never be scored."))
-    if not (0.0 < payload.value < 1.0):
+            detail=("this build can incubate a 'step' or a 'wait' candidate. "
+                    "Storing a parameter with no engine behind it would create a "
+                    "cohort that can never be scored."))
+    if param == "step" and not (0.0 < payload.value < 1.0):
         raise HTTPException(status_code=400,
                             detail="a step is a fraction, e.g. 0.04 for 4%")
+    if param == "wait":
+        # A wait shorter than the candle it is measured on cannot be
+        # distinguished from an instant fill, and one longer than a week is
+        # not a maker rung, it is a position.
+        if not (60.0 <= payload.value <= 604800.0):
+            raise HTTPException(
+                status_code=400,
+                detail=("a wait is SECONDS, between 60 and 604800. The live "
+                        "fleet runs 3600."))
 
     key = inc.cohort_key(product_id, param, payload.value)
     now = int(time.time())

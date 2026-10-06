@@ -1350,6 +1350,7 @@
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <div id="capital-velocity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
+    <div id="incubator-arm-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <!-- EXECUTION & INVENTORY. Added because none of it was on this page:
          /grid-status/invariants was reporting FAIL with $639.28 short across
          nine positions and the dashboard did not mention it, and the three
@@ -3300,6 +3301,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridOpportunityPanel(data);
     renderAccountCensus();
     renderCapitalVelocity();
+    renderIncubatorArm();
     renderExecutionInventory();
     renderMakerExpiries();
     renderGridMakerOnlyToggle(data);
@@ -4974,6 +4976,135 @@ async function renderAccountCensus() {
 // out-of-sample test and this panel prints that verdict at the top of the
 // ranking, in the reader's way, because three ranking ideas have already
 // been tested on this fleet's real tape and lost money out of sample.
+// ARMING AN INCUBATOR FROM THE PAGE, so it never needs a terminal.
+//
+// The account owner has now had three separate attempts at arming one from
+// PowerShell fail: once pasting the literal placeholder from an example,
+// once mashing two commands onto one line, and once sending an empty
+// variable. The third attempt also echoed his write token into a chat
+// transcript, because Read-Host does not mask what it is given. None of
+// those is a mistake about trading - they are a mistake about shells, and
+// the page already holds the token for exactly this reason.
+//
+// Every write here goes through postGuarded, so it carries the same header
+// and the same padlock as every other button on this page, and it refuses
+// before sending when the tab is locked.
+async function renderIncubatorArm() {
+    const el = document.getElementById('incubator-arm-panel');
+    if (!el) return;
+    let d;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/incubator');
+        d = await r.json();
+    } catch (e) { el.innerHTML = ''; return; }
+    if (!d) { el.innerHTML = ''; return; }
+    const usd = v => (v === null || v === undefined) ? '&mdash;'
+        : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    const num = (v, dp) => (v === null || v === undefined)
+        ? '<span style="color:var(--text-dim);">unknown</span>' : Number(v).toFixed(dp);
+
+    let h = '<div class="panel" style="padding:10px 12px;">';
+    h += '<div style="font-weight:600; margin-bottom:4px;">Incubator &mdash; forward tests, no money on them</div>';
+    h += `<div style="color:var(--text-dim); margin-bottom:7px;">`
+       + `A candidate is armed NOW and from this minute is scored on bars that did not `
+       + `exist when it was chosen. It places no order, creates no slice, touches no `
+       + `branch and spends no dollar. Re-arming resets the clock and discards the `
+       + `elapsed window.</div>`;
+
+    const rows = d.cohorts || [];
+    if (rows.length) {
+        h += `<div class="table-scroll"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">`
+           + `<thead><tr style="text-align:left; color:var(--text-dim);">`
+           + `<th style="padding:3px 8px 3px 0;">Candidate</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Live trips</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Live $/day</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Compared with</th>`
+           + `<th style="padding:3px 8px;">Verdict</th><th></th></tr></thead><tbody>`;
+        for (const c of rows) {
+            const isWait = c.param === 'wait';
+            const label = isWait ? `${c.product_id} wait ${Math.round(c.value)}s`
+                                 : `${c.product_id} step ${(c.value * 100).toFixed(2)}%`;
+            const live = c.live || {};
+            const trips = isWait ? ((live.candidate || {}).round_trips) : live.round_trips;
+            const perDay = isWait ? live.candidate_usd_per_day : live.net_usd_per_day;
+            const against = isWait ? `live wait ${num(live.live_wait_usd_per_day, 4)}/day`
+                                   : `backtest ${num((c.backtest || {}).net_usd_per_day, 4)}/day`;
+            const early = c.verdict !== 'READABLE';
+            h += `<tr><td style="padding:2px 8px 2px 0;">${label}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${trips === undefined ? '&mdash;' : trips}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${num(perDay, 4)}</td>`
+               + `<td style="text-align:right; padding:2px 8px; color:var(--text-dim);">${against}</td>`
+               + `<td style="padding:2px 8px; color:${early ? '#f59e0b' : 'var(--green)'};">${c.verdict || 'UNKNOWN'}`
+               + (c.unknown_reason ? `<div style="color:var(--text-dim);">${c.unknown_reason}</div>` : '')
+               + `</td>`
+               + `<td style="text-align:right; padding:2px 0;">`
+               + `<button data-inc-disarm="${c.product_id}" data-inc-param="${c.param}" data-inc-value="${c.value}"`
+               + ` style="font-size:.9em;">Disarm</button></td></tr>`;
+        }
+        h += `</tbody></table></div>`;
+    } else {
+        h += `<div style="color:var(--text-dim); margin-bottom:6px;">Nothing armed. `
+           + `An empty list is not a result &mdash; it means no candidate is being watched.</div>`;
+    }
+
+    h += `<div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">`
+       + `<input id="inc-product" placeholder="HBAR-USD" style="width:120px;">`
+       + `<select id="inc-param"><option value="step">step (fraction)</option>`
+       + `<option value="wait">wait (seconds)</option></select>`
+       + `<input id="inc-value" placeholder="0.012" style="width:100px;">`
+       + `<button id="inc-arm">Arm this candidate</button>`
+       + `<span id="inc-arm-msg" style="color:var(--text-dim);"></span></div>`;
+    h += `<div style="margin-top:5px; color:var(--text-dim); font-size:.92em;">`
+       + `A step is a fraction (0.012 is 1.2%). A wait is SECONDS &mdash; the live fleet `
+       + `runs ${d.live_wait_seconds || 3600}. A wait candidate is scored against the live `
+       + `wait on the SAME bars, at that branch's own live step, so only one thing differs.`
+       + `</div></div>`;
+    el.innerHTML = h;
+
+    const msg = document.getElementById('inc-arm-msg');
+    const say = (t, bad) => { if (msg) { msg.textContent = t;
+        msg.style.color = bad ? 'var(--red)' : 'var(--text-dim)'; } };
+    const arm = async (product_id, param, value, disarm) => {
+        say(disarm ? 'disarming...' : 'arming...');
+        try {
+            const out = await postGuarded(
+                '/api/trading-dashboard/grid-status/incubator/arm',
+                { product_id, param, value: Number(value), disarm: !!disarm });
+            say(out && out.status ? out.status : 'done');
+            renderIncubatorArm();
+        } catch (e) {
+            say(String((e && e.message) || e), true);
+        }
+    };
+    const btn = document.getElementById('inc-arm');
+    if (btn) btn.onclick = () => {
+        const p = (document.getElementById('inc-product').value || '').trim().toUpperCase();
+        const pr = document.getElementById('inc-param').value;
+        const v = document.getElementById('inc-value').value;
+        // Refuse here rather than sending a request that cannot work: the
+        // server's own refusal is correct but describes the REQUEST, and a
+        // blank field is the single most common way this goes wrong.
+        if (!p || !p.includes('-')) return say('a product id looks like HBAR-USD', true);
+        if (!v || isNaN(Number(v))) return say('a value is required', true);
+        arm(p, pr, v, false);
+    };
+    // ONE DELEGATED HANDLER, not a querySelectorAll loop.
+    //
+    // The loop version broke test_branch_coin_label.py, which runs this
+    // page's script against a stub DOM: the stub's elements have no
+    // querySelectorAll, so the whole render threw. Delegation needs
+    // nothing but the click event, works identically in a browser, and
+    // keeps the rows re-renderable without re-binding anything.
+    el.onclick = (ev) => {
+        const t = ev && ev.target;
+        if (!t || typeof t.getAttribute !== 'function') return;
+        const pid = t.getAttribute('data-inc-disarm');
+        if (!pid) return;
+        arm(pid, t.getAttribute('data-inc-param'),
+            t.getAttribute('data-inc-value'), true);
+    };
+}
+
 async function renderCapitalVelocity() {
     const el = document.getElementById('capital-velocity-panel');
     if (!el) return;
