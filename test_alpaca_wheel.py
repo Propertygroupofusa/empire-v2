@@ -178,7 +178,13 @@ def _run(fake, setup=None, active=True, today=TODAY, cycles=1):
     async def go():
         async with engine.begin() as conn:
             await conn.run_sync(models.Base.metadata.create_all)
-        with mock.patch.object(w, "AsyncSessionLocal", factory), \
+        # PATCH THE ACCESSOR, NOT A BOUND NAME. alpaca_wheel_bot now calls
+        # get_session_factory()() at call time rather than holding an
+        # import-time copy of database.AsyncSessionLocal - which was None
+        # at import and only worked by import-order luck. The test follows
+        # the module: it replaces the accessor so every call site gets this
+        # test's factory, exactly as the real one gets the real factory.
+        with mock.patch.object(w, "get_session_factory", lambda: factory), \
              mock.patch.object(w, "_get", fake.get), \
              mock.patch.object(w, "place_option_order", fake.place), \
              mock.patch.object(w, "datetime", FakeDT), \
@@ -262,7 +268,7 @@ def test_risk_cap_blocks_put_even_with_cash():
 def test_assignment_then_covered_call_above_basis():
     async def setup():
         await w.set_approved("X", True)
-        async with w.AsyncSessionLocal() as db:
+        async with w.get_session_factory()() as db:
             from sqlalchemy import select
             st = (await db.execute(select(models.AlpacaWheelState))).scalar_one()
             st.stage, st.contracts = "PUT", 1
@@ -285,7 +291,7 @@ def test_assignment_then_covered_call_above_basis():
 def test_expired_put_keeps_premium_and_returns_idle():
     async def setup():
         await w.set_approved("X", True)
-        async with w.AsyncSessionLocal() as db:
+        async with w.get_session_factory()() as db:
             from sqlalchemy import select
             st = (await db.execute(select(models.AlpacaWheelState))).scalar_one()
             st.stage, st.contracts = "PUT", 1
@@ -300,7 +306,7 @@ def test_expired_put_keeps_premium_and_returns_idle():
 def test_take_profit_buys_to_close():
     async def setup():
         await w.set_approved("X", True)
-        async with w.AsyncSessionLocal() as db:
+        async with w.get_session_factory()() as db:
             from sqlalchemy import select
             st = (await db.execute(select(models.AlpacaWheelState))).scalar_one()
             st.stage, st.contracts = "PUT", 1
@@ -357,7 +363,7 @@ def test_one_wheel_at_a_time():
     async def setup():
         await w.set_approved("X", True)
         await w.set_approved("Y", True)
-        async with w.AsyncSessionLocal() as db:
+        async with w.get_session_factory()() as db:
             from sqlalchemy import select
             st = (await db.execute(select(models.AlpacaWheelState).where(
                 models.AlpacaWheelState.underlying == "X"))).scalar_one()

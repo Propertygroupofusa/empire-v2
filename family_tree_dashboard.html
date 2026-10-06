@@ -1349,6 +1349,7 @@
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
+    <div id="capital-velocity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <!-- EXECUTION & INVENTORY. Added because none of it was on this page:
          /grid-status/invariants was reporting FAIL with $639.28 short across
          nine positions and the dashboard did not mention it, and the three
@@ -3298,6 +3299,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridMakerOrdersToggle(data);
     renderGridOpportunityPanel(data);
     renderAccountCensus();
+    renderCapitalVelocity();
     renderExecutionInventory();
     renderMakerExpiries();
     renderGridMakerOnlyToggle(data);
@@ -4844,6 +4846,42 @@ async function lookupAssetBalance() {
     out.innerHTML = h;
 }
 
+// THE CENSUS TABLE WAS LIVE THE WHOLE TIME AND LOOKED FROZEN.
+//
+// It refetches on the 15-second dashboard poll and the numbers really do
+// move: three reads 13 seconds apart on 2026-10-06 gave $10,038.56,
+// $10,039.65 and $10,008.67. But the panel drew each reading as a fresh
+// flat table with no memory of the one before it, so nothing could be
+// coloured and nothing could carry an arrow - and the account owner,
+// comparing it against the ticker at the top of the same page, read the
+// stillness as a dead feed. One remembered reading is the whole fix.
+//
+// WHAT THIS COLOURS IS PRICE, NOT EARNINGS. Unit counts barely move; what
+// ticks second to second is what the market says those units are worth.
+// Banked profit is the figure that moves only on a completed sell, and it
+// is deliberately not in this panel - a green row here must never be read
+// as the bots having earned something.
+let CENSUS_PREV = null;
+
+// The markup that follows a number: a caret and a colour when there is a
+// previous reading to compare against, and NOTHING on the first render -
+// an unknown is not a flat. An unchanged value gets no colour either,
+// because a still reading is not an up tick, and sub-cent noise is held
+// still so the table does not strobe on rounding.
+function censusMove(now, before) {
+    if (before === null || before === undefined) return '';
+    if (!isFinite(now) || !isFinite(before)) return '';
+    const d = now - before;
+    if (Math.abs(d) < 0.005) return '';
+    const up = d > 0;
+    const col = up ? 'var(--green)' : 'var(--red)';
+    const amt = Math.abs(d).toLocaleString(undefined,
+        {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    return ` <span style="color:${col}; font-size:.85em; font-variant-numeric:tabular-nums;"`
+         + ` title="${up ? 'up' : 'down'} $${amt} since the previous read">`
+         + `${up ? '\u25B2' : '\u25BC'}${amt}</span>`;
+}
+
 async function renderAccountCensus() {
     const el = document.getElementById('account-census-panel');
     if (!el) return;
@@ -4856,6 +4894,9 @@ async function renderAccountCensus() {
         return;
     }
     if (!d || !d.available) { el.innerHTML = ''; return; }
+    // Read BEFORE anything is drawn; CENSUS_PREV is replaced at the end.
+    const prev = CENSUS_PREV || {};
+    const prevAsset = prev.byAsset || {};
     const usd = v => (v === null || v === undefined) ? '&mdash;'
         : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     let h = '<div class="panel" style="padding:10px 12px;">';
@@ -4867,9 +4908,12 @@ async function renderAccountCensus() {
               background:rgba(245,158,11,.10); color:var(--text-dim);">${d.warning}</div>`;
     }
     h += `<div style="display:flex; flex-wrap:wrap; gap:4px 22px; font-variant-numeric:tabular-nums;">`
-       + `<span><span style="color:var(--text-dim);">Coinbase total</span> <strong>${usd(d.total_usd)}</strong></span>`
-       + `<span><span style="color:var(--text-dim);">cash</span> ${usd(d.cash_usd)}</span>`
-       + `<span><span style="color:var(--text-dim);">coin</span> ${usd(d.coin_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Coinbase total</span> <strong>${usd(d.total_usd)}</strong>`
+       + `${censusMove(d.total_usd, prev.total)}</span>`
+       + `<span><span style="color:var(--text-dim);">cash</span> ${usd(d.cash_usd)}`
+       + `${censusMove(d.cash_usd, prev.cash)}</span>`
+       + `<span><span style="color:var(--text-dim);">coin</span> ${usd(d.coin_usd)}`
+       + `${censusMove(d.coin_usd, prev.coin)}</span>`
        + `<span><span style="color:var(--text-dim);">assets</span> ${d.assets_priced}`
        + (d.assets_unpriced ? ` <span style="color:#f59e0b;">+${d.assets_unpriced} unpriced</span>` : '')
        + `</span></div>`;
@@ -4890,7 +4934,8 @@ async function renderAccountCensus() {
             h += `<tr><td style="padding:2px 8px 2px 0;">${r.asset}</td>`
                + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${Number(r.units).toLocaleString(undefined,{maximumFractionDigits:6})}</td>`
                + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${r.price}</td>`
-               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;"><strong>${usd(r.usd)}</strong></td></tr>`;
+               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;"><strong>${usd(r.usd)}</strong>`
+               + `${censusMove(r.usd, prevAsset[r.asset])}</td></tr>`;
         }
         h += `</tbody></table></div>`;
         const more = d.holdings.length - 15;
@@ -4903,6 +4948,200 @@ async function renderAccountCensus() {
     }
     h += `<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">`
        + `Read straight from Coinbase at ${d.as_of}. Read-only.</div></div>`;
+    el.innerHTML = h;
+    // LAST, and only once the draw succeeded. A render that threw halfway
+    // would otherwise leave a baseline nothing on screen was ever drawn
+    // from, and the next tick would colour against a reading the owner
+    // never saw.
+    CENSUS_PREV = {
+        total: d.total_usd,
+        cash: d.cash_usd,
+        coin: d.coin_usd,
+        byAsset: Object.fromEntries((d.holdings || []).map(r => [r.asset, r.usd])),
+    };
+}
+
+// HOW FAST CAPITAL COMES BACK, which no other panel on this page answers.
+//
+// Every profit surface here says "did this branch make money". None said
+// "how fast did the money come back", and the two rank the fleet
+// differently enough that reading only the first is a mistake: XRP and
+// HBAR have earned almost the same dollars on this book while HBAR used
+// about a sixty-fourth of the capital-days to do it.
+//
+// THIS PANEL MUST NOT BECOME A BUY LIST. The ranking it draws is a
+// description of what already happened. The endpoint carries its own
+// out-of-sample test and this panel prints that verdict at the top of the
+// ranking, in the reader's way, because three ranking ideas have already
+// been tested on this fleet's real tape and lost money out of sample.
+async function renderCapitalVelocity() {
+    const el = document.getElementById('capital-velocity-panel');
+    if (!el) return;
+    let d;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/capital-velocity');
+        d = await r.json();
+    } catch (e) { el.innerHTML = ''; return; }
+    if (!d || !d.velocity) { el.innerHTML = ''; return; }
+    const usd = v => (v === null || v === undefined) ? '&mdash;'
+        : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    // A MISSING NUMBER PRINTS AS UNKNOWN, never as zero. A zero here would
+    // read as "nothing is trapped" or "no cash is available", which are
+    // the two most expensive wrong answers this panel could give.
+    const num = (v, dp, suffix) => (v === null || v === undefined)
+        ? '<span style="color:var(--text-dim);">unknown</span>'
+        : Number(v).toFixed(dp) + (suffix || '');
+    const hrs = v => (v === null || v === undefined)
+        ? '<span style="color:var(--text-dim);">unknown</span>' : Number(v).toFixed(1) + 'h';
+
+    const v = d.velocity, rc = d.recycle || {}, rd = d.redeploy || {}, tr = d.trapped || {};
+    const pr = d.predictive || {}, tree = d.capital_tree || {};
+
+    let h = '<div class="panel" style="padding:10px 12px;">';
+    h += '<div style="font-weight:600; margin-bottom:6px;">Capital velocity &mdash; how fast a dollar comes back</div>';
+
+    // THE CAPITAL ENGINE BLOCK. Four buckets of money, then the four
+    // numbers that say how fast it moves. The buckets come FIRST because
+    // every rate below them is meaningless if the money they describe
+    // cannot actually be spent.
+    const rdd = d.redeploy_distribution || {};
+
+    // THE FIVE BUCKETS, and they must sum to the venue total. There is
+    // deliberately no "unallocated" row: unallocated is not a state, it is
+    // the absence of one, and a dollar sitting in it is one careless sum
+    // away from being read as buying power. A residual the buckets cannot
+    // account for is printed in red rather than absorbed - a split that
+    // quietly fails to add up looks authoritative and is wrong by exactly
+    // the amount it does not mention.
+    const dc = d.dollar_classification;
+    if (dc && dc.readable) {
+        const order = ["VERIFIED_AVAILABLE", "RESERVED", "BRANCH_ALLOCATED",
+                       "VERIFIED_COIN", "UNRESOLVED"];
+        h += `<div style="margin-bottom:8px; font-variant-numeric:tabular-nums;">`;
+        for (const k of order) {
+            const warn = (k === "UNRESOLVED");
+            h += `<div style="display:flex; justify-content:space-between; max-width:380px;`
+               + (warn ? ` color:#f59e0b;` : ``) + `">`
+               + `<span>${k.toLowerCase().replace(/_/g, ' ')}</span>`
+               + `<strong>${usd(dc.buckets[k])}</strong></div>`;
+        }
+        h += `<div style="display:flex; justify-content:space-between; max-width:380px;`
+           + ` border-top:1px solid var(--border, #333); margin-top:3px; padding-top:3px;`
+           + ` color:var(--text-dim);"><span>venue total</span>`
+           + `<span>${usd(dc.venue_total_usd)}</span></div>`;
+        if (!dc.balances) {
+            h += `<div style="margin-top:4px; padding:5px 8px; border-left:3px solid #ef4444;">`
+               + `${dc.residual_warning}</div>`;
+        }
+        h += `</div>`;
+    }
+
+    // WORKING IS A DERIVED FIGURE AND INHERITS ITS INPUTS' UNKNOWNS.
+    // Defaulting either side to zero would print a confident "$0.00
+    // working" on a read where the trapped split could not be computed,
+    // which is the most alarming number on the panel and would be false.
+    const working = (tr.deployed_usd === null || tr.deployed_usd === undefined
+                     || tr.trapped_usd === null || tr.trapped_usd === undefined)
+                    ? null : tr.deployed_usd - tr.trapped_usd;
+    h += `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:4px 18px;`
+       + ` font-variant-numeric:tabular-nums; margin-bottom:8px;">`
+       + `<span><span style="color:var(--text-dim);">Capital working</span> <strong>${usd(working)}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">Capital trapped</span> ${usd(tr.trapped_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Avg sell &rarr; buy</span> `
+       + `${rdd.p50_hours === null || rdd.p50_hours === undefined ? '<span style="color:var(--text-dim);">unknown</span>' : (rdd.p50_hours * 60).toFixed(0) + ' min'}</span>`
+       + `<span><span style="color:var(--text-dim);">Cumulative recycled</span> ${usd((d.recycle_ledger || {}).cumulative_recycled_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Capital-days</span> ${num(v.capital_days, 1)}</span>`
+       + `<span><span style="color:var(--text-dim);">$/capital-day</span> <strong>${num(v.usd_per_capital_day, 4)}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">Avg hold</span> ${hrs(v.hold_hours_median)}</span>`
+       + `<span><span style="color:var(--text-dim);">Sell &rarr; buy p50/p75/p90</span> `
+       + `${hrs(rdd.p50_hours)} / ${hrs(rdd.p75_hours)} / ${hrs(rdd.p90_hours)}</span>`
+       + `<span><span style="color:var(--text-dim);">Completed cycles</span> ${v.cycles}</span>`
+       + `<span><span style="color:var(--text-dim);">Recycle rate</span> ${num(rc.pct_per_cycle, 3, '%')}</span>`
+       + `<span><span style="color:var(--text-dim);">Realized profit</span> <strong>${usd(v.profit_usd)}</strong></span>`
+       + `</div>`;
+
+    // THE RULE, CHECKED. An empty violations list is not silence - it is
+    // the one place the page can say the deployable figure has not been
+    // contaminated by coin, by unpriced assets, or by capital no branch
+    // holds. A violation is drawn in red and says what leaked.
+    const dv = d.deployable_violations;
+    if (Array.isArray(dv) && dv.length) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #ef4444;">`
+           + `<strong>Unresolved capital has leaked into buying power</strong>`
+           + dv.map(x => `<div style="color:var(--text-dim);">${x.check}: ${x.detail}</div>`).join('')
+           + `</div>`;
+    } else if (Array.isArray(dv)) {
+        h += `<div style="margin-bottom:7px; color:var(--text-dim);">`
+           + `Unresolved capital never buys, never routes, never counts as available `
+           + `&mdash; checked this read, no leak.</div>`;
+    }
+
+    // Deployable is the ONE number on this page that can buy something
+    // this minute. It is given its own line so it cannot be mistaken for
+    // the account total sitting above it.
+    if (tree && tree.deployable_now_usd !== undefined) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid var(--green);">`
+           + `<strong>${usd(tree.deployable_now_usd)}</strong> can buy something right now`
+           + `<span style="color:var(--text-dim);"> &mdash; ${usd(tree.reserved_cash_usd)} is reserve, `
+           + `${usd(tree.branch_held_coin_usd)} is already in coin, and branch claim exceeds the cash behind it `
+           + `by ${usd(tree.claim_minus_cash_usd)}. Claim is a name on a rung, not money.</span></div>`;
+    }
+
+    if (tr.deployed_usd) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #f59e0b;">`
+           + `<strong>${usd(tr.trapped_usd)}</strong> of ${usd(tr.deployed_usd)} deployed cannot recycle on price alone`
+           + ` <span style="color:var(--text-dim);">(${num(tr.trapped_pct, 1, '%')})</span>`;
+        const states = tr.by_state || {};
+        const parts = Object.keys(states).map(k =>
+            `${k.toLowerCase().replace(/_/g, ' ')} ${usd(states[k].capital_usd)} (${states[k].slices})`);
+        if (parts.length) h += `<div style="color:var(--text-dim); margin-top:3px;">${parts.join(' &middot; ')}</div>`;
+        h += `</div>`;
+    }
+
+    // THE GATE, printed ABOVE the ranking it governs. A table of winners
+    // with the caveat underneath it is a buy list with a footnote.
+    const allowed = pr.routing_allowed === true;
+    h += `<div style="margin-bottom:6px; padding:6px 8px; border-left:3px solid ${allowed ? 'var(--green)' : '#ef4444'};">`
+       + `<strong>${allowed ? 'Velocity rank survived out of sample' : 'Not a buy list'}</strong> `
+       + `<span style="color:var(--text-dim);">&mdash; ${pr.verdict || 'UNKNOWN'}`
+       + (pr.spearman_rho !== undefined && pr.spearman_rho !== null
+            ? `, rho ${num(pr.spearman_rho, 3)} against a ${num(pr.critical_value_5pct, 3)} bar at n=${pr.branches_in_both_halves}` : '')
+       + `. ${allowed ? 'Past rank predicted future rank on this book.'
+            : 'This ranking describes what already happened and is not a reason to move money.'}</span></div>`;
+
+    const ranked = (d.by_branch && d.by_branch.ranked) || [];
+    if (ranked.length) {
+        h += `<div class="table-scroll"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">`
+           + `<thead><tr style="text-align:left; color:var(--text-dim);">`
+           + `<th style="padding:3px 8px 3px 0;">Branch</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Cycles</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Profit</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Capital-days</th>`
+           + `<th style="text-align:right; padding:3px 8px;">$/cap-day</th>`
+           + `<th style="text-align:right; padding:3px 0;">Avg hold</th></tr></thead><tbody>`;
+        for (const r of ranked) {
+            const neg = (r.usd_per_capital_day || 0) < 0;
+            h += `<tr><td style="padding:2px 8px 2px 0;">${r.product_id}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${r.cycles}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${usd(r.profit_usd)}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${Number(r.capital_days).toLocaleString(undefined,{maximumFractionDigits:1})}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums; color:${neg ? 'var(--red)' : 'inherit'};">`
+               + `<strong>${num(r.usd_per_capital_day, 4)}</strong></td>`
+               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;">${hrs(r.avg_hold_hours)}</td></tr>`;
+        }
+        h += `</tbody></table></div>`;
+    }
+    const held = (d.by_branch && d.by_branch.too_few_cycles) || [];
+    if (held.length) {
+        h += `<div style="margin-top:4px; color:var(--text-dim); font-size:.92em;">`
+           + `${held.length} branch(es) under ${d.by_branch.min_cycles} closed cycles are not ranked &mdash; `
+           + `a rate from one or two trades is arithmetic, not evidence.</div>`;
+    }
+    for (const u of (d.unknowns || [])) {
+        h += `<div style="margin-top:4px; padding:5px 8px; border-left:3px solid #f59e0b; color:var(--text-dim);">${u}</div>`;
+    }
+    h += `<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">`
+       + `Read-only; it places nothing. Measured at ${d.as_of}.</div></div>`;
     el.innerHTML = h;
 }
 
@@ -7490,10 +7729,30 @@ async function advDraw() {
         const first = candles[0];
         const chg = first.close ? (last.close - first.close) / first.close * 100 : 0;
         const col = chg >= 0 ? 'var(--green)' : 'var(--red)';
+        // THE PERCENTAGE IS FIRST CANDLE TO LAST, AND THE LABEL MUST SAY SO.
+        //
+        // It read "-0.77% over 350 candles" beside a chart whose visible
+        // slope was clearly up, and the only available reading of that is
+        // "the price is down" - which was false at every horizon the eye
+        // was actually looking at. Measured on the same candles 2026-10-06:
+        // BTC was -0.73% across the window's 14.5 days and +1.01% across
+        // the last three, sitting at 65% of the window's own high-low
+        // range. Both numbers are true of different spans; the label named
+        // neither. A candle COUNT says how much data there is and never
+        // says what the number is measured FROM, which is the one thing a
+        // reader needs to reconcile it with the shape on screen.
+        //
+        // Span comes from the candle timestamps rather than
+        // count x granularity, so it stays right when the venue drops a
+        // bar or the granularity selector changes under it.
+        const spanDays = (last.t - first.t) / 86400;
+        const spanTxt = spanDays < 1 ? `${(spanDays * 24).toFixed(1)} hours`
+                                     : `${spanDays.toFixed(1)} days`;
         const el = document.getElementById('adv-last');
         if (el) el.innerHTML = `<span class="px">${ADV.money(last.close)}</span>`
             + ` <span style="color:${col}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`
-            + ` <span style="opacity:.7">over ${candles.length} candles</span>`;
+            + ` <span style="opacity:.7">over the last ${spanTxt}`
+            + ` &middot; ${candles.length} candles</span>`;
         const rr = document.getElementById('adv-rsi-read');
         if (rr) {
             // State the reading and what it is, never what to do with it.

@@ -10560,6 +10560,419 @@ async def grid_money_check_endpoint():
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/capital-velocity")
+async def grid_capital_velocity_endpoint(min_cycles: int = 3):
+    """How fast capital completes a cycle, and how much of it cannot.
+
+    The account owner's question, in his words: "make the existing capital
+    recycle faster when the system has a verified profitable exit." Every
+    other P&L surface here answers "did this branch make money"; none of
+    them answered "how fast did the money come back", and the two rank the
+    fleet differently enough that acting on the first alone is a mistake.
+    XRP and HBAR have earned almost the same dollars on this book while
+    HBAR used about one sixty-fourth of the capital-days to do it.
+
+    STRICTLY READ-ONLY, and deliberately NOT a router. It chooses no coin,
+    sizes no rung and places no order. The payload carries its own
+    out-of-sample test (`predictive`) with a `routing_allowed` flag,
+    because three ranking ideas have already been tested on this fleet's
+    real tape and lost money out of sample - the yield-weighted one, which
+    is "give the capital to the highest-scoring branch", was the worst of
+    them. Nothing in this repository may route capital while that flag
+    reads False, and it re-computes itself as the book grows rather than
+    being a number somebody wrote down once.
+
+    An input that cannot be read becomes UNKNOWN with its cause attached,
+    never a zero. A zero here would read as "nothing is trapped" or "no
+    cash is available", which are the two most expensive wrong answers
+    this endpoint could give.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    import capital_recycle as cv
+    import account_census
+    import aiohttp as _aiohttp
+    from models import CryptoGridTradeHistory
+    from sqlalchemy import select
+
+    g = crypto_grid_bot_module
+    status = await g.get_grid_status()
+    branches = status.get("branches") or []
+
+    # ---- the closed book, own round trips only ----
+    #
+    # An adopted exit is the account owner's older decision resolving, not
+    # a cycle this strategy chose both ends of, so it cannot speak to how
+    # fast this strategy recycles capital. Four of them carry -$311.24 and
+    # would swamp every rate on this page.
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory).order_by(CryptoGridTradeHistory.closed_at)
+        )).scalars().all()
+    trades = [{
+        "product_id": r.product_id, "qty": r.qty, "entry_price": r.entry_price,
+        "exit_price": r.exit_price,
+        "pnl": r.pnl, "opened_at": r.opened_at, "closed_at": r.closed_at,
+        "exit_reason": r.exit_reason,
+    } for r in rows if (r.exit_reason or "") != "adopted_exit"]
+    records = cv.cycle_records(trades)
+
+    # ---- sell -> next buy, per branch ----
+    #
+    # The buy timeline is the closed trades' ENTRIES plus the slices still
+    # open; using only closed trades would miss every buy that has not sold
+    # yet, which is most of the recent ones.
+    sells, buys = {}, {}
+    for t in trades:
+        if t.get("closed_at"):
+            sells.setdefault(t["product_id"], []).append(t["closed_at"])
+        if t.get("opened_at"):
+            buys.setdefault(t["product_id"], []).append(t["opened_at"])
+    for b in branches:
+        for sl in (b.get("slices") or []):
+            if sl.get("opened_at"):
+                try:
+                    from datetime import datetime as _dt
+                    v = sl["opened_at"]
+                    v = _dt.fromisoformat(str(v).replace("Z", "+00:00")) if isinstance(v, str) else v
+                    buys.setdefault(b.get("product_id"), []).append(
+                        v.replace(tzinfo=None) if getattr(v, "tzinfo", None) else v)
+                except Exception:
+                    pass
+
+    # THE FLEET-WIDE BUY TIMELINE. Cash is shared, so a branch that sells
+    # does not get first claim on its own proceeds - "where did the money
+    # go next" is a fleet question and cannot be answered per branch.
+    fleet_buys = []
+    for t in trades:
+        if t.get("opened_at"):
+            fleet_buys.append((t["opened_at"], t["product_id"],
+                               (t.get("qty") or 0) * (t.get("entry_price") or 0)))
+    for b in branches:
+        for sl in (b.get("slices") or []):
+            v = sl.get("opened_at")
+            if not v:
+                continue
+            try:
+                from datetime import datetime as _dt
+                v = _dt.fromisoformat(str(v).replace("Z", "+00:00")) if isinstance(v, str) else v
+                fleet_buys.append((v.replace(tzinfo=None) if getattr(v, "tzinfo", None) else v,
+                                   b.get("product_id"),
+                                   (sl.get("qty") or 0) * (sl.get("entry_price") or 0)))
+            except Exception:
+                continue
+
+    # ---- inventory truth, from the same source the buy gate uses ----
+    short_products, avail_map, inventory_unknown = set(), {}, None
+    _short_usd = 0.0
+    try:
+        async with _aiohttp.ClientSession() as _s:
+            bal = await account_census.fetch_balances(_s)
+        owned = account_census.owned_units_map(bal) or {}
+        avail = account_census.available_units_map(bal) or {}
+        for b in branches:
+            pid = b.get("product_id") or ""
+            base = pid.split("-")[0].upper()
+            claimed = sum((sl.get("qty") or 0) for sl in (b.get("slices") or []))
+            held = owned.get(base)
+            # ABSENT IS UNKNOWN, NEVER ZERO. A gap in the reading that was
+            # treated as zero would declare every branch short.
+            if held is not None and claimed > 0 and claimed - held > 1e-12:
+                short_products.add(pid)
+            if base in avail:
+                avail_map[pid] = avail[base]
+        # Claimed-but-not-held, priced, so the verified-coin bucket can
+        # exclude it. Priced at the branch's own current price, which is
+        # the same price the deployed figure uses.
+        for b in branches:
+            if b.get("product_id") in short_products:
+                _short_usd += sum((sl.get("qty") or 0) * (b.get("current_price") or 0)
+                                  for sl in (b.get("slices") or []))
+    except Exception as e:
+        inventory_unknown = (f"the wallet could not be read ({type(e).__name__}), so "
+                             "ACCOUNTING_HOLD and INVENTORY_LOCKED cannot be told "
+                             "apart from a price wait on this reading. Treat the "
+                             "trapped split as UNKNOWN, not as zero.")
+
+    classified = cv.classify_slices(branches, short_products, avail_map,
+                                    now_epoch=time.time())
+
+    money, money_unknown = {}, None
+    try:
+        money = await g.money_check()
+    except Exception as e:
+        money_unknown = f"money_check failed ({type(e).__name__})"
+    census_d, census_unknown = {}, None
+    try:
+        async with _aiohttp.ClientSession() as _s:
+            census_d = await account_census.census(_s, tracked_usd=0.0)
+        if not census_d.get("available"):
+            census_unknown = "the venue census is unavailable on this reading"
+            census_d = {}
+    except Exception as e:
+        census_unknown = f"census failed ({type(e).__name__})"
+
+    # The raw gaps, so the percentile view and the summary are the same
+    # measurement rather than two that can disagree.
+    _gaps = []
+    for _pid, _ss in sells.items():
+        _bl = sorted(buys.get(_pid) or [])
+        for _t in _ss:
+            _n = next((x for x in _bl if x > _t), None)
+            if _n is not None:
+                _gaps.append((_n - _t).total_seconds() / 3600.0)
+
+    data = {
+        "velocity": cv.fleet_velocity(records),
+        "recycle": cv.recycle_rate(records),
+        "redeploy": cv.redeploy_gaps(sells, buys),
+        "redeploy_distribution": cv.recycle_distribution(_gaps),
+        "by_branch": cv.by_branch(records, min_cycles=min_cycles),
+        "branch_rollup": cv.branch_rollup(records, branches, classified),
+        "open_slices": cv.open_slice_records(classified),
+        "trapped": cv.trapped_capital(classified),
+        "capital_tree": cv.capital_tree(census_d, money) if (census_d and money) else None,
+        "never_deployable": (cv.never_deployable(census_d, money)
+                             if (census_d and money) else None),
+        "dollar_classification": (cv.classify_every_dollar(census_d, money, _short_usd)
+                                  if (census_d and money) else None),
+        "recycle_ledger": cv.recycle_ledger(trades, buys, fleet_buys),
+        # THE RULE, CHECKED RATHER THAN REMEMBERED. Empty means the
+        # deployable figure is still derived from cash alone and no
+        # unresolved dollar has leaked into it.
+        "deployable_violations": (cv.assert_deployable_is_clean(census_d, money)
+                                  if (census_d and money) else None),
+        "predictive": cv.predictive_check(records),
+        "unknowns": [u for u in (inventory_unknown, money_unknown, census_unknown) if u],
+        "read_only": True,
+        "this_is_not_a_router": ("Measurement only. It chooses no coin, sizes no rung "
+                                 "and places no order. Read predictive.routing_allowed "
+                                 "before letting any of it move a dollar."),
+        "as_of": datetime.utcnow().isoformat() + "Z",
+    }
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
+async def _incubator_candles(product_id, gran, days, pause=0.25):
+    """Oldest-first (t, low, high, close) from Coinbase's PUBLIC tape.
+
+    Public on purpose. The incubator must be re-derivable by anyone with
+    the same candles - a result scored from a private feed is a number
+    nobody can check, which is the failure mode the whole design is built
+    against.
+
+    The timestamp format is load-bearing: isoformat() on a tz-aware
+    datetime ends "+00:00", and a literal "+" in a query string decodes as
+    a SPACE, so every request comes back empty. A bare UTC stamp with a
+    trailing Z is what the endpoint wants.
+    """
+    import aiohttp as _aiohttp
+    import asyncio as _asyncio
+    rows, now = {}, int(time.time())
+    end, floor, err = now, now - int(days * 86400), None
+    async with _aiohttp.ClientSession() as sess:
+        while end > floor:
+            start = max(floor, end - 300 * gran)
+            url = (f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+                   f"?granularity={gran}"
+                   f"&start={datetime.utcfromtimestamp(start).isoformat()}Z"
+                   f"&end={datetime.utcfromtimestamp(end).isoformat()}Z")
+            try:
+                async with sess.get(url, timeout=30) as r:
+                    data = await r.json()
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                break
+            if not data or not isinstance(data, list):
+                err = err or "the public candle endpoint returned an empty page"
+                break
+            for x in data:
+                try:
+                    rows[int(x[0])] = (float(x[1]), float(x[2]), float(x[4]))
+                except Exception:
+                    continue
+            end = start
+            await _asyncio.sleep(pause)
+    if not rows:
+        # A GAP IS NOT A FLAT MARKET. Returning an empty tape here would
+        # score every candidate at zero round trips and read as "the
+        # candidate does nothing", which is a different claim entirely.
+        return None, (err or "no bars came back")
+    ts = sorted(rows)
+    return [(t, rows[t][0], rows[t][1], rows[t][2]) for t in ts], err
+
+
+@router.get("/grid-status/incubator")
+async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
+                                  min_live_trips: int = 20):
+    """Candidates running forward on live prices, with no money on them.
+
+    The account owner's ask: an incubator measured AGAINST the backtest, so
+    the divergence between what a backtest promised and what the same rule
+    has since delivered is visible rather than argued about. Five candidate
+    changes were backtested on this fleet's tape and five were rejected,
+    each because it looked good on the window it was fitted to - a forward
+    test on bars that did not exist when the candidate was chosen is the
+    step that was missing between a backtest and real money.
+
+    STRICTLY READ-ONLY, and it holds no position. Nothing here places an
+    order, creates a slice, touches a branch or spends a dollar; an
+    incubating candidate is invisible to the fleet and the fleet is
+    invisible to it. Arming one is a separate write-guarded POST, because
+    deciding what to test is the account owner's call, not this endpoint's.
+
+    NOTHING IS STORED BUT THE CANDIDATE AND THE MINUTE IT WAS ARMED. Every
+    figure below is recomputed from the public tape on each read, so a
+    result cannot go stale, cannot be edited after the fact, and can be
+    re-derived from scratch by anyone with the same candles.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    import incubator as inc
+    from models import TradingBotState
+    from sqlalchemy import select
+
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(TradingBotState).where(
+                TradingBotState.bot_name.like(inc.COHORT_PREFIX + "%"))
+        )).scalars().all()
+
+    cohorts, unreadable = [], []
+    for row in rows:
+        spec = inc.parse_cohort_key(row.bot_name)
+        if not spec:
+            # A stray row in a shared table is skipped, never guessed at.
+            unreadable.append(row.bot_name)
+            continue
+        armed_at = int(row.base_capital or 0)
+        bars, err = await _incubator_candles(spec["product_id"], granularity, days)
+        if bars is None:
+            cohorts.append({"key": row.bot_name, **spec, "armed_at_epoch": armed_at,
+                            "verdict": "UNKNOWN", "unknown_reason": err,
+                            "placed_nothing": True})
+            continue
+        step = spec["value"] if spec["param"] == "step" else None
+        if step is None:
+            cohorts.append({"key": row.bot_name, **spec, "armed_at_epoch": armed_at,
+                            "verdict": "UNKNOWN",
+                            "unknown_reason": (f"this build can incubate a 'step' "
+                                               f"candidate; '{spec['param']}' has no "
+                                               f"engine here yet, and guessing one "
+                                               f"would score a rule nobody wrote"),
+                            "placed_nothing": True})
+            continue
+        result = inc.incubate(bars, armed_at, step=step, gran_seconds=granularity,
+                              min_live_trips=min_live_trips)
+        result.update({"key": row.bot_name, "product_id": spec["product_id"],
+                       "param": spec["param"],
+                       "armed_at": datetime.utcfromtimestamp(armed_at).isoformat() + "Z",
+                       "tape_partial": bool(err)})
+        if err:
+            result["tape_note"] = ("the window is SHORTER than asked for: " + err)
+        cohorts.append(result)
+
+    return JSONResponse(content={
+        "cohorts": cohorts,
+        "cohort_count": len(cohorts),
+        "unreadable_rows": unreadable or None,
+        "granularity_seconds": granularity,
+        "window_days_requested": days,
+        "read_only": True,
+        "holds_no_position": ("An incubating candidate places no order, creates no "
+                             "slice, touches no branch and spends no dollar. It is "
+                             "scored on the public tape and nothing else."),
+        "how_to_read_it": ("backtest = the window BEFORE arming, which is the number "
+                          "the candidate was chosen on. live = bars that did not "
+                          "exist when it was chosen. The gap between the two per-day "
+                          "rates is the whole point; a TOO EARLY verdict means the "
+                          "live side has not yet closed enough round trips for that "
+                          "gap to mean anything."),
+        "as_of": datetime.utcnow().isoformat() + "Z",
+    }, headers={"Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache", "Expires": "0"})
+
+
+class ArmIncubatorRequest(BaseModel):
+    product_id: str
+    param: str = "step"
+    value: float
+    disarm: bool = False
+
+
+@router.post("/grid-status/incubator/arm")
+async def arm_incubator_endpoint(payload: ArmIncubatorRequest):
+    """Start (or stop) incubating one candidate. Write-guarded like every POST.
+
+    Arming is the ONLY thing this writes, and what it writes is a name and
+    a timestamp. It places no order, moves no money, changes no gate and
+    touches no branch - the fleet cannot tell that a candidate exists.
+
+    THE ARMING MOMENT IS NOW, AND IS NOT SETTABLE. A caller-supplied start
+    time is how a forward test quietly becomes a backtest: pick the date
+    after seeing the chart and the 'live' window is hindsight with a new
+    label. Re-arming an existing candidate RESETS the clock to now and
+    discards the elapsed window, which is the honest behaviour - a
+    candidate whose start moves is a different candidate.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    import incubator as inc
+    from models import TradingBotState
+    from sqlalchemy import select
+
+    product_id = (payload.product_id or "").strip().upper()
+    param = (payload.param or "step").strip().lower()
+    if not product_id or "-" not in product_id:
+        raise HTTPException(status_code=400,
+                            detail="product_id must look like BTC-USD")
+    if param != "step":
+        raise HTTPException(
+            status_code=400,
+            detail=("this build can incubate a 'step' candidate only. Storing a "
+                    "parameter with no engine behind it would create a cohort "
+                    "that can never be scored."))
+    if not (0.0 < payload.value < 1.0):
+        raise HTTPException(status_code=400,
+                            detail="a step is a fraction, e.g. 0.04 for 4%")
+
+    key = inc.cohort_key(product_id, param, payload.value)
+    now = int(time.time())
+    async with get_session_factory()() as db:
+        row = (await db.execute(
+            select(TradingBotState).where(TradingBotState.bot_name == key)
+        )).scalar_one_or_none()
+        if payload.disarm:
+            if row is None:
+                return JSONResponse(content={"status": "not armed", "key": key,
+                                             "changed": False})
+            await db.delete(row)
+            await db.commit()
+            log.warning(f"[incubator] DISARMED {key}")
+            return JSONResponse(content={"status": "disarmed", "key": key,
+                                         "changed": True, "placed_nothing": True})
+        was = int(row.base_capital) if row is not None and row.base_capital else None
+        if row is None:
+            db.add(TradingBotState(bot_name=key, base_capital=float(now),
+                                   starting_capital=float(now)))
+        else:
+            row.base_capital = float(now)
+        await db.commit()
+    log.warning(f"[incubator] ARMED {key} at {now} (no order placed, no branch touched)")
+    return JSONResponse(content={
+        "status": "armed", "key": key, "armed_at_epoch": now,
+        "armed_at": datetime.utcfromtimestamp(now).isoformat() + "Z",
+        "previously_armed_at_epoch": was,
+        "clock_reset": was is not None,
+        "placed_nothing": True,
+        "means": ("From this minute the candidate is scored on bars that did not "
+                  "exist when you chose it. Read it at GET /grid-status/incubator. "
+                  "Nothing was bought, sold, allocated or reserved."),
+    })
+
+
 @router.get("/grid-status/harvest-preview")
 async def grid_harvest_preview_endpoint():
     """What the hourly profit harvest would take right now, and why not.
