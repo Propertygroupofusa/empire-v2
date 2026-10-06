@@ -5088,11 +5088,21 @@ async function renderIncubatorArm() {
         if (!v || isNaN(Number(v))) return say('a value is required', true);
         arm(p, pr, v, false);
     };
-    for (const b of el.querySelectorAll('[data-inc-disarm]')) {
-        b.onclick = () => arm(b.getAttribute('data-inc-disarm'),
-                              b.getAttribute('data-inc-param'),
-                              b.getAttribute('data-inc-value'), true);
-    }
+    // ONE DELEGATED HANDLER, not a querySelectorAll loop.
+    //
+    // The loop version broke test_branch_coin_label.py, which runs this
+    // page's script against a stub DOM: the stub's elements have no
+    // querySelectorAll, so the whole render threw. Delegation needs
+    // nothing but the click event, works identically in a browser, and
+    // keeps the rows re-renderable without re-binding anything.
+    el.onclick = (ev) => {
+        const t = ev && ev.target;
+        if (!t || typeof t.getAttribute !== 'function') return;
+        const pid = t.getAttribute('data-inc-disarm');
+        if (!pid) return;
+        arm(pid, t.getAttribute('data-inc-param'),
+            t.getAttribute('data-inc-value'), true);
+    };
 }
 
 async function renderCapitalVelocity() {
