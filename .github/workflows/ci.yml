@@ -37,3 +37,20 @@ jobs:
       # .claude/skills/run-empire-v2/SKILL.md's Build section.
       - name: Import FastAPI app
         run: python -c "from main import app; print('FastAPI app loaded OK')"
+
+      # THE SUITE ITSELF. Until now CI compile-checked 639 files and ran
+      # none of the 356 test modules - a test could be red for weeks and
+      # nothing said so.
+      #
+      # It cannot simply fail on red: 19 modules fail on a clean checkout of
+      # main (network-dependent, environment-dependent, or genuinely broken
+      # and not yet fixed). With no recorded list "the suite is red" is true
+      # every run and therefore means nothing, and a real regression hides
+      # among the 19. run_tests.sh compares against the checked-in
+      # test_baseline.txt and exits non-zero ONLY on a module that was
+      # passing and now is not.
+      #
+      # Fixing one of the 19 is reported, not failed - then
+      # `./run_tests.sh --update` records the better state.
+      - name: Test suite against the recorded baseline
+        run: ./run_tests.sh
