@@ -52,7 +52,29 @@ from datetime import date, datetime, timedelta, timezone
 import aiohttp
 from sqlalchemy import select
 
-from database import AsyncSessionLocal
+# THE FACTORY IS FETCHED AT CALL TIME, NOT BOUND AT IMPORT TIME.
+#
+# database.AsyncSessionLocal is None at module load and is only assigned
+# when get_session_factory() first runs. `from database import
+# AsyncSessionLocal` copies whatever that attribute is AT THAT MOMENT -
+# which is None - and rebinding it inside database.py afterwards never
+# reaches the copy this module holds. Every call here would then be
+# None(), a TypeError, unless the import happened to land after something
+# else had already initialised the factory.
+#
+# It currently works by exactly that import-order luck: main.py awaits
+# init_db() and uses get_session_factory()() during startup before it
+# imports this module at all. One reordering of main.py turns five
+# database calls in a live trading bot into TypeErrors, and nothing in
+# between would warn.
+#
+# test_no_none_db_bindings.py exists to catch this class and has been
+# failing on main since this bot landed. Every other bot in the repository
+# - crypto_grid_bot, prop_bot, alpaca_swing_bot, crypto_coinbase_bot,
+# profit_sweep_engine - already calls get_session_factory()() for the same
+# reason. This is an import-lifecycle correction and changes no trading
+# behaviour: same session, same queries, same transactions.
+from database import get_session_factory
 from models import AlpacaWheelState, TradingBotState
 
 log = logging.getLogger("alpaca_wheel_bot")
@@ -301,7 +323,7 @@ async def place_option_order(session, symbol, qty, side, intent, limit_price, ta
 
 async def is_wheel_active() -> bool:
     try:
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             row = (await db.execute(select(TradingBotState).where(
                 TradingBotState.bot_name == WHEEL_MODE_KEY))).scalar_one_or_none()
             return bool(row and row.base_capital and row.base_capital >= 1.0)
@@ -311,7 +333,7 @@ async def is_wheel_active() -> bool:
 
 
 async def set_wheel_active(enabled: bool):
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         row = (await db.execute(select(TradingBotState).where(
             TradingBotState.bot_name == WHEEL_MODE_KEY))).scalar_one_or_none()
         if row is None:
@@ -323,7 +345,7 @@ async def set_wheel_active(enabled: bool):
 
 
 async def list_states():
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         return list((await db.execute(select(AlpacaWheelState))).scalars().all())
 
 
@@ -331,7 +353,7 @@ async def set_approved(underlying: str, approved: bool):
     underlying = underlying.strip().upper()
     if not underlying.isalpha() or len(underlying) > 6:
         raise ValueError(f"{underlying!r} is not a stock ticker")
-    async with AsyncSessionLocal() as db:
+    async with get_session_factory()() as db:
         row = (await db.execute(select(AlpacaWheelState).where(
             AlpacaWheelState.underlying == underlying))).scalar_one_or_none()
         if row is None:
@@ -681,7 +703,7 @@ async def run_wheel_cycle():
         positions_by_symbol = {p.get("symbol"): p for p in positions or []}
         today = datetime.now(timezone.utc).date()
 
-        async with AsyncSessionLocal() as db:
+        async with get_session_factory()() as db:
             rows = list((await db.execute(select(AlpacaWheelState))).scalars().all())
             for st in rows:
                 try:
