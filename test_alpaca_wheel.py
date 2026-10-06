@@ -399,6 +399,30 @@ def test_scan_grades_and_hides_rejected():
     assert fake.placed == []
 
 
+def test_panel_capacity_matches_the_order_gate_exactly():
+    """The capacity the panel shows and the gates that block a real order
+    are two functions. They must never disagree: a strike passes both
+    order gates if and only if its collateral fits the shown capacity."""
+    import random
+    rng = random.Random(7)
+    for _ in range(5000):
+        cash = rng.uniform(0, 3000)
+        obp = rng.uniform(0, 3000)
+        equity = rng.uniform(100, 6000)
+        open_n = rng.uniform(0, 2000)
+        reserved = rng.choice([0.0, rng.uniform(0, 800)])
+        strike = round(rng.uniform(0.5, 30), 2)
+        cap = w.collateral_capacity(cash, obp, equity, open_n, reserved, 0.50)
+        gates = (w.collateral_gate(strike, 1, cash, obp, reserved)[0]
+                 and w.risk_cap_gate(equity, open_n, reserved, strike * 100, 0.50)[0])
+        fits = strike * 100 <= cap["max_collateral"] + 0.005
+        if abs(strike * 100 - cap["max_collateral"]) > 0.01:   # ignore rounding at the exact edge
+            assert gates == fits, (cash, obp, equity, open_n, reserved, strike, cap)
+    # Today's account: the panel's ~$122 is the gate's real ceiling.
+    assert w.risk_cap_gate(976.83, 366.0, 0.0, 122.0, 0.50)[0]
+    assert not w.risk_cap_gate(976.83, 366.0, 0.0, 123.0, 0.50)[0]
+
+
 def test_bad_ticker_rejected():
     import pytest
     with pytest.raises(ValueError):
