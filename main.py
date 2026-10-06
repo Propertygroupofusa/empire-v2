@@ -1680,6 +1680,17 @@ async def lifespan(app: FastAPI):
         # until market_brain_owns_equities is set in TradingBotState -
         # the runner re-reads that flag every cycle, so the owner can
         # stop it from the dashboard without a redeploy.
+        # Alpaca wheel (cash-secured puts / covered calls). Real orders,
+        # but does nothing until its dashboard switch is on AND a ticker is
+        # approved - the cycle re-reads both every 15 minutes.
+        try:
+            import threading
+            import alpaca_wheel_bot
+            threading.Thread(target=alpaca_wheel_bot.run, daemon=True).start()
+            log.info("🛞 Alpaca wheel engine started (idle until switched on with an approved ticker)")
+        except Exception as e:
+            log.warning(f"⚠️ Alpaca wheel engine failed to start: {e}")
+
         try:
             import threading
             import market_brain_runner

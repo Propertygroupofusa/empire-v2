@@ -6735,6 +6735,59 @@ async def set_opening_bar_live_mode_endpoint(payload: SetOpeningBarLiveModeReque
     return {"status": "updated", "mode_active": payload.enabled}
 
 
+class WheelModeRequest(BaseModel):
+    enabled: bool
+
+
+class WheelTickerRequest(BaseModel):
+    underlying: str
+    approved: bool = True
+
+
+@router.get("/alpaca-overview/wheel-status")
+async def get_alpaca_wheel_status():
+    """The Alpaca wheel: switch state, approved tickers with their stage and
+    premium kept, and the exact gate it is waiting on. Read-only."""
+    import alpaca_wheel_bot as wheel
+    states = await wheel.list_states()
+    return {
+        "mode_active": await wheel.is_wheel_active(),
+        "tickers": [s.to_dict() for s in states],
+        "premium_total": round(sum(s.premium_total or 0 for s in states), 2),
+        "reserved_collateral_usd": round(wheel.reserved_collateral_usd, 2),
+        "last_check": wheel.last_status,
+        "rules": {
+            "put_strike_below_pct": wheel.PUT_STRIKE_BELOW_PCT,
+            "call_strike_above_pct": wheel.CALL_STRIKE_ABOVE_PCT,
+            "dte": [wheel.MIN_DTE, wheel.MAX_DTE],
+            "take_profit_fraction": wheel.TAKE_PROFIT_FRACTION,
+            "max_spread_pct": wheel.MAX_SPREAD_PCT,
+            "min_open_interest": wheel.MIN_OPEN_INTEREST,
+            "min_premium_yield": wheel.MIN_PREMIUM_YIELD,
+        },
+    }
+
+
+@router.post("/alpaca-overview/wheel-mode")
+async def set_alpaca_wheel_mode(payload: WheelModeRequest):
+    """Master switch for the REAL-money wheel. Off by default."""
+    import alpaca_wheel_bot as wheel
+    await wheel.set_wheel_active(payload.enabled)
+    return {"status": "updated", "mode_active": payload.enabled}
+
+
+@router.post("/alpaca-overview/wheel-ticker")
+async def set_alpaca_wheel_ticker(payload: WheelTickerRequest):
+    """Approve (or un-approve) a ticker for the wheel. Un-approving stops
+    NEW puts on it; an open contract or held shares keep being managed."""
+    import alpaca_wheel_bot as wheel
+    try:
+        row = await wheel.set_approved(payload.underlying, payload.approved)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "updated", "ticker": row}
+
+
 class SetEquityHandoverRequest(BaseModel):
     enabled: bool
 

@@ -3173,3 +3173,56 @@ class OrderAttribution(Base):
         return {"order_id": self.order_id, "source": self.source,
                 "product_id": self.product_id, "side": self.side,
                 "placed_at": self.placed_at.isoformat() + "Z" if self.placed_at else None}
+
+
+class AlpacaWheelState(Base):
+    """One row per underlying the account owner has APPROVED for the
+    Alpaca wheel (alpaca_wheel_bot.py). The row is both the approval and
+    the live cycle state - no row, no trading on that ticker.
+
+    stage: IDLE (no contract, no shares) -> PUT (short put open or
+    pending) -> SHARES (assigned, holding 100*contracts) -> CALL (covered
+    call open or pending) -> back to IDLE when called away.
+
+    premium_total accumulates every real credit kept across all cycles,
+    minus every real debit paid to close early - the "track my premium
+    across all cycles" figure the owner asked for."""
+    __tablename__ = "alpaca_wheel_state"
+
+    id = Column(Integer, primary_key=True, index=True)
+    underlying = Column(String, unique=True, index=True)
+    approved = Column(Boolean, default=True)
+    stage = Column(String, default="IDLE")
+    option_symbol = Column(String, nullable=True)
+    option_strike = Column(Float, nullable=True)
+    option_expiration = Column(String, nullable=True)
+    contracts = Column(Integer, default=0)
+    open_order_id = Column(String, nullable=True)
+    close_order_id = Column(String, nullable=True)
+    open_credit = Column(Float, nullable=True)   # dollars received for the open contract(s)
+    cost_basis = Column(Float, nullable=True)    # per share, after put premium, once assigned
+    shares = Column(Float, default=0.0)
+    premium_total = Column(Float, default=0.0)
+    cycles_completed = Column(Integer, default=0)
+    last_note = Column(Text, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "underlying": self.underlying,
+            "approved": bool(self.approved),
+            "stage": self.stage,
+            "option_symbol": self.option_symbol,
+            "option_strike": self.option_strike,
+            "option_expiration": self.option_expiration,
+            "contracts": self.contracts,
+            "open_order_id": self.open_order_id,
+            "close_order_id": self.close_order_id,
+            "open_credit": self.open_credit,
+            "cost_basis": self.cost_basis,
+            "shares": self.shares,
+            "premium_total": round(self.premium_total or 0.0, 2),
+            "cycles_completed": self.cycles_completed or 0,
+            "last_note": self.last_note,
+            "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
+        }

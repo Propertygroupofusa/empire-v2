@@ -510,6 +510,23 @@
         <div id="opening-bar-content" class="empty">Loading…</div>
     </div>
 
+    <div class="section-title">🛞 Wheel (cash-secured puts → covered calls) <span id="wheel-mode-badge" style="font-size:0.7em; font-weight:600; margin-left:8px;"></span></div>
+    <p class="panel-sub" style="margin-bottom:10px;">
+        Real money. Sells a put ~10% below the price, 2–4 weeks out, only on tickers you approve — and only when
+        your cash covers buying all 100 shares. If assigned, sells a covered call ~10% above cost, never below it.
+        Closes any contract early at 50% of its premium. Checks every 15 minutes, market hours only. Off by default.
+    </p>
+    <div class="panel" id="wheel-panel">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:8px;">
+            <button id="wheel-mode-toggle-btn" class="unlock-btn" onclick="toggleWheelMode()" disabled>Loading…</button>
+            <div style="display:flex; gap:6px; align-items:center;">
+                <input id="wheel-ticker-input" class="modal-input" style="width:90px; margin:0;" placeholder="Ticker" maxlength="6">
+                <button class="unlock-btn" onclick="approveWheelTicker()">➕ Approve</button>
+            </div>
+        </div>
+        <div id="wheel-content" class="empty">Loading…</div>
+    </div>
+
     <div class="modal-overlay" id="create-branch-modal-overlay">
         <div class="modal-card">
             <div class="modal-title">🌱 New Real Branch</div>
@@ -1187,6 +1204,7 @@ async function refresh() {
         // cycle along with everything else, unlike Next Best Trade above.
         loadBranches();
         loadOpeningBar();
+        loadWheel();
     } catch (e) {
         statusEl.textContent = 'Error: ' + e.message;
         statusEl.className = 'error';
@@ -1487,6 +1505,90 @@ async function toggleOpeningBarMode() {
     } finally {
         await loadOpeningBar();
     }
+}
+
+let wheelModeActive = false;
+
+function _wheelEsc(v) {
+    return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function loadWheel() {
+    try {
+        renderWheel(await apiGet('/alpaca-overview/wheel-status'));
+    } catch (e) {
+        document.getElementById('wheel-content').innerHTML = `<div class="empty">Could not load: ${_wheelEsc(e.message)}</div>`;
+    }
+}
+
+function renderWheel(d) {
+    wheelModeActive = !!d.mode_active;
+    const badge = document.getElementById('wheel-mode-badge');
+    badge.textContent = wheelModeActive ? '🟢 live ON' : '⚪ off';
+    badge.style.color = wheelModeActive ? 'var(--green)' : 'var(--text-dim)';
+    const btn = document.getElementById('wheel-mode-toggle-btn');
+    btn.disabled = false;
+    btn.textContent = wheelModeActive ? '⏸️ Turn wheel off' : '▶️ Turn wheel on (real money)';
+
+    const lc = d.last_check || {};
+    const blockers = (lc.blockers || []).map(b => `<li>${_wheelEsc(b)}</li>`).join('');
+    const tickers = d.tickers || [];
+    const rows = tickers.map(t => `<tr>
+        <td>${_wheelEsc(t.underlying)}${t.approved ? '' : ' <span style="color:var(--text-dim)">(not approved)</span>'}</td>
+        <td>${_wheelEsc(t.stage)}</td>
+        <td>${t.option_symbol ? _wheelEsc(t.option_symbol) : '—'}</td>
+        <td>${t.cost_basis ? fmtUsd(t.cost_basis) : '—'}</td>
+        <td>${fmtUsd(t.premium_total || 0)}</td>
+        <td style="font-size:0.85em; color:var(--text-dim)">${_wheelEsc(t.last_note || '')}</td>
+        <td>${t.approved ? `<button class="unlock-btn" onclick="setWheelTicker('${_wheelEsc(t.underlying)}', false)">Remove</button>` : ''}</td>
+    </tr>`).join('');
+    document.getElementById('wheel-content').innerHTML =
+        `<div class="panel-sub">Premium kept across all cycles: <b>${fmtUsd(d.premium_total || 0)}</b> · ` +
+        `cash tied up as put collateral: ${fmtUsd(d.reserved_collateral_usd || 0)}` +
+        (lc.checked_at ? ` · last check ${new Date(lc.checked_at).toLocaleTimeString()}` : '') + `</div>` +
+        (blockers ? `<div class="panel-sub" style="margin-top:6px;">Waiting on:<ul style="margin:4px 0 0 18px;">${blockers}</ul></div>` : '') +
+        (rows ? `<table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-top:8px;"><thead><tr>
+            <th>Ticker</th><th>Stage</th><th>Contract</th><th>Cost basis</th><th>Premium</th><th>Status</th><th></th>
+            </tr></thead><tbody>${rows}</tbody></table>`
+              : `<div class="empty">No approved tickers. Nothing will trade until you approve one.</div>`);
+}
+
+async function _wheelPost(path, body) {
+    const key = getAdminKey();
+    const res = await fetch(API_BASE + path, {
+        method: 'POST',
+        headers: { 'X-Admin-Key': key, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    return data;
+}
+
+async function toggleWheelMode() {
+    const enabling = !wheelModeActive;
+    const msg = enabling
+        ? 'Turn the wheel ON with real money? It will sell real cash-secured puts on approved tickers whenever your cash covers 100 shares and every other gate passes.'
+        : 'Turn the wheel OFF? No new contracts will be sold. Anything already open stays open at Alpaca until it expires, is assigned, or you close it.';
+    if (!confirm(msg)) return;
+    try { await _wheelPost('/alpaca-overview/wheel-mode', { enabled: enabling }); }
+    catch (e) { alert('Could not update: ' + e.message); }
+    await loadWheel();
+}
+
+async function setWheelTicker(t, approved) {
+    try { await _wheelPost('/alpaca-overview/wheel-ticker', { underlying: t, approved }); }
+    catch (e) { alert('Could not update: ' + e.message); }
+    await loadWheel();
+}
+
+async function approveWheelTicker() {
+    const input = document.getElementById('wheel-ticker-input');
+    const t = (input.value || '').trim().toUpperCase();
+    if (!t) return;
+    if (!confirm(`Approve ${t} for the real-money wheel? It still has to pass the cash, risk-cap, liquidity, spread and premium checks before any put is sold.`)) return;
+    await setWheelTicker(t, true);
+    input.value = '';
 }
 
 async function toggleBranchActive(botName, newActive) {

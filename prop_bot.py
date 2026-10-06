@@ -2065,6 +2065,17 @@ def size_position(cash_remaining, slots_remaining, price, account_equity=None, a
     return qty if qty > 0 else None
 
 
+def _wheel_reserved_collateral() -> float:
+    """Cash alpaca_wheel_bot has tied up as cash-secured-put collateral.
+    0.0 if the module is unavailable - the wheel cannot have sold a put
+    without that module running."""
+    try:
+        import alpaca_wheel_bot
+        return float(alpaca_wheel_bot.reserved_collateral_usd or 0.0)
+    except Exception:
+        return 0.0
+
+
 def check_margin_safety(buying_power, equity, open_positions_count, extra_open_notional=0.0):
     """Hard check: is it safe to open a new position?
     Returns (is_safe, reason_if_not)
@@ -2086,7 +2097,10 @@ def check_margin_safety(buying_power, equity, open_positions_count, extra_open_n
     if buying_power < CRITICAL_BUYING_POWER_THRESHOLD:
         return False, f"CRITICAL: Buying power ${buying_power:.2f} near zero — halting new positions"
 
-    # Total open position risk can't exceed max % of equity
+    # Total open position risk can't exceed max % of equity. Cash the
+    # wheel has promised as put collateral counts too: it is cash that may
+    # have to buy 100 shares, so no stock entry may spend it.
+    extra_open_notional = extra_open_notional + _wheel_reserved_collateral()
     prop_notional = sum(p.get("qty", 0) * p.get("entry", 0) for p in open_prop_positions.values())
     total_open_notional = prop_notional + extra_open_notional
     if equity > 0 and total_open_notional > (equity * MAX_RISK_PERCENT):
@@ -3142,7 +3156,7 @@ async def run_prop_cycle():
             # inside that real remaining room, not an independent guess
             # that could still overshoot it. See size_position's own
             # docstring for the real bug this closes.
-            already_open_notional = total_notional + _total_alpaca_branch_notional() + _total_opening_bar_notional()
+            already_open_notional = total_notional + _total_alpaca_branch_notional() + _total_opening_bar_notional() + _wheel_reserved_collateral()
             qty = size_position(cash_remaining, slots_remaining, price, account_equity=equity, already_open_notional=already_open_notional)
             if qty is None:
                 log.warning(f"[APEX_589296] ⛔ INSUFFICIENT CASH: {contract} {side} skipped — only ${cash_remaining:.2f} left (need ${config.get('min_cash', 1000):.2f})")
