@@ -52,5 +52,27 @@ ok('and says plainly that claim is not money',
 ok('thin branch samples are reported as withheld, not ranked',
    /too_few_cycles/.test(body) && /not evidence/.test(body));
 
+section('[6] the CAPITAL ENGINE block leads with money, then rates');
+const engineAt = body.indexOf('Verified deployable');
+const rateAt = body.indexOf('$/capital-day');
+ok('the buckets are drawn', engineAt > -1);
+ok('and BEFORE the rates - every rate is meaningless if the money it '
+   + 'describes cannot be spent', engineAt < rateAt);
+for (const field of ['Reserved', 'In coin', 'Unresolved', 'Capital-days',
+                     'Avg hold', 'Completed cycles', 'Recycle rate',
+                     'Realized profit']) {
+    ok(`the block shows ${field}`, body.includes(field));
+}
+ok('sell to buy is shown as a DISTRIBUTION, not one number',
+   /p50_hours[\s\S]{0,120}p75_hours[\s\S]{0,120}p90_hours/.test(body));
+
+section('[7] the never-deployable rule is reported either way');
+ok('a violation is drawn in red and names what leaked',
+   /deployable_violations[\s\S]{0,900}#ef4444/.test(body));
+ok('and a clean read SAYS it was checked rather than staying silent',
+   /checked this read, no leak/.test(body));
+ok('the rule is stated in the words the owner used',
+   /never buys, never routes, never counts as available/.test(body));
+
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

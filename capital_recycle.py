@@ -33,6 +33,7 @@ measures, that file allocates.
 
 import math
 from collections import defaultdict
+from datetime import datetime as _datetime
 
 
 # A sell whose branch has not bought since is CENSORED, never a zero and
@@ -323,7 +324,8 @@ DUST_USD = 1.00
 MAKER_ROUND_TRIP = 0.007
 
 
-def classify_slices(branches, short_products=None, available_units=None):
+def classify_slices(branches, short_products=None, available_units=None,
+                    now_epoch=None):
     """Why each open slice cannot recycle right now, one reason each.
 
     The order matters and is not arbitrary. A branch short of coin cannot
@@ -370,11 +372,28 @@ def classify_slices(branches, short_products=None, available_units=None):
                 state = "ABOVE_ITS_OWN_TRIGGER"
             else:
                 state = "WAITING_ON_PRICE"
+            # AGE, so an open slice can report the capital-days it is
+            # accruing. Parsed defensively: a timestamp this code cannot
+            # read becomes None, never 0 - a zero age would make an old
+            # stuck slice report no capital cost at all, which is the
+            # opposite of the truth.
+            age_days = None
+            opened = s.get("opened_at")
+            if opened is not None and now_epoch is not None:
+                try:
+                    if isinstance(opened, str):
+                        dt = _datetime.fromisoformat(opened.replace("Z", "+00:00"))
+                        ts = dt.timestamp()
+                    else:
+                        ts = opened.timestamp()
+                    age_days = max(0.0, (now_epoch - ts) / 86400.0)
+                except Exception:
+                    age_days = None
             out.append({
                 "product_id": pid, "capital_usd": round(cost, 2),
                 "entry_price": entry, "break_even_price": breakeven,
                 "branch_target_price": target, "current_price": price,
-                "net_pct": net_pct, "state": state,
+                "net_pct": net_pct, "state": state, "age_days": age_days,
             })
     return out
 
@@ -464,3 +483,211 @@ def capital_tree(census, money):
                             "fenced as reserve, or a claim with no cash behind it."),
     }
     return tree
+
+
+def _pct(sorted_xs, q):
+    """Nearest-rank percentile. Returns None rather than interpolating a
+    value out of a sample too small to have one."""
+    if not sorted_xs:
+        return None
+    k = max(0, min(len(sorted_xs) - 1, int(round(q * (len(sorted_xs) - 1)))))
+    return sorted_xs[k]
+
+
+def recycle_distribution(gap_hours):
+    """SELL -> next BUY as a DISTRIBUTION, not one number.
+
+    A median alone hides the tail, and the tail is where the money sits:
+    a fleet that redeploys half its exits in minutes and the other half in
+    days has an execution problem a median of a few hours conceals
+    entirely. The account owner asked for the percentiles for exactly that
+    reason.
+    """
+    g = sorted(x for x in (gap_hours or []) if x is not None)
+    if not g:
+        return {"measured": 0, "unknown_reason": "no sell has been followed by a buy"}
+    return {
+        "measured": len(g),
+        "p50_hours": round(_pct(g, 0.50), 2),
+        "p75_hours": round(_pct(g, 0.75), 2),
+        "p90_hours": round(_pct(g, 0.90), 2),
+        "fastest_minutes": round(g[0] * 60, 1),
+        "slowest_days": round(g[-1] / 24.0, 2),
+        "means": ("Hours from a completed sell to that branch's next buy. The "
+                  "percentiles are the point: a median hides the tail, and the "
+                  "tail is where capital actually sits still."),
+    }
+
+
+def open_slice_records(classified, now_epoch=None, opened_at_by_key=None):
+    """Capital-days ACCRUING on slices that have not closed.
+
+    An open slice has a capital and an age, so it has capital-days. It does
+    NOT have a $/capital-day, because it has no realised profit yet, and
+    printing one from an unrealised mark would put a price move where a
+    measurement belongs - the single most common way a trading dashboard
+    lies. The field is omitted rather than estimated.
+    """
+    out = []
+    for c in classified or []:
+        age_days = c.get("age_days")
+        cap = c.get("capital_usd") or 0.0
+        out.append({
+            "product_id": c.get("product_id"),
+            "capital_usd": cap,
+            "age_days": round(age_days, 3) if age_days is not None else None,
+            "capital_days_accrued": round(cap * age_days, 2) if age_days is not None else None,
+            "state": c.get("state"),
+            "net_pct": c.get("net_pct"),
+            "usd_per_capital_day": None,
+            "why_no_rate": ("an open slice has no realised profit, so a rate would "
+                            "be an unrealised price move wearing a measurement's "
+                            "name"),
+        })
+    return out
+
+
+def branch_rollup(records, branches, classified):
+    """Per branch: what it has closed, what it is holding, and what it could
+    still open. Three different questions, kept apart.
+
+    available_rung_capacity answers "could this branch buy at all" and is
+    NOT a claim that the cash exists to fund it - the fleet routinely has
+    forty-odd free rungs and one rung's worth of cash. Those two facts
+    together are the real bottleneck, and they only read correctly when
+    neither is presented as the other.
+    """
+    closed = defaultdict(lambda: {"cycles": 0, "profit": 0.0, "capital_days": 0.0,
+                                  "hold_hours": 0.0})
+    for r in records or []:
+        a = closed[r["product_id"]]
+        a["cycles"] += 1
+        a["profit"] += r["pnl"]
+        a["capital_days"] += r["capital_days"]
+        a["hold_hours"] += r["hold_hours"]
+    held = defaultdict(lambda: {"deployed": 0.0, "trapped": 0.0, "slices": 0})
+    for c in classified or []:
+        h = held[c["product_id"]]
+        h["deployed"] += c["capital_usd"]
+        h["slices"] += 1
+        if c["state"] in _TRAPPED_STATES:
+            h["trapped"] += c["capital_usd"]
+    out = []
+    for b in branches or []:
+        pid = b.get("product_id")
+        sl = [s for s in (b.get("slices") or [])
+              if (s.get("qty") or 0) * (s.get("entry_price") or 0) >= DUST_USD]
+        levels = b.get("num_levels") or 0
+        cl, hd = closed.get(pid), held.get(pid)
+        out.append({
+            "product_id": pid,
+            "deployed_capital_usd": round(hd["deployed"], 2) if hd else 0.0,
+            "trapped_capital_usd": round(hd["trapped"], 2) if hd else 0.0,
+            "open_slices": hd["slices"] if hd else 0,
+            # Rungs, not dollars. See the docstring.
+            "available_rung_capacity": max(0, levels - len(sl)),
+            "buys_frozen": bool(b.get("drawdown_breached")),
+            "completed_cycles": cl["cycles"] if cl else 0,
+            "realized_profit_usd": round(cl["profit"], 2) if cl else 0.0,
+            "capital_days": round(cl["capital_days"], 1) if cl else 0.0,
+            "avg_hold_hours": (round(cl["hold_hours"] / cl["cycles"], 1)
+                               if cl and cl["cycles"] else None),
+            "usd_per_capital_day": (round(cl["profit"] / cl["capital_days"], 6)
+                                    if cl and cl["capital_days"] else None),
+        })
+    out.sort(key=lambda r: (r["usd_per_capital_day"] is None,
+                            -(r["usd_per_capital_day"] or 0)))
+    return out
+
+
+# Every dollar in one of these states is capital the system must not spend,
+# route, or add into any figure a buy gate reads. They are listed once,
+# here, so a future caller cannot quietly disagree about what counts.
+NEVER_DEPLOYABLE_STATES = (
+    "unpriced",        # the census could not price it; its value is UNKNOWN
+    "coin",            # already converted - it is a position, not purchasing power
+    "unbranched",      # no branch monitors, prices or stops it
+    "reserved",        # the account owner's floor
+)
+
+
+def never_deployable(census, money):
+    """The dollars that may NEVER become buying power, and why each one.
+
+    THE RULE THIS ENFORCES, in the account owner's words: unresolved
+    capital never buys, never routes, and never counts as available.
+
+    The danger is specific and has a number on it. The venue holds about
+    $6,026 that belongs to no branch, and an accounting table calling it
+    "unallocated" is one careless sum away from a buy gate reading it as
+    spendable. It is not spendable: most of it is coin, some of it the
+    census cannot even price, and none of it is cash with nothing claiming
+    it.
+
+    This function does not merely report. assert_deployable_is_clean()
+    below turns it into a check that FAILS when the deployable figure has
+    been contaminated, so the rule is enforced by the code rather than
+    remembered by a reader.
+    """
+    cash = census.get("cash_usd")
+    coin = census.get("coin_usd")
+    untracked = census.get("untracked_usd")
+    unpriced = census.get("assets_unpriced")
+    reserve = money.get("reserve_usd")
+    free = money.get("free_cash_usd")
+    buckets = {
+        "coin_usd": coin,
+        "unbranched_usd": untracked,
+        "reserved_cash_usd": reserve,
+        "unpriced_asset_count": unpriced,
+    }
+    return {
+        "buckets": buckets,
+        "deployable_usd": free,
+        "deployable_is": ("the USD WALLET balance less what is already claimed. It "
+                          "is derived from cash and never from coin, so an "
+                          "unpriced or unbranched asset cannot reach it by any "
+                          "arithmetic - and assert_deployable_is_clean() fails "
+                          "loudly if that ever stops being true."),
+        "rule": ("UNRESOLVED CAPITAL: never buy, never route, never count as "
+                 "available."),
+    }
+
+
+def assert_deployable_is_clean(census, money):
+    """Returns the violations, empty when the rule holds. Never raises.
+
+    A check that raised would take the whole panel down at the moment the
+    owner most needs to see it. It returns findings instead, and the page
+    shows them.
+    """
+    problems = []
+    cash = census.get("cash_usd")
+    free = money.get("free_cash_usd")
+    coin = census.get("coin_usd")
+    if free is None or cash is None:
+        return [{"check": "readable", "detail":
+                 "cash or free cash is unreadable on this pass, so the rule is "
+                 "UNKNOWN rather than passing"}]
+    # Deployable can never exceed the cash that exists. If it does, something
+    # priced in coin has been counted as purchasing power.
+    if free > cash + 0.005:
+        problems.append({
+            "check": "deployable_exceeds_cash",
+            "detail": (f"deployable ${free:,.2f} is larger than the ${cash:,.2f} of "
+                       "cash at the venue, so something that is not cash has been "
+                       "counted as buying power"),
+        })
+    # And it can never be as large as cash plus coin, which would mean the
+    # whole account was treated as spendable.
+    if coin is not None and free >= (cash + coin) - 0.005 and coin > 0:
+        problems.append({
+            "check": "whole_account_treated_as_cash",
+            "detail": "deployable has reached the entire venue balance, coin included",
+        })
+    if free < 0:
+        problems.append({
+            "check": "negative_deployable",
+            "detail": f"deployable is ${free:,.2f}; a negative is not a floor to buy from",
+        })
+    return problems

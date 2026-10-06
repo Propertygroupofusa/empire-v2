@@ -10663,7 +10663,8 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
                              "apart from a price wait on this reading. Treat the "
                              "trapped split as UNKNOWN, not as zero.")
 
-    classified = cv.classify_slices(branches, short_products, avail_map)
+    classified = cv.classify_slices(branches, short_products, avail_map,
+                                    now_epoch=time.time())
 
     money, money_unknown = {}, None
     try:
@@ -10680,13 +10681,33 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
     except Exception as e:
         census_unknown = f"census failed ({type(e).__name__})"
 
+    # The raw gaps, so the percentile view and the summary are the same
+    # measurement rather than two that can disagree.
+    _gaps = []
+    for _pid, _ss in sells.items():
+        _bl = sorted(buys.get(_pid) or [])
+        for _t in _ss:
+            _n = next((x for x in _bl if x > _t), None)
+            if _n is not None:
+                _gaps.append((_n - _t).total_seconds() / 3600.0)
+
     data = {
         "velocity": cv.fleet_velocity(records),
         "recycle": cv.recycle_rate(records),
         "redeploy": cv.redeploy_gaps(sells, buys),
+        "redeploy_distribution": cv.recycle_distribution(_gaps),
         "by_branch": cv.by_branch(records, min_cycles=min_cycles),
+        "branch_rollup": cv.branch_rollup(records, branches, classified),
+        "open_slices": cv.open_slice_records(classified),
         "trapped": cv.trapped_capital(classified),
         "capital_tree": cv.capital_tree(census_d, money) if (census_d and money) else None,
+        "never_deployable": (cv.never_deployable(census_d, money)
+                             if (census_d and money) else None),
+        # THE RULE, CHECKED RATHER THAN REMEMBERED. Empty means the
+        # deployable figure is still derived from cash alone and no
+        # unresolved dollar has leaked into it.
+        "deployable_violations": (cv.assert_deployable_is_clean(census_d, money)
+                                  if (census_d and money) else None),
         "predictive": cv.predictive_check(records),
         "unknowns": [u for u in (inventory_unknown, money_unknown, census_unknown) if u],
         "read_only": True,

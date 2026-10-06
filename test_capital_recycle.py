@@ -257,5 +257,101 @@ for bad in ("requests", "aiohttp", "place_order", "grid_sell", "grid_buy",
             "session.post", "import os"):
     ok(f"no {bad}", bad not in src)
 
+section("[11] the recycle TAIL, which a median hides")
+# Eight fast exits and two slow ones. With nine 1s and a single 100 the
+# 90th percentile is 1, correctly - only the top tenth exceeds it - so the
+# fixture needs a tail wide enough for p90 to land in.
+d = cv.recycle_distribution([1, 1, 1, 1, 1, 1, 1, 1, 50, 100])
+ok("the median stays near the fast cluster", d["p50_hours"] <= 2)
+ok("and the 90th percentile shows the tail the median hid", d["p90_hours"] >= 50)
+ok("p75 sits between them", d["p50_hours"] <= d["p75_hours"] <= d["p90_hours"])
+ok("an empty sample is UNKNOWN, not a zero-hour recycle",
+   cv.recycle_distribution([])["measured"] == 0
+   and "unknown_reason" in cv.recycle_distribution([]))
+ok("a None in the sample is dropped, never read as instant",
+   cv.recycle_distribution([None, 5])["measured"] == 1)
+
+section("[12] an OPEN slice accrues capital-days and has NO rate")
+cl = cv.classify_slices(
+    [{"product_id": "A-USD", "current_price": 100.0, "reference_price": 100.0,
+      "grid_pct": 0.03,
+      "slices": [{"qty": 1, "entry_price": 99.0, "unrealized_net_pct": -0.01,
+                  "opened_at": "2026-10-01T00:00:00Z"}]}],
+    now_epoch=1790899200.0)   # 2026-10-02T00:00:00Z, one day later
+rec = cv.open_slice_records(cl)[0]
+ok("it carries an age", rec["age_days"] is not None and abs(rec["age_days"] - 1.0) < 0.05)
+ok("and the capital-days it has already cost",
+   abs(rec["capital_days_accrued"] - 99.0) < 1.0)
+ok("but NO $/capital-day - an unrealised mark is not a measurement",
+   rec["usd_per_capital_day"] is None)
+ok("and it says why, where a reader will see it",
+   "unrealised price move" in rec["why_no_rate"])
+no_ts = cv.classify_slices(
+    [{"product_id": "B-USD", "current_price": 100.0, "reference_price": 100.0,
+      "grid_pct": 0.03, "slices": [{"qty": 1, "entry_price": 99.0}]}],
+    now_epoch=1790899200.0)
+ok("an unreadable timestamp gives age None, never 0 - a zero age would make "
+   "an old stuck slice report no capital cost at all",
+   cv.open_slice_records(no_ts)[0]["age_days"] is None)
+# A timestamp that is PRESENT but unparseable takes a different code path
+# from one that is absent, and a first draft of this test only covered the
+# absent case - so setting the except branch to 0.0 passed. Found by
+# mutation. A zero age makes a stuck slice report no capital cost at all,
+# which is the opposite of the truth and exactly the wrong way round.
+for junk in ("not-a-date", "", "2026-13-45T99:99:99Z", 12345):
+    bad = cv.classify_slices(
+        [{"product_id": "C-USD", "current_price": 100.0, "reference_price": 100.0,
+          "grid_pct": 0.03,
+          "slices": [{"qty": 1, "entry_price": 99.0, "opened_at": junk}]}],
+        now_epoch=1790899200.0)
+    r = cv.open_slice_records(bad)[0]
+    ok(f"an unparseable timestamp ({junk!r}) gives age None, never 0",
+       r["age_days"] is None and r["capital_days_accrued"] is None)
+
+section("[13] rungs free is not dollars available")
+roll = cv.branch_rollup(
+    cv.cycle_records([trade("A-USD", 10, 10, 1.0, i * 48, 24) for i in range(3)]),
+    [{"product_id": "A-USD", "num_levels": 3,
+      "slices": [{"qty": 1, "entry_price": 50.0}]}],
+    cv.classify_slices([{"product_id": "A-USD", "current_price": 100.0,
+                         "reference_price": 100.0, "grid_pct": 0.03,
+                         "slices": [{"qty": 1, "entry_price": 50.0,
+                                     "unrealized_net_pct": 0.5}]}]))[0]
+ok("a branch with one of three rungs filled has two free",
+   roll["available_rung_capacity"] == 2)
+ok("closed cycles and open slices are counted separately",
+   roll["completed_cycles"] == 3 and roll["open_slices"] == 1)
+ok("a frozen branch is flagged rather than shown as able to buy",
+   cv.branch_rollup([], [{"product_id": "F-USD", "num_levels": 3, "slices": [],
+                          "drawdown_breached": True}], [])[0]["buys_frozen"] is True)
+
+section("[14] THE RULE - unresolved capital never counts as available")
+census = {"cash_usd": 3772.47, "coin_usd": 6267.24, "total_usd": 10039.72,
+          "untracked_usd": 6026.33, "assets_unpriced": 4}
+money = {"reserve_usd": 2000.0, "free_cash_usd": 70.67, "deployed_usd": 3942.72,
+         "earmarked_behind_slices_usd": 7625.11}
+nd = cv.never_deployable(census, money)
+ok("coin is named as never-deployable", nd["buckets"]["coin_usd"] == 6267.24)
+ok("unbranched capital is named", nd["buckets"]["unbranched_usd"] == 6026.33)
+ok("the reserve is named", nd["buckets"]["reserved_cash_usd"] == 2000.0)
+ok("unpriced assets are named", nd["buckets"]["unpriced_asset_count"] == 4)
+ok("the rule is stated in the payload, not only in a comment",
+   "never buy, never route, never count as available" in nd["rule"])
+ok("the live numbers PASS the check", cv.assert_deployable_is_clean(census, money) == [])
+ok("deployable larger than the cash that exists is caught",
+   any(p["check"] == "deployable_exceeds_cash" for p in
+       cv.assert_deployable_is_clean(census, {**money, "free_cash_usd": 5000.0})))
+ok("treating the whole account as spendable is caught",
+   any(p["check"] == "whole_account_treated_as_cash" for p in
+       cv.assert_deployable_is_clean(census, {**money, "free_cash_usd": 10039.72})))
+ok("a negative deployable is caught, not used as a floor to buy from",
+   any(p["check"] == "negative_deployable" for p in
+       cv.assert_deployable_is_clean(census, {**money, "free_cash_usd": -5.0})))
+ok("an unreadable input is UNKNOWN, never a pass",
+   cv.assert_deployable_is_clean({}, {}) != [])
+ok("the check RETURNS findings rather than raising - a check that took the "
+   "panel down would blind the owner at the moment he needs it",
+   isinstance(cv.assert_deployable_is_clean(census, {**money, "free_cash_usd": 9e9}), list))
+
 print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILED: " + "; ".join(FAILS))
 sys.exit(0 if not FAILS else 1)

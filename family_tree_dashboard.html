@@ -5000,12 +5000,42 @@ async function renderCapitalVelocity() {
     let h = '<div class="panel" style="padding:10px 12px;">';
     h += '<div style="font-weight:600; margin-bottom:6px;">Capital velocity &mdash; how fast a dollar comes back</div>';
 
-    h += `<div style="display:flex; flex-wrap:wrap; gap:4px 22px; font-variant-numeric:tabular-nums; margin-bottom:7px;">`
-       + `<span><span style="color:var(--text-dim);">per capital-day</span> <strong>${num(v.usd_per_capital_day, 4, '')}</strong></span>`
-       + `<span><span style="color:var(--text-dim);">per cycle</span> ${num(rc.pct_per_cycle, 3, '%')}</span>`
-       + `<span><span style="color:var(--text-dim);">median hold</span> ${hrs(v.hold_hours_median)}</span>`
-       + `<span><span style="color:var(--text-dim);">sell &rarr; next buy</span> ${hrs(rd.median_hours)}</span>`
-       + `<span><span style="color:var(--text-dim);">cycles</span> ${v.cycles}</span></div>`;
+    // THE CAPITAL ENGINE BLOCK. Four buckets of money, then the four
+    // numbers that say how fast it moves. The buckets come FIRST because
+    // every rate below them is meaningless if the money they describe
+    // cannot actually be spent.
+    const rdd = d.redeploy_distribution || {};
+    h += `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:4px 18px;`
+       + ` font-variant-numeric:tabular-nums; margin-bottom:8px;">`
+       + `<span><span style="color:var(--text-dim);">Verified deployable</span> <strong>${usd(tree.deployable_now_usd)}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">Reserved</span> ${usd(tree.reserved_cash_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">In coin</span> ${usd(tree.branch_held_coin_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Unresolved</span> ${usd(tree.coin_no_branch_holds_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Capital-days</span> ${num(v.capital_days, 1)}</span>`
+       + `<span><span style="color:var(--text-dim);">$/capital-day</span> <strong>${num(v.usd_per_capital_day, 4)}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">Avg hold</span> ${hrs(v.hold_hours_median)}</span>`
+       + `<span><span style="color:var(--text-dim);">Sell &rarr; buy p50/p75/p90</span> `
+       + `${hrs(rdd.p50_hours)} / ${hrs(rdd.p75_hours)} / ${hrs(rdd.p90_hours)}</span>`
+       + `<span><span style="color:var(--text-dim);">Completed cycles</span> ${v.cycles}</span>`
+       + `<span><span style="color:var(--text-dim);">Recycle rate</span> ${num(rc.pct_per_cycle, 3, '%')}</span>`
+       + `<span><span style="color:var(--text-dim);">Realized profit</span> <strong>${usd(v.profit_usd)}</strong></span>`
+       + `</div>`;
+
+    // THE RULE, CHECKED. An empty violations list is not silence - it is
+    // the one place the page can say the deployable figure has not been
+    // contaminated by coin, by unpriced assets, or by capital no branch
+    // holds. A violation is drawn in red and says what leaked.
+    const dv = d.deployable_violations;
+    if (Array.isArray(dv) && dv.length) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #ef4444;">`
+           + `<strong>Unresolved capital has leaked into buying power</strong>`
+           + dv.map(x => `<div style="color:var(--text-dim);">${x.check}: ${x.detail}</div>`).join('')
+           + `</div>`;
+    } else if (Array.isArray(dv)) {
+        h += `<div style="margin-bottom:7px; color:var(--text-dim);">`
+           + `Unresolved capital never buys, never routes, never counts as available `
+           + `&mdash; checked this read, no leak.</div>`;
+    }
 
     // Deployable is the ONE number on this page that can buy something
     // this minute. It is given its own line so it cannot be mistaken for
