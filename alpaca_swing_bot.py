@@ -577,7 +577,34 @@ async def get_open_positions(session):
 
 
 async def place_order(session, symbol, qty, side):
-    """Place a market order with validation"""
+    """Place a market order with validation.
+
+    THE ONE CHOKEPOINT FOR NEW RISK ON THIS BOT. Both of its entry paths
+    (run_intraday_check and run_swing_check) reach the venue through here,
+    so the owner's entry pause is enforced here rather than at each call
+    site - a gate at one chokepoint cannot be bypassed by a path someone
+    forgets to update.
+
+    SELLS ARE NEVER BLOCKED. This bot shares an account with prop_bot.py
+    and an exit is a protection; refusing one would trap a position the
+    same way passive mode does. Only `buy` is refused, and only while the
+    owner's flag is set.
+    """
+    if side == "buy":
+        try:
+            from prop_bot import are_alpaca_entries_paused
+            if await are_alpaca_entries_paused():
+                log.info(
+                    f"\u23f8\ufe0f  ENTRY PAUSED {symbol}: the account owner has paused new Alpaca "
+                    f"entries - no buy placed. Exits are unaffected."
+                )
+                return None
+        except Exception as e:
+            # FAIL OPEN, deliberately, and only for the pause check: this
+            # bot's existing behaviour is to trade, and a DB hiccup must not
+            # silently become a second, invisible kill switch. It is logged
+            # loudly so a persistent failure is visible.
+            log.error(f"Entry-pause check failed for {symbol} - proceeding as unpaused: {e}")
     try:
         url = f"{get_base_url()}/v2/orders"
         payload = {
