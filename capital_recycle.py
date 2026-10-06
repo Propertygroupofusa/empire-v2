@@ -691,3 +691,198 @@ def assert_deployable_is_clean(census, money):
             "detail": f"deployable is ${free:,.2f}; a negative is not a floor to buy from",
         })
     return problems
+
+
+# EVERY DOLLAR LANDS IN EXACTLY ONE OF THESE. There is deliberately no
+# "unallocated" bucket: unallocated is not a state, it is the absence of
+# one, and a dollar in it is one careless sum away from being read as
+# buying power. Anything that cannot be placed is UNRESOLVED, which is a
+# state with a rule attached - never buy, never route, never count as
+# available.
+DOLLAR_BUCKETS = (
+    "VERIFIED_AVAILABLE",   # cash, unclaimed, spendable this minute
+    "RESERVED",             # cash, fenced by the owner's floor
+    "BRANCH_ALLOCATED",     # cash a branch has already claimed for a rung
+    "VERIFIED_COIN",        # coin a branch holds AND the wallet confirms
+    "UNRESOLVED",           # everything else, and it may never be spent
+)
+
+
+def classify_every_dollar(census, money, short_usd=0.0):
+    """The venue balance, split so the parts sum back to the whole.
+
+    The residual is published rather than absorbed. A classification whose
+    parts quietly fail to add up is worse than none: it looks authoritative
+    and is wrong by exactly the amount it does not mention. If `residual_usd`
+    is not within a cent of zero, one of the inputs disagrees with another
+    and the page says so instead of picking a side.
+
+    CASH and COIN are split separately because they are different kinds of
+    thing. Cash divides into what is spendable, what the floor holds, and
+    what branches have already claimed. Coin divides into what a branch
+    holds and can account for, and everything else.
+    """
+    cash = census.get("cash_usd")
+    coin = census.get("coin_usd")
+    total = census.get("total_usd")
+    free = money.get("free_cash_usd")
+    reserve = money.get("reserve_usd")
+    deployed = money.get("deployed_usd")
+    if cash is None or coin is None or free is None or reserve is None or deployed is None:
+        return {"readable": False, "unknown_reason":
+                ("one of cash, coin, free cash, reserve or deployed is unreadable "
+                 "on this pass. A bucket built on a missing input would be a "
+                 "guess wearing a total's name.")}
+
+    # Cash the branches have claimed is whatever is left once the spendable
+    # part and the floor are taken out. It is a RESIDUAL by construction,
+    # never a figure read from an allocation table - branch claim exceeds
+    # the cash that exists, so reading claim here would overstate the
+    # account by thousands.
+    branch_cash = round(cash - free - reserve, 2)
+    # Coin a branch holds and the wallet confirms. The short figure is
+    # subtracted because coin a branch CLAIMS but does not hold is not
+    # verified coin by any reading.
+    verified_coin = round(max(0.0, deployed - (short_usd or 0.0)), 2)
+    unresolved = round(coin - verified_coin, 2)
+
+    buckets = {
+        "VERIFIED_AVAILABLE": round(free, 2),
+        "RESERVED": round(reserve, 2),
+        "BRANCH_ALLOCATED": branch_cash,
+        "VERIFIED_COIN": verified_coin,
+        "UNRESOLVED": unresolved,
+    }
+    summed = round(sum(buckets.values()), 2)
+    residual = round((total if total is not None else cash + coin) - summed, 2)
+    notes = {
+        "VERIFIED_AVAILABLE": "cash with nothing claiming it - the only bucket that can buy",
+        "RESERVED": "cash held by the account owner's floor",
+        "BRANCH_ALLOCATED": ("cash a branch has claimed for a rung it has not bought "
+                             "yet. A RESIDUAL of cash, never read from the allocation "
+                             "table - claim exceeds the cash that exists"),
+        "VERIFIED_COIN": "coin a branch holds and the wallet confirms",
+        "UNRESOLVED": ("coin no branch holds, coin a branch claims but the wallet "
+                       "does not have, and anything the census could not price. "
+                       "NEVER buys, NEVER routes, NEVER counts as available"),
+    }
+    out = {
+        "readable": True,
+        "buckets": buckets,
+        "notes": notes,
+        "venue_total_usd": total,
+        "sum_of_buckets_usd": summed,
+        "residual_usd": residual,
+        # Five buckets each rounded to the cent can carry up to two and a
+        # half cents of rounding between them, so the tolerance is a few
+        # cents and not zero. Anything larger is a real disagreement
+        # between two inputs and is reported rather than absorbed.
+        "balances": abs(residual) <= 0.05,
+        "balance_tolerance_usd": 0.05,
+        "no_unallocated_bucket": ("Unallocated is not a state, it is the absence of "
+                                  "one. Anything that cannot be placed is UNRESOLVED, "
+                                  "which carries a rule."),
+    }
+    if not out["balances"]:
+        out["residual_warning"] = (
+            f"the buckets sum to ${summed:,.2f} against a venue total of "
+            f"${total:,.2f}. Something disagrees by ${residual:,.2f}; the split "
+            "above is not trustworthy until that is explained.")
+    return out
+
+
+def recycle_ledger(trades, buys_by_branch, all_buys=None, limit=200):
+    """One row per completed sell: what came back, and where it went next.
+
+    THE ROW IS THE MEASUREMENT. An aggregate says the fleet redeploys in a
+    median of eight hours; a row says which sell waited four days and which
+    branch finally took the money. Only the second can be acted on.
+
+    TWO "next buy" answers, because they are different questions and
+    collapsing them would answer neither. The SAME branch's next buy is
+    that branch's own recycle. The FLEET's next buy anywhere is where the
+    cash actually went, since cash is shared and a branch that sells does
+    not get first claim on its own proceeds.
+
+    A sell with no buy after it is carried with None, never dropped - the
+    slowest redeployments are the ones this exists to find.
+    """
+    rows, cumulative = [], 0.0
+    ordered = sorted((t for t in (trades or []) if t.get("closed_at")),
+                     key=lambda t: t["closed_at"])
+    fleet = sorted(all_buys or [])
+    for t in ordered:
+        pid = t.get("product_id")
+        qty = t.get("qty") or 0.0
+        exit_price = t.get("exit_price")
+        pnl = float(t.get("pnl") or 0.0)
+        basis = qty * (t.get("entry_price") or 0.0)
+        # What actually came back as cash. Gross proceeds when the exit
+        # price is recorded; basis plus P&L when it is not. The two agree
+        # to within the sell-leg fee, and which one was used is stated so
+        # nobody reconciles them against each other and finds a phantom gap.
+        if exit_price:
+            released = qty * exit_price
+            released_from = "exit price x quantity (gross of the sell-leg fee)"
+        else:
+            released = basis + pnl
+            released_from = "cost basis plus realised P&L (no exit price recorded)"
+        cumulative += released
+        own = next((b for b in sorted(buys_by_branch.get(pid) or [])
+                    if b > t["closed_at"]), None)
+        nxt = next((b for b in fleet if b[0] > t["closed_at"]), None)
+        hold_h = (((t["closed_at"] - t["opened_at"]).total_seconds() / 3600.0)
+                  if t.get("opened_at") else None)
+        cap_days = (basis * (hold_h / 24.0)) if hold_h else None
+        own_h = None
+        rows.append({
+            "entry_time": (t["opened_at"].isoformat() if t.get("opened_at")
+                           and hasattr(t["opened_at"], "isoformat")
+                           else (str(t["opened_at"]) if t.get("opened_at") else None)),
+            "exit_time": t["closed_at"].isoformat() if hasattr(t["closed_at"], "isoformat")
+                         else str(t["closed_at"]),
+            "sold_at": t["closed_at"].isoformat() if hasattr(t["closed_at"], "isoformat")
+                       else str(t["closed_at"]),
+            "hold_hours": round(hold_h, 2) if hold_h is not None else None,
+            "capital_days": round(cap_days, 3) if cap_days is not None else None,
+            # Per CYCLE, so a single fast winner and a single slow one are
+            # comparable without averaging them first.
+            "usd_per_capital_day": (round(pnl / cap_days, 6)
+                                    if cap_days and cap_days > 0 else None),
+            "branch": pid,
+            "product": pid,
+            "product_id": pid,
+            "cash_released_usd": round(released, 2),
+            "cash_released_from": released_from,
+            "realized_profit_usd": round(pnl, 2),
+            "capital_usd": round(basis, 2),
+            "hours_to_next_buy_same_branch": (
+                round((own - t["closed_at"]).total_seconds() / 3600.0, 2)
+                if own else None),
+            # MINUTES as well as hours, because the interesting end of this
+            # distribution is minutes: the fastest redeployment on the real
+            # book is under five, and reading that as "0.1 h" buries it.
+            "sell_to_next_buy_minutes": (
+                round((own - t["closed_at"]).total_seconds() / 60.0, 1)
+                if own else None),
+            "redeployed_amount_usd": round(nxt[2], 2) if nxt and nxt[2] is not None else None,
+            "hours_to_next_buy_anywhere": (
+                round((nxt[0] - t["closed_at"]).total_seconds() / 3600.0, 2)
+                if nxt else None),
+            "next_branch": nxt[1] if nxt else None,
+            "next_buy_usd": round(nxt[2], 2) if nxt and nxt[2] is not None else None,
+            "cumulative_recycled_usd": round(cumulative, 2),
+            "still_waiting": own is None,
+        })
+    rows.reverse()                      # newest first, like every other feed here
+    return {
+        "rows": rows[:limit],
+        "returned": min(len(rows), limit),
+        "total_sells": len(rows),
+        "truncated": len(rows) > limit,
+        "cumulative_recycled_usd": round(cumulative, 2),
+        "means": ("Cumulative recycled is the sum of every dollar that has come "
+                  "back from a completed sell. The same dollar recycled twenty "
+                  "times is counted twenty times - that is what 'recycled' means "
+                  "and it is NOT the size of the account."),
+    }

@@ -5005,12 +5005,51 @@ async function renderCapitalVelocity() {
     // every rate below them is meaningless if the money they describe
     // cannot actually be spent.
     const rdd = d.redeploy_distribution || {};
+
+    // THE FIVE BUCKETS, and they must sum to the venue total. There is
+    // deliberately no "unallocated" row: unallocated is not a state, it is
+    // the absence of one, and a dollar sitting in it is one careless sum
+    // away from being read as buying power. A residual the buckets cannot
+    // account for is printed in red rather than absorbed - a split that
+    // quietly fails to add up looks authoritative and is wrong by exactly
+    // the amount it does not mention.
+    const dc = d.dollar_classification;
+    if (dc && dc.readable) {
+        const order = ["VERIFIED_AVAILABLE", "RESERVED", "BRANCH_ALLOCATED",
+                       "VERIFIED_COIN", "UNRESOLVED"];
+        h += `<div style="margin-bottom:8px; font-variant-numeric:tabular-nums;">`;
+        for (const k of order) {
+            const warn = (k === "UNRESOLVED");
+            h += `<div style="display:flex; justify-content:space-between; max-width:380px;`
+               + (warn ? ` color:#f59e0b;` : ``) + `">`
+               + `<span>${k.toLowerCase().replace(/_/g, ' ')}</span>`
+               + `<strong>${usd(dc.buckets[k])}</strong></div>`;
+        }
+        h += `<div style="display:flex; justify-content:space-between; max-width:380px;`
+           + ` border-top:1px solid var(--border, #333); margin-top:3px; padding-top:3px;`
+           + ` color:var(--text-dim);"><span>venue total</span>`
+           + `<span>${usd(dc.venue_total_usd)}</span></div>`;
+        if (!dc.balances) {
+            h += `<div style="margin-top:4px; padding:5px 8px; border-left:3px solid #ef4444;">`
+               + `${dc.residual_warning}</div>`;
+        }
+        h += `</div>`;
+    }
+
+    // WORKING IS A DERIVED FIGURE AND INHERITS ITS INPUTS' UNKNOWNS.
+    // Defaulting either side to zero would print a confident "$0.00
+    // working" on a read where the trapped split could not be computed,
+    // which is the most alarming number on the panel and would be false.
+    const working = (tr.deployed_usd === null || tr.deployed_usd === undefined
+                     || tr.trapped_usd === null || tr.trapped_usd === undefined)
+                    ? null : tr.deployed_usd - tr.trapped_usd;
     h += `<div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:4px 18px;`
        + ` font-variant-numeric:tabular-nums; margin-bottom:8px;">`
-       + `<span><span style="color:var(--text-dim);">Verified deployable</span> <strong>${usd(tree.deployable_now_usd)}</strong></span>`
-       + `<span><span style="color:var(--text-dim);">Reserved</span> ${usd(tree.reserved_cash_usd)}</span>`
-       + `<span><span style="color:var(--text-dim);">In coin</span> ${usd(tree.branch_held_coin_usd)}</span>`
-       + `<span><span style="color:var(--text-dim);">Unresolved</span> ${usd(tree.coin_no_branch_holds_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Capital working</span> <strong>${usd(working)}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">Capital trapped</span> ${usd(tr.trapped_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Avg sell &rarr; buy</span> `
+       + `${rdd.p50_hours === null || rdd.p50_hours === undefined ? '<span style="color:var(--text-dim);">unknown</span>' : (rdd.p50_hours * 60).toFixed(0) + ' min'}</span>`
+       + `<span><span style="color:var(--text-dim);">Cumulative recycled</span> ${usd((d.recycle_ledger || {}).cumulative_recycled_usd)}</span>`
        + `<span><span style="color:var(--text-dim);">Capital-days</span> ${num(v.capital_days, 1)}</span>`
        + `<span><span style="color:var(--text-dim);">$/capital-day</span> <strong>${num(v.usd_per_capital_day, 4)}</strong></span>`
        + `<span><span style="color:var(--text-dim);">Avg hold</span> ${hrs(v.hold_hours_median)}</span>`

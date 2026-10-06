@@ -42,6 +42,9 @@ ok('the number formatter returns "unknown" for null/undefined',
    /\(v === null \|\| v === undefined\)[\s\S]{0,80}unknown/.test(body));
 ok('deployable cash is not defaulted to 0', !/deployable_now_usd \|\| 0/.test(body));
 ok('trapped capital is not defaulted to 0', !/trapped_usd \|\| 0/.test(body));
+ok('and capital working inherits its inputs unknowns rather than printing '
+   + 'a confident $0.00 on a read where the split could not be computed',
+   /const working = \(tr\.deployed_usd === null/.test(body));
 ok('server-side unknowns are surfaced, not swallowed',
    /d\.unknowns/.test(body));
 
@@ -53,12 +56,12 @@ ok('thin branch samples are reported as withheld, not ranked',
    /too_few_cycles/.test(body) && /not evidence/.test(body));
 
 section('[6] the CAPITAL ENGINE block leads with money, then rates');
-const engineAt = body.indexOf('Verified deployable');
+const engineAt = body.indexOf('VERIFIED_AVAILABLE');
 const rateAt = body.indexOf('$/capital-day');
 ok('the buckets are drawn', engineAt > -1);
 ok('and BEFORE the rates - every rate is meaningless if the money it '
    + 'describes cannot be spent', engineAt < rateAt);
-for (const field of ['Reserved', 'In coin', 'Unresolved', 'Capital-days',
+for (const field of ['RESERVED', 'VERIFIED_COIN', 'UNRESOLVED', 'Capital-days',
                      'Avg hold', 'Completed cycles', 'Recycle rate',
                      'Realized profit']) {
     ok(`the block shows ${field}`, body.includes(field));
@@ -73,6 +76,35 @@ ok('and a clean read SAYS it was checked rather than staying silent',
    /checked this read, no leak/.test(body));
 ok('the rule is stated in the words the owner used',
    /never buys, never routes, never counts as available/.test(body));
+
+section('[8] the five buckets are drawn, and nothing is "unallocated"');
+ok('all five bucket names are rendered',
+   ['VERIFIED_AVAILABLE', 'RESERVED', 'BRANCH_ALLOCATED', 'VERIFIED_COIN',
+    'UNRESOLVED'].every(k => body.includes(k)));
+// Comments are stripped first. The promise is that no unallocated bucket
+// is RENDERED, not that the word never appears - the panel's own comment
+// explains why there is no such row, and a blunt search matches that and
+// reports a failure that is the opposite of the truth.
+const rendered = body.replace(/^\s*\/\/.*$/gm, '');
+ok('there is no unallocated row - unallocated is the absence of a state, '
+   + 'and a dollar in it is one sum away from being read as buying power',
+   !/UNALLOCATED/i.test(rendered));
+ok('the venue total is shown beneath them so the sum can be checked by eye',
+   /venue total/.test(body));
+ok('a residual the buckets cannot explain is drawn in red, not absorbed',
+   /!dc\.balances[\s\S]{0,200}#ef4444/.test(body));
+ok('UNRESOLVED is coloured apart from the rest',
+   /k === "UNRESOLVED"/.test(body));
+
+section('[9] the engine row shows working, trapped and recycled');
+for (const f of ['Capital working', 'Capital trapped', 'Avg sell',
+                 'Cumulative recycled']) {
+    ok(`the row shows ${f}`, body.includes(f));
+}
+ok('sell to buy is shown in minutes where the fast end lives',
+   /\* 60\)\.toFixed\(0\) \+ ' min'/.test(body));
+ok('and an unknown recycle time says unknown rather than 0 min',
+   /p50_hours === null \|\| rdd\.p50_hours === undefined/.test(body));
 
 console.log(fails === 0 ? '\nALL PASS' : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

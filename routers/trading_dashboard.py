@@ -10611,6 +10611,7 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
         )).scalars().all()
     trades = [{
         "product_id": r.product_id, "qty": r.qty, "entry_price": r.entry_price,
+        "exit_price": r.exit_price,
         "pnl": r.pnl, "opened_at": r.opened_at, "closed_at": r.closed_at,
         "exit_reason": r.exit_reason,
     } for r in rows if (r.exit_reason or "") != "adopted_exit"]
@@ -10639,8 +10640,31 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
                 except Exception:
                     pass
 
+    # THE FLEET-WIDE BUY TIMELINE. Cash is shared, so a branch that sells
+    # does not get first claim on its own proceeds - "where did the money
+    # go next" is a fleet question and cannot be answered per branch.
+    fleet_buys = []
+    for t in trades:
+        if t.get("opened_at"):
+            fleet_buys.append((t["opened_at"], t["product_id"],
+                               (t.get("qty") or 0) * (t.get("entry_price") or 0)))
+    for b in branches:
+        for sl in (b.get("slices") or []):
+            v = sl.get("opened_at")
+            if not v:
+                continue
+            try:
+                from datetime import datetime as _dt
+                v = _dt.fromisoformat(str(v).replace("Z", "+00:00")) if isinstance(v, str) else v
+                fleet_buys.append((v.replace(tzinfo=None) if getattr(v, "tzinfo", None) else v,
+                                   b.get("product_id"),
+                                   (sl.get("qty") or 0) * (sl.get("entry_price") or 0)))
+            except Exception:
+                continue
+
     # ---- inventory truth, from the same source the buy gate uses ----
     short_products, avail_map, inventory_unknown = set(), {}, None
+    _short_usd = 0.0
     try:
         async with _aiohttp.ClientSession() as _s:
             bal = await account_census.fetch_balances(_s)
@@ -10657,6 +10681,13 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
                 short_products.add(pid)
             if base in avail:
                 avail_map[pid] = avail[base]
+        # Claimed-but-not-held, priced, so the verified-coin bucket can
+        # exclude it. Priced at the branch's own current price, which is
+        # the same price the deployed figure uses.
+        for b in branches:
+            if b.get("product_id") in short_products:
+                _short_usd += sum((sl.get("qty") or 0) * (b.get("current_price") or 0)
+                                  for sl in (b.get("slices") or []))
     except Exception as e:
         inventory_unknown = (f"the wallet could not be read ({type(e).__name__}), so "
                              "ACCOUNTING_HOLD and INVENTORY_LOCKED cannot be told "
@@ -10703,6 +10734,9 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
         "capital_tree": cv.capital_tree(census_d, money) if (census_d and money) else None,
         "never_deployable": (cv.never_deployable(census_d, money)
                              if (census_d and money) else None),
+        "dollar_classification": (cv.classify_every_dollar(census_d, money, _short_usd)
+                                  if (census_d and money) else None),
+        "recycle_ledger": cv.recycle_ledger(trades, buys, fleet_buys),
         # THE RULE, CHECKED RATHER THAN REMEMBERED. Empty means the
         # deployable figure is still derived from cash alone and no
         # unresolved dollar has leaked into it.

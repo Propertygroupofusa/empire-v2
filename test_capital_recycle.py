@@ -353,5 +353,74 @@ ok("the check RETURNS findings rather than raising - a check that took the "
    "panel down would blind the owner at the moment he needs it",
    isinstance(cv.assert_deployable_is_clean(census, {**money, "free_cash_usd": 9e9}), list))
 
+section("[15] every dollar lands in exactly one bucket, and they sum")
+census = {"cash_usd": 3772.47, "coin_usd": 6267.24, "total_usd": 10039.72,
+          "untracked_usd": 6026.33, "assets_unpriced": 4}
+money = {"reserve_usd": 2000.0, "free_cash_usd": 70.67, "deployed_usd": 3942.72,
+         "earmarked_behind_slices_usd": 7625.11}
+dc = cv.classify_every_dollar(census, money, short_usd=0.0)
+ok("there are exactly five buckets", set(dc["buckets"]) == set(cv.DOLLAR_BUCKETS))
+ok("and none of them is called 'unallocated'",
+   not any("UNALLOC" in b.upper() for b in dc["buckets"]))
+ok("they sum to the venue total within a few cents of rounding", dc["balances"])
+ok("branch-allocated cash is a RESIDUAL of cash, not the claim figure - "
+   "claim exceeds the cash that exists by thousands",
+   abs(dc["buckets"]["BRANCH_ALLOCATED"] - (3772.47 - 70.67 - 2000.0)) < 0.01)
+ok("only the available bucket can buy",
+   dc["notes"]["VERIFIED_AVAILABLE"].endswith("the only bucket that can buy"))
+ok("unresolved carries the rule, not just a label",
+   "NEVER buys" in dc["notes"]["UNRESOLVED"])
+short = cv.classify_every_dollar(census, money, short_usd=622.05)
+ok("coin a branch claims but does not hold leaves VERIFIED_COIN",
+   short["buckets"]["VERIFIED_COIN"] < dc["buckets"]["VERIFIED_COIN"])
+ok("and lands in UNRESOLVED instead",
+   short["buckets"]["UNRESOLVED"] > dc["buckets"]["UNRESOLVED"])
+ok("the totals still balance once it moves", short["balances"])
+bad = cv.classify_every_dollar({**census, "total_usd": 99999.0}, money)
+ok("a residual the buckets cannot explain is REPORTED, never absorbed",
+   bad["balances"] is False and "residual_warning" in bad)
+ok("a missing input is UNKNOWN rather than a bucket built on a guess",
+   cv.classify_every_dollar({}, {})["readable"] is False)
+
+section("[16] the recycle ledger - one row per completed sell")
+T1 = datetime(2026, 10, 1, 12, 0, 0)
+tr = [{"product_id": "A-USD", "qty": 2.0, "entry_price": 10.0, "exit_price": 11.0,
+       "pnl": 1.8, "opened_at": T1, "closed_at": T1 + timedelta(hours=24)},
+      {"product_id": "B-USD", "qty": 1.0, "entry_price": 50.0, "exit_price": 51.0,
+       "pnl": 0.6, "opened_at": T1, "closed_at": T1 + timedelta(hours=48)}]
+buysb = {"A-USD": [T1 + timedelta(hours=24, minutes=30)]}
+fleet = [(T1 + timedelta(hours=24, minutes=5), "C-USD", 33.0),
+         (T1 + timedelta(hours=49), "D-USD", 77.0)]
+led = cv.recycle_ledger(tr, buysb, fleet)
+ok("one row per sell", led["total_sells"] == 2)
+ok("newest first, like every other feed here",
+   led["rows"][0]["product"] == "B-USD")
+a = [r for r in led["rows"] if r["product"] == "A-USD"][0]
+ok("cash released is the exit price times quantity", a["cash_released_usd"] == 22.0)
+ok("and says which basis it used, so nobody finds a phantom gap "
+   "reconciling it against cost-plus-P&L",
+   "exit price" in a["cash_released_from"])
+ok("the hold is recorded in hours", a["hold_hours"] == 24.0)
+ok("capital-days are per cycle", abs(a["capital_days"] - 20.0) < 1e-9)
+ok("and so is the rate", abs(a["usd_per_capital_day"] - 0.09) < 1e-6)
+ok("sell to next buy is in MINUTES, where the interesting end of this "
+   "distribution lives", a["sell_to_next_buy_minutes"] == 30.0)
+ok("the FLEET's next buy is recorded separately from the branch's own - "
+   "cash is shared and a branch has no first claim on its own proceeds",
+   a["next_branch"] == "C-USD" and a["redeployed_amount_usd"] == 33.0)
+b_ = [r for r in led["rows"] if r["product"] == "B-USD"][0]
+ok("a sell with no buy after it in its own branch is carried, not dropped",
+   b_["still_waiting"] is True and b_["sell_to_next_buy_minutes"] is None)
+ok("cumulative recycled sums every dollar that came back",
+   abs(led["cumulative_recycled_usd"] - 73.0) < 1e-9)
+ok("and says plainly that it is NOT the size of the account",
+   "NOT the size of the account" in led["means"])
+no_exit = cv.recycle_ledger(
+    [{"product_id": "A-USD", "qty": 2.0, "entry_price": 10.0, "exit_price": None,
+      "pnl": 1.8, "opened_at": T1, "closed_at": T1 + timedelta(hours=1)}], {}, [])
+ok("a missing exit price falls back to basis plus P&L and SAYS so",
+   no_exit["rows"][0]["cash_released_usd"] == 21.8
+   and "cost basis plus" in no_exit["rows"][0]["cash_released_from"])
+
 print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILED: " + "; ".join(FAILS))
 sys.exit(0 if not FAILS else 1)
