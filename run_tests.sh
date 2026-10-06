@@ -22,6 +22,7 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 BASELINE=test_baseline.txt
+FAILURES_FILE=test_failures_last_run.txt
 UPDATE=0
 PATTERN=""
 for a in "$@"; do
@@ -49,6 +50,14 @@ for f in "${MODULES[@]}"; do
   fi
 done
 sort -o "$NOW" "$NOW" 2>/dev/null || : > "$NOW"
+
+# The failing list from THIS run, written where something other than a human
+# reading scrollback can pick it up. CI needs it: a job log is served from a
+# host some tooling cannot follow, so a run that fails the baseline comparison
+# could report "exit 1" and nothing else - which is how this gate stayed red
+# for three commits without anyone able to say which module caused it.
+cp "$NOW" "$FAILURES_FILE" 2>/dev/null || :
+
 printf '\n\n%d passed, %d failed, %d total\n' "$PASSED" "$FAILED" "${#MODULES[@]}"
 
 if [ "$UPDATE" = "1" ]; then
