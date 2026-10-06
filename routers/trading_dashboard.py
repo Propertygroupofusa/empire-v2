@@ -10560,6 +10560,146 @@ async def grid_money_check_endpoint():
         "Pragma": "no-cache", "Expires": "0"})
 
 
+@router.get("/grid-status/capital-velocity")
+async def grid_capital_velocity_endpoint(min_cycles: int = 3):
+    """How fast capital completes a cycle, and how much of it cannot.
+
+    The account owner's question, in his words: "make the existing capital
+    recycle faster when the system has a verified profitable exit." Every
+    other P&L surface here answers "did this branch make money"; none of
+    them answered "how fast did the money come back", and the two rank the
+    fleet differently enough that acting on the first alone is a mistake.
+    XRP and HBAR have earned almost the same dollars on this book while
+    HBAR used about one sixty-fourth of the capital-days to do it.
+
+    STRICTLY READ-ONLY, and deliberately NOT a router. It chooses no coin,
+    sizes no rung and places no order. The payload carries its own
+    out-of-sample test (`predictive`) with a `routing_allowed` flag,
+    because three ranking ideas have already been tested on this fleet's
+    real tape and lost money out of sample - the yield-weighted one, which
+    is "give the capital to the highest-scoring branch", was the worst of
+    them. Nothing in this repository may route capital while that flag
+    reads False, and it re-computes itself as the book grows rather than
+    being a number somebody wrote down once.
+
+    An input that cannot be read becomes UNKNOWN with its cause attached,
+    never a zero. A zero here would read as "nothing is trapped" or "no
+    cash is available", which are the two most expensive wrong answers
+    this endpoint could give.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    import capital_recycle as cv
+    import account_census
+    import aiohttp as _aiohttp
+    from models import CryptoGridTradeHistory
+    from sqlalchemy import select
+
+    g = crypto_grid_bot_module
+    status = await g.get_grid_status()
+    branches = status.get("branches") or []
+
+    # ---- the closed book, own round trips only ----
+    #
+    # An adopted exit is the account owner's older decision resolving, not
+    # a cycle this strategy chose both ends of, so it cannot speak to how
+    # fast this strategy recycles capital. Four of them carry -$311.24 and
+    # would swamp every rate on this page.
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(CryptoGridTradeHistory).order_by(CryptoGridTradeHistory.closed_at)
+        )).scalars().all()
+    trades = [{
+        "product_id": r.product_id, "qty": r.qty, "entry_price": r.entry_price,
+        "pnl": r.pnl, "opened_at": r.opened_at, "closed_at": r.closed_at,
+        "exit_reason": r.exit_reason,
+    } for r in rows if (r.exit_reason or "") != "adopted_exit"]
+    records = cv.cycle_records(trades)
+
+    # ---- sell -> next buy, per branch ----
+    #
+    # The buy timeline is the closed trades' ENTRIES plus the slices still
+    # open; using only closed trades would miss every buy that has not sold
+    # yet, which is most of the recent ones.
+    sells, buys = {}, {}
+    for t in trades:
+        if t.get("closed_at"):
+            sells.setdefault(t["product_id"], []).append(t["closed_at"])
+        if t.get("opened_at"):
+            buys.setdefault(t["product_id"], []).append(t["opened_at"])
+    for b in branches:
+        for sl in (b.get("slices") or []):
+            if sl.get("opened_at"):
+                try:
+                    from datetime import datetime as _dt
+                    v = sl["opened_at"]
+                    v = _dt.fromisoformat(str(v).replace("Z", "+00:00")) if isinstance(v, str) else v
+                    buys.setdefault(b.get("product_id"), []).append(
+                        v.replace(tzinfo=None) if getattr(v, "tzinfo", None) else v)
+                except Exception:
+                    pass
+
+    # ---- inventory truth, from the same source the buy gate uses ----
+    short_products, avail_map, inventory_unknown = set(), {}, None
+    try:
+        async with _aiohttp.ClientSession() as _s:
+            bal = await account_census.fetch_balances(_s)
+        owned = account_census.owned_units_map(bal) or {}
+        avail = account_census.available_units_map(bal) or {}
+        for b in branches:
+            pid = b.get("product_id") or ""
+            base = pid.split("-")[0].upper()
+            claimed = sum((sl.get("qty") or 0) for sl in (b.get("slices") or []))
+            held = owned.get(base)
+            # ABSENT IS UNKNOWN, NEVER ZERO. A gap in the reading that was
+            # treated as zero would declare every branch short.
+            if held is not None and claimed > 0 and claimed - held > 1e-12:
+                short_products.add(pid)
+            if base in avail:
+                avail_map[pid] = avail[base]
+    except Exception as e:
+        inventory_unknown = (f"the wallet could not be read ({type(e).__name__}), so "
+                             "ACCOUNTING_HOLD and INVENTORY_LOCKED cannot be told "
+                             "apart from a price wait on this reading. Treat the "
+                             "trapped split as UNKNOWN, not as zero.")
+
+    classified = cv.classify_slices(branches, short_products, avail_map)
+
+    money, money_unknown = {}, None
+    try:
+        money = await g.money_check()
+    except Exception as e:
+        money_unknown = f"money_check failed ({type(e).__name__})"
+    census_d, census_unknown = {}, None
+    try:
+        async with _aiohttp.ClientSession() as _s:
+            census_d = await account_census.census(_s, tracked_usd=0.0)
+        if not census_d.get("available"):
+            census_unknown = "the venue census is unavailable on this reading"
+            census_d = {}
+    except Exception as e:
+        census_unknown = f"census failed ({type(e).__name__})"
+
+    data = {
+        "velocity": cv.fleet_velocity(records),
+        "recycle": cv.recycle_rate(records),
+        "redeploy": cv.redeploy_gaps(sells, buys),
+        "by_branch": cv.by_branch(records, min_cycles=min_cycles),
+        "trapped": cv.trapped_capital(classified),
+        "capital_tree": cv.capital_tree(census_d, money) if (census_d and money) else None,
+        "predictive": cv.predictive_check(records),
+        "unknowns": [u for u in (inventory_unknown, money_unknown, census_unknown) if u],
+        "read_only": True,
+        "this_is_not_a_router": ("Measurement only. It chooses no coin, sizes no rung "
+                                 "and places no order. Read predictive.routing_allowed "
+                                 "before letting any of it move a dollar."),
+        "as_of": datetime.utcnow().isoformat() + "Z",
+    }
+    return JSONResponse(content=data, headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/harvest-preview")
 async def grid_harvest_preview_endpoint():
     """What the hourly profit harvest would take right now, and why not.

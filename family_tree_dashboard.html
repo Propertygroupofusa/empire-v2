@@ -1349,6 +1349,7 @@
     <div id="grid-fee-rate-badge" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="grid-maker-orders-toggle" style="font-size:0.8em; color: var(--text-dim); margin-bottom: 10px;"></div>
     <div id="account-census-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
+    <div id="capital-velocity-panel" style="font-size:0.85em; margin-bottom: 12px;"></div>
     <!-- EXECUTION & INVENTORY. Added because none of it was on this page:
          /grid-status/invariants was reporting FAIL with $639.28 short across
          nine positions and the dashboard did not mention it, and the three
@@ -3298,6 +3299,7 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
     renderGridMakerOrdersToggle(data);
     renderGridOpportunityPanel(data);
     renderAccountCensus();
+    renderCapitalVelocity();
     renderExecutionInventory();
     renderMakerExpiries();
     renderGridMakerOnlyToggle(data);
@@ -4957,6 +4959,121 @@ async function renderAccountCensus() {
         coin: d.coin_usd,
         byAsset: Object.fromEntries((d.holdings || []).map(r => [r.asset, r.usd])),
     };
+}
+
+// HOW FAST CAPITAL COMES BACK, which no other panel on this page answers.
+//
+// Every profit surface here says "did this branch make money". None said
+// "how fast did the money come back", and the two rank the fleet
+// differently enough that reading only the first is a mistake: XRP and
+// HBAR have earned almost the same dollars on this book while HBAR used
+// about a sixty-fourth of the capital-days to do it.
+//
+// THIS PANEL MUST NOT BECOME A BUY LIST. The ranking it draws is a
+// description of what already happened. The endpoint carries its own
+// out-of-sample test and this panel prints that verdict at the top of the
+// ranking, in the reader's way, because three ranking ideas have already
+// been tested on this fleet's real tape and lost money out of sample.
+async function renderCapitalVelocity() {
+    const el = document.getElementById('capital-velocity-panel');
+    if (!el) return;
+    let d;
+    try {
+        const r = await fetch('/api/trading-dashboard/grid-status/capital-velocity');
+        d = await r.json();
+    } catch (e) { el.innerHTML = ''; return; }
+    if (!d || !d.velocity) { el.innerHTML = ''; return; }
+    const usd = v => (v === null || v === undefined) ? '&mdash;'
+        : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    // A MISSING NUMBER PRINTS AS UNKNOWN, never as zero. A zero here would
+    // read as "nothing is trapped" or "no cash is available", which are
+    // the two most expensive wrong answers this panel could give.
+    const num = (v, dp, suffix) => (v === null || v === undefined)
+        ? '<span style="color:var(--text-dim);">unknown</span>'
+        : Number(v).toFixed(dp) + (suffix || '');
+    const hrs = v => (v === null || v === undefined)
+        ? '<span style="color:var(--text-dim);">unknown</span>' : Number(v).toFixed(1) + 'h';
+
+    const v = d.velocity, rc = d.recycle || {}, rd = d.redeploy || {}, tr = d.trapped || {};
+    const pr = d.predictive || {}, tree = d.capital_tree || {};
+
+    let h = '<div class="panel" style="padding:10px 12px;">';
+    h += '<div style="font-weight:600; margin-bottom:6px;">Capital velocity &mdash; how fast a dollar comes back</div>';
+
+    h += `<div style="display:flex; flex-wrap:wrap; gap:4px 22px; font-variant-numeric:tabular-nums; margin-bottom:7px;">`
+       + `<span><span style="color:var(--text-dim);">per capital-day</span> <strong>${num(v.usd_per_capital_day, 4, '')}</strong></span>`
+       + `<span><span style="color:var(--text-dim);">per cycle</span> ${num(rc.pct_per_cycle, 3, '%')}</span>`
+       + `<span><span style="color:var(--text-dim);">median hold</span> ${hrs(v.hold_hours_median)}</span>`
+       + `<span><span style="color:var(--text-dim);">sell &rarr; next buy</span> ${hrs(rd.median_hours)}</span>`
+       + `<span><span style="color:var(--text-dim);">cycles</span> ${v.cycles}</span></div>`;
+
+    // Deployable is the ONE number on this page that can buy something
+    // this minute. It is given its own line so it cannot be mistaken for
+    // the account total sitting above it.
+    if (tree && tree.deployable_now_usd !== undefined) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid var(--green);">`
+           + `<strong>${usd(tree.deployable_now_usd)}</strong> can buy something right now`
+           + `<span style="color:var(--text-dim);"> &mdash; ${usd(tree.reserved_cash_usd)} is reserve, `
+           + `${usd(tree.branch_held_coin_usd)} is already in coin, and branch claim exceeds the cash behind it `
+           + `by ${usd(tree.claim_minus_cash_usd)}. Claim is a name on a rung, not money.</span></div>`;
+    }
+
+    if (tr.deployed_usd) {
+        h += `<div style="margin-bottom:7px; padding:6px 8px; border-left:3px solid #f59e0b;">`
+           + `<strong>${usd(tr.trapped_usd)}</strong> of ${usd(tr.deployed_usd)} deployed cannot recycle on price alone`
+           + ` <span style="color:var(--text-dim);">(${num(tr.trapped_pct, 1, '%')})</span>`;
+        const states = tr.by_state || {};
+        const parts = Object.keys(states).map(k =>
+            `${k.toLowerCase().replace(/_/g, ' ')} ${usd(states[k].capital_usd)} (${states[k].slices})`);
+        if (parts.length) h += `<div style="color:var(--text-dim); margin-top:3px;">${parts.join(' &middot; ')}</div>`;
+        h += `</div>`;
+    }
+
+    // THE GATE, printed ABOVE the ranking it governs. A table of winners
+    // with the caveat underneath it is a buy list with a footnote.
+    const allowed = pr.routing_allowed === true;
+    h += `<div style="margin-bottom:6px; padding:6px 8px; border-left:3px solid ${allowed ? 'var(--green)' : '#ef4444'};">`
+       + `<strong>${allowed ? 'Velocity rank survived out of sample' : 'Not a buy list'}</strong> `
+       + `<span style="color:var(--text-dim);">&mdash; ${pr.verdict || 'UNKNOWN'}`
+       + (pr.spearman_rho !== undefined && pr.spearman_rho !== null
+            ? `, rho ${num(pr.spearman_rho, 3)} against a ${num(pr.critical_value_5pct, 3)} bar at n=${pr.branches_in_both_halves}` : '')
+       + `. ${allowed ? 'Past rank predicted future rank on this book.'
+            : 'This ranking describes what already happened and is not a reason to move money.'}</span></div>`;
+
+    const ranked = (d.by_branch && d.by_branch.ranked) || [];
+    if (ranked.length) {
+        h += `<div class="table-scroll"><table style="width:100%; font-size:0.92em; border-collapse:collapse;">`
+           + `<thead><tr style="text-align:left; color:var(--text-dim);">`
+           + `<th style="padding:3px 8px 3px 0;">Branch</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Cycles</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Profit</th>`
+           + `<th style="text-align:right; padding:3px 8px;">Capital-days</th>`
+           + `<th style="text-align:right; padding:3px 8px;">$/cap-day</th>`
+           + `<th style="text-align:right; padding:3px 0;">Avg hold</th></tr></thead><tbody>`;
+        for (const r of ranked) {
+            const neg = (r.usd_per_capital_day || 0) < 0;
+            h += `<tr><td style="padding:2px 8px 2px 0;">${r.product_id}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${r.cycles}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${usd(r.profit_usd)}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${Number(r.capital_days).toLocaleString(undefined,{maximumFractionDigits:1})}</td>`
+               + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums; color:${neg ? 'var(--red)' : 'inherit'};">`
+               + `<strong>${num(r.usd_per_capital_day, 4)}</strong></td>`
+               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;">${hrs(r.avg_hold_hours)}</td></tr>`;
+        }
+        h += `</tbody></table></div>`;
+    }
+    const held = (d.by_branch && d.by_branch.too_few_cycles) || [];
+    if (held.length) {
+        h += `<div style="margin-top:4px; color:var(--text-dim); font-size:.92em;">`
+           + `${held.length} branch(es) under ${d.by_branch.min_cycles} closed cycles are not ranked &mdash; `
+           + `a rate from one or two trades is arithmetic, not evidence.</div>`;
+    }
+    for (const u of (d.unknowns || [])) {
+        h += `<div style="margin-top:4px; padding:5px 8px; border-left:3px solid #f59e0b; color:var(--text-dim);">${u}</div>`;
+    }
+    h += `<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">`
+       + `Read-only; it places nothing. Measured at ${d.as_of}.</div></div>`;
+    el.innerHTML = h;
 }
 
 function renderGridOpportunityPanel(d) {
