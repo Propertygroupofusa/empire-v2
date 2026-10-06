@@ -6768,6 +6768,25 @@ async def get_alpaca_wheel_status():
     }
 
 
+_wheel_candidates_cache = {"at": 0.0, "data": None}
+
+
+@router.get("/alpaca-overview/wheel-candidates")
+async def get_alpaca_wheel_candidates(refresh: bool = False):
+    """Scan the listed put market for tickers this account could genuinely
+    wheel right now, graded on the engine's own rules. Read-only - a pass
+    is a proposal; nothing trades until the owner approves it. Cached 5
+    minutes because one scan is dozens of Alpaca requests."""
+    import time as _t
+    import alpaca_wheel_bot as wheel
+    if not refresh and _wheel_candidates_cache["data"] and _t.time() - _wheel_candidates_cache["at"] < 300:
+        return _wheel_candidates_cache["data"]
+    data = await wheel.scan_candidates()
+    data["max_active_wheels"] = wheel.MAX_ACTIVE_WHEELS
+    _wheel_candidates_cache.update(at=_t.time(), data=data)
+    return data
+
+
 @router.post("/alpaca-overview/wheel-mode")
 async def set_alpaca_wheel_mode(payload: WheelModeRequest):
     """Master switch for the REAL-money wheel. Off by default."""
@@ -6785,6 +6804,10 @@ async def set_alpaca_wheel_ticker(payload: WheelTickerRequest):
         row = await wheel.set_approved(payload.underlying, payload.approved)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    cached = _wheel_candidates_cache.get("data") or {}
+    for c in cached.get("candidates") or []:
+        if c.get("underlying") == (row or {}).get("underlying"):
+            c["status"] = "approved" if payload.approved else "rejected"
     return {"status": "updated", "ticker": row}
 
 

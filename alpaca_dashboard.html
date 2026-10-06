@@ -519,12 +519,14 @@
     <div class="panel" id="wheel-panel">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; flex-wrap:wrap; gap:8px;">
             <button id="wheel-mode-toggle-btn" class="unlock-btn" onclick="toggleWheelMode()" disabled>Loading…</button>
-            <div style="display:flex; gap:6px; align-items:center;">
-                <input id="wheel-ticker-input" class="modal-input" style="width:90px; margin:0;" placeholder="Ticker" maxlength="6">
-                <button class="unlock-btn" onclick="approveWheelTicker()">➕ Approve</button>
-            </div>
+            <button class="unlock-btn" onclick="loadWheelCandidates(true)">🔎 Find candidates</button>
         </div>
         <div id="wheel-content" class="empty">Loading…</div>
+        <div class="section-title" style="font-size:1em; margin-top:14px;">🛞 Wheel candidates</div>
+        <p class="panel-sub">Scanned from the whole listed put market and graded on the same rules the wheel trades by.
+            A pass is a proposal — nothing trades until you approve it, and only one wheel runs at a time during the first live validation.</p>
+        <div id="wheel-capacity" class="panel-sub"></div>
+        <div id="wheel-candidates" class="empty">Press “Find candidates” to scan (takes ~30s).</div>
     </div>
 
     <div class="modal-overlay" id="create-branch-modal-overlay">
@@ -1582,13 +1584,58 @@ async function setWheelTicker(t, approved) {
     await loadWheel();
 }
 
-async function approveWheelTicker() {
-    const input = document.getElementById('wheel-ticker-input');
-    const t = (input.value || '').trim().toUpperCase();
-    if (!t) return;
-    if (!confirm(`Approve ${t} for the real-money wheel? It still has to pass the cash, risk-cap, liquidity, spread and premium checks before any put is sold.`)) return;
-    await setWheelTicker(t, true);
-    input.value = '';
+async function loadWheelCandidates(refresh) {
+    const el = document.getElementById('wheel-candidates');
+    el.innerHTML = '<div class="empty">Scanning the options market…</div>';
+    try {
+        renderWheelCandidates(await apiGet('/alpaca-overview/wheel-candidates' + (refresh ? '?refresh=true' : ''), 120000));
+    } catch (e) {
+        el.innerHTML = `<div class="empty">Could not scan: ${_wheelEsc(e.message)}</div>`;
+    }
+}
+
+function renderWheelCandidates(d) {
+    const cap = d.capacity;
+    const capEl = document.getElementById('wheel-capacity');
+    capEl.innerHTML = cap
+        ? `Collateral available: <b>${fmtUsd(cap.max_collateral)}</b> (max strike ${fmtUsd(cap.max_strike)}) — limited by <b>${_wheelEsc(cap.binding)}</b>. ` +
+          `Cash room ${fmtUsd(cap.cash_room)} · options buying power ${fmtUsd(cap.options_buying_power)} · risk room ${fmtUsd(cap.risk_room)} ` +
+          `(stock ${fmtUsd(cap.open_stock_notional)} + wheel ${fmtUsd(cap.reserved_by_wheel)} already counted) · options level ${cap.options_level}`
+        : '';
+    const blockers = (d.blockers || []).map(b => `<li>${_wheelEsc(b)}</li>`).join('');
+    const rows = (d.candidates || []).map(c => {
+        const verdict = c.pass ? '<span style="color:var(--green);font-weight:700">PASS</span>'
+                               : '<span style="color:var(--red);font-weight:700">FAIL</span>';
+        const nums = c.contract
+            ? `${fmtUsd(c.price)} → ${fmtUsd(c.strike)} put, ${_wheelEsc(c.expiration)} (${c.dte}d)<br>` +
+              `bid ${fmtUsd(c.bid)} / ask ${fmtUsd(c.ask)} · spread ${c.spread_pct}% · OI ${c.open_interest}<br>` +
+              `premium ${fmtUsd(c.premium_usd)} on ${fmtUsd(c.collateral_usd)} collateral = ${c.return_pct}% (${c.annualized_pct}%/yr) · ` +
+              `breakeven ${fmtUsd(c.breakeven)}, ${c.cushion_pct}% below price`
+            : (c.price ? fmtUsd(c.price) : '—');
+        let actions = '';
+        if (c.status === 'approved') actions = '<span style="color:var(--green)">approved</span>';
+        else if (c.status === 'rejected') actions = '<span style="color:var(--text-dim)">rejected</span>';
+        else actions = (c.pass ? `<button class="unlock-btn" onclick="decideWheelCandidate('${_wheelEsc(c.underlying)}', true)">Approve</button> ` : '') +
+                       `<button class="unlock-btn" onclick="decideWheelCandidate('${_wheelEsc(c.underlying)}', false)">Reject</button>`;
+        return `<tr><td><b>${_wheelEsc(c.underlying)}</b></td><td>${verdict}</td>
+            <td style="font-size:0.85em">${nums}<br><span style="color:var(--text-dim)">${_wheelEsc(c.reason)}</span></td>
+            <td>${actions}</td></tr>`;
+    }).join('');
+    document.getElementById('wheel-candidates').innerHTML =
+        (blockers ? `<div class="panel-sub">Blocked:<ul style="margin:4px 0 0 18px;">${blockers}</ul></div>` : '') +
+        (rows ? `<table style="width:100%; border-collapse:collapse; font-size:0.9em; margin-top:6px;"><thead><tr>
+            <th>Ticker</th><th>Grade</th><th>Why</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+              : '<div class="empty">No candidates found. No qualified contract means no trade.</div>') +
+        (d.checked_at ? `<div class="panel-sub" style="margin-top:6px;">Scanned ${new Date(d.checked_at).toLocaleTimeString()}</div>` : '');
+}
+
+async function decideWheelCandidate(t, approve) {
+    const msg = approve
+        ? `Approve ${t} for the real-money wheel? The wheel must also be switched on, and every cash, risk, liquidity and premium check is re-run fresh before any put is sold.`
+        : `Reject ${t}? The scanner will stop proposing it.`;
+    if (!confirm(msg)) return;
+    await setWheelTicker(t, approve);
+    await loadWheelCandidates(false);
 }
 
 async function toggleBranchActive(botName, newActive) {

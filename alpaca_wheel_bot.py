@@ -68,6 +68,11 @@ MAX_SPREAD_PCT = 0.25             # (ask-bid)/mid
 MIN_OPEN_INTEREST = 100
 MIN_PREMIUM_YIELD = 0.005         # premium >= 0.5% of the collateral
 CONTRACTS_PER_CYCLE = 1
+# First live deployment is a single-contract validation: one wheel open at a
+# time across ALL tickers, until a real fill has proven the whole chain
+# (balance -> reservation -> risk check -> order -> fill -> ledger ->
+# assignment/exit). Raise only after that, deliberately.
+MAX_ACTIVE_WHEELS = 1
 CHECK_INTERVAL_SECONDS = 15 * 60
 DEFAULT_MAX_RISK_PERCENT = 0.50
 
@@ -330,9 +335,9 @@ async def set_approved(underlying: str, approved: bool):
         row = (await db.execute(select(AlpacaWheelState).where(
             AlpacaWheelState.underlying == underlying))).scalar_one_or_none()
         if row is None:
-            if not approved:
-                return None
-            row = AlpacaWheelState(underlying=underlying, approved=True, stage=STAGE_IDLE,
+            # A rejection is recorded too, so the candidate scan stops
+            # proposing the ticker. approved=False never trades.
+            row = AlpacaWheelState(underlying=underlying, approved=approved, stage=STAGE_IDLE,
                                    premium_total=0.0, cycles_completed=0, shares=0.0, contracts=0)
             db.add(row)
         else:
@@ -345,6 +350,170 @@ def _reserved_from_states(states):
     return sum(put_collateral(s.option_strike, s.contracts)
                for s in states
                if s.stage == STAGE_PUT and s.option_strike and s.contracts)
+
+
+def _active_wheel_count(states):
+    return sum(1 for s in states if s.stage != STAGE_IDLE or s.open_order_id)
+
+
+# ── candidate discovery ──────────────────────────────────────────────────
+#
+# The owner should not have to guess a ticker. This scans the whole listed
+# put market for contracts the account could actually secure with cash,
+# and grades each underlying on the same rules the live engine trades by.
+# Read-only: it never places an order. A pass here is a PROPOSAL - nothing
+# trades until the owner presses Approve.
+
+SCAN_MAX_UNDERLYINGS = 60
+
+
+def collateral_capacity(cash, options_bp, equity, open_notional, reserved, max_pct):
+    """The most collateral a new put could use right now, and why."""
+    if None in (cash, options_bp, equity) or equity <= 0:
+        return {"max_collateral": 0.0, "max_strike": 0.0, "binding": "balance unknown"}
+    cash_room = cash - reserved
+    risk_room = equity * max_pct - open_notional - reserved
+    limits = {"cash": cash_room, "options buying power": options_bp, "risk cap": risk_room}
+    binding = min(limits, key=limits.get)
+    cap = max(0.0, limits[binding])
+    return {"max_collateral": round(cap, 2), "max_strike": round(cap / 100.0, 2),
+            "binding": binding, "cash_room": round(cash_room, 2),
+            "options_buying_power": round(options_bp, 2), "risk_room": round(risk_room, 2)}
+
+
+def evaluate_candidate(underlying, price, contracts, today, max_strike):
+    """Grade one underlying. Returns the numbers the owner needs to decide,
+    with pass/fail and the specific reason."""
+    out = {"underlying": underlying, "price": price, "pass": False}
+    if not price:
+        out["reason"] = "no live price"
+        return out
+    c, mid, why = pick_put(contracts, price, today)
+    if c is None:
+        out["reason"] = why
+        return out
+    dte = _dte(c["expiration"], today)
+    collateral = put_collateral(c["strike"])
+    premium = round_option_price(mid) * 100
+    breakeven = c["strike"] - premium / 100
+    out.update({
+        "contract": c["symbol"], "strike": c["strike"], "expiration": c["expiration"],
+        "dte": dte, "bid": c["bid"], "ask": c["ask"],
+        "spread_pct": round((c["ask"] - c["bid"]) / mid * 100, 1),
+        "open_interest": c["open_interest"],
+        "premium_usd": round(premium, 2), "collateral_usd": round(collateral, 2),
+        "return_pct": round(premium / collateral * 100, 2),
+        "annualized_pct": round(premium / collateral * 365 / max(dte, 1) * 100, 1),
+        "breakeven": round(breakeven, 2),
+        "cushion_pct": round((price - breakeven) / price * 100, 1),
+    })
+    if c["strike"] > max_strike:
+        out["reason"] = (f"needs ${collateral:,.2f} collateral - account can secure "
+                         f"${max_strike*100:,.2f} right now")
+        return out
+    out["pass"] = True
+    out["reason"] = "qualifies - approve to let the wheel sell this put"
+    return out
+
+
+async def _scan_put_universe(session, today, max_strike):
+    """Every active put 14-28 DTE at or below max_strike, any underlying."""
+    params = {"type": "put", "status": "active", "limit": 10000,
+              "expiration_date_gte": (today + timedelta(days=MIN_DTE)).isoformat(),
+              "expiration_date_lte": (today + timedelta(days=MAX_DTE)).isoformat(),
+              "strike_price_lte": f"{max(max_strike, 0.5):.2f}"}
+    out, pages = [], 0
+    while pages < 5:
+        data = await _get(session, f"{_trading_url()}/v2/options/contracts", params)
+        out.extend(data.get("option_contracts") or [])
+        token = data.get("next_page_token")
+        pages += 1
+        if not token:
+            break
+        params["page_token"] = token
+    return out
+
+
+async def fetch_stock_prices(session, symbols):
+    prices = {}
+    for i in range(0, len(symbols), 100):
+        data = await _get(session, f"{_data_url()}/v2/stocks/trades/latest",
+                          {"symbols": ",".join(symbols[i:i + 100]), "feed": "iex"})
+        for sym, t in (data.get("trades") or {}).items():
+            p = float((t or {}).get("p") or 0)
+            if p:
+                prices[sym] = p
+    return prices
+
+
+async def scan_candidates():
+    """Fresh account read, capacity, then the best-qualified underlyings."""
+    states = await list_states()
+    decided = {s.underlying: ("approved" if s.approved else "rejected") for s in states}
+    reserved = _reserved_from_states(states)
+    result = {"checked_at": datetime.now(timezone.utc).isoformat(), "candidates": [],
+              "capacity": None, "blockers": []}
+    today = datetime.now(timezone.utc).date()
+    async with aiohttp.ClientSession() as session:
+        try:
+            account = await _get(session, f"{_trading_url()}/v2/account")
+            positions = await _get(session, f"{_trading_url()}/v2/positions")
+            cash = float(account.get("cash"))
+            options_bp = float(account.get("options_buying_power"))
+            equity = float(account.get("equity"))
+        except Exception as e:
+            result["blockers"].append(f"fresh account read failed ({e}) - no candidates")
+            return result
+        level = int(float(account.get("options_trading_level") or 0))
+        if level < 1:
+            result["blockers"].append(f"Alpaca options approval level {level} - "
+                                      f"cash-secured puts need level 1+")
+        open_notional = sum(abs(float(p.get("market_value") or 0)) for p in positions or []
+                            if p.get("asset_class") != "us_option")
+        cap = collateral_capacity(cash, options_bp, equity, open_notional, reserved, _max_risk_pct())
+        cap["open_stock_notional"] = round(open_notional, 2)
+        cap["reserved_by_wheel"] = round(reserved, 2)
+        cap["options_level"] = level
+        result["capacity"] = cap
+
+        # Look a little beyond what fits today, so the owner can see what
+        # becomes reachable - those are graded FAIL with the dollar gap.
+        look_strike = max(cap["max_strike"], 5.0)
+        try:
+            raw = await _scan_put_universe(session, today, look_strike)
+        except Exception as e:
+            result["blockers"].append(f"options chain unreadable ({e})")
+            return result
+        by_und = {}
+        for c in raw:
+            try:
+                by_und.setdefault(c["underlying_symbol"], []).append({
+                    "symbol": c["symbol"], "type": "put", "strike": float(c["strike_price"]),
+                    "expiration": c["expiration_date"],
+                    "open_interest": int(float(c.get("open_interest") or 0))})
+            except (KeyError, TypeError, ValueError):
+                continue
+        # Most open interest first - liquidity is the first filter that matters.
+        ranked = sorted(by_und, key=lambda u: -sum(c["open_interest"] for c in by_und[u]))
+        ranked = [u for u in ranked if decided.get(u) != "rejected"][:SCAN_MAX_UNDERLYINGS]
+        prices = await fetch_stock_prices(session, ranked) if ranked else {}
+        graded = []
+        for u in ranked:
+            price = prices.get(u)
+            target = (price or 0) * (1 - PUT_STRIKE_BELOW_PCT)
+            near = sorted((c for c in by_und[u] if c["strike"] <= target),
+                          key=lambda c: c["strike"])[-40:]
+            if price and near:
+                quotes = await fetch_option_quotes(session, [c["symbol"] for c in near])
+                for c in near:
+                    q = quotes.get(c["symbol"], {})
+                    c["bid"], c["ask"] = q.get("bid"), q.get("ask")
+            g = evaluate_candidate(u, price, near, today, cap["max_strike"])
+            g["status"] = decided.get(u, "new")
+            graded.append(g)
+    graded.sort(key=lambda g: (not g["pass"], "contract" not in g, -(g.get("annualized_pct") or 0)))
+    result["candidates"] = graded
+    return result
 
 
 # ── one cycle ────────────────────────────────────────────────────────────
@@ -557,6 +726,10 @@ async def run_wheel_cycle():
                 # Un-approving a ticker stops NEW puts; shares already held
                 # still get covered calls.
                 if st.stage == STAGE_IDLE and not st.approved:
+                    continue
+                if st.stage == STAGE_IDLE and _active_wheel_count(rows) >= MAX_ACTIVE_WHEELS:
+                    st.last_note = (f"waiting: {MAX_ACTIVE_WHEELS} wheel already active - "
+                                    f"single-contract validation until it completes")
                     continue
                 try:
                     price = await fetch_stock_price(session, st.underlying)

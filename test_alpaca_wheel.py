@@ -129,6 +129,7 @@ class FakeAlpaca:
         self.price = price
         self.orders = orders or {}
         self.placed = []
+        self.prices = {}
 
     async def get(self, session, url, params=None):
         if url.endswith("/v2/clock"):
@@ -139,12 +140,16 @@ class FakeAlpaca:
             return self.positions
         if "/v2/orders/" in url:
             return self.orders[url.rsplit("/", 1)[1]]
+        if url.endswith("/v2/stocks/trades/latest"):
+            return {"trades": {sym: {"p": self.prices.get(sym, self.price)}
+                               for sym in params["symbols"].split(",")}}
         if url.endswith("/trades/latest"):
             return {"trade": {"p": self.price}}
         if url.endswith("/v2/options/contracts"):
             t = params["type"]
             return {"option_contracts": [
                 {"symbol": c["symbol"], "type": c["type"], "strike_price": str(c["strike"]),
+                 "underlying_symbol": c.get("underlying", "X"),
                  "expiration_date": c["expiration"], "open_interest": str(c["open_interest"])}
                 for c in self.contracts if c["type"] == t]}
         if url.endswith("/options/snapshots"):
@@ -324,6 +329,74 @@ def test_prop_bot_counts_wheel_collateral_against_its_cap():
          mock.patch.object(prop_bot, "MAX_RISK_PERCENT", 0.50):
         ok, why = prop_bot.check_margin_safety(5000, 800, 0, extra_open_notional=0.0)
     assert not ok and "Risk limit" in why
+
+
+def test_capacity_names_the_binding_limit():
+    # Today's real account: cash 611.07, ~366 of stock, 50% cap of 976.83.
+    cap = w.collateral_capacity(611.07, 611.07, 976.83, 366.0, 0.0, 0.50)
+    assert cap["binding"] == "risk cap"
+    assert abs(cap["max_collateral"] - 122.42) < 0.01 and abs(cap["max_strike"] - 1.22) < 0.01
+
+
+def test_capacity_unknown_balance_is_zero():
+    assert w.collateral_capacity(None, 1, 1, 0, 0, 0.5)["max_collateral"] == 0.0
+
+
+def test_candidate_fails_with_dollar_gap_when_unaffordable():
+    g = w.evaluate_candidate("X", 10.0, [_c("X_P8", "put", 8.0, 0.10, 0.12)], TODAY, max_strike=1.22)
+    assert not g["pass"] and "800.00" in g["reason"]
+    assert g["annualized_pct"] > 0 and g["breakeven"] == 7.89
+
+
+def test_candidate_passes_when_affordable():
+    g = w.evaluate_candidate("X", 2.0, [_c("X_P1", "put", 1.5, 0.05, 0.06)], TODAY, max_strike=2.0)
+    assert g["pass"] and g["collateral_usd"] == 150.0
+
+
+def test_one_wheel_at_a_time():
+    async def setup():
+        await w.set_approved("X", True)
+        await w.set_approved("Y", True)
+        async with w.AsyncSessionLocal() as db:
+            from sqlalchemy import select
+            st = (await db.execute(select(models.AlpacaWheelState).where(
+                models.AlpacaWheelState.underlying == "X"))).scalar_one()
+            st.stage, st.contracts = "PUT", 1
+            st.option_symbol, st.option_strike, st.open_credit = "X_P5", 5.0, 11.0
+            await db.commit()
+    fake = FakeAlpaca(cash=5000, obp=5000, equity=20000, price=6.0,
+                      positions=[{"symbol": "X_P5", "qty": "-1", "market_value": "-11",
+                                  "asset_class": "us_option"}],
+                      contracts=[_c("X_P5", "put", 5.0, 0.30, 0.31), _c("Y_P5", "put", 5.0, 0.10, 0.12)])
+    with _passive_off():
+        _, states = _run(fake, setup=setup)
+    y = next(s for s in states if s["underlying"] == "Y")
+    assert fake.placed == [] and "single-contract" in y["last_note"]
+
+
+def test_reject_is_recorded_and_never_trades():
+    fake = FakeAlpaca(cash=2000, obp=2000, equity=5000,
+                      contracts=[_c("X_P5", "put", 5.0, 0.10, 0.12)], price=6.0)
+    with _passive_off():
+        _, states = _run(fake, setup=lambda: w.set_approved("X", False))
+    assert states[0]["approved"] is False and fake.placed == []
+
+
+def test_scan_grades_and_hides_rejected():
+    fake = FakeAlpaca(cash=2000, obp=2000, equity=5000, price=6.0,
+                      contracts=[dict(_c("A_P5", "put", 5.0, 0.10, 0.12), underlying="A"),
+                                 dict(_c("B_P5", "put", 5.0, 0.10, 0.12), underlying="B")])
+    out = {}
+
+    async def setup():
+        await w.set_approved("B", False)
+        out.update(await w.scan_candidates())
+    with _passive_off():
+        _run(fake, setup=setup, active=False)
+    names = [c["underlying"] for c in out["candidates"]]
+    assert names == ["A"] and out["candidates"][0]["pass"]
+    assert out["capacity"]["binding"] in ("cash", "options buying power", "risk cap")
+    assert fake.placed == []
 
 
 def test_bad_ticker_rejected():
