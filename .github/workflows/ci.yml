@@ -53,4 +53,37 @@ jobs:
       # Fixing one of the 19 is reported, not failed - then
       # `./run_tests.sh --update` records the better state.
       - name: Test suite against the recorded baseline
+        id: suite
         run: ./run_tests.sh
+
+      # The runner's own failing list, surfaced as an annotation.
+      #
+      # WHY THIS STEP EXISTS. The step above compares this run against
+      # test_baseline.txt and exits 1 on a module that was passing and now is
+      # not. That is the right gate, but when it fires the only thing some
+      # tooling can read back is "Process completed with exit code 1" - the job
+      # log is served from a separate host that an API client restricted to
+      # api.github.com cannot follow. A check annotation CAN be read back from
+      # the API, so the list goes there too.
+      #
+      # It also makes the baseline correctable from evidence. test_baseline.txt
+      # records the modules that fail in whatever environment it was recorded
+      # in; if the runner's environment fails a different set, every run reads
+      # that difference as a regression and the gate cries wolf on every commit.
+      # Printing the runner's actual list is what lets the recorded one be
+      # replaced with the truth instead of a guess.
+      #
+      # if: always() so it runs on the failing path, which is the path that
+      # needs it. It never changes the job's outcome.
+      - name: Report the runner's failing modules
+        if: always()
+        run: |
+          if [ ! -f test_failures_last_run.txt ]; then
+            echo "::warning title=Suite failures::run_tests.sh produced no failure list"
+            exit 0
+          fi
+          count=$(wc -l < test_failures_last_run.txt | tr -d ' ')
+          list=$(sed 's/$/%0A/' test_failures_last_run.txt | tr -d '\n')
+          echo "::notice title=Runner failing modules (${count})::${list}"
+          echo "--- modules failing on THIS runner (${count}) ---"
+          cat test_failures_last_run.txt

@@ -5929,12 +5929,19 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
 
     locked_usd = round(await get_alpaca_locked_usd(), 2)
     alpaca_passive_mode = await prop_bot_module.is_alpaca_passive_mode() if prop_bot_module else False
+    alpaca_entries_paused = await prop_bot_module.are_alpaca_entries_paused() if prop_bot_module else False
     entry_variant = await prop_bot_module.get_live_entry_variant() if prop_bot_module else "A"
     strategy_family = await prop_bot_module.get_live_strategy_family() if prop_bot_module else "momentum"
 
     _out = {
         "equity": round(equity, 2),
         "alpaca_passive_mode": alpaca_passive_mode,
+        "alpaca_entries_paused": alpaca_entries_paused,
+        "alpaca_entries_paused_means": (
+            "NEW entries refused; every exit path still runs, so open positions keep "
+            "their 3% trailing stop and their 24-hour backstop. Not passive mode, "
+            "which abandons exit management, and nothing is sold to enable it."
+        ),
         "entry_variant": entry_variant,
         "strategy_family": strategy_family,
         "cash": round(cash, 2),
@@ -6392,6 +6399,46 @@ async def resume_alpaca_active_trading():
     await prop_bot_module.set_alpaca_passive_mode(False)
     log.info("[dashboard] 🔓📉 Alpaca active trading resumed (passive/buy-and-hold-SPY mode turned off)")
     return {"status": "active_trading_resumed", "was_passive": was_passive, "passive_mode": False}
+
+
+class SetAlpacaEntriesPausedRequest(BaseModel):
+    paused: bool
+
+
+@router.post("/alpaca-overview/entries-paused")
+async def set_alpaca_entries_paused_endpoint(payload: SetAlpacaEntriesPausedRequest):
+    """Stop (or resume) NEW Alpaca entries, without selling anything and
+    without touching Coinbase.
+
+    Write-guarded by the app-wide middleware like every other mutating
+    route, so this is the account owner's to call with their token.
+
+    WHY THIS EXISTS, given three switches already looked like they would do
+    it and none of them would:
+      - STOP_TRADING is read at the top of crypto_grid_bot's own branch
+        cycle, so it halts the Coinbase grid's buys AND its sells.
+      - liquidate-and-buy-spy force-closes every open position before it
+        retires anything, which the owner has ruled out.
+      - passive mode has no setter of its own, and short-circuits the loop
+        before exit management, leaving open positions unmanaged.
+
+    ON:  prop_bot's try_open refuses (via the same `entries_halted` path the
+         kill conditions use) and alpaca_swing_bot refuses buys at its order
+         chokepoint. Every exit path in both bots stays live.
+    OFF: both resume. Reversible at any time, no redeploy - the flag is
+         DB-persisted and read each cycle."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
+    was = await prop_bot_module.are_alpaca_entries_paused()
+    await prop_bot_module.set_alpaca_entries_paused(payload.paused)
+    what = "\u23f8\ufe0f ALPACA ENTRIES PAUSED" if payload.paused else "\u25b6\ufe0f ALPACA ENTRIES RESUMED"
+    log.warning(f"[dashboard] {what} (exits unaffected either way)")
+    return {
+        "status": "updated",
+        "was_paused": was,
+        "entries_paused": payload.paused,
+        "exits_unaffected": True,
+    }
 
 
 class SetEntryVariantRequest(BaseModel):
