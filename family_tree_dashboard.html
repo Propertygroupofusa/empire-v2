@@ -4844,6 +4844,42 @@ async function lookupAssetBalance() {
     out.innerHTML = h;
 }
 
+// THE CENSUS TABLE WAS LIVE THE WHOLE TIME AND LOOKED FROZEN.
+//
+// It refetches on the 15-second dashboard poll and the numbers really do
+// move: three reads 13 seconds apart on 2026-10-06 gave $10,038.56,
+// $10,039.65 and $10,008.67. But the panel drew each reading as a fresh
+// flat table with no memory of the one before it, so nothing could be
+// coloured and nothing could carry an arrow - and the account owner,
+// comparing it against the ticker at the top of the same page, read the
+// stillness as a dead feed. One remembered reading is the whole fix.
+//
+// WHAT THIS COLOURS IS PRICE, NOT EARNINGS. Unit counts barely move; what
+// ticks second to second is what the market says those units are worth.
+// Banked profit is the figure that moves only on a completed sell, and it
+// is deliberately not in this panel - a green row here must never be read
+// as the bots having earned something.
+let CENSUS_PREV = null;
+
+// The markup that follows a number: a caret and a colour when there is a
+// previous reading to compare against, and NOTHING on the first render -
+// an unknown is not a flat. An unchanged value gets no colour either,
+// because a still reading is not an up tick, and sub-cent noise is held
+// still so the table does not strobe on rounding.
+function censusMove(now, before) {
+    if (before === null || before === undefined) return '';
+    if (!isFinite(now) || !isFinite(before)) return '';
+    const d = now - before;
+    if (Math.abs(d) < 0.005) return '';
+    const up = d > 0;
+    const col = up ? 'var(--green)' : 'var(--red)';
+    const amt = Math.abs(d).toLocaleString(undefined,
+        {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    return ` <span style="color:${col}; font-size:.85em; font-variant-numeric:tabular-nums;"`
+         + ` title="${up ? 'up' : 'down'} $${amt} since the previous read">`
+         + `${up ? '\u25B2' : '\u25BC'}${amt}</span>`;
+}
+
 async function renderAccountCensus() {
     const el = document.getElementById('account-census-panel');
     if (!el) return;
@@ -4856,6 +4892,9 @@ async function renderAccountCensus() {
         return;
     }
     if (!d || !d.available) { el.innerHTML = ''; return; }
+    // Read BEFORE anything is drawn; CENSUS_PREV is replaced at the end.
+    const prev = CENSUS_PREV || {};
+    const prevAsset = prev.byAsset || {};
     const usd = v => (v === null || v === undefined) ? '&mdash;'
         : '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     let h = '<div class="panel" style="padding:10px 12px;">';
@@ -4867,9 +4906,12 @@ async function renderAccountCensus() {
               background:rgba(245,158,11,.10); color:var(--text-dim);">${d.warning}</div>`;
     }
     h += `<div style="display:flex; flex-wrap:wrap; gap:4px 22px; font-variant-numeric:tabular-nums;">`
-       + `<span><span style="color:var(--text-dim);">Coinbase total</span> <strong>${usd(d.total_usd)}</strong></span>`
-       + `<span><span style="color:var(--text-dim);">cash</span> ${usd(d.cash_usd)}</span>`
-       + `<span><span style="color:var(--text-dim);">coin</span> ${usd(d.coin_usd)}</span>`
+       + `<span><span style="color:var(--text-dim);">Coinbase total</span> <strong>${usd(d.total_usd)}</strong>`
+       + `${censusMove(d.total_usd, prev.total)}</span>`
+       + `<span><span style="color:var(--text-dim);">cash</span> ${usd(d.cash_usd)}`
+       + `${censusMove(d.cash_usd, prev.cash)}</span>`
+       + `<span><span style="color:var(--text-dim);">coin</span> ${usd(d.coin_usd)}`
+       + `${censusMove(d.coin_usd, prev.coin)}</span>`
        + `<span><span style="color:var(--text-dim);">assets</span> ${d.assets_priced}`
        + (d.assets_unpriced ? ` <span style="color:#f59e0b;">+${d.assets_unpriced} unpriced</span>` : '')
        + `</span></div>`;
@@ -4890,7 +4932,8 @@ async function renderAccountCensus() {
             h += `<tr><td style="padding:2px 8px 2px 0;">${r.asset}</td>`
                + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${Number(r.units).toLocaleString(undefined,{maximumFractionDigits:6})}</td>`
                + `<td style="text-align:right; padding:2px 8px; font-variant-numeric:tabular-nums;">${r.price}</td>`
-               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;"><strong>${usd(r.usd)}</strong></td></tr>`;
+               + `<td style="text-align:right; padding:2px 0; font-variant-numeric:tabular-nums;"><strong>${usd(r.usd)}</strong>`
+               + `${censusMove(r.usd, prevAsset[r.asset])}</td></tr>`;
         }
         h += `</tbody></table></div>`;
         const more = d.holdings.length - 15;
@@ -4904,6 +4947,16 @@ async function renderAccountCensus() {
     h += `<div style="margin-top:6px; color:var(--text-dim); font-size:.92em;">`
        + `Read straight from Coinbase at ${d.as_of}. Read-only.</div></div>`;
     el.innerHTML = h;
+    // LAST, and only once the draw succeeded. A render that threw halfway
+    // would otherwise leave a baseline nothing on screen was ever drawn
+    // from, and the next tick would colour against a reading the owner
+    // never saw.
+    CENSUS_PREV = {
+        total: d.total_usd,
+        cash: d.cash_usd,
+        coin: d.coin_usd,
+        byAsset: Object.fromEntries((d.holdings || []).map(r => [r.asset, r.usd])),
+    };
 }
 
 function renderGridOpportunityPanel(d) {
@@ -7490,10 +7543,30 @@ async function advDraw() {
         const first = candles[0];
         const chg = first.close ? (last.close - first.close) / first.close * 100 : 0;
         const col = chg >= 0 ? 'var(--green)' : 'var(--red)';
+        // THE PERCENTAGE IS FIRST CANDLE TO LAST, AND THE LABEL MUST SAY SO.
+        //
+        // It read "-0.77% over 350 candles" beside a chart whose visible
+        // slope was clearly up, and the only available reading of that is
+        // "the price is down" - which was false at every horizon the eye
+        // was actually looking at. Measured on the same candles 2026-10-06:
+        // BTC was -0.73% across the window's 14.5 days and +1.01% across
+        // the last three, sitting at 65% of the window's own high-low
+        // range. Both numbers are true of different spans; the label named
+        // neither. A candle COUNT says how much data there is and never
+        // says what the number is measured FROM, which is the one thing a
+        // reader needs to reconcile it with the shape on screen.
+        //
+        // Span comes from the candle timestamps rather than
+        // count x granularity, so it stays right when the venue drops a
+        // bar or the granularity selector changes under it.
+        const spanDays = (last.t - first.t) / 86400;
+        const spanTxt = spanDays < 1 ? `${(spanDays * 24).toFixed(1)} hours`
+                                     : `${spanDays.toFixed(1)} days`;
         const el = document.getElementById('adv-last');
         if (el) el.innerHTML = `<span class="px">${ADV.money(last.close)}</span>`
             + ` <span style="color:${col}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</span>`
-            + ` <span style="opacity:.7">over ${candles.length} candles</span>`;
+            + ` <span style="opacity:.7">over the last ${spanTxt}`
+            + ` &middot; ${candles.length} candles</span>`;
         const rr = document.getElementById('adv-rsi-read');
         if (rr) {
             // State the reading and what it is, never what to do with it.
