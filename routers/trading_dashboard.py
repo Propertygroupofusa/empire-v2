@@ -10700,6 +10700,224 @@ async def grid_capital_velocity_endpoint(min_cycles: int = 3):
         "Pragma": "no-cache", "Expires": "0"})
 
 
+async def _incubator_candles(product_id, gran, days, pause=0.25):
+    """Oldest-first (t, low, high, close) from Coinbase's PUBLIC tape.
+
+    Public on purpose. The incubator must be re-derivable by anyone with
+    the same candles - a result scored from a private feed is a number
+    nobody can check, which is the failure mode the whole design is built
+    against.
+
+    The timestamp format is load-bearing: isoformat() on a tz-aware
+    datetime ends "+00:00", and a literal "+" in a query string decodes as
+    a SPACE, so every request comes back empty. A bare UTC stamp with a
+    trailing Z is what the endpoint wants.
+    """
+    import aiohttp as _aiohttp
+    import asyncio as _asyncio
+    rows, now = {}, int(time.time())
+    end, floor, err = now, now - int(days * 86400), None
+    async with _aiohttp.ClientSession() as sess:
+        while end > floor:
+            start = max(floor, end - 300 * gran)
+            url = (f"https://api.exchange.coinbase.com/products/{product_id}/candles"
+                   f"?granularity={gran}"
+                   f"&start={datetime.utcfromtimestamp(start).isoformat()}Z"
+                   f"&end={datetime.utcfromtimestamp(end).isoformat()}Z")
+            try:
+                async with sess.get(url, timeout=30) as r:
+                    data = await r.json()
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                break
+            if not data or not isinstance(data, list):
+                err = err or "the public candle endpoint returned an empty page"
+                break
+            for x in data:
+                try:
+                    rows[int(x[0])] = (float(x[1]), float(x[2]), float(x[4]))
+                except Exception:
+                    continue
+            end = start
+            await _asyncio.sleep(pause)
+    if not rows:
+        # A GAP IS NOT A FLAT MARKET. Returning an empty tape here would
+        # score every candidate at zero round trips and read as "the
+        # candidate does nothing", which is a different claim entirely.
+        return None, (err or "no bars came back")
+    ts = sorted(rows)
+    return [(t, rows[t][0], rows[t][1], rows[t][2]) for t in ts], err
+
+
+@router.get("/grid-status/incubator")
+async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
+                                  min_live_trips: int = 20):
+    """Candidates running forward on live prices, with no money on them.
+
+    The account owner's ask: an incubator measured AGAINST the backtest, so
+    the divergence between what a backtest promised and what the same rule
+    has since delivered is visible rather than argued about. Five candidate
+    changes were backtested on this fleet's tape and five were rejected,
+    each because it looked good on the window it was fitted to - a forward
+    test on bars that did not exist when the candidate was chosen is the
+    step that was missing between a backtest and real money.
+
+    STRICTLY READ-ONLY, and it holds no position. Nothing here places an
+    order, creates a slice, touches a branch or spends a dollar; an
+    incubating candidate is invisible to the fleet and the fleet is
+    invisible to it. Arming one is a separate write-guarded POST, because
+    deciding what to test is the account owner's call, not this endpoint's.
+
+    NOTHING IS STORED BUT THE CANDIDATE AND THE MINUTE IT WAS ARMED. Every
+    figure below is recomputed from the public tape on each read, so a
+    result cannot go stale, cannot be edited after the fact, and can be
+    re-derived from scratch by anyone with the same candles.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    import incubator as inc
+    from models import TradingBotState
+    from sqlalchemy import select
+
+    async with get_session_factory()() as db:
+        rows = (await db.execute(
+            select(TradingBotState).where(
+                TradingBotState.bot_name.like(inc.COHORT_PREFIX + "%"))
+        )).scalars().all()
+
+    cohorts, unreadable = [], []
+    for row in rows:
+        spec = inc.parse_cohort_key(row.bot_name)
+        if not spec:
+            # A stray row in a shared table is skipped, never guessed at.
+            unreadable.append(row.bot_name)
+            continue
+        armed_at = int(row.base_capital or 0)
+        bars, err = await _incubator_candles(spec["product_id"], granularity, days)
+        if bars is None:
+            cohorts.append({"key": row.bot_name, **spec, "armed_at_epoch": armed_at,
+                            "verdict": "UNKNOWN", "unknown_reason": err,
+                            "placed_nothing": True})
+            continue
+        step = spec["value"] if spec["param"] == "step" else None
+        if step is None:
+            cohorts.append({"key": row.bot_name, **spec, "armed_at_epoch": armed_at,
+                            "verdict": "UNKNOWN",
+                            "unknown_reason": (f"this build can incubate a 'step' "
+                                               f"candidate; '{spec['param']}' has no "
+                                               f"engine here yet, and guessing one "
+                                               f"would score a rule nobody wrote"),
+                            "placed_nothing": True})
+            continue
+        result = inc.incubate(bars, armed_at, step=step, gran_seconds=granularity,
+                              min_live_trips=min_live_trips)
+        result.update({"key": row.bot_name, "product_id": spec["product_id"],
+                       "param": spec["param"],
+                       "armed_at": datetime.utcfromtimestamp(armed_at).isoformat() + "Z",
+                       "tape_partial": bool(err)})
+        if err:
+            result["tape_note"] = ("the window is SHORTER than asked for: " + err)
+        cohorts.append(result)
+
+    return JSONResponse(content={
+        "cohorts": cohorts,
+        "cohort_count": len(cohorts),
+        "unreadable_rows": unreadable or None,
+        "granularity_seconds": granularity,
+        "window_days_requested": days,
+        "read_only": True,
+        "holds_no_position": ("An incubating candidate places no order, creates no "
+                             "slice, touches no branch and spends no dollar. It is "
+                             "scored on the public tape and nothing else."),
+        "how_to_read_it": ("backtest = the window BEFORE arming, which is the number "
+                          "the candidate was chosen on. live = bars that did not "
+                          "exist when it was chosen. The gap between the two per-day "
+                          "rates is the whole point; a TOO EARLY verdict means the "
+                          "live side has not yet closed enough round trips for that "
+                          "gap to mean anything."),
+        "as_of": datetime.utcnow().isoformat() + "Z",
+    }, headers={"Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache", "Expires": "0"})
+
+
+class ArmIncubatorRequest(BaseModel):
+    product_id: str
+    param: str = "step"
+    value: float
+    disarm: bool = False
+
+
+@router.post("/grid-status/incubator/arm")
+async def arm_incubator_endpoint(payload: ArmIncubatorRequest):
+    """Start (or stop) incubating one candidate. Write-guarded like every POST.
+
+    Arming is the ONLY thing this writes, and what it writes is a name and
+    a timestamp. It places no order, moves no money, changes no gate and
+    touches no branch - the fleet cannot tell that a candidate exists.
+
+    THE ARMING MOMENT IS NOW, AND IS NOT SETTABLE. A caller-supplied start
+    time is how a forward test quietly becomes a backtest: pick the date
+    after seeing the chart and the 'live' window is hindsight with a new
+    label. Re-arming an existing candidate RESETS the clock to now and
+    discards the elapsed window, which is the honest behaviour - a
+    candidate whose start moves is a different candidate.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    import incubator as inc
+    from models import TradingBotState
+    from sqlalchemy import select
+
+    product_id = (payload.product_id or "").strip().upper()
+    param = (payload.param or "step").strip().lower()
+    if not product_id or "-" not in product_id:
+        raise HTTPException(status_code=400,
+                            detail="product_id must look like BTC-USD")
+    if param != "step":
+        raise HTTPException(
+            status_code=400,
+            detail=("this build can incubate a 'step' candidate only. Storing a "
+                    "parameter with no engine behind it would create a cohort "
+                    "that can never be scored."))
+    if not (0.0 < payload.value < 1.0):
+        raise HTTPException(status_code=400,
+                            detail="a step is a fraction, e.g. 0.04 for 4%")
+
+    key = inc.cohort_key(product_id, param, payload.value)
+    now = int(time.time())
+    async with get_session_factory()() as db:
+        row = (await db.execute(
+            select(TradingBotState).where(TradingBotState.bot_name == key)
+        )).scalar_one_or_none()
+        if payload.disarm:
+            if row is None:
+                return JSONResponse(content={"status": "not armed", "key": key,
+                                             "changed": False})
+            await db.delete(row)
+            await db.commit()
+            log.warning(f"[incubator] DISARMED {key}")
+            return JSONResponse(content={"status": "disarmed", "key": key,
+                                         "changed": True, "placed_nothing": True})
+        was = int(row.base_capital) if row is not None and row.base_capital else None
+        if row is None:
+            db.add(TradingBotState(bot_name=key, base_capital=float(now),
+                                   starting_capital=float(now)))
+        else:
+            row.base_capital = float(now)
+        await db.commit()
+    log.warning(f"[incubator] ARMED {key} at {now} (no order placed, no branch touched)")
+    return JSONResponse(content={
+        "status": "armed", "key": key, "armed_at_epoch": now,
+        "armed_at": datetime.utcfromtimestamp(now).isoformat() + "Z",
+        "previously_armed_at_epoch": was,
+        "clock_reset": was is not None,
+        "placed_nothing": True,
+        "means": ("From this minute the candidate is scored on bars that did not "
+                  "exist when you chose it. Read it at GET /grid-status/incubator. "
+                  "Nothing was bought, sold, allocated or reserved."),
+    })
+
+
 @router.get("/grid-status/harvest-preview")
 async def grid_harvest_preview_endpoint():
     """What the hourly profit harvest would take right now, and why not.
