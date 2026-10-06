@@ -34,4 +34,11 @@ schedule==1.2.0
 python-multipart==0.0.6
 sendgrid==6.11.0
 stripe
+
+# Test-only, but listed here because CI installs this file and nothing else.
+# 55 test modules `import pytest` at the top; without it they die on the import
+# line before a single assertion runs, and the suite step read that as 55 new
+# regressions on every commit. Range-pinned rather than exact: this is not a
+# runtime dependency of the app and a hard pin would age into a conflict.
+pytest>=8.0,<10
 # python-telegram-bot>=21.0,<22.0  # Added in Phase 2 for actual Telegram API implementation

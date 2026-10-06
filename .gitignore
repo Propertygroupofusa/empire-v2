@@ -24,3 +24,8 @@ empire.db
 # Collected market data - regenerable, can grow large, not source
 kalshi_polymarket_data.jsonl
 .money_truth_snapshot.json
+
+# Written by run_tests.sh on every run - the failing list from the last run,
+# read by CI to surface it as an annotation. Never a committed fact; the
+# committed one is test_baseline.txt.
+test_failures_last_run.txt

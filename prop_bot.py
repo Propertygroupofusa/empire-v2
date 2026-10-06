@@ -575,6 +575,7 @@ async def load_open_positions():
 
 
 ALPACA_PASSIVE_MODE_KEY = "alpaca_passive_mode"
+ALPACA_ENTRIES_PAUSED_KEY = "alpaca_entries_paused"
 
 
 async def is_alpaca_passive_mode() -> bool:
@@ -2775,6 +2776,11 @@ async def run_prop_cycle():
                 # position ($197.46 of DOG) unable to exit.
                 entries_halted = _kill_detail
 
+        # The owner's own pause outranks every other reason, so the log and
+        # the dashboard say "paused by the owner" rather than "market closed".
+        if await are_alpaca_entries_paused():
+            entries_halted = ENTRIES_PAUSED_REASON
+
         if not entries_halted:
             entries_halted = await market_entry_block_reason(session)
 
@@ -3847,6 +3853,51 @@ ALPACA_IDLE_SWEEP_MIN_SPENDABLE_USD = _safe_float_env("ALPACA_IDLE_SWEEP_MIN_SPE
 ALPACA_IDLE_SWEEP_MIN_EQUITY_CUSHION_USD = _safe_float_env("ALPACA_IDLE_SWEEP_MIN_EQUITY_CUSHION_USD", "100")
 
 ALPACA_BRANCH_MODE_KEY = "alpaca_branch_mode"
+
+
+ENTRIES_PAUSED_REASON = (
+    "entries paused by the account owner - no NEW positions; every exit path "
+    "stays live, so what is already open keeps its trailing stop and its "
+    "24-hour backstop"
+)
+
+
+async def are_alpaca_entries_paused() -> bool:
+    """True when the account owner has paused NEW Alpaca entries.
+
+    DELIBERATELY NOT passive mode. is_alpaca_passive_mode() short-circuits
+    this file's whole loop with a `continue` BEFORE exit management runs, so
+    anything already open is left with no trailing stop and no 24-hour
+    backstop - the exact shape of the USO/MCL position that sat unmanaged at
+    -4.9%. It is also only reachable through the liquidate-and-buy-SPY
+    endpoint, which force-closes every position first.
+
+    This flag instead feeds `entries_halted`, the mechanism the kill
+    conditions already use: try_open refuses, and all seven close paths
+    below it stay reachable. Stop opening, keep managing.
+
+    DB-persisted rather than a Railway env var, for the reason
+    is_alpaca_passive_mode's own docstring gives: a hand-pasted env var is a
+    real, recurring failure mode, and a value this code sets itself is not.
+    It also means flipping it needs no redeploy - nothing restarts, and the
+    Coinbase side never notices. STOP_TRADING would have: it is read at the
+    top of crypto_grid_bot.run_grid_branch_cycle, so it halts the grid
+    fleet's buys AND its sells."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_ENTRIES_PAUSED_KEY))
+        row = result.scalar_one_or_none()
+        return bool(row and row.base_capital and row.base_capital >= 1.0)
+
+
+async def set_alpaca_entries_paused(enabled: bool):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == ALPACA_ENTRIES_PAUSED_KEY))
+        row = result.scalar_one_or_none()
+        if row is None:
+            row = TradingBotState(bot_name=ALPACA_ENTRIES_PAUSED_KEY, base_capital=0.0)
+            db.add(row)
+        row.base_capital = 1.0 if enabled else 0.0
+        await db.commit()
 
 
 async def is_alpaca_branch_mode_active() -> bool:

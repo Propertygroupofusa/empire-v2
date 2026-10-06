@@ -1819,7 +1819,7 @@
         </div>
         <div class="panel">
             <div class="panel-title">Realized P&amp;L, cumulative</div>
-            <div class="panel-sub">The running total of closed grid profit, trade by trade, oldest to newest. Closed money only - the open slices counted at the top of this page are not in this line, which is why it ends lower than the headline number up there.</div>
+            <div class="panel-sub">The running total of the grid&rsquo;s OWN closed profit, trade by trade, oldest to newest. Closed money only - open slices are not in this line, and neither are inherited positions the grid never bought; those are named under the chart.</div>
             <div id="grid-pnl-curve"><div class="coin-history-empty">Loading…</div></div>
         </div>
     </div>
@@ -9291,30 +9291,78 @@ async function executeGridLevels() {
     }
 }
 
-// The running total of closed grid profit, trade by trade. Drawn from
-// recent_trades (the API returns the newest 50), so the curve is
-// deliberately started at the real total MINUS the trades shown - which
-// makes its right-hand end land exactly on the headline realized
+// The running total of the grid's OWN closed profit, trade by trade.
+// Drawn from recent_trades (the API returns the newest 50), so the curve
+// is deliberately started at the real own total MINUS the trades shown -
+// which makes its right-hand end land exactly on the headline realized
 // figure, instead of on a number that only matches the window.
+//
+// Rows tagged adopted_exit are EXCLUDED. Such a row closes a position the
+// grid never opened, against an adoption mark nobody paid, so it does not
+// describe what a round trip of this configuration earns. Four ZEC rows on
+// 2026-10-04 booked -$311.24 inside eleven minutes and dragged this curve
+// from +$135.58 through zero to -$164.00, which read as the grid losing
+// money it never lost. get_realized_edge, /growth-model, /is-it-growing,
+// loss_study.analyse and capital_kpis.compute all already drop these rows;
+// this curve was the last place still pooling them. They are not hidden -
+// they are reported on their own line beneath the chart, both ways.
 function renderGridPnlCurve(history) {
     const wrap = document.getElementById('grid-pnl-curve');
     if (!wrap) return;
     try {
-        const trades = (history.recent_trades || []).slice()
-            .filter(t => t.closed_at && t.pnl != null)
+        const usable = (history.recent_trades || []).slice()
+            .filter(t => t.closed_at && t.pnl != null);
+        const isInherited = t => (t.exit_reason || '') === 'adopted_exit';
+        const trades = usable.filter(t => !isInherited(t))
             .sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
         if (trades.length < 2) {
             wrap.innerHTML = '<div class="coin-history-empty">Not enough completed grid round trips to draw a curve yet.</div>';
             return;
         }
+        // Inherited closes, counted from the ledger's own totals when it
+        // publishes them and from this window only as a fallback.
+        const inheritedCount = history.realized_adopted_trades != null
+            ? history.realized_adopted_trades : usable.filter(isInherited).length;
+        const inheritedUsd = history.realized_adopted_usd != null
+            ? history.realized_adopted_usd
+            : usable.filter(isInherited).reduce((s, t) => s + t.pnl, 0);
+        const restatedUsd = history.realized_adopted_restated_usd != null
+            ? history.realized_adopted_restated_usd : null;
+
         const shownSum = trades.reduce((s, t) => s + t.pnl, 0);
-        const total = history.total_realized_pnl != null ? history.total_realized_pnl : shownSum;
+        // Does the LEDGER hold anything inherited - not just this window?
+        // The trade counts answer it when the feed publishes them; otherwise
+        // the window is all we can see and we say only what it supports.
+        const inheritedAnywhere = history.realized_adopted_trades != null
+            ? history.realized_adopted_trades > 0 : usable.some(isInherited);
+
+        // Anchor on the OWN all-time total. The curve opens at
+        // (total - window sum), so the anchor decides where the line ENDS:
+        // falling back to the pooled figure would feed the inherited dollars
+        // back in through the offset even with their rows no longer plotted -
+        // a cliff with no cause on screen, which is worse than pooling.
+        // total_realized_pnl is safe ONLY when the ledger holds nothing
+        // inherited, in which case it IS the own total. With no own figure
+        // and something inherited in the book, the honest answer is the
+        // window alone, said as the window alone.
+        let total, windowOnly = false;
+        if (history.realized_own_usd != null) {
+            total = history.realized_own_usd;
+        } else if (!inheritedAnywhere && history.total_realized_pnl != null) {
+            total = history.total_realized_pnl;
+        } else {
+            total = shownSum;
+            windowOnly = true;
+        }
         const startAt = total - shownSum;
-        // Trades that exist in the ledger but not in this window. Their sum IS
-        // startAt, so the left edge of the line is a real running total, not a
-        // synthetic offset - but the reader cannot know that unless it is said.
-        const olderCount = (history.total_trade_count != null && history.total_trade_count > trades.length)
-            ? history.total_trade_count - trades.length : 0;
+        // Own trades that exist in the ledger but not in this window. Their sum
+        // IS startAt, so the left edge of the line is a real running total, not
+        // a synthetic offset - but the reader cannot know that unless it is said.
+        const ledgerCount = history.realized_own_trades != null
+            ? history.realized_own_trades
+            : (!inheritedAnywhere && history.total_trade_count != null
+                ? history.total_trade_count : trades.length);
+        const olderCount = ledgerCount > trades.length ? ledgerCount - trades.length : 0;
 
         let running = startAt;
         const pts = [{ x: 0, y: running, t: null }];
@@ -9359,7 +9407,17 @@ function renderGridPnlCurve(history) {
                        ${trades.length} closed round trip${trades.length === 1 ? '' : 's'}, ending at `
                     : `All ${trades.length} closed round trip${trades.length === 1 ? '' : 's'}, ending at `}
                 <strong style="color:${endUp ? 'var(--green)' : 'var(--red)'};">${total >= 0 ? '+' : '-'}${fmtUsd(Math.abs(total))}</strong>
-                all-time realized. Closed money only - open slices are not in this line.
+                ${windowOnly ? 'realized across the round trips shown here'
+                             : 'all-time realized'} on the trades the grid itself
+                opened and closed.
+                Closed money only - open slices are not in this line.
+                ${inheritedCount > 0 ? `<div style="margin-top:5px;">Not in this line:
+                   ${inheritedCount} inherited close${inheritedCount === 1 ? '' : 's'} on
+                   position${inheritedCount === 1 ? '' : 's'} the grid never bought -
+                   <strong>${fmtSignedUsd(inheritedUsd)}</strong> against the adoption mark
+                   nobody paid${restatedUsd != null
+                     ? `, <strong>${fmtSignedUsd(restatedUsd)}</strong> against what was actually paid`
+                     : ''}. Real cash either way, and not a measure of this strategy.</div>` : ''}
             </div>`;
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty">Could not draw the P&L curve (${e.message}).</div>`;

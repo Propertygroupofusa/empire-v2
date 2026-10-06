@@ -5929,12 +5929,19 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
 
     locked_usd = round(await get_alpaca_locked_usd(), 2)
     alpaca_passive_mode = await prop_bot_module.is_alpaca_passive_mode() if prop_bot_module else False
+    alpaca_entries_paused = await prop_bot_module.are_alpaca_entries_paused() if prop_bot_module else False
     entry_variant = await prop_bot_module.get_live_entry_variant() if prop_bot_module else "A"
     strategy_family = await prop_bot_module.get_live_strategy_family() if prop_bot_module else "momentum"
 
     _out = {
         "equity": round(equity, 2),
         "alpaca_passive_mode": alpaca_passive_mode,
+        "alpaca_entries_paused": alpaca_entries_paused,
+        "alpaca_entries_paused_means": (
+            "NEW entries refused; every exit path still runs, so open positions keep "
+            "their 3% trailing stop and their 24-hour backstop. Not passive mode, "
+            "which abandons exit management, and nothing is sold to enable it."
+        ),
         "entry_variant": entry_variant,
         "strategy_family": strategy_family,
         "cash": round(cash, 2),
@@ -6392,6 +6399,46 @@ async def resume_alpaca_active_trading():
     await prop_bot_module.set_alpaca_passive_mode(False)
     log.info("[dashboard] 🔓📉 Alpaca active trading resumed (passive/buy-and-hold-SPY mode turned off)")
     return {"status": "active_trading_resumed", "was_passive": was_passive, "passive_mode": False}
+
+
+class SetAlpacaEntriesPausedRequest(BaseModel):
+    paused: bool
+
+
+@router.post("/alpaca-overview/entries-paused")
+async def set_alpaca_entries_paused_endpoint(payload: SetAlpacaEntriesPausedRequest):
+    """Stop (or resume) NEW Alpaca entries, without selling anything and
+    without touching Coinbase.
+
+    Write-guarded by the app-wide middleware like every other mutating
+    route, so this is the account owner's to call with their token.
+
+    WHY THIS EXISTS, given three switches already looked like they would do
+    it and none of them would:
+      - STOP_TRADING is read at the top of crypto_grid_bot's own branch
+        cycle, so it halts the Coinbase grid's buys AND its sells.
+      - liquidate-and-buy-spy force-closes every open position before it
+        retires anything, which the owner has ruled out.
+      - passive mode has no setter of its own, and short-circuits the loop
+        before exit management, leaving open positions unmanaged.
+
+    ON:  prop_bot's try_open refuses (via the same `entries_halted` path the
+         kill conditions use) and alpaca_swing_bot refuses buys at its order
+         chokepoint. Every exit path in both bots stays live.
+    OFF: both resume. Reversible at any time, no redeploy - the flag is
+         DB-persisted and read each cycle."""
+    if prop_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
+    was = await prop_bot_module.are_alpaca_entries_paused()
+    await prop_bot_module.set_alpaca_entries_paused(payload.paused)
+    what = "\u23f8\ufe0f ALPACA ENTRIES PAUSED" if payload.paused else "\u25b6\ufe0f ALPACA ENTRIES RESUMED"
+    log.warning(f"[dashboard] {what} (exits unaffected either way)")
+    return {
+        "status": "updated",
+        "was_paused": was,
+        "entries_paused": payload.paused,
+        "exits_unaffected": True,
+    }
 
 
 class SetEntryVariantRequest(BaseModel):
@@ -14455,6 +14502,97 @@ async def cost_truth():
     }
 
 
+def _num_or_none(v):
+    """float(v), or None. None and 0.0 are different claims about a ledger
+    and the whole point of this endpoint is to keep them apart."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f
+
+
+@router.get("/portfolio-plan")
+async def portfolio_plan(days: int = 10, split_days: int = 5):
+    """The re-ranking loop, on demand, so a schedule can drive it.
+
+    THE OWNER'S INSTRUCTION, 2026-10-06: "Close the loop, make the
+    re-ranking run on a schedule."
+
+    Until this existed the cycle - measure outcomes, re-rank capital, act,
+    measure again - was closed ONCE by hand on 2026-10-05, and the ranking
+    built that day would have aged into a frozen opinion about branches
+    that have since changed.
+
+    THE REFUSAL IS THE POINT. Every call re-tests the claim the ranking
+    rests on (that a branch's net % per close predicts its own next window)
+    against the CURRENT ledger, and publishes no ordering at all when that
+    test fails. A scheduled ranker that always ranks is worse than none: it
+    launders a stale ordering as a fresh finding, on a timer, with
+    accumulating authority.
+
+    READ-ONLY. It places no order, sells no coin, moves no dollar and
+    writes nothing. It returns a plan for a person to run.
+    """
+    try:
+        import crypto_grid_bot as grid
+        import portfolio_plan as planner
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail=f"unavailable: {exc}")
+
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    now = _dt.now(_tz.utc)
+    since = (now - _td(days=max(1, days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    split_at = (now - _td(days=max(1, split_days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        hist = await grid.get_grid_trade_history(limit_recent=5000)
+        status = await grid.get_grid_status()
+    except Exception as exc:
+        log.warning(f"[plan] unreadable: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=503, detail=f"ledger unreadable: {exc}")
+
+    # The coin cost basis per branch comes from the right-size preview,
+    # which is the module that already knows a branch's floor. Recomputing
+    # it here would be a second implementation of the one number that keeps
+    # this from proposing a sale.
+    # branch_rightsize.coin_basis() is THE definition of a branch's floor in
+    # this codebase. Calling it rather than recomputing the number here is
+    # deliberate: that floor is the single line separating "scaling" from
+    # "selling", and a second implementation of it would be a second place
+    # for it to drift. An unreadable basis leaves sources EMPTY - never a
+    # zero, which would read as "this branch has nothing backing it" and
+    # make its whole allocation look releasable.
+    rs_rows = []
+    try:
+        import branch_rightsize as _rsz
+        for _b in (status.get("branches") or []):
+            if not _b.get("bot_name"):
+                continue
+            rs_rows.append({
+                "bot_name": _b.get("bot_name"),
+                "coin_basis_usd": _rsz.coin_basis(_rsz._slices_of(_b)),
+            })
+    except Exception as exc:
+        rs_rows = []
+        log.warning(f"[plan] coin basis unreadable, sources will be empty "
+                    f"rather than guessed: {type(exc).__name__}: {exc}")
+
+    out = planner.build(
+        trades=hist.get("recent_trades") or [],
+        branches=status.get("branches") or [],
+        rightsize_rows=rs_rows,
+        loose_cash_usd=float(status.get("real_free_cash_usd") or 0.0),
+        fleet_allocated_usd=float(status.get("total_allocated_usd") or 0.0),
+        split_at=split_at, since=since)
+    out["window_days"] = days
+    out["split_days"] = split_days
+    out["as_of"] = now.isoformat()
+    out["read_only"] = True
+    out["coin_basis_readable"] = bool(rs_rows)
+    return out
+
+
 @router.get("/is-it-growing")
 async def is_it_growing():
     """The only number on this dashboard that is actually growth.
@@ -14485,12 +14623,56 @@ async def is_it_growing():
 
     realized = trades = win_rate = None
     first_at = last_at = None
+    inherited = inherited_trades = inherited_restated = None
+
+    # THE KEYWORD WAS WRONG AND THE FAILURE WAS SILENT.
+    #
+    # This called get_grid_trade_history(limit=500). The parameter is named
+    # limit_recent, so every call raised TypeError, the bare except below
+    # swallowed it, and the function fell through to the raw SUM(pnl) that
+    # follows - for as long as this endpoint has existed. Nothing logged,
+    # because an unreadable ledger and an uncalled provider look identical
+    # from here.
+    #
+    # WHAT THAT COST. The provider already splits the book into the grid's
+    # OWN trading and rows tagged adopted_exit - positions the grid did not
+    # open, priced against an adoption mark nobody paid. The fallback sums
+    # pnl across every row with no such filter. So on 2026-10-05 this
+    # endpoint published -$165.29 under the field name
+    # "is_the_only_growth_figure_here", when the grid's own 207 round trips
+    # had earned +$145.95 and the four inherited ZEC exits that dragged it
+    # negative had actually put $1,268.45 of cash in the wallet, gaining
+    # $297.78 against the basis really paid.
+    #
+    # The exception is logged now. A provider that cannot be called is a
+    # bug, and a bug that falls back silently is the one that lasts.
     try:
-        hist = await grid.get_grid_trade_history(limit=500) \
+        hist = await grid.get_grid_trade_history(limit_recent=500) \
             if hasattr(grid, "get_grid_trade_history") else None
-    except Exception:
+    except Exception as exc:
+        log.warning("[growing] trade-history provider failed, falling back to "
+                    f"the pooled ledger sum: {type(exc).__name__}: {exc}")
         hist = None
-    if hist is None:
+
+    if hist is not None:
+        # OWN TRADING IS THE ANSWER TO "IS IT GROWING". The inherited rows
+        # are published beside it, never added into it and never dropped -
+        # they are real money, they are just not this fleet's work.
+        realized = _num_or_none(hist.get("realized_own_usd"))
+        trades = hist.get("realized_own_trades")
+        inherited = _num_or_none(hist.get("realized_adopted_usd"))
+        inherited_trades = hist.get("realized_adopted_trades")
+        inherited_restated = _num_or_none(hist.get("realized_adopted_restated_usd"))
+        _rt = hist.get("recent_trades") or []
+        _own = [t for t in _rt
+                if (t.get("exit_reason") or "") != "adopted_exit"]
+        _wins = len([t for t in _own if (t.get("pnl") or 0) > 0])
+        win_rate = round(_wins / len(_own) * 100, 1) if _own else None
+        _closed = sorted(t.get("closed_at") for t in _own if t.get("closed_at"))
+        if _closed:
+            first_at, last_at = _closed[0], _closed[-1]
+
+    if realized is None:
         try:
             from models import CryptoGridTradeHistory
             from database import get_session_factory
@@ -14518,16 +14700,57 @@ async def is_it_growing():
     except Exception:
         deployed = None
 
+    # first_at/last_at arrive as ISO strings from the provider and as
+    # datetimes from the DB fallback. Both are handled rather than one being
+    # assumed, because picking either would make the OTHER path silently
+    # produce no rate at all - which is the exact failure this fix is for.
     days = None
-    if first_at and last_at:
-        days = max((last_at - first_at).days, 1)
+    try:
+        _a, _b = first_at, last_at
+        if isinstance(_a, str):
+            _a = datetime.fromisoformat(_a.replace("Z", "+00:00"))
+        if isinstance(_b, str):
+            _b = datetime.fromisoformat(_b.replace("Z", "+00:00"))
+        if _a and _b:
+            days = max((_b - _a).days, 1)
+    except (TypeError, ValueError) as exc:
+        log.warning(f"[growing] span unreadable, no per-day rate: {exc}")
+        days = None
 
     per_day = round(realized / days, 4) if (realized is not None and days) else None
     per_hour = round(per_day / 24, 4) if per_day is not None else None
 
+    _head = (f"${realized:,.2f} earned across {trades} closed round trips"
+             + (f" over {days} days - ${per_day:,.4f} a day, "
+                f"${per_hour:,.4f} an hour" if per_day is not None else "")
+             if realized is not None else
+             "The trade ledger could not be read, so no growth figure "
+             "can be given.")
+    if inherited is not None and inherited_trades:
+        _head += (f" - and, separately, {inherited_trades} inherited exit(s) "
+                  f"booked ${inherited:,.2f} against an adoption mark"
+                  + (f", ${inherited_restated:,.2f} against the basis really "
+                     f"paid" if inherited_restated is not None else "")
+                  + ". That is not this fleet's trading either way.")
+
     return {
         "is_the_only_growth_figure_here": True,
+        "this_figure_is": (
+            "the grid's OWN closed round trips. Rows tagged adopted_exit are "
+            "NOT in it: those close positions the grid never opened, priced "
+            "against an adoption mark nobody paid, so adding them answers a "
+            "different question than 'is the bot earning'. They are published "
+            "below instead of being hidden or blended."),
         "realized_usd": realized,
+        "inherited_realized_usd": inherited,
+        "inherited_trades": inherited_trades,
+        "inherited_restated_usd": inherited_restated,
+        "inherited_is": (
+            "positions the grid adopted rather than bought. inherited_realized_usd "
+            "is what the ledger booked against the adoption mark; "
+            "inherited_restated_usd is the same sales measured against the cost "
+            "basis the account owner declared. Both are shown because the stored "
+            "row is never rewritten to make a number look better."),
         "unrealized_usd": unrealized,
         "trades": trades,
         "win_rate_pct": win_rate,
@@ -14535,12 +14758,7 @@ async def is_it_growing():
         "realized_per_day_usd": per_day,
         "realized_per_hour_usd": per_hour,
         "capital_behind_it_usd": deployed,
-        "headline": (
-            f"${realized:,.2f} earned across {trades} closed round trips"
-            + (f" over {days} days - ${per_day:,.4f} a day, ${per_hour:,.4f} an hour"
-               if per_day is not None else "")
-            if realized is not None else
-            "The trade ledger could not be read, so no growth figure can be given."),
+        "headline": _head,
         "what_this_excludes": (
             "Price drift. The coins moved $4,706 over 90 days on their own; none of that "
             "is here, because none of it was earned by a bot. It also excludes every "
