@@ -10838,6 +10838,13 @@ async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
     """
     if crypto_grid_bot_module is None:
         raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    # BOUND BEFORE IT IS USED. `g` was referenced further down without
+    # ever being assigned here, which is a NameError at request time and
+    # nothing but a 500 to the caller - the route answered for one deploy
+    # and then stopped the moment the live-wait read was added below it.
+    # The source-parsing endpoint tests could not see it: they read the
+    # handler's text and never execute it.
+    g = crypto_grid_bot_module
     import incubator as inc
     from models import TradingBotState
     from sqlalchemy import select
