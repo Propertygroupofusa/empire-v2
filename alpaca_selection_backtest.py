@@ -490,6 +490,51 @@ def _replay_symbol_reverse_momentum(closes: list, spend_per_trade: float = SPEND
     return trades
 
 
+# ============================================================================
+# MOVING-AVERAGE CROSSOVER - the textbook strategy from Alpaca's own example
+# set, added 2026-10-07 at the owner's request to be judged against what is
+# live, never to replace it without winning.
+#
+# Entry: the fast SMA crosses UP through the slow SMA on this bar (it was at
+# or below on the previous bar). Exit: the fast SMA crosses back DOWN, or
+# the same 1.5% hard stop the live mean-reversion strategy uses - a plain
+# crossover with no stop can sit through an unlimited drawdown waiting for
+# the cross, and nothing on this account is allowed to do that.
+# 10/30 on 15-minute bars matches Alpaca's published example periods.
+SMA_CROSS_FAST = 10
+SMA_CROSS_SLOW = 30
+SMA_CROSS_STOP_PCT = STOP_LOSS_PCT
+
+
+def _replay_symbol_sma_crossover(closes: list, spend_per_trade: float = SPEND_PER_TRADE,
+                                 fast: int = SMA_CROSS_FAST, slow: int = SMA_CROSS_SLOW,
+                                 stop_pct: float = SMA_CROSS_STOP_PCT) -> list:
+    trades = []
+    position = None
+    prev_fast = prev_slow = None
+    for i in range(slow - 1, len(closes)):
+        f = sum(closes[i - fast + 1:i + 1]) / fast
+        sl = sum(closes[i - slow + 1:i + 1]) / slow
+        price = closes[i]
+        if position is None:
+            if prev_fast is not None and prev_fast <= prev_slow and f > sl:
+                position = {"entry": price}
+        else:
+            hit_stop = price <= position["entry"] * (1 - stop_pct)
+            crossed_down = f < sl
+            if hit_stop or crossed_down:
+                pnl_pct = (price - position["entry"]) / position["entry"]
+                trades.append({"pnl_usd": spend_per_trade * pnl_pct, "pnl_pct": pnl_pct,
+                               "exit": "STOP" if hit_stop else "CROSS_DOWN"})
+                position = None
+        prev_fast, prev_slow = f, sl
+    if position is not None:
+        price = closes[-1]
+        pnl_pct = (price - position["entry"]) / position["entry"]
+        trades.append({"pnl_usd": spend_per_trade * pnl_pct, "pnl_pct": pnl_pct, "exit": "OPEN_AT_END"})
+    return trades
+
+
 async def run_momentum_vs_mean_reversion_comparison(contract_codes=None, days: int = BACKTEST_DAYS, max_concurrent: int = 6) -> dict:
     """Fetches real Alpaca history ONCE per symbol, then replays BOTH the
     existing real mean-reversion strategy (_replay_symbol(), completely
@@ -635,84 +680,52 @@ async def run_momentum_vs_mean_reversion_multi_window(
 
             await asyncio.gather(*[_one(t) for t in unique_tickers])
 
-            mr_total, mom_total, rev_total = 0.0, 0.0, 0.0
-            mr_trades_total, mom_trades_total, rev_trades_total = 0, 0, 0
-            mr_wins_total, mom_wins_total, rev_wins_total = 0, 0, 0
-            for ticker, closes in per_symbol.items():
-                mr_trades = _replay_symbol(closes, symbol=ticker)
-                mom_trades = _replay_symbol_momentum(closes)
-                rev_trades = _replay_symbol_reverse_momentum(closes)
-                mr_total += sum(t["pnl_usd"] for t in mr_trades)
-                mom_total += sum(t["pnl_usd"] for t in mom_trades)
-                rev_total += sum(t["pnl_usd"] for t in rev_trades)
-                mr_trades_total += len(mr_trades)
-                mom_trades_total += len(mom_trades)
-                rev_trades_total += len(rev_trades)
-                mr_wins_total += len([t for t in mr_trades if t["pnl_usd"] > 0])
-                mom_wins_total += len([t for t in mom_trades if t["pnl_usd"] > 0])
-                rev_wins_total += len([t for t in rev_trades if t["pnl_usd"] > 0])
-
-            windows.append({
+            replays = {
+                "mean_reversion": lambda c, t: _replay_symbol(c, symbol=t),
+                "momentum": lambda c, t: _replay_symbol_momentum(c),
+                "reverse_momentum": lambda c, t: _replay_symbol_reverse_momentum(c),
+                "sma_crossover": lambda c, t: _replay_symbol_sma_crossover(c),
+            }
+            entry = {
                 "window_index": w,
                 "window_start": (window_end - timedelta(days=window_days)).strftime("%Y-%m-%d"),
                 "window_end": window_end.strftime("%Y-%m-%d"),
                 "symbols_with_results": len(per_symbol),
                 "skipped": skipped,
-                "mean_reversion": {
-                    "num_trades": mr_trades_total,
-                    "win_rate": round(mr_wins_total / mr_trades_total * 100, 1) if mr_trades_total else 0.0,
-                    "total_pnl": round(mr_total, 2),
-                },
-                "momentum": {
-                    "num_trades": mom_trades_total,
-                    "win_rate": round(mom_wins_total / mom_trades_total * 100, 1) if mom_trades_total else 0.0,
-                    "total_pnl": round(mom_total, 2),
-                },
-                "reverse_momentum": {
-                    "num_trades": rev_trades_total,
-                    "win_rate": round(rev_wins_total / rev_trades_total * 100, 1) if rev_trades_total else 0.0,
-                    "total_pnl": round(rev_total, 2),
-                },
-            })
+            }
+            for name, replay in replays.items():
+                total, n, wins = 0.0, 0, 0
+                for ticker, closes in per_symbol.items():
+                    trades = replay(closes, ticker)
+                    total += sum(t["pnl_usd"] for t in trades)
+                    n += len(trades)
+                    wins += len([t for t in trades if t["pnl_usd"] > 0])
+                entry[name] = {"num_trades": n,
+                               "win_rate": round(wins / n * 100, 1) if n else 0.0,
+                               "total_pnl": round(total, 2)}
+            windows.append(entry)
 
-    # Three-way "which real strategy actually won this window" - a genuine
-    # tie for best (identical total_pnl, e.g. all three at $0 with zero
-    # trades) counts toward none of them rather than crediting an arbitrary
-    # one.
-    mr_wins_windows = mom_wins_windows = rev_wins_windows = 0
+    # Which strategy actually won each window. A genuine tie for best
+    # (e.g. all at $0 with zero trades) credits none of them.
+    names = ["mean_reversion", "momentum", "reverse_momentum", "sma_crossover"]
+    won = {n: 0 for n in names}
     for wnd in windows:
-        pnls = {
-            "mean_reversion": wnd["mean_reversion"]["total_pnl"],
-            "momentum": wnd["momentum"]["total_pnl"],
-            "reverse_momentum": wnd["reverse_momentum"]["total_pnl"],
-        }
-        best_pnl = max(pnls.values())
-        leaders = [name for name, pnl in pnls.items() if pnl == best_pnl]
-        if len(leaders) > 1:
-            continue
-        if leaders[0] == "mean_reversion":
-            mr_wins_windows += 1
-        elif leaders[0] == "momentum":
-            mom_wins_windows += 1
-        else:
-            rev_wins_windows += 1
-    mr_total_all = round(sum(wnd["mean_reversion"]["total_pnl"] for wnd in windows), 2)
-    mom_total_all = round(sum(wnd["momentum"]["total_pnl"] for wnd in windows), 2)
-    rev_total_all = round(sum(wnd["reverse_momentum"]["total_pnl"] for wnd in windows), 2)
+        pnls = {n: wnd[n]["total_pnl"] for n in names}
+        best = max(pnls.values())
+        leaders = [n for n, v in pnls.items() if v == best]
+        if len(leaders) == 1:
+            won[leaders[0]] += 1
 
+    summary = {}
+    for n in names:
+        summary[f"{n}_windows_won"] = won[n]
+        summary[f"{n}_total_pnl"] = round(sum(wnd[n]["total_pnl"] for wnd in windows), 2)
     return {
         "window_days": window_days,
         "num_windows": num_windows,
         "spend_per_trade": SPEND_PER_TRADE,
         "windows": windows,
-        "summary": {
-            "mean_reversion_windows_won": mr_wins_windows,
-            "momentum_windows_won": mom_wins_windows,
-            "reverse_momentum_windows_won": rev_wins_windows,
-            "mean_reversion_total_pnl": mr_total_all,
-            "momentum_total_pnl": mom_total_all,
-            "reverse_momentum_total_pnl": rev_total_all,
-        },
+        "summary": summary,
     }
 
 
