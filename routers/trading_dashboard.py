@@ -476,7 +476,33 @@ async def _alpaca_realized_record(session: aiohttp.ClientSession) -> dict:
     """
     import closed_trades
     try:
-        params = {"status": "closed", "direction": "asc", "limit": "500"}
+        # DESC = the MOST RECENT 500 closed orders. It was "asc" from
+        # 2026-09-28 to 2026-10-07, which is the OLDEST 500 - a window
+        # that stopped moving the day the account passed 500 closed
+        # orders. This block then read -$3.92 across 188 completed sells
+        # while the book turned over several times a day, and the
+        # docstring beside it said "most recent 500", so the figure
+        # looked stable rather than frozen. A number read to decide
+        # whether a strategy works is the worst place to publish a
+        # constant.
+        #
+        # The "asc" was a real fix for a real bug: this module used to
+        # pair orders in a loop that assumed a buy was seen before its
+        # own sell, so newest-first produced rows whose exit preceded
+        # their entry. That loop is gone. The pairing now lives in
+        # closed_trades.pair_round_trips(), which sorts ascending itself
+        # and is covered directly by
+        # test_an_exit_never_predates_its_own_entry and
+        # test_input_order_does_not_change_the_result. Arrival order no
+        # longer reaches the arithmetic, so the fetch is free to ask for
+        # the window that answers the question.
+        #
+        # EXPECT MORE unmatched_sells. A recent window cuts some sells
+        # off from their opening buy. Those are reported separately and
+        # never folded into the totals - a gap named is not a loss, and
+        # inventing an entry price to make the page look complete is the
+        # failure this codebase has already had once.
+        params = {"status": "closed", "direction": "desc", "limit": "500"}
         async with session.get(f"{ALPACA_BASE_URL}/v2/orders",
                                headers=ALPACA_HEADERS, params=params) as r:
             if r.status != 200:
@@ -528,7 +554,14 @@ async def _alpaca_realized_record(session: aiohttp.ClientSession) -> dict:
                  "avg_per_trade are computed on REAL SELL ORDERS; "
                  "lot_win_rate_pct is the old lot-level figure, kept so a "
                  "reader comparing against an older screenshot can see "
-                 "which is which."),
+                 "which is which. THE WINDOW IS BOUNDED: this is "
+                 "rebuilt from the most recent `orders_scanned` closed "
+                 "orders, so when that figure equals the 500 cap, older "
+                 "sells sit outside it and a move here is the NET of "
+                 "sells entering and sells leaving - not a ledger of "
+                 "new losses. It read a frozen -$3.92 across 188 sells "
+                 "for weeks while this fetch asked for the OLDEST 500 "
+                 "instead, and nothing said so."),
     }
 
 
@@ -683,7 +716,12 @@ async def get_closed_trades(limit: int = 50):
 
     try:
         async with aiohttp.ClientSession() as session:
-            params = {"status": "closed", "direction": "asc", "limit": "500"}
+            # DESC - the MOST RECENT 500. See the note in
+            # _alpaca_realized_record above: "asc" reads the OLDEST 500,
+            # which froze both this endpoint and that block on the
+            # account's first 500 orders. The pairing is order-agnostic
+            # because pair_round_trips sorts ascending itself.
+            params = {"status": "closed", "direction": "desc", "limit": "500"}
             async with session.get(f"{ALPACA_BASE_URL}/v2/orders",
                                    headers=ALPACA_HEADERS, params=params) as r:
                 if r.status != 200:

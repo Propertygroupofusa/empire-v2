@@ -264,39 +264,69 @@ with open(_ROUTER, encoding="utf-8") as _fh:
 _TREE = _ast.parse(_SRC)
 
 
-def _endpoint_src():
+def _node(name="get_closed_trades"):
     for node in _ast.walk(_TREE):
         if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) \
-                and node.name == "get_closed_trades":
-            return _ast.get_source_segment(_SRC, node)
-    raise AssertionError("get_closed_trades not found")
+                and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found")
 
 
 def _endpoint_node():
-    for node in _ast.walk(_TREE):
-        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) \
-                and node.name == "get_closed_trades":
-            return node
-    raise AssertionError("get_closed_trades not found")
+    return _node("get_closed_trades")
 
 
-def test_the_endpoint_no_longer_fetches_newest_first():
-    """direction=desc fed an algorithm that assumes ascending. That one
-    parameter is what made every row show an exit before its entry.
+def _endpoint_src():
+    return _ast.get_source_segment(_SRC, _endpoint_node())
 
-    Read off the params dict via AST, not by searching the source text:
-    the first version of this test matched the word "desc" in the
-    docstring that EXPLAINS the bug and failed on prose. Never match on
-    source containing comments."""
-    directions = []
-    for node in _ast.walk(_endpoint_node()):
+
+def _directions(name):
+    """Every literal `direction` in that function's params dicts.
+
+    Read off via AST, not by searching the source text: the first
+    version of this test matched the word "desc" in the docstring that
+    EXPLAINS the bug and failed on prose. Never match on source
+    containing comments."""
+    out = []
+    for node in _ast.walk(_node(name)):
         if isinstance(node, _ast.Dict):
             for k, v in zip(node.keys, node.values):
                 if isinstance(k, _ast.Constant) and k.value == "direction" \
                         and isinstance(v, _ast.Constant):
-                    directions.append(v.value)
-    assert directions, "the endpoint sends no direction parameter at all"
-    assert all(d == "asc" for d in directions), directions
+                    out.append(v.value)
+    return out
+
+
+@pytest.mark.parametrize("name", ["get_closed_trades",
+                                  "_alpaca_realized_record"])
+def test_the_window_is_the_most_recent_orders_not_the_oldest(name):
+    """THIS TEST USED TO PIN THE BUG IN PLACE.
+
+    It asserted direction == "asc" on get_closed_trades, written on
+    2026-09-28 against a real defect: orders were fetched newest-first
+    and walked by a loop that assumed a buy was seen before its own
+    sell, so every row showed an exit before its entry.
+
+    That loop no longer exists. The pairing moved into
+    closed_trades.pair_round_trips(), which sorts ascending itself, and
+    two tests above cover that directly -
+    test_an_exit_never_predates_its_own_entry and
+    test_input_order_does_not_change_the_result. The guarantee lives
+    where the arithmetic lives, so the fetch no longer has to carry it.
+
+    Meanwhile "asc" with limit=500 means the OLDEST 500 closed orders -
+    a window that stops moving the moment the account passes 500 and
+    never moves again. Both of these functions published figures from
+    the account's first 500 orders while the book turned over daily, and
+    nothing flagged it because the number looked stable. Pinning "asc"
+    here is what let that survive a year of passing tests.
+
+    _alpaca_realized_record is included because it is the one the owner
+    actually reads - it had no test of its own, which is why its copy of
+    the same parameter was never questioned."""
+    directions = _directions(name)
+    assert directions, f"{name} sends no direction parameter at all"
+    assert all(d == "desc" for d in directions), directions
 
 
 def test_the_endpoint_does_not_pair_trades_itself():
