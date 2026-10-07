@@ -1662,6 +1662,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Status snapshot thread failed to start: {e}")
 
+    # SHADOW ALLOCATOR - ranks the fleet on a timer and records what it WOULD
+    # have funded. It has no order path, no write-guarded call and no flag
+    # write: it cannot move capital, and switching it off changes no trading
+    # behaviour. Started last and in its own daemon thread so a failure here
+    # can never reach the trading loop.
+    try:
+        import shadow_allocator
+        import threading
+        threading.Thread(target=shadow_allocator.run, daemon=True).start()
+        log.info("🧭 Shadow allocator thread started (ranks only - deploys nothing)")
+    except Exception as e:
+        log.warning(f"Shadow allocator thread failed to start (trading unaffected): {e}")
+
     print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
     try:
         if alpaca_swing_bot_module is not None:

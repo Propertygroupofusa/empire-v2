@@ -10812,6 +10812,39 @@ async def _incubator_candles(product_id, gran, days, pause=0.25):
     return [(t, rows[t][0], rows[t][1], rows[t][2]) for t in ts], err
 
 
+@router.get("/grid-status/allocator")
+async def grid_allocator_endpoint():
+    """What the scorer would fund right now, and why it rejects the rest.
+
+    STRICTLY READ-ONLY, AND STRUCTURALLY SO. shadow_allocator has no order
+    path, no write-guarded call and no flag write. This handler serves the
+    newest completed pass out of memory - it starts no scoring work of its
+    own, so it cannot slow a request or touch an external API on the
+    request path.
+
+    `would_have_funded` is a RECORD, not an instruction. No capital moved.
+    """
+    import shadow_allocator
+    return shadow_allocator.latest()
+
+
+@router.get("/grid-status/allocator-ledger")
+async def grid_allocator_ledger_endpoint(hours: int = 4, passes: int = 200):
+    """Did the branch the scorer picked actually complete a profitable cycle?
+
+    The prediction is read from trade_decisions; the outcome is read from
+    the real trade ledger. Nothing grades its own homework, and a window
+    that has not closed yet is skipped rather than scored as a miss.
+    """
+    import shadow_allocator
+    try:
+        return await shadow_allocator.resolve_outcomes(
+            hours_forward=max(1, min(int(hours), 72)),
+            limit_passes=max(1, min(int(passes), 1000)))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ledger unreadable: {e}")
+
+
 @router.get("/grid-status/exit-classification")
 async def grid_exit_classification_endpoint():
     """Why each open slice has not sold - six answers, one of which is a bug.
