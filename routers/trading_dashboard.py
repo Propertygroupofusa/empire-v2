@@ -10812,6 +10812,84 @@ async def _incubator_candles(product_id, gran, days, pause=0.25):
     return [(t, rows[t][0], rows[t][1], rows[t][2]) for t in ts], err
 
 
+@router.get("/grid-status/exit-classification")
+async def grid_exit_classification_endpoint():
+    """Why each open slice has not sold - six answers, one of which is a bug.
+
+    THE STATISTIC THIS REPLACES. The fleet logged 958 sell "expiries" against
+    42 buys in 720 hours, and that 95.8% was read as a jammed exit engine. It
+    was not: order_rested is ZERO on every one of those rows, and the rows say
+    why - "nothing sellable: available 0.0463890000 floors to 0". One resting
+    sell LOCKS the coin, and every cycle after it sees the unlocked crumb and
+    writes an expiry. The counter was measuring one healthy order being
+    polled. It cost an hour and nearly cost a change to a correct sell path.
+
+    So this publishes no failure rate. It answers the only question whose
+    answer is actionable: how many slices are profitable past the account's
+    own floor, unlocked, and have NO working order? That is the only shape an
+    exit defect can take, and it is the ONLY condition that warrants
+    investigating the sell engine.
+
+    STRICTLY READ-ONLY. exit_classifier has no imports at all - no venue, no
+    database, no network - and this handler only hands it state the fleet
+    already publishes.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    g = crypto_grid_bot_module
+    import exit_classifier as exc
+    import account_census
+
+    status = await g.get_grid_status()
+    slices = []
+    for b in (status.get("branches") or []):
+        for s in (b.get("slices") or []):
+            slices.append({**s, "product_id": b.get("product_id"),
+                           "bot_name": b.get("bot_name")})
+
+    # OWNED is the wrong question here and AVAILABLE is the right one: this
+    # asks "could this have been sold right now", not "does the coin exist".
+    # Same call the rest of this router makes - census(session, ...), inside
+    # the bot module's own aiohttp session. A first draft of this handler
+    # invented account_census.account_census() with no arguments, which does
+    # not exist and would have been a 500 on every read; the same class of
+    # bug as the unbound `g` that took /grid-status/incubator down.
+    holdings, census_err = {}, None
+    if crypto_btc_compound_bot_module is None:
+        census_err = "crypto_btc_compound_bot not importable - no Coinbase auth"
+    else:
+        try:
+            async with crypto_btc_compound_bot_module.aiohttp.ClientSession() as _s:
+                cen = await account_census.census(_s, tracked_usd=0.0)
+            if not cen.get("available"):
+                census_err = f"census unavailable: {cen.get('error')}"
+            else:
+                for h in (cen.get("holdings") or []):
+                    holdings[h.get("asset")] = h
+        except Exception as e:
+            # UNREADABLE, never empty. An empty holdings map would classify
+            # every profitable slice as UNKNOWN rather than silently calling
+            # it unlocked - but say so out loud rather than leaving the
+            # reader to infer it from a bucket count.
+            census_err = f"{type(e).__name__}: {e}"
+
+    # The floor is READ FROM THE ENGINE, never defaulted here. A classifier
+    # that sources its own bar can grade the engine against a number the
+    # engine does not use, which is the failure this module exists to stop.
+    floor = getattr(g, "GRID_PARKED_MIN_NET_PCT", None)
+
+    result = exc.classify(slices, holdings, floor)
+    unknown = exc.unknown_is_not_clean(result)
+
+    return JSONResponse(content={
+        **result,
+        "unknown_is_not_clean": unknown,
+        "census_unreadable": census_err,
+        "as_of": datetime.utcnow().isoformat() + "Z",
+    }, headers={"Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                "Pragma": "no-cache", "Expires": "0"})
+
+
 @router.get("/grid-status/incubator")
 async def grid_incubator_endpoint(granularity: int = 3600, days: float = 30.0,
                                   min_live_trips: int = 20):
