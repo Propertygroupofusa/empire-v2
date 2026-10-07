@@ -75,14 +75,32 @@ def str_consts(name):
             if isinstance(c, ast.Constant) and isinstance(c.value, str)]
 
 
-def dict_value_for(name, key):
-    """The value node for a given string key in any dict literal in the function."""
+def dict_values_for(name, key):
+    """EVERY value node for a string key, across every dict literal here.
+
+    This used to return the FIRST match and that made it ask the wrong
+    question. place_maker_sell builds TWO dicts carrying "decision": the
+    cooldown-skip block near the top, which correctly writes the constant
+    _dust.DUST because no planner has run and there is no verdict to read,
+    and the real refusal block at the bottom, which correctly writes
+    plan.decision. ast.walk reaches the cooldown one first, so a check for
+    "the planner's decision" was reading a path that has no planner, and
+    failed against code that was right. Returning all of them lets the
+    assertion say what it means: at least one dict records the real verdict.
+    """
+    out = []
     for n in ast.walk(FN[name]):
         if isinstance(n, ast.Dict):
             for k, v in zip(n.keys, n.values):
                 if isinstance(k, ast.Constant) and k.value == key:
-                    return v
-    return None
+                    out.append(v)
+    return out
+
+
+def dict_value_for(name, key):
+    """First match only. Kept for checks where the function builds one dict."""
+    vals = dict_values_for(name, key)
+    return vals[0] if vals else None
 
 
 def calls(name):
@@ -258,10 +276,16 @@ print("== dust is reported as dust, not as a failed sale ==")
 ok("no string literal still says 'nothing sellable'",
    not any("nothing sellable" in c for c in str_consts("place_maker_sell")))
 ok("the reason recorded is the planner's code", "reason" in attrs("place_maker_sell"))
-_dec = dict_value_for("place_maker_sell", "decision")
-ok("the block detail carries the planner's decision",
-   isinstance(_dec, ast.Attribute) and _dec.attr == "decision",
-   ast.dump(_dec)[:60] if _dec is not None else "absent")
+_decs = dict_values_for("place_maker_sell", "decision")
+ok("the refusal block carries the planner's own decision",
+   any(isinstance(d, ast.Attribute) and d.attr == "decision" for d in _decs),
+   " | ".join(ast.dump(d)[:50] for d in _decs) or "absent")
+# And the cooldown-skip path is NOT required to - it has no plan object.
+# Pinning that too, so a later refactor cannot quietly make it read a
+# verdict that was never computed on that path.
+ok("and the cooldown-skip path reports the stored constant, not a verdict",
+   any(isinstance(d, ast.Attribute) and d.attr == "DUST" for d in _decs),
+   " | ".join(ast.dump(d)[:50] for d in _decs) or "absent")
 
 print("== the module is imported once, at module level ==")
 _imports = [a for a in ast.walk(TREE) if isinstance(a, ast.Import)
