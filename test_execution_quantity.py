@@ -259,6 +259,103 @@ ok("one whole unit available is not a wallet problem",
 ok("the two reasons are different strings",
    eq.REQUEST_BELOW_BASE_INCREMENT != eq.BELOW_BASE_INCREMENT)
 
+# --- A CONFIRMED ZERO IS NOT DUST ------------------------------------------
+#
+# Measured live 2026-10-07. ZEC-USD had been refused 200 times and the fleet
+# published this, verbatim, as the reason:
+#
+#   "BELOW_BASE_INCREMENT: 0.0 available is less than one tradeable unit of
+#    1E-8 (requested 0.073518066164). This is a real holding the venue's
+#    rules cannot express yet ... It becomes sellable again once inventory
+#    reaches 1E-8."
+#
+# The same reading reported ZEC held_units 0.0 under BOTH available and
+# owned, so it is not under a resting order and not staked. The books claim
+# 0.378166652152 units ($499.54, carrying +$89.25 of unrealized) against a
+# wallet the venue confirms is empty. Every clause of that message is wrong
+# for this branch, and the last one - wait for inventory - is advice that
+# can never come true.
+ZEC = dict(requested_quantity="0.073518066164", available_quantity="0.0",
+           price="1320.96", base_increment="0.00000001",
+           base_min_size=None, quote_min_size=None)
+
+# A zero venue balance blocks the sell. This is the part that was already
+# right and must stay right: whatever it is CALLED, no order goes out.
+p = eq.plan_order_quantity(**ZEC)
+ok("a zero venue balance sends nothing", p.executable_quantity == 0,
+   str(p.executable_quantity))
+ok("and it produces no order size string", p.order_size_string is None,
+   str(p.order_size_string))
+
+# A phantom claim is named as a books problem, not as dust that will heal.
+ok("a confirmed-zero wallet is NOTHING_HELD, not BELOW_BASE_INCREMENT",
+   p.reason == eq.NOTHING_HELD, p.reason)
+ok("and the message no longer calls it a real holding",
+   "a real holding" not in p.detail, p.detail)
+ok("and no longer promises it becomes sellable once inventory arrives",
+   "becomes sellable" not in p.detail, p.detail)
+ok("and it points at reconcile-slices, which is the owner's to run",
+   "reconcile-slices" in p.detail and "owner" in p.detail, p.detail)
+
+# THE RETRY SUPPRESSION IS THE WHOLE REASON THE DECISION STAYS DUST.
+# dust_cooldown.note_dust arms on DUST and on nothing else; REFUSED and any
+# verdict it does not recognise deliberately leave an existing cooldown
+# alone. Promoting this case to its own decision - which reads like the
+# tidier change - would drop the 900s suppression and send ZEC back to the
+# venue every cycle instead of every fifteen minutes. This check exists so
+# that the next person to reach for a new decision here fails loudly.
+ok("the decision stays DUST so the cooldown still arms",
+   p.decision == eq.DUST, p.decision)
+import dust_cooldown as dc
+dc.clear("ZEC-USD")
+_armed = dc.note_dust("ZEC-USD", p.decision, available_units=0.0,
+                      reason=p.reason, now=1000.0)
+ok("and note_dust actually arms on it", _armed is True, str(_armed))
+dc.clear("ZEC-USD")
+
+# The two zero-ish cases stay distinguishable. 0.00097323 of QNT against a
+# 0.001 increment IS a real holding under one unit and recovers on its own;
+# 0.0 of ZEC is not and does not. One reason code for both is what produced
+# the wrong diagnosis in the first place.
+q = eq.plan_order_quantity(requested_quantity="1000",
+                           available_quantity="0.00097323", price=None,
+                           base_increment="0.001", base_min_size=None,
+                           quote_min_size=None)
+ok("a real sub-unit holding is still BELOW_BASE_INCREMENT",
+   q.reason == eq.BELOW_BASE_INCREMENT, q.reason)
+ok("the empty wallet and the sub-unit holding are different reasons",
+   eq.NOTHING_HELD not in (eq.BELOW_BASE_INCREMENT,
+                           eq.REQUEST_BELOW_BASE_INCREMENT))
+
+# UNREADABLE IS STILL NOT ZERO. The new branch must not swallow the
+# BALANCE_UNREADABLE refusal above it - None is a gap, and a gap fails
+# closed as REFUSED rather than becoming a claim about an empty wallet.
+u = eq.plan_order_quantity(requested_quantity="1", available_quantity=None,
+                           price="1320.96", base_increment="0.00000001",
+                           base_min_size=None, quote_min_size=None)
+ok("an unreadable balance still REFUSES and is not called empty",
+   u.decision == eq.REFUSED and u.reason == eq.BALANCE_UNREADABLE,
+   f"{u.decision}/{u.reason}")
+
+# THE INVARIANT UNDERNEATH ALL OF IT: a sell is never sized above what the
+# venue will release. Checked across the live shapes rather than asserted
+# once, because the clamp is what stops a books-vs-wallet gap from becoming
+# an order the venue rejects.
+for _req, _avail, _inc in (("0.073518066164", "0.0", "0.00000001"),
+                           ("1000", "0.00097323", "0.001"),
+                           ("0.005", "0.22", "0.01"),
+                           ("12.5", "4.48", "0.01"),
+                           ("1000000", "1347.646389", "0.1"),
+                           ("0.5", "0.5", "0.00000001")):
+    _p = eq.plan_order_quantity(requested_quantity=_req,
+                                available_quantity=_avail, price=None,
+                                base_increment=_inc, base_min_size=None,
+                                quote_min_size=None)
+    ok(f"sell size never exceeds the {_avail} the venue will release",
+       _p.executable_quantity <= Decimal(_avail),
+       f"{_p.executable_quantity} > {_avail}")
+
+
 import inspect
 tree = ast.parse(inspect.getsource(eq))
 # AST, not substring: the module's docstring QUOTES the buggy

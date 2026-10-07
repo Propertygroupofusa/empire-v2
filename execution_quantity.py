@@ -61,9 +61,15 @@ from resting_stops import round_down
 # --- decisions -------------------------------------------------------------
 #
 # EXECUTE  the quantity clears every rule the venue imposes; send it.
-# DUST     confirmed too small to express. NOT an error, NOT a rejection,
-#          and NOT "nothing sellable" - it is a real holding below one
-#          tradeable unit, and it recovers on its own as inventory grows.
+# DUST     confirmed unsendable on a SIZE rule, by a balance that was
+#          read successfully. NOT an error and NOT a rejection. It covers
+#          two different facts, and the reason code says which:
+#            - a real holding below one tradeable unit, which recovers on
+#              its own as inventory grows (BELOW_BASE_INCREMENT), and
+#            - a confirmed empty wallet, which does not recover and is a
+#              books problem, not an inventory problem (NOTHING_HELD).
+#          Both stop the order and both arm the dust cooldown, which is
+#          the only reason they share a decision - see NOTHING_HELD.
 # REFUSED  the decision could not be made. Fails CLOSED: no order.
 #
 # REJECTED deliberately does not appear. That belongs to the order
@@ -92,6 +98,36 @@ BELOW_BASE_INCREMENT = "BELOW_BASE_INCREMENT"
 # reported, not dispatched on - so splitting them costs nothing and the
 # combined message cost a wrong diagnosis.
 REQUEST_BELOW_BASE_INCREMENT = "REQUEST_BELOW_BASE_INCREMENT"
+# AN EMPTY WALLET IS NOT DUST, AND TELLING THE READER TO WAIT FOR IT IS
+# A WRONG DIAGNOSIS.
+#
+# Measured live 2026-10-07. ZEC-USD, the fleet's only frozen branch, had
+# its escape sell refused 200 times with this exact published string:
+#
+#   "BELOW_BASE_INCREMENT: 0.0 available is less than one tradeable unit
+#    of 1E-8 (requested 0.073518066164). This is a real holding the
+#    venue's rules cannot express yet ... It becomes sellable again once
+#    inventory reaches 1E-8."
+#
+# Every clause of that is false for this branch. 0.0 is not a holding the
+# rules cannot express; it is no holding. 1E-8 is not a threshold ZEC is
+# approaching from below; the same reading reports held_units 0.0 for both
+# AVAILABLE and OWNED, so the coin is not under a resting order and not
+# staked - it is not there. And inventory does not reach 1E-8 by waiting:
+# the branch's books claim 0.37816665 units ($499.54, carrying +$89.25 of
+# unrealized that cannot be taken at any price) against a wallet the venue
+# confirms as empty. That is an accounting defect, and the fix for it is
+# reconcile-slices, which is write-guarded and the account owner's to run.
+#
+# THE DECISION STAYS DUST ON PURPOSE. dust_cooldown.note_dust arms only on
+# DUST; REFUSED and any verdict it does not recognise deliberately leave an
+# existing cooldown alone and never arm one. So promoting this case to its
+# own decision - the obvious-looking move - would silently drop the 900s
+# suppression and send ZEC back to the venue every cycle (heartbeat
+# measured at 23.8s) instead of every fifteen minutes, making the retry
+# storm it is meant to explain very much worse. What was wrong here was
+# never the decision. It was the words.
+NOTHING_HELD = "NOTHING_HELD"
 BELOW_BASE_MIN_SIZE = "BELOW_BASE_MIN_SIZE"
 BELOW_QUOTE_MIN_SIZE = "BELOW_QUOTE_MIN_SIZE"
 METADATA_UNAVAILABLE = "METADATA_UNAVAILABLE"
@@ -253,6 +289,27 @@ def plan_order_quantity(*, requested_quantity, available_quantity, price,
     if executable <= 0:
         # WHICH SIDE ACTUALLY BOUND. The wallet takes precedence when both
         # are under one unit, because raising the request would not help.
+        #
+        # A CONFIRMED ZERO IS CHECKED FIRST, because it is the one case the
+        # increment never explains. `avail` is 0 only when the balance was
+        # READ and came back as zero - an unreadable balance is None and has
+        # already refused above as BALANCE_UNREADABLE - so this is a fact
+        # about the wallet, not a gap in the reading.
+        if avail == 0:
+            return QuantityPlan(
+                decision=DUST, reason=NOTHING_HELD,
+                detail=(f"the available balance read as exactly 0 and {req} "
+                        f"was requested. There is no holding here to "
+                        f"express: this is a confirmed empty wallet, not a "
+                        f"holding under one tradeable unit of {inc}, and 0 "
+                        f"does not accumulate into a sellable size by "
+                        f"waiting. A ledger claim against an empty wallet is "
+                        f"a bookkeeping row, and correcting the books is "
+                        f"reconcile-slices - write-guarded, and the account "
+                        f"owner's to run. No order either way, and the dust "
+                        f"cooldown still arms, because retrying this sell "
+                        f"cannot change a balance of 0."),
+                executable_quantity=Decimal(0), **common)
         if avail < inc:
             return QuantityPlan(
                 decision=DUST, reason=BELOW_BASE_INCREMENT,
