@@ -2,6 +2,7 @@ import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from models import Worker
+from sqlalchemy.exc import IntegrityError
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///empire.db")
@@ -43,14 +44,31 @@ async def initialize_bot_worker():
                     print(f"✓ Bot worker already exists: {existing.id}")
                     return
 
+                # Worker HAS NO `role` COLUMN. Passing role="bot" raised
+                # TypeError: 'role' is an invalid keyword argument for Worker
+                # on every boot, which the handler below turned into
+                # "failed - skipping (will retry later)". It retried forever
+                # and failed identically every time, because the kwarg could
+                # never become valid. Seen live in the 2026-10-07 14:27 log.
+                #
+                # custom_metadata is a real JSON column and is where this
+                # belongs, so the intent is kept rather than deleted.
                 bot_worker = Worker(
                     name="Empire Bot",
                     email="bot@pgusa.local",
-                    role="bot",
-                    status="active"
+                    status="active",
+                    custom_metadata={"role": "bot"},
                 )
                 session.add(bot_worker)
-                await session.commit()
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    # Another init path committed the same email first. The
+                    # row exists, which is the outcome this function wanted -
+                    # reporting it as a failure to retry later was wrong.
+                    await session.rollback()
+                    print("✓ Bot worker already created by another init path")
+                    return
                 print(f"✓ Bot worker created: {bot_worker.id}")
 
             await engine.dispose()

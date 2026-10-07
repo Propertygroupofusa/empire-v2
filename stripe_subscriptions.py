@@ -47,14 +47,62 @@ STRIPE_PRODUCTS = {
 stripe_price_ids = {}
 
 
-def setup_stripe_products():
+def _find_product(client, tier_id):
+    """An existing active product for this tier, or None.
+
+    Stripe does NOT reject a duplicate product name - Product.create always
+    succeeds and makes another one. So the previous code's "create, and fall
+    back to a lookup if it errors" never took the lookup branch, and every
+    boot added three more products and three more prices to the live
+    account. Two restarts on 2026-10-07 alone produced six of each.
+
+    Look FIRST, create only if nothing matches.
     """
-    Create or fetch Stripe products and prices for subscription tiers
-    Run this once on startup to ensure products exist
+    starting_after = None
+    for _ in range(10):                       # 10 x 100 = 1,000 products
+        page = client.Product.list(limit=100, active=True,
+                                   **({"starting_after": starting_after}
+                                      if starting_after else {}))
+        items = list(page)
+        for p in items:
+            if (p.get("metadata") or {}).get("tier_id") == tier_id:
+                return p
+        if not getattr(page, "has_more", False) or not items:
+            return None
+        starting_after = items[-1].id
+    return None
+
+
+def _find_price(client, product_id, tier_info, tier_id):
+    """An existing active monthly price at this amount, or None.
+
+    Matched on what actually defines the price - product, amount, currency
+    and interval - not on metadata alone, so a price created before the
+    metadata was added is still reused instead of duplicated.
+    """
+    page = client.Price.list(product=product_id, limit=100, active=True)
+    for p in page:
+        rec = p.get("recurring") or {}
+        if (p.get("unit_amount") == tier_info["price_cents"]
+                and (p.get("currency") or "").lower() == "usd"
+                and rec.get("interval") == "month"):
+            return p
+    return None
+
+
+def setup_stripe_products(client=None):
+    """
+    Ensure Stripe products and prices for subscription tiers exist.
+
+    IDEMPOTENT. Reuses what is already in the account and creates only what
+    is genuinely missing, so restarting the service no longer litters the
+    live Stripe account with duplicates. `client` exists so this can be
+    tested without touching Stripe.
     """
     global stripe_price_ids
 
-    if not stripe.api_key:
+    client = client or stripe
+    if not client.api_key:
         log.warning("STRIPE_SECRET_KEY not configured - subscription billing disabled")
         return False
 
@@ -64,28 +112,25 @@ def setup_stripe_products():
                 # Skip free tier - no Stripe product needed
                 continue
 
-            # Create product if it doesn't exist
-            try:
-                product = stripe.Product.create(
+            product = _find_product(client, tier_id)
+            if product is not None:
+                log.info(f"Reusing Stripe product for {tier_id}: {product.id}")
+            else:
+                product = client.Product.create(
                     name=tier_info["name"],
                     description=tier_info["description"],
                     metadata={"tier_id": tier_id},
                 )
                 log.info(f"Created Stripe product for {tier_id}: {product.id}")
-            except stripe.error.InvalidRequestError:
-                # Product might already exist, try to fetch by metadata
-                products = stripe.Product.list(limit=100)
-                product = next(
-                    (p for p in products if p.metadata.get("tier_id") == tier_id),
-                    None,
-                )
-                if not product:
-                    log.error(f"Failed to create/find product for {tier_id}")
-                    continue
 
-            # Create price for the product
+            price = _find_price(client, product.id, tier_info, tier_id)
+            if price is not None:
+                stripe_price_ids[tier_id] = price.id
+                log.info(f"Reusing Stripe price for {tier_id}: {price.id}")
+                continue
+
             try:
-                price = stripe.Price.create(
+                price = client.Price.create(
                     product=product.id,
                     unit_amount=tier_info["price_cents"],
                     currency="usd",
@@ -94,18 +139,8 @@ def setup_stripe_products():
                 )
                 stripe_price_ids[tier_id] = price.id
                 log.info(f"Created Stripe price for {tier_id}: {price.id}")
-            except stripe.error.InvalidRequestError as e:
-                # Price might already exist
-                prices = stripe.Price.list(product=product.id, limit=10)
-                price = next(
-                    (p for p in prices if p.metadata.get("tier_id") == tier_id),
-                    None,
-                )
-                if price:
-                    stripe_price_ids[tier_id] = price.id
-                    log.info(f"Found existing Stripe price for {tier_id}: {price.id}")
-                else:
-                    log.error(f"Failed to create/find price for {tier_id}: {e}")
+            except Exception as e:                        # noqa: BLE001
+                log.error(f"Failed to create price for {tier_id}: {e}")
 
         log.info(f"Stripe products ready: {stripe_price_ids}")
         return True

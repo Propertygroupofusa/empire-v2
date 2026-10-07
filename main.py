@@ -743,8 +743,24 @@ async def validate_foreign_keys():
         return  # Foreign key checks are for PostgreSQL only
 
     async with get_engine().begin() as conn:
-        inspector = inspect.__call__(conn.sync_conn)
-        existing_tables = {t.lower() for t in inspector.get_table_names()}
+        # AN ASYNC CONNECTION HAS NO .sync_conn, AND THIS IS THE FIRST LINE
+        # OF THE FUNCTION, SO NONE OF IT HAS EVER RUN ON POSTGRES.
+        #
+        # Every boot logged "Foreign key validation failed: 'AsyncConnection'
+        # object has no attribute 'sync_conn'" at WARNING and carried on, so
+        # the missing-table detection and repair below has been dead since it
+        # was written - a safety check that looked present and did nothing.
+        # Measured live on 2026-10-07; the same shape as the None-database
+        # bindings and the dead status-snapshot thread.
+        #
+        # run_sync is the accessor that works, and it is what database.py and
+        # the migration path at main.py:536 already use. Reflection is done
+        # INSIDE the callable, because the inspector is only valid against the
+        # sync connection it was handed.
+        existing_tables = {
+            t.lower() for t in await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names())
+        }
 
         # Check each model's table exists
         missing_tables = []
@@ -3004,4 +3020,20 @@ if __name__ == "__main__":
     except (ValueError, TypeError):
         log.warning("Invalid PORT value, using default: 8000")
         port = 8000
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    # PASS THE APP OBJECT, NOT THE IMPORT STRING.
+    #
+    # service_entrypoint runs `python main.py`, so this module executes as
+    # __main__. "main:app" then makes uvicorn IMPORT main a second time,
+    # under its real name - so every router, every bot module and every
+    # module-level initialisation in this file runs TWICE on every boot,
+    # and the app built by the first pass is discarded.
+    #
+    # The 2026-10-07 14:27 deploy log shows it plainly: the full
+    # "Router loaded: /auth ... /sweep" block appears twice, ~700ms apart.
+    # Doubling the startup work also doubles the outbound calls that made
+    # the same boot log three "HTTP 429" rate limits.
+    #
+    # Passing the object is the documented alternative and is equivalent
+    # here, because reload is already False (the import string is only
+    # REQUIRED for reload/workers, neither of which this uses).
+    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
