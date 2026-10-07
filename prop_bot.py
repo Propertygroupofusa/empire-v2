@@ -1084,6 +1084,30 @@ async def get_live_strategy_family() -> str:
     return family
 
 
+# The owner's switch to mean-reversion, 2026-10-07 ("switch it to mean
+# reversion"), after it beat momentum in all three 30-day windows tested
+# (+$77.51 vs +$14.30). Applied ONCE: a marker row records that it ran, so
+# a later dashboard flip back to momentum is never overridden on restart.
+OWNER_SWITCH_MARKER_KEY = "alpaca_strategy_switch_mr_2026_10_07"
+
+
+async def apply_owner_strategy_switch_once() -> bool:
+    """Set the live family to mean_reversion the first time this runs.
+    Returns True if it changed anything."""
+    async with AsyncSessionLocal() as db:
+        marker = (await db.execute(select(TradingBotState).where(
+            TradingBotState.bot_name == OWNER_SWITCH_MARKER_KEY))).scalar_one_or_none()
+        if marker is not None:
+            return False
+    await set_live_strategy_family("mean_reversion")
+    async with AsyncSessionLocal() as db:
+        db.add(TradingBotState(bot_name=OWNER_SWITCH_MARKER_KEY, base_capital=1.0))
+        await db.commit()
+    log.warning("[APEX_589296] Owner switch applied: live strategy -> mean_reversion "
+                "(one-time; the dashboard toggle stays in control from here)")
+    return True
+
+
 async def set_live_strategy_family(family: str):
     if family not in STRATEGY_FAMILIES:
         raise ValueError(f"unknown strategy family {family!r} - must be one of {STRATEGY_FAMILIES}")
@@ -5030,6 +5054,11 @@ def run():
         asyncio.run(load_alpaca_branch_positions())
     except Exception as e:
         log.error(f"[APEX_589296] Startup Alpaca branch position reload failed: {e}")
+
+    try:
+        asyncio.run(apply_owner_strategy_switch_once())
+    except Exception as e:
+        log.error(f"[APEX_589296] Owner strategy switch failed - strategy unchanged: {e}")
 
     try:
         family = asyncio.run(get_live_strategy_family())
