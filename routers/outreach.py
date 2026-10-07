@@ -160,7 +160,12 @@ async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
 
-    db.delete(campaign)
+    # AsyncSession.delete() is a coroutine: without await it never runs, the
+    # commit flushes nothing, and the endpoint reports success on a row that
+    # is still there. Contacts go first because campaign_contacts.campaign_id
+    # is a foreign key, which Postgres enforces.
+    await db.execute(delete(CampaignContact).where(CampaignContact.campaign_id == campaign_id))
+    await db.delete(campaign)
     await db.commit()
     return {"message": "Campaign deleted"}
 
@@ -260,7 +265,7 @@ async def delete_contact(
     if not contact:
         raise HTTPException(status_code=404, detail="Contact not found")
 
-    db.delete(contact)
+    await db.delete(contact)
     await db.commit()
     return {"message": "Contact deleted"}
 
