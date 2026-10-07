@@ -247,8 +247,11 @@ async def resolve_outcomes(hours_forward: int = 4, limit_passes: int = 200) -> d
         passes.setdefault(_aware(r.decided_at), []).append((r, c))
 
     now = datetime.now(timezone.utc)
-    sel_n = sel_hit = unsel_n = unsel_hit = 0
-    sel_net = unsel_net = 0.0
+    # Two side-by-side books. Cycle counts alone cannot settle this: a
+    # scorer can be excellent at finding coins that trade often and still
+    # lose money on those trades, so every side carries its economics.
+    side = {k: {"branches": 0, "cycled": 0, "closes": 0, "stops": 0,
+                "net": 0.0} for k in ("sel", "unsel")}
     graded = []
 
     for t0 in sorted(passes, reverse=True):
@@ -261,43 +264,61 @@ async def resolve_outcomes(hours_forward: int = 4, limit_passes: int = 200) -> d
             after = [t for t in closes
                      if t.product_id == r.symbol and t0 < _aware(t.closed_at) <= t1]
             pnl = sum(float(t.pnl or 0) for t in after)
+            stops = sum(1 for t in after if (t.exit_reason or "") == "stop_loss")
             cycled = bool(after) and pnl > 0
+            k = "sel" if c.get("selected") else "unsel"
             if c.get("selected"):
                 picked = r.symbol
-                sel_n += 1
-                sel_hit += 1 if cycled else 0
-                sel_net += pnl
-            else:
-                unsel_n += 1
-                unsel_hit += 1 if cycled else 0
-                unsel_net += pnl
+            d = side[k]
+            d["branches"] += 1
+            d["cycled"] += 1 if cycled else 0
+            d["closes"] += len(after)
+            d["stops"] += stops
+            d["net"] += pnl
         graded.append({"at": t0.isoformat(), "picked": picked,
                        "branches_in_pass": len(branch_rows)})
         if len(graded) >= limit_passes:
             break
 
-    sel_pct = (100.0 * sel_hit / sel_n) if sel_n else None
-    unsel_pct = (100.0 * unsel_hit / unsel_n) if unsel_n else None
-    disc = (round(sel_pct - unsel_pct, 1)
-            if sel_pct is not None and unsel_pct is not None else None)
+    def book(d):
+        n = d["branches"]
+        return {
+            "branches": n,
+            "cycles": d["cycled"],
+            "cycled_pct": round(100.0 * d["cycled"] / n, 1) if n else None,
+            "closes": d["closes"],
+            "stops": d["stops"],
+            "stop_rate_pct": (round(100.0 * d["stops"] / d["closes"], 1)
+                              if d["closes"] else None),
+            "net_usd": round(d["net"], 4),
+            "avg_usd_per_branch": round(d["net"] / n, 4) if n else None,
+        }
+
+    sel, unsel = book(side["sel"]), book(side["unsel"])
+    cycle_edge = (round(sel["cycled_pct"] - unsel["cycled_pct"], 1)
+                  if sel["cycled_pct"] is not None and unsel["cycled_pct"] is not None
+                  else None)
+    net_edge = (round(sel["avg_usd_per_branch"] - unsel["avg_usd_per_branch"], 4)
+                if sel["avg_usd_per_branch"] is not None
+                and unsel["avg_usd_per_branch"] is not None else None)
 
     return {
         "graded_passes": len(graded),
         "window_hours": hours_forward,
-        "selected_branches": sel_n,
-        "selected_cycled": sel_hit,
-        "selected_cycled_pct": round(sel_pct, 1) if sel_pct is not None else None,
-        "unselected_branches": unsel_n,
-        "unselected_cycled": unsel_hit,
-        "unselected_cycled_pct": round(unsel_pct, 1) if unsel_pct is not None else None,
-        "discrimination_pts": disc,
-        "net_usd_selected": round(sel_net, 4),
-        "net_usd_unselected_avg": round(unsel_net / unsel_n, 4) if unsel_n else None,
+        "selected": sel,
+        "unselected": unsel,
+        "discrimination": {
+            "cycle_edge_pts": cycle_edge,
+            "net_edge_usd_per_branch": net_edge,
+            "both_must_be_positive": True,
+        },
         "read_discrimination_not_accuracy": (
-            "selected_cycled_pct alone is not a score. Compare it against "
-            "unselected_cycled_pct, which is the base rate of a branch "
-            "cycling anyway. discrimination_pts at or below zero means the "
-            "ranking carries no information however high the first looks."),
+            "cycled_pct alone is not a score. Compare it against the "
+            "unselected side, which is the base rate of a branch cycling "
+            "anyway. And a positive cycle edge with a net edge at or below "
+            "zero is the failure this is built to catch: a scorer can be "
+            "excellent at finding coins that trade often and still lose "
+            "money on those trades."),
         "what_this_cannot_say": (
             "This does NOT say the fleet would have earned more. No capital "
             "moved and the counterfactual book was never run. It is evidence "

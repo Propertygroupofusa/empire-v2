@@ -115,7 +115,7 @@ ok("the rejected branch is not flagged selected",
 print("\n4. OUTCOMES COME FROM THE REAL LEDGER, AND OPEN WINDOWS ARE NOT SCORED")
 
 
-async def _grade(close_pnl, pass_age_hours, close_age_hours):
+async def _grade(close_pnl, pass_age_hours, close_age_hours, reason="profit_target"):
     now = datetime.now(timezone.utc)
     async with get_session_factory()() as db:
         for r in (await db.execute(select(TradeDecision))).scalars().all():
@@ -131,36 +131,43 @@ async def _grade(close_pnl, pass_age_hours, close_age_hours):
         db.add(CryptoGridTradeHistory(
             bot_name="crypto_grid_3", product_id="PRIME-USD",
             entry_price=1.0, exit_price=1.03, qty=1.0, pnl=close_pnl,
+            exit_reason=reason,
             closed_at=(now - timedelta(hours=close_age_hours)).replace(tzinfo=None)))
         await db.commit()
     return await SA.resolve_outcomes(hours_forward=4)
 
 
-# a pass 6h old, with a profitable close 5h ago -> inside the 4h window, graded a hit
+# a pass 6h old, with a profitable close 5h ago -> inside the 4h window
 r = asyncio.run(_grade(+1.42, 6, 5))
 ok("a closed window is graded", r["graded_passes"] == 1)
 ok("the selected branch is counted as having cycled",
-   r["selected_branches"] == 1 and r["selected_cycled"] == 1)
+   r["selected"]["branches"] == 1 and r["selected"]["cycles"] == 1)
 ok("the branch it passed over is counted separately",
-   r["unselected_branches"] == 1 and r["unselected_cycled"] == 0)
-ok("discrimination is selected minus the base rate, not a bare accuracy",
-   r["discrimination_pts"] == 100.0)
-ok("the net is read from the real trade ledger",
-   abs(r["net_usd_selected"] - 1.42) < 1e-6)
-ok("the headline warns against reading it as accuracy",
-   "not a score" in (r.get("read_discrimination_not_accuracy") or ""))
+   r["unselected"]["branches"] == 1 and r["unselected"]["cycles"] == 0)
+ok("cycle edge is selected minus the base rate, not a bare accuracy",
+   r["discrimination"]["cycle_edge_pts"] == 100.0)
+ok("net is read from the real trade ledger",
+   abs(r["selected"]["net_usd"] - 1.42) < 1e-6)
+ok("net edge per branch is reported beside the cycle edge",
+   abs(r["discrimination"]["net_edge_usd_per_branch"] - 1.42) < 1e-6)
+ok("a profit_target close is not counted as a stop",
+   r["selected"]["stops"] == 0 and r["selected"]["stop_rate_pct"] == 0.0)
+ok("the payload warns that a cycle edge without a net edge is the failure case",
+   "still lose money on those trades" in (r.get("read_discrimination_not_accuracy") or ""))
 
-# a pass 6h old whose only close LOST -> graded, but the pick did not cycle
-r = asyncio.run(_grade(-0.90, 6, 5))
-ok("a losing cycle is graded and does not count as cycled",
-   r["graded_passes"] == 1 and r["selected_cycled"] == 0)
-ok("discrimination is zero when neither side cycled",
-   r["discrimination_pts"] == 0.0)
+# the case this whole section exists for: the pick CYCLED but it was a stop
+r = asyncio.run(_grade(-0.90, 6, 5, reason="stop_loss"))
+ok("a losing close does not count as a cycle",
+   r["selected"]["cycles"] == 0)
+ok("the stop is counted and surfaced as a rate",
+   r["selected"]["stops"] == 1 and r["selected"]["stop_rate_pct"] == 100.0)
+ok("a losing pick shows a NEGATIVE net edge even though it traded",
+   r["discrimination"]["net_edge_usd_per_branch"] < 0)
 
-# a pass 1h old -> its 4h window has not closed, so it must not be scored at all
+# a pass 1h old -> its 4h window has not closed, so it must not be scored
 r = asyncio.run(_grade(+1.42, 1, 0.5))
 ok("a window that has not closed yet is skipped, not counted a miss",
-   r["graded_passes"] == 0 and r["selected_cycled_pct"] is None)
+   r["graded_passes"] == 0 and r["selected"]["cycled_pct"] is None)
 
 ok("the result says plainly what it cannot prove",
    "counterfactual" in (r.get("what_this_cannot_say") or ""))
