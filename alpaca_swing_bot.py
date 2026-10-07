@@ -328,7 +328,14 @@ async def _record_closed_trade(symbol, entry_price, exit_price, qty, pnl, pnl_pc
                 bot=BOT_NAME, symbol=symbol, side="long",
                 entry_price=entry_price, exit_price=exit_price, qty=qty,
                 pnl=pnl, pnl_pct=pnl_pct, exit_reason=reason,
-                closed_at=datetime.now(timezone.utc),
+                # NAIVE UTC, BECAUSE THE COLUMN IS NAIVE.
+                # closed_trades.closed_at is Column(DateTime) - TIMESTAMP
+                # WITHOUT TIME ZONE - and its own default is datetime.utcnow.
+                # Passing an AWARE value made asyncpg raise DataError
+                # ("can't subtract offset-naive and offset-aware datetimes")
+                # on EVERY insert, which the handler below swallowed as
+                # "trade happened, sample lost". No row has ever landed.
+                closed_at=datetime.utcnow(),
             ))
             await db.commit()
         log.info(f"     📒 ledger: {symbol} ${pnl:+.2f} ({pnl_pct:+.2f}%) - {reason}")
@@ -1017,7 +1024,15 @@ async def run_swing_check():
                             side="long",
                             entry_price=price,
                             qty=qty,
-                            opened_at=datetime.now(ET),
+                            # NAIVE UTC: BotPosition.opened_at is TIMESTAMP
+                            # WITHOUT TIME ZONE. An aware value made asyncpg
+                            # refuse the insert, and the handler below logged
+                            # "Failed to record position" and moved on - so the
+                            # tracker that reconcile_positions_with_broker reads
+                            # never got the row. datetime.now(ET) was wrong twice
+                            # over: aware, AND Eastern wall-clock in a column
+                            # every other writer fills with UTC.
+                            opened_at=datetime.now(timezone.utc).replace(tzinfo=None),
                         )
                         async with get_session_factory()() as db:
                             db.add(position)

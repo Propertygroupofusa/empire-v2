@@ -683,7 +683,7 @@ async def _db_save_closed_trade(contract: str, side: str, entry_price: float, ex
                 pnl=profit_loss,
                 pnl_pct=pnl_pct,
                 exit_reason=reason,
-                closed_at=datetime.now(timezone.utc)
+                closed_at=datetime.utcnow(),  # naive: the column is TIMESTAMP WITHOUT TIME ZONE
             )
             db.add(trade)
             await db.commit()

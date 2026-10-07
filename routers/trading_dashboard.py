@@ -7382,7 +7382,7 @@ async def check_and_auto_close_positions():
                         entry_price=entry_price, exit_price=current_price, qty=qty,
                         pnl=pnl, pnl_pct=unrealized_plpc * 100, exit_reason=reason.upper(),
                         hold_hours=(age_days * 24 if age_days is not None else None),
-                        closed_at=datetime.now(timezone.utc),
+                        closed_at=datetime.utcnow(),  # naive: see alpaca_swing_bot._record_closed_trade
                     ))
                     await db.commit()
             except Exception as e:

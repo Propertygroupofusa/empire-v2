@@ -1259,9 +1259,10 @@ async def log_trade_entry(symbol: str, entry_rsi: float, entry_price: float, qty
             trade = CryptoTradeLog(
                 symbol=symbol,
                 strategy_version="SMA200_RSI_CROSSOVER_SWING_V2",  # UPGRADED: 200-day SMA + RSI cross-above + swing-based stops
-                armed_at=datetime.now(timezone.utc),  # Timestamp trade was armed
+                # naive UTC - the column is TIMESTAMP WITHOUT TIME ZONE
+                armed_at=datetime.utcnow(),  # Timestamp trade was armed
                 arm_rsi=arm_rsi,
-                entered_at=datetime.now(timezone.utc),
+                entered_at=datetime.utcnow(),
                 entry_rsi=entry_rsi,
                 entry_price=entry_price,
                 quantity=qty,
