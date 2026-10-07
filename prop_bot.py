@@ -8,6 +8,7 @@ Rule: 7 consecutive profitable days before going live
 
 import os
 import asyncio
+import market_direction
 import logging
 import math
 import smtplib
@@ -3106,6 +3107,22 @@ async def run_prop_cycle():
                 contract, "excluded_symbol",
                 f"{contract} ({config['symbol']}) excluded - {reason}",
                 mandate="apex", direction=side, value=config["symbol"]))
+            return False
+
+        # MANDATE CHECK 1.6: never bet against a position already held.
+        # open_prop_positions holds every tracked broker position (the
+        # reconciler adopts the swing bot's too), so this sees the whole
+        # account. Long SH while long AAPL is two bets that cancel.
+        held_tickers = [FUTURES[c]["symbol"] for c in open_prop_positions if c in FUTURES]
+        opposing = market_direction.opposing_holdings(config["symbol"], held_tickers)
+        if opposing:
+            log.info(f"[MANDATE] {contract} ({config['symbol']}) would bet against "
+                     f"{', '.join(opposing)} already held - SKIPPING")
+            await _record_trade_decision(_dlog.refusal(
+                contract, "opposing_position",
+                f"{contract} ({config['symbol']}) bets the opposite way to "
+                f"{', '.join(opposing)} already held - the two would cancel",
+                mandate="apex", direction=side, value=",".join(opposing)))
             return False
 
         # A real Alpaca branch (see the ALPACA BRANCHES section below) may

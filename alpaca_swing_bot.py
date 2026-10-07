@@ -29,6 +29,7 @@ Trades: Indices (MES, MNQ, MYM, M2K) + Commodities (MGC, MCL, SIL)
 
 import os
 import asyncio
+import market_direction
 import logging
 import time
 import traceback
@@ -729,10 +730,16 @@ async def run_intraday_check():
             log.info(f"\n📈 Intraday positions: {intraday_count}/{max_intraday}"
                      f" | notional ${open_notional:,.2f} of ${notional_budget:,.2f} budget")
 
+            held_now = list(open_positions)
             for strength, symbol, config, rsi, price in intraday_setups[:slots]:
                 proxy = config["proxy"]
                 if proxy in open_positions:
                     continue
+                opposing = market_direction.opposing_holdings(proxy, held_now)
+                if opposing:
+                    log.info(f"  {symbol} ({proxy}) would bet against {', '.join(opposing)} already held - skipping")
+                    continue
+                held_now.append(proxy)
 
                 # PRE-TRADE CHECK: Verify buying power
                 if buying_power is None or buying_power < RISK_PER_TRADE:
@@ -943,6 +950,7 @@ async def run_swing_check():
 
             log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT_SWING}")
 
+            held_now = list(open_positions)
             for confidence, symbol, config, rsi, price in setups[:slots_available]:
                 # Real, always-tradable ticker - never the internal
                 # SWING_SYMBOLS key (see PROXY_TO_KEY's own docstring for
@@ -951,6 +959,14 @@ async def run_swing_check():
                 if proxy in open_positions:
                     log.info(f"  {symbol} ({proxy}) already held, skipping")
                     continue
+                # Never bet against a position already held - see
+                # market_direction.py. Counted before the order is placed,
+                # so two opposite setups in one cycle cannot both open.
+                opposing = market_direction.opposing_holdings(proxy, held_now)
+                if opposing:
+                    log.info(f"  {symbol} ({proxy}) would bet against {', '.join(opposing)} already held - skipping")
+                    continue
+                held_now.append(proxy)
 
                 # PRE-TRADE CHECKS
                 # 1. Verify buying power is sufficient
