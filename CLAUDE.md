@@ -14253,3 +14253,91 @@ on that misreading. The independent measurement: of 78 open slices, 74 were
 UNDERWATER at $4,786.05 and `PROFITABLE_WORKING` was ZERO. The rule is to
 print the two numbers a verdict came from - `target 0.490383` beside
 `breakeven 0.446645` - never the field name.
+
+## A branch may be deleted at a gain or at nothing. Never at a loss.
+
+Stated by the account owner 2026-10-08, refining the earlier absolute
+("Don't delete any losing branches. Not none of them."):
+
+  "If we need to delete the branch that's fine but not as a loss. A gain
+   delete is fine but not a loss."
+
+So the test before a delete is not "is this branch wanted" but "what does
+the delete BOOK". Three cases, and only the first two are permitted:
+
+  AT A GAIN      - the branch's open slices are above break-even and the
+                   close banks money. Permitted.
+  AT NOTHING     - the branch holds NO coin: zero open slices, nothing
+                   unrealized, nothing to sell. A delete releases a budget
+                   claim and books nothing at all. Permitted, because no
+                   loss is realized. crypto_grid_21 / ZEC-USD is exactly
+                   this shape (measured 21:10Z: 0 slices, $1,767.76
+                   allocated, total_unrealized_net_usd null, drawdown 0.0%).
+  AT A LOSS      - the branch holds coin below break-even and the delete
+                   forces or orphans a losing exit. REFUSED, always, and
+                   the owner's prior words still govern: "Scaling, not
+                   selling", "Do not sell anything that I have as a loss."
+
+A PAST realized loss does not make a present delete a loss-delete. ZEC's
+inherited -$311.24 is history already banked; deleting the empty shell adds
+nothing to it. The question is what THIS action books, not what the branch
+once cost.
+
+AND THE DELETE IS STILL NOT MINE TO RUN. `withdraw_from_grid_branch(...,
+allow_delete=True)` is a money-moving write. This rule widens what the
+owner may choose, not what I may execute.
+
+## The withdraw really does free real cash - verified, not assumed
+
+Worth re-deriving because `withdraw_from_grid_branch`'s own docstring is
+STALE on this point. It claims get_real_free_cash_usd() "subtracts every
+grid branch's own allocated_usd". It does not - crypto_grid_bot.py:3372
+subtracts `get_grid_undeployed_reserve_total()`, which is each branch's
+allocation MINUS the cost basis it already converted into coin, clamped at
+zero per branch.
+
+That distinction decides whether the ZEC withdraw frees anything. Because
+ZEC holds zero slices, its deployed basis is $0.00, so its FULL $1,767.76
+sits in the undeployed reserve and is subtracted from free cash in full.
+Withdrawing it therefore does raise deployable cash by that amount - it is
+real USD in the wallet being held in reserve for a branch that cannot spend
+it. Measured 21:10Z: allocated $6,701.07 - deployed $4,763.45 = $1,937.62 of
+undeployed reserve, of which ZEC is $1,767.76. ONE EMPTY BRANCH IS 91% OF
+THE FLEET'S ENTIRE RESERVE. The other 20 branches hold $169.86 between them.
+
+Had the docstring been true, the withdraw would have freed nothing and the
+whole plan would have been wrong. Read the function, not the comment above it.
+
+## "Make it trigger sooner" is answered, and the answer is no
+
+The owner asked 2026-10-08 why the sale trigger is so far away and whether
+it can be brought closer. The fleet's own scanner answers it. Measured
+21:10Z from /grid-status `pipeline.per_coin`, 4,882 resolved detections
+across 21 coins, each coin ~232 observations:
+
+  net expectancy after costs, POSITIVE on 1 coin of 20 measured
+  TIA-USD   +0.0962%      <- the only one above zero
+  ALGO-USD  -0.0233%
+  ONDO-USD  -0.2520%
+  ...
+  JASMY-USD -0.8400%      <- the worst
+  mean -0.5062%   median -0.5793%   (SHIB unmeasurable, reported as None)
+
+The horizon those were measured on is the short one: median 9.9 to 17.5
+minutes to target. Reach rates are HEALTHY - 64.8% to 93.1% of detections
+reach their target - and it still does not pay, because
+`profitable_after_costs` collapses to 0.0% on ETH, PRIME and JASMY and to
+0.4% on BTC. The move arrives; the fee eats it. Against a measured 0.700%
+maker round trip, a median net of -0.5793% puts the median gross move near
++0.12%.
+
+So shortening the trigger toward that horizon moves 19 of 20 coins into
+negative expectancy after costs. The 3% step (1.33% BTC) is not an
+obstacle to the money - it is what keeps the round trip on the right side
+of the fee. This closes the question rather than opening a change, and it
+is the same lesson as the five candidate changes that all failed their own
+test earlier the same day: do not tune toward a faster trade.
+
+TIA at +0.0962% on 233 observations is NOT a signal to concentrate into.
+It is one coin a tenth of a percent above zero, and acting on it is the
+textbook fit-to-noise.
