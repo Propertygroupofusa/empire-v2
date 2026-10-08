@@ -1120,7 +1120,7 @@
         </div>
         <div id="tab-lock-banner" style="display:none;"></div>
         <div id="env-rejected-banner" style="display:none;"></div>
-        <div id="alarm-top-wrap" style="display:none;"></div>
+        <!-- alarm-top-wrap removed with the alarm panel - see the note below. -->
         <div id="backing-banner" style="display:none;"></div>
         <div id="out-of-reach-banner" style="display:none;"></div>
         <div id="grid-reconcile-wrap" style="display:none;"></div>
@@ -1770,15 +1770,19 @@
         <div id="newsroom-league-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
     </div>
 
-    <div class="section-title">🔔 The alarm</div>
-    <div class="panel">
-        <div class="panel-sub">A level you have to come and look at is decorative. This is the queue that turns it
-            into something that reaches you. It fires on <strong>transitions</strong> - a coin becoming breached is
-            news, a coin still being breached is not, which is the difference between an alarm and ninety-six
-            identical messages a day. Recoveries are reported too, because silence after an alarm reads exactly
-            like a broken sender. Nothing is marked sent unless it was actually delivered.</div>
-        <div id="alert-queue-wrap"><div class="coin-history-empty">Loading…</div></div>
-    </div>
+    <!-- THE EMAIL ALERT QUEUE WAS REMOVED FROM THIS PAGE 2026-10-08.
+         It rendered 156 pending alerts, each repeating the SAME four-line
+         delivery error - sendgrid HTTP 401 "Maximum credits exceeded", and
+         smtp:465/587 refused by the host - so the page carried six hundred
+         lines of identical red text about ONE fact: no mail can leave this
+         box. The account owner, who reads this page on a phone: "It's too
+         much red that's negative on my dashboard... causing too much noise
+         and confusion. Just take it away."
+         NOTHING ABOUT TRADING CHANGED. Those alerts are about holdings_watch
+         ALERT LEVELS, which this page states plainly elsewhere: "nothing
+         here rests at the exchange and nothing here will sell." The queue,
+         the worker and the endpoint are all untouched - if SENDGRID_API_KEY
+         is ever set, delivery resumes with no further change here. -->
 
     <div class="section-title">🔎 Where the money went</div>
     <div class="panel">
@@ -11810,7 +11814,7 @@ loadActivityFeed();
 // The alarm's own health loads itself - unlike the two button panels above
 // it costs one cheap DB read, and an alarm you have to remember to check is
 // the thing this whole section exists to replace.
-loadAlertQueue();
+// loadAlertQueue() is no longer called - both panels it fed are gone.
 loadTradingProfile();
 // The charts read Coinbase from this browser, not through the app, so a
 // slow or unreachable candles endpoint delays nothing else on the page
@@ -11856,7 +11860,7 @@ pollEvery(loadTicker, 15000);
 // 5s -> 15s. The feed is a list of things that already happened; three
 // reads a minute of it is not journalism, it is bandwidth.
 pollEvery(loadActivityFeed, 15000);
-pollEvery(loadAlertQueue, 60000);
+// alert queue no longer polled - its panels were removed 2026-10-08.
 pollEvery(loadTradingProfile, 60000);
 // The tape is the one panel that must actually move - 6s -> 12s, still
 // faster than the 30s cycle that produces anything for it to show.
