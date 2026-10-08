@@ -14433,3 +14433,19 @@ closes made +$16.52 and the four stops cost -$20.31. One rule turned a
 green day red. That is the measurement; whether to keep a rule that sells
 at a loss against a standing instruction not to is the owner's call, and
 proposing the change is still off the table under ITEM 11.
+
+## Pending owner actions live in my notes, not at the bottom of every report
+
+Asked for directly 2026-10-08, after I had put the same two Railway values
+at the foot of several consecutive reports: "Yeah, keep it in your own
+notes."
+
+So the standing list lives in the scratchpad file OWNER_ACTIONS.md and is
+NOT restated in reports. Raise an item only when he asks for it, when
+something changes that makes it newly urgent, or when a measurement makes
+one of them wrong and it has to be withdrawn. Re-measure before raising
+anything from that list; item 3 was already on the way to moot when it was
+written.
+
+This is about repetition, not about the items. Nothing on the list has been
+dropped and none of it has been done.
