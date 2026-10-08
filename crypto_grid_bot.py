@@ -2721,6 +2721,30 @@ async def account_market_book(max_age_seconds=ACCOUNT_BOOK_TTL_SECONDS):
 _WALLET_UNITS_CACHE = {"units": None, "at": 0.0}
 WALLET_UNITS_TTL_SECONDS = 60.0
 
+# A SHORTFALL THIS GATE HAS ALREADY CONFIRMED, held across the cycles
+# where the balance cannot be read at all.
+#
+# 2026-10-08 12:25:03-12:43:49Z the gate refused LINK twenty-four times
+# in a row on a confirmed 5.88-unit shortfall, one refusal per cycle. At
+# 12:44:58Z a single balance read failed, the units map arrived as None,
+# the gate passed, and the branch bought 1.05 more LINK - deepening the
+# very claim it had spent twenty minutes refusing to grow. The wallet
+# reading is cached for WALLET_UNITS_TTL_SECONDS, so one rate-limited
+# read is one open cycle, and one open cycle is one buy.
+#
+# UNKNOWN IS STILL NOT A SHORTFALL. A branch nobody has ever measured
+# short still buys through an unreadable window, which is the whole
+# point of that doctrine - a rate limit must not freeze the fleet. What
+# changes is narrower: an unreadable balance is no longer a licence to
+# forget a shortfall measured seconds earlier on THIS product.
+#
+# {product_id: (unix_seconds, reason)}. Cleared by the first CONFIRMED
+# clean reading, so a reconcile un-sticks the branch on the next cycle
+# instead of stranding it, and expired after the TTL so a remembered
+# shortfall can never outlive the books it was measured against.
+_CONFIRMED_SHORT = {}
+CONFIRMED_SHORT_TTL_SECONDS = 3600.0
+
 
 async def wallet_owned_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
     """{ASSET: units the account OWNS}, or None when unreadable.
@@ -2809,7 +2833,24 @@ async def branch_backing_verdict(product_id, slices, price,
     buy branch of the gate. UNKNOWN is not a refusal.
     """
     import slice_backing
+    import time as _t
+
+    _remembered = _CONFIRMED_SHORT.get(product_id)
+    if _remembered and (_t.time() - _remembered[0]) >= CONFIRMED_SHORT_TTL_SECONDS:
+        _CONFIRMED_SHORT.pop(product_id, None)
+        _remembered = None
+
     if units is None:
+        # The one case where an unreadable balance refuses: this product
+        # was measured short, recently, by this same gate. Everything
+        # else still passes - see _CONFIRMED_SHORT.
+        if _remembered:
+            return False, (
+                "wallet units unreadable, and this branch was measured short "
+                f"{_t.time() - _remembered[0]:.0f}s ago: {_remembered[1]} "
+                "A confirmed shortfall is not forgotten because the next "
+                "balance read failed."
+            )
         return True, "wallet units unreadable - backing not checked (UNKNOWN is not a shortfall)"
     probe = [{
         "product_id": product_id,
@@ -2822,7 +2863,7 @@ async def branch_backing_verdict(product_id, slices, price,
     }]
     out = slice_backing.assess(probe, units)
     for row in (out.get("unbacked") or ()):
-        return False, (
+        _why = (
             f"{row['backed_pct']:.3f}% backed - books claim "
             f"{row['claimed_units']:.8f} {row['asset']}, wallet holds "
             f"{row['held_units']:.8f} (short ${row['short_usd']:,.2f}). "
@@ -2830,8 +2871,25 @@ async def branch_backing_verdict(product_id, slices, price,
             f"cannot exit what it already holds. Correcting the books is "
             f"reconcile-slices, which is the owner's to run."
         )
+        _CONFIRMED_SHORT[product_id] = (_t.time(), _why)
+        return False, _why
     for row in (out.get("unknown") or ()):
+        # UNKNOWN for the asset itself, not for the whole wallet: the map
+        # was readable and this asset was not in it. Same rule as None -
+        # a remembered shortfall survives it.
+        if _remembered:
+            return False, (
+                f"{row['asset']} absent from a readable balance map, and this "
+                f"branch was measured short {_t.time() - _remembered[0]:.0f}s "
+                f"ago: {_remembered[1]} A confirmed shortfall is not forgotten "
+                "because the asset dropped out of the reading."
+            )
         return True, f"backing unknown for {row['asset']} - {row['reason']}"
+    # A CONFIRMED CLEAN READING CLEARS THE MEMORY. Reaching here means
+    # assess() measured this product against a readable map and found no
+    # shortfall worth naming, so a reconcile - or coin arriving - frees
+    # the branch on the very next cycle rather than waiting out the TTL.
+    _CONFIRMED_SHORT.pop(product_id, None)
     return True, "backed"
 
 

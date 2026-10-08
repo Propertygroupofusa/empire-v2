@@ -13833,3 +13833,85 @@ came out of it:
    own line - digits only, no arrow, no "from X to Y", nothing that is
    wrong if pasted whole. The instruction has to be safe to paste, because
    it will be.
+
+## The buy gate forgot a shortfall it had just confirmed
+
+Measured live 2026-10-08. Between 12:25:03Z and 12:43:49Z the backing
+gate refused `crypto_grid_16` (LINK-USD) twenty-four times in a row, one
+refusal per cycle, on a confirmed shortfall: the books claimed 10.36
+units and the wallet OWNED 4.48. At 12:44:58Z the branch bought 1.05
+more LINK anyway, taking the claim to 11.41 against 5.53 owned.
+
+Nothing about the shortfall had changed. One balance read failed,
+`wallet_owned_units()` returned `None` exactly as designed, and
+`branch_backing_verdict`'s first line passed the buy on the UNKNOWN
+doctrine - an unreadable balance is not a shortfall. The wallet reading
+is cached for `WALLET_UNITS_TTL_SECONDS` (60s), so one rate-limited read
+is one open cycle, and one open cycle is one buy into a branch that
+cannot exit what it already holds. The account's `/accounts` endpoint
+rate-limited three separate times the same day.
+
+THE DOCTRINE IS NARROWED, NOT REVERSED. `_CONFIRMED_SHORT` now remembers
+a shortfall this gate itself measured, keyed by product_id, and refuses
+that product - and only that product - while the balance is unreadable
+or the asset drops out of a readable map. A branch nobody has ever
+measured short still buys straight through an unreadable window, which
+is the whole point of the doctrine: a rate limit must not freeze the
+fleet. `test_backing_gate_remembers.py` asserts both halves, and the
+anti-freeze half is the one that matters most.
+
+The memory clears on the first CONFIRMED clean reading, so a reconcile
+un-sticks the branch on the next cycle rather than stranding it, and
+expires after `CONFIRMED_SHORT_TTL_SECONDS` so a remembered shortfall
+can never outlive the books it was measured against. A branch whose coin
+is merely locked under the fleet's own resting order reads clean and
+never enters the memory - the units map is OWNED, which is the fix that
+ended the four-hour false-refusal incident and must not be undone here.
+
+### NOT changed, and it is a live exposure: the 50% threshold
+
+`branch_backing_verdict` refuses only what `slice_backing.assess()` puts
+in its `unbacked` list, and that list is drawn at
+`BACKED_ENOUGH_PCT = 50.0`. That constant is correct for the question
+slice_backing's docstring asks - "can this branch's reported gain be
+taken to the venue" - but this gate asks a different one, and its own
+stated harm is "cash spent into a branch that cannot sell what it
+claims". That harm lands at ANY confirmed shortfall, not only a majority
+one.
+
+Measured 2026-10-08 14:17Z on OWNED units:
+
+| branch | claimed | owned | backed | short | gate |
+|---|---|---|---|---|---|
+| ZEC-USD | 0.378166652152 | 0.0 | 0.000% | 0.378166652152 | refused |
+| LINK-USD | 11.41 | 5.53 | 48.466% | 5.88 | refused |
+| SOL-USD | 2.33270305 | 1.556753 | 66.736% | 0.77595005 | **passes** |
+| ACH-USD | 15148.60 | 9803.40459504 | 64.715% | 5345.195404960 | **passes** |
+
+SOL and ACH carry $118.07 of confirmed owned shortfall between them and
+may keep buying. LINK was refused only because it happened to sit 1.534
+points under the line. The strict test needs no new arithmetic - every
+`rows` entry already carries `short_usd`, and `MATERIAL_GAP_USD` ($5.00)
+already keeps a venue's rounding from tripping it.
+
+It is left alone deliberately. `test_backing_gate.py`'s
+`test_fifty_percent_exactly_is_backed` asserts the present behaviour on
+purpose, so moving the line is a policy change for the account owner to
+decide, not a bug fix to slip in beside one. One constant answering two
+different questions is the finding; which answer the gate should take is
+his call.
+
+### ALGO is not short, and a report of mine said it was
+
+The dashboard publishes two blocks on purpose. `backing` reads AVAILABLE
+units and answers "can this branch place a sell right now"; `backing_owned`
+reads OWNED and answers "does this coin exist at all". Condition 6 of the
+Coinbase guard must be read from the OWNED block.
+
+ALGO-USD claims 1150.9 units and OWNS 2005.8463889999998 - 174.285%,
+short 0.0. It reads 75.73% short 279.353611 in the `backing` block only
+because 1134.3 of its units sit under the fleet's own resting sell. A
+report of mine on 2026-10-08 listed "ALGO 279.353611" in a list of
+shortfalls; that was the AVAILABLE figure quoted against the OWNED
+question, which is the exact confusion ITEM 0 was retracted for. The
+owned shortfalls are four: ZEC, SOL, LINK, ACH.
