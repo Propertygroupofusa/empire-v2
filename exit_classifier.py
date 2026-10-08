@@ -67,11 +67,13 @@ UNDERWATER = "UNDERWATER"
 PROFITABLE_WORKING = "PROFITABLE_WORKING"
 PROFITABLE_LOCKED = "PROFITABLE_LOCKED"
 PROFITABLE_BELOW_MIN = "PROFITABLE_BELOW_MIN"
+BRANCH_BELOW_ITS_RISE_TRIGGER = "BRANCH_BELOW_ITS_RISE_TRIGGER"
 QUALIFIED_EXIT_MISSING = "QUALIFIED_EXIT_MISSING"
 UNKNOWN_READING = "UNKNOWN_READING"
 
 BUCKETS = (UNDERWATER, PROFITABLE_WORKING, PROFITABLE_LOCKED,
-           PROFITABLE_BELOW_MIN, QUALIFIED_EXIT_MISSING, UNKNOWN_READING)
+           PROFITABLE_BELOW_MIN, BRANCH_BELOW_ITS_RISE_TRIGGER,
+           QUALIFIED_EXIT_MISSING, UNKNOWN_READING)
 
 # The ONLY bucket that means the sell engine needs looking at.
 DEFECT_BUCKET = QUALIFIED_EXIT_MISSING
@@ -85,6 +87,23 @@ FLOOR_REQUIRED = ("the net floor a parked sell must clear is REQUIRED. "
                   "Defaulting it would let this module grade the engine "
                   "against a bar the engine does not use.")
 
+# THE SAME DOCTRINE, FOR THE SELL TRIGGER. The grid does not sell per slice;
+# it sells per BRANCH, when price >= reference_price * (1 + grid_pct), or on
+# the parked route when the branch is as full as its levels. A classifier
+# that does not know whether either route was open grades the engine against
+# a rule the engine does not use - which is the exact failure this module was
+# written to prevent, and which it then committed itself on 2026-10-08 by
+# calling three slices short of their own branch step an exit defect.
+#
+# Supplied by the caller rather than derived here, for the floor's reason: a
+# rule re-derived in two places can disagree in two places.
+BRANCH_REQUIRED = ("whether the branch's own sell routes were open was not "
+                   "measured. The grid sells per BRANCH - on the rise "
+                   "trigger, or on the parked route - so a profitable slice "
+                   "with no order cannot be called a defect without knowing "
+                   "that at least one of those routes was open. UNKNOWN, not "
+                   "a defect and not a pass.")
+
 
 def _num(v):
     """A number, or None. A string that will not parse is None, not zero."""
@@ -97,13 +116,31 @@ def _num(v):
     return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
-def classify_slice(slice_row, holding, floor_pct):
+def classify_slice(slice_row, holding, floor_pct, branch=None):
     """One slice -> (bucket, reason). Never raises.
 
     `holding` is the venue's own reading for that base currency: units,
     available_units, locked_units. OWNED and AVAILABLE are different
     questions and this module needs AVAILABLE - "can this be sold right
     now" - which is the opposite of what a backing check wants.
+
+    `branch` carries the two facts about the slice's BRANCH that decide
+    whether a sale was even attempted this cycle:
+
+        rise_trigger_reached  price >= reference_price * (1 + grid_pct),
+                              computed by the caller from the engine's own
+                              expression.
+        parked_possible       the branch may be as full as its levels, in
+                              which case it sells a past-floor slice on its
+                              own merit without waiting for the rise.
+
+    parked_possible is deliberately a SUPERSET of the engine's own test. The
+    engine counts tradeable_slices(), which published state cannot
+    reproduce; the caller can only compare open_slices to num_levels, which
+    reads parked at least as often. That error direction is chosen: reading
+    parked too widely keeps a false alarm in a narrow case, where reading it
+    too narrowly would HIDE a real defect. Suppression therefore requires
+    BOTH routes shut, never one.
     """
     qty = _num((slice_row or {}).get("qty"))
     net = _num((slice_row or {}).get("unrealized_net_usd"))
@@ -146,28 +183,56 @@ def classify_slice(slice_row, holding, floor_pct):
                                       f"{net_pct * 100:.3f}% but under the "
                                       f"{floor * 100:.2f}% floor. Held on "
                                       f"purpose.")
+
+    # PAST THE FLOOR, UNLOCKED, NO ORDER. Before 2026-10-08 that was the end
+    # of it and this returned a defect. It is not enough: the grid only
+    # reaches its FIFO sell path when the branch's rise trigger fires, or
+    # when the branch is parked. With both shut, no order is the correct
+    # state and calling it a defect is a false alarm that reads INVESTIGATE
+    # every minute of a working day.
+    _b = branch if isinstance(branch, dict) else None
+    _reached = _b.get("rise_trigger_reached") if _b else None
+    _parked = _b.get("parked_possible") if _b else None
+    if not isinstance(_reached, bool) or not isinstance(_parked, bool):
+        return UNKNOWN_READING, BRANCH_REQUIRED
+    if not _reached and not _parked:
+        _px, _tg = _num(_b.get("current_price")), _num(_b.get("target_price"))
+        _short = (f" - {(_tg - _px) / _px * 100:.3f}% short of ${_tg:,.6f}"
+                  if _px not in (None, 0.0) and _tg is not None else "")
+        return BRANCH_BELOW_ITS_RISE_TRIGGER, (
+            f"profitable past the floor and unlocked, but the BRANCH has not "
+            f"reached its own sell trigger{_short}, and it is not parked. The "
+            f"grid sells per branch, not per slice: with neither route open "
+            f"no sale was attempted, so no order is the correct state. Not a "
+            f"defect.")
+
     return QUALIFIED_EXIT_MISSING, ("profitable past the floor, unlocked, and "
                                     "no working order. This is the only shape "
                                     "an exit defect can take.")
 
 
-def classify(slices, holdings, floor_pct):
+def classify(slices, holdings, floor_pct, branches=None):
     """Every open slice, bucketed, with the one number that matters on top.
 
     `holdings` maps base currency -> the venue reading. `slices` carries
     product_id so the base can be derived; a row without one lands in
     UNKNOWN_READING rather than being matched to a guess.
+
+    `branches` maps product_id -> the branch state classify_slice needs. A
+    product missing from it is UNKNOWN, never assumed open: see
+    BRANCH_REQUIRED.
     """
     out = {b: [] for b in BUCKETS}
     for s in (slices or []):
         pid = (s or {}).get("product_id") or ""
         base = pid.split("-")[0] if "-" in pid else None
         h = (holdings or {}).get(base) if base else None
+        br = (branches or {}).get(pid) if pid else None
         if base is None:
             bucket, why = UNKNOWN_READING, ("no product id, so no venue "
                                             "balance can be matched to it")
         else:
-            bucket, why = classify_slice(s, h, floor_pct)
+            bucket, why = classify_slice(s, h, floor_pct, branch=br)
         out[bucket].append({
             "slice_id": s.get("id"),
             "product_id": pid or None,
@@ -200,8 +265,19 @@ def classify(slices, holdings, floor_pct):
                       "warrants investigating the sell engine. A rising "
                       "UNDERWATER count is a market; a rising "
                       "PROFITABLE_WORKING count is the engine working; a "
-                      "rising UNKNOWN_READING count is an accounting problem. "
-                      "None of those is a reason to touch execution."),
+                      "rising BRANCH_BELOW_ITS_RISE_TRIGGER count is the grid "
+                      "waiting for its own step, which is the strategy and not "
+                      "a fault; a rising UNKNOWN_READING count is an "
+                      "accounting problem. None of those is a reason to touch "
+                      "execution."),
+        "why_the_rise_trigger_bucket_exists": (
+            "Added 2026-10-08, after this endpoint reported INVESTIGATE on "
+            "four consecutive reads for three slices that were simply short "
+            "of their branch step - ONDO +8.25% at 1.449% short, XLM +1.58% "
+            "at 0.391% short, TIA +3.31% at 3.000% short. The grid sells per "
+            "BRANCH, not per slice. A classifier that does not know the "
+            "trigger grades the engine against a rule the engine does not "
+            "use, which is the failure this module was written to prevent."),
         "not_a_failure_rate": ("This deliberately does NOT publish "
                                "expiries/cycles. That ratio read 95.8% sells "
                                "while order_rested was zero on every row - it "

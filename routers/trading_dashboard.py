@@ -10999,10 +10999,58 @@ async def grid_exit_classification_endpoint():
 
     status = await g.get_grid_status()
     slices = []
+    # THE BRANCH'S OWN SELL ROUTES, which the classifier cannot see from a
+    # slice. Added 2026-10-08 after this endpoint reported INVESTIGATE on
+    # four consecutive reads for three slices that were merely short of their
+    # branch step - ONDO +8.25% at 1.449% short of its trigger, XLM +1.58% at
+    # 0.391%, TIA +3.31% at 3.000%. The grid sells per BRANCH, so without
+    # these two facts the classifier was grading the engine against a rule
+    # the engine does not use.
+    branches = {}
     for b in (status.get("branches") or []):
         for s in (b.get("slices") or []):
             slices.append({**s, "product_id": b.get("product_id"),
                            "bot_name": b.get("bot_name")})
+
+        # Route 1, the rise trigger. THE ENGINE'S OWN EXPRESSION, copied
+        # rather than approximated: crypto_grid_bot computes
+        #   _rise_hit = price >= branch.reference_price * (1 + grid_pct)
+        # Any input missing leaves both facts None, which the classifier
+        # reads as UNKNOWN - never as a route being open or shut.
+        _px = b.get("current_price")
+        _ref = b.get("reference_price")
+        _step = b.get("grid_pct")
+        _target = (_ref * (1.0 + _step)
+                   if isinstance(_ref, (int, float)) and isinstance(_step, (int, float))
+                   else None)
+        _reached = (bool(_px >= _target)
+                    if isinstance(_px, (int, float)) and _target is not None
+                    else None)
+
+        # Route 2, the parked escape. A branch as full as its levels cannot
+        # buy, so it sells a past-floor slice on its own merit without
+        # waiting for the rise - and that floor is the same
+        # GRID_PARKED_MIN_NET_PCT the classifier already applies.
+        #
+        # DELIBERATELY WIDER THAN THE ENGINE'S TEST. The engine counts
+        # tradeable_slices(), which filters remnants the venue will not sell,
+        # and this payload cannot reproduce that - open_slices is every open
+        # slice, so this reads parked at least as often as the engine does.
+        # The classifier is told so by the field name and suppresses a defect
+        # only when BOTH routes are shut: too-wide keeps a false alarm in a
+        # narrow case, too-narrow would hide a real defect.
+        _open = b.get("open_slices")
+        _levels = b.get("num_levels")
+        _parked = (bool(_open >= _levels)
+                   if isinstance(_open, int) and isinstance(_levels, int)
+                   else None)
+
+        branches[b.get("product_id")] = {
+            "rise_trigger_reached": _reached,
+            "parked_possible": _parked,
+            "current_price": _px,
+            "target_price": _target,
+        }
 
     # OWNED is the wrong question here and AVAILABLE is the right one: this
     # asks "could this have been sold right now", not "does the coin exist".
@@ -11035,7 +11083,7 @@ async def grid_exit_classification_endpoint():
     # engine does not use, which is the failure this module exists to stop.
     floor = getattr(g, "GRID_PARKED_MIN_NET_PCT", None)
 
-    result = exc.classify(slices, holdings, floor)
+    result = exc.classify(slices, holdings, floor, branches=branches)
     unknown = exc.unknown_is_not_clean(result)
 
     return JSONResponse(content={

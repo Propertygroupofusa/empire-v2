@@ -1615,7 +1615,31 @@ async def _place_maker_order(session, order: dict, wait_seconds: int):
         # absent so it reads as UNKNOWN.
         return None
 
-    fill = await _await_fill(session, order_id, wait_seconds)
+    # THE WAIT THAT FROZE THE FLEET, NOW VISIBLE WHILE IT HAPPENS.
+    #
+    # This await is in-line and the grid loop is sequential over branches, so
+    # for as long as it runs no other branch is looked at. On 2026-10-08 it
+    # ran 64 minutes on one XLM-USD buy (budget 3,600s, maker-only), the
+    # order filled and paid - and for that hour /grid-status reported
+    # `heartbeat.alive: false`, which reads as a dead fleet. It took fourteen
+    # hand-polls to establish otherwise.
+    #
+    # The order behaviour below is UNCHANGED: same budget, same cancel, same
+    # late-fill re-check. All that is added is a marker saying what is being
+    # waited on, cleared in a finally so the exception path cannot leak it.
+    # loop_wait never raises and reaches nothing; the import is guarded
+    # anyway, because instrumentation must never be what breaks an order.
+    try:
+        import loop_wait
+        _wait_token = loop_wait.mark(product_id, order.get("side", "").lower(),
+                                     wait_seconds)
+    except Exception:
+        loop_wait, _wait_token = None, None
+    try:
+        fill = await _await_fill(session, order_id, wait_seconds)
+    finally:
+        if loop_wait is not None and _wait_token is not None:
+            loop_wait.clear(_wait_token)
     if fill is None:
         # Cancel FIRST, then re-check: a fill can land in the same instant
         # the cancel does, and silently dropping it would leave the account

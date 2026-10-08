@@ -38,6 +38,17 @@ def hold(avail=10.0, locked=0.0, units=None):
             "units": units if units is not None else (avail + locked)}
 
 
+# ADDED 2026-10-08 ALONGSIDE BRANCH_BELOW_ITS_RISE_TRIGGER. Every assertion
+# below about the defect bucket was written when "profitable past the floor,
+# unlocked, no order" was the whole test. It is not: the grid sells per
+# BRANCH, and a slice whose branch never reached its step was never offered
+# for sale at all. These tests still assert exactly what they always did -
+# the behaviour WITH a sell route open - and OPEN is what says so out loud
+# instead of leaving it to a default. The suppression case is pinned in
+# test_exit_classifier_knows_the_trigger.py, section [2].
+OPEN = {"rise_trigger_reached": True, "parked_possible": False}
+
+
 section("[1] underwater is the rule working, never a defect")
 b, why = ec.classify_slice(sl(net=-5.0, pct=-0.04), hold(), FLOOR)
 ok("a slice below its entry is UNDERWATER", b == ec.UNDERWATER)
@@ -63,7 +74,7 @@ ok("+0.58% against a 1.00% floor is PROFITABLE_BELOW_MIN, held on purpose",
 ok("the reason quotes both numbers rather than saying 'too small'",
    "0.580%" in why and "1.00%" in why)
 ok("exactly AT the floor qualifies - the floor is a minimum, not a gap",
-   ec.classify_slice(sl(net=1.0, pct=0.01), hold(), FLOOR)[0]
+   ec.classify_slice(sl(net=1.0, pct=0.01), hold(), FLOOR, branch=OPEN)[0]
    == ec.QUALIFIED_EXIT_MISSING)
 # A first pass of this analysis used net>0 as "profitable" and reported THREE
 # defects. All three were under the floor. The bar is the engine's, not zero.
@@ -72,8 +83,10 @@ ok("net>0 alone does NOT make a defect - the error this test exists for",
    != ec.QUALIFIED_EXIT_MISSING)
 
 section("[5] the one real defect shape")
-b, why = ec.classify_slice(sl(net=5.0, pct=0.05), hold(avail=10.0, locked=0.0), FLOOR)
-ok("profitable past the floor, unlocked, no order -> QUALIFIED_EXIT_MISSING",
+b, why = ec.classify_slice(sl(net=5.0, pct=0.05), hold(avail=10.0, locked=0.0),
+                           FLOOR, branch=OPEN)
+ok("profitable past the floor, unlocked, no order, A ROUTE OPEN "
+   "-> QUALIFIED_EXIT_MISSING",
    b == ec.QUALIFIED_EXIT_MISSING)
 ok("and it names itself the only shape a defect can take",
    "only shape" in why)
@@ -128,7 +141,8 @@ ok("the unreadable capital is the ZEC basis, carried separately",
 
 section("[8] one defect flips the verdict, and nothing else does")
 more = list(live_slices) + [sl(pid="CCC-USD", qty=1.0, net=9.0, pct=0.09, sid=999)]
-r2 = ec.classify(more, live_hold, FLOOR)
+r2 = ec.classify(more, live_hold, FLOOR,
+                 branches={s["product_id"]: OPEN for s in more})
 ok("a single real defect sets INVESTIGATE",
    r2["qualified_exit_opportunities_with_no_order"] == 1
    and r2["exit_engine_verdict"] == "INVESTIGATE")

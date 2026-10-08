@@ -14131,3 +14131,125 @@ second LEVELS row. Note `GRID_LEVEL_SPACING_CANDIDATES` carries a
 `num_levels` per override label and `grid_spacing_override` reads
 "3_levels_2.5pct", so a computed level cap is one place to look before
 concluding the DB value is what the status reports.
+
+## The hour the fleet looked dead, and why no alarm could have told you
+
+2026-10-08. At 17:26:39Z crypto_grid_10 passed its gate on XLM-USD (net edge
++1.744% on a 2.64% step) and the loop placed a post-only buy. Nothing from
+any of the 21 branches appeared again until 18:30:50Z, when that order
+filled. 64 minutes 11 seconds. Sixteen seconds later ONDO sold for +$0.72 -
+a sale that had been ready the whole time.
+
+Measured with the per-cycle ZEC `EXITING` event as the loop's own heartbeat,
+over the 2.50 hours from 16:01:16Z: 95 cycles, median 50.7s, p90 64.5s, and
+exactly one stall of 65.1 minutes - **42.8% of the window**.
+
+THE MECHANISM. `_place_maker_order` awaits the fill IN-LINE, for
+`GRID_MAKER_ONLY_WAIT_SECONDS` (3600 on this account, via
+`MAKER_ONLY_ORDER_WAIT_SECONDS`), and the fleet loop is sequential over
+branches. One resting rung holds every other branch behind it.
+
+WHAT THE DASHBOARD SAID FOR THAT HOUR:
+
+    heartbeat: {"alive": false, "age_seconds": 3316.3, "stage": "cycled"}
+    silence:   {"verdict": "BROKEN", "alarm": true, ... "ZEC-USD x199" ...}
+
+Both misleading. `alive` means only "newer than 300s", and it is read as "the
+fleet is dead" - it was very nearly reported that way. The silence alarm
+blamed ZEC, which was a real refusal (0 units, 199 non-orders between
+13:02:52 and 15:58:38) and had nothing to do with the stall. Establishing the
+truth took fourteen hand-polls of the activity feed over ten minutes.
+
+THE FIX IS A MEASUREMENT, NOT A BEHAVIOUR CHANGE. `loop_wait.py` holds a
+process-local marker that the waiting code sets before it waits and clears in
+a `finally`. `get_grid_heartbeat(holds_loop=...)` publishes `verdict`,
+`verdict_detail` and `waiting_on` beside the untouched `alive`. The order
+behaviour is byte-identical: same budget, same cancel, same late-fill
+re-check. `test_maker_wait_is_visible.py` pins that.
+
+TWO GUARDS THAT MATTER MORE THAN THE FEATURE:
+
+1. A LEAKED MARKER MUST NOT MASK A DEAD LOOP. Set and never cleared, it
+   would make a dead loop read as busy forever - a false alarm turned into a
+   missed one, which is strictly worse than the bug. Past its budget plus
+   `ABANDON_GRACE_SECONDS` (300) a marker is `abandoned` and can never
+   produce a WAITING verdict. `test_loop_wait.py` section [4].
+2. THE MARKER IS PROCESS-LOCAL, SO ITS ABSENCE PROVES NOTHING unless this
+   process holds the loop lease. Hence `holds_loop`, and
+   `UNKNOWN_WHETHER_WAITING` rather than STALLED. Section [6].
+
+Mutation-tested: removing either guard, or reporting the newest wait instead
+of the oldest, fails the suite.
+
+## The exit classifier graded the engine against a rule the engine does not use
+
+The same day, 18:38-18:42Z, `/grid-status/exit-classification` reported
+`INVESTIGATE` on four consecutive reads, climbing 2 -> 3, with the text
+"profitable past the floor, unlocked, and no working order. This is the only
+shape an exit defect can take."
+
+It was not a defect. **The grid sells per BRANCH, not per slice.** Measured
+at 18:45Z:
+
+    ONDO-USD slice 219  +8.25% net  target 0.490383  price 0.48338  1.449% short
+    XLM-USD  slice 224  +1.58% net  target 0.190328  price 0.189586 0.391% short
+    TIA-USD  slice 208  +3.31% net  target 0.510674  price 0.4958   3.000% short
+
+All three were short of their own branch step. `exit_classifier` knew nothing
+of the trigger, so it was doing exactly what its own docstring was written to
+prevent - grading the engine against a bar the engine does not use - in the
+module built to prevent it. An alarm that is always on cannot tell anyone
+anything.
+
+THE TWO SELL ROUTES, AND WHY SUPPRESSION NEEDS BOTH SHUT:
+
+1. THE RISE TRIGGER. `price >= reference_price * (1 + grid_pct)`, the
+   engine's own expression (`crypto_grid_bot._rise_hit`), copied not
+   approximated.
+2. THE PARKED ROUTE. A branch as full as its levels cannot buy, so it sells
+   a past-floor slice on its own merit - and that floor is the same
+   `GRID_PARKED_MIN_NET_PCT` the classifier already applies.
+
+`parked_possible` is DELIBERATELY WIDER than the engine's test. The engine
+counts `tradeable_slices()`, which published state cannot reproduce; the
+router can only compare `open_slices` to `num_levels`, which reads parked at
+least as often. That error direction is chosen on purpose: too wide keeps a
+false alarm in a narrow case, too narrow would HIDE a real defect. So
+`BRANCH_BELOW_ITS_RISE_TRIGGER` is returned only when BOTH routes are shut,
+and a branch whose state was not supplied is `UNKNOWN_READING` - never a
+quiet pass.
+
+VERIFIED IN BOTH DIRECTIONS ON LIVE DATA, which is the point:
+
+  * 19:12:37Z - the live endpoint said INVESTIGATE / 2. The same payload
+    through the fix: CLEAN / 0, both slices in the new bucket, XLM 0.139%
+    and ONDO 0.790% from their triggers.
+  * 18:21Z - the fix says INVESTIGATE / 1, and it is RIGHT. ONDO's reference
+    was still 0.44354, so its target was 0.4568462 against a price of
+    0.46152: the trigger HAD fired and slice 219 was +3.34%, unlocked, with
+    no order. The reason there was no order is that the loop was frozen in
+    the XLM maker wait at that moment.
+
+So the two fixes above cross-explain each other instead of both lying. The
+18:31:06Z ONDO sale then re-anchored the reference UP to 0.47610, which is
+why the same slice reads "short of trigger" by 18:45Z.
+
+A CORRECTION THIS RECORD OWES. I told the owner the classifier was "shouting
+INVESTIGATE at normal operation". That was true of the 18:38-18:42 reads. It
+was NOT true at 18:21, where INVESTIGATE was correct and I had dismissed it
+as noise. The fix distinguishes the two instants; my first reading did not.
+
+## ABOVE_ITS_OWN_TRIGGER means the opposite of what it sounds like
+
+Read `capital_recycle.py:372` before quoting this field. The state is set
+when `target < breakeven` - when the BRANCH'S TRIGGER HAS FALLEN BELOW the
+slice's break-even, because the reference resets DOWN on every dip buy while
+the older slices keep their higher entries. It is a slice too expensive for
+the branch's trigger to sell at a gain. It is NOT a slice sitting in profit
+above its trigger.
+
+I reported $3,972.96 across 60 slices as "ready profit waiting on a queue"
+on that misreading. The independent measurement: of 78 open slices, 74 were
+UNDERWATER at $4,786.05 and `PROFITABLE_WORKING` was ZERO. The rule is to
+print the two numbers a verdict came from - `target 0.490383` beside
+`breakeven 0.446645` - never the field name.

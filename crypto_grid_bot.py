@@ -8687,8 +8687,26 @@ async def _record_grid_heartbeat(stage: str):
         log.debug(f"[GRID] heartbeat write failed (non-fatal): {type(e).__name__}: {e}")
 
 
-async def get_grid_heartbeat() -> dict:
-    """Age and stage of the last grid-loop heartbeat, or never-seen."""
+async def get_grid_heartbeat(holds_loop: bool = False) -> dict:
+    """Age and stage of the last grid-loop heartbeat, or never-seen.
+
+    `alive` IS DELIBERATELY UNCHANGED. It means, and has always meant, "the
+    heartbeat is newer than 300 seconds". Other code reads it and this is a
+    measurement change, not a behaviour change.
+
+    What is NEW is `verdict`, because `alive: false` was read - by me, to the
+    account owner, on 2026-10-08 - as "the fleet is dead" when the loop was
+    merely inside an in-line maker wait on XLM-USD. That wait ran 64 minutes
+    against a 3,600-second budget, the order filled, and nothing was broken;
+    establishing that took fourteen hand-polls of the activity feed. The
+    marker loop_wait consults is set by the code that does the waiting, so
+    "stale because it is waiting" and "stale because it is dead" are now two
+    different answers instead of one misleading one.
+
+    `holds_loop` must be passed from the lease, because the marker is
+    process-local: without it, a reader that does not own the loop would
+    report STALLED on the strength of a marker it could never have seen.
+    """
     try:
         async with get_session_factory()() as db:
             result = await db.execute(
@@ -8701,12 +8719,34 @@ async def get_grid_heartbeat() -> dict:
                 "detail": "The grid loop has never recorded a cycle on this database."}
     age = round(time.time() - float(row.base_capital), 1)
     by_value = {v: k for k, v in _HEARTBEAT_STAGES.items()}
+    # Never raises and reaches nothing - one process-local dict. Wrapped
+    # anyway: the heartbeat is what a reader checks when things look wrong,
+    # and it must not be the thing that fails then.
+    try:
+        import loop_wait
+        _v = loop_wait.verdict(age_seconds=age, holds_loop=bool(holds_loop))
+    except Exception as e:
+        _v = {"verdict": "UNKNOWN_WHETHER_WAITING", "waiting_on": None,
+              "detail": f"the wait marker could not be read: {type(e).__name__}: {e}"}
     return {
         "seen": True,
         "stage": by_value.get(float(row.starting_capital or 0.0), "unknown"),
         "age_seconds": age,
         # CYCLE_SECONDS is 30, so 10 missed cycles is unambiguously dead.
+        #
+        # EXCEPT WHEN IT IS NOT. Under maker-only the loop waits in-line for
+        # up to GRID_MAKER_ONLY_WAIT_SECONDS on a single resting order - 3600
+        # on this account - and the loop is sequential over branches, so this
+        # field reads false for an hour while the fleet is perfectly healthy.
+        # The field is kept as it was; read `verdict` for which of the two it
+        # is, and never report a dead fleet from this line alone.
         "alive": age < 300,
+        "alive_means": ("the heartbeat is newer than 300s. A long in-line "
+                        "maker wait makes this false while the loop is fine - "
+                        "see verdict before calling anything dead."),
+        "verdict": _v.get("verdict"),
+        "verdict_detail": _v.get("detail"),
+        "waiting_on": _v.get("waiting_on"),
         "last_cycle_at": datetime.utcfromtimestamp(float(row.base_capital)).isoformat() + "Z",
     }
 
@@ -9438,6 +9478,16 @@ async def get_grid_status() -> dict:
     unrealized_own_usd = round(_own, 2) if _split_known else None
     unrealized_adopted_usd = round(_adopted, 2) if _split_known else None
 
+    # READ THE LEASE FIRST, so the heartbeat can be told whether a missing
+    # wait marker means anything. The marker is process-local: if the loop is
+    # held by another process, its absence HERE is not evidence that the loop
+    # is idle, and loop_wait.verdict needs that fact to refuse to say
+    # STALLED. These were two separate awaits inside the dict literal below
+    # and neither could see the other.
+    _lease_payload = await read_grid_lease_state()
+    _hb_payload = await get_grid_heartbeat(
+        holds_loop=bool((_lease_payload or {}).get("held_by_this_process")))
+
     return {
         "fleet_name": "Adaptive Capital Fleet",
         "mode_active": mode_active,
@@ -9451,10 +9501,10 @@ async def get_grid_status() -> dict:
         # dashboard describes state the loop acts on; only this describes the
         # loop. Added after a full day was lost inferring liveness from a
         # paused branch's stale spacing - see _record_grid_heartbeat.
-        "heartbeat": await get_grid_heartbeat(),
+        "heartbeat": _hb_payload,
         # Surfaced because a heartbeat alone cannot distinguish "working" from
         # "alive but locked out of working" - see read_grid_lease_state.
-        "loop_lease": await read_grid_lease_state(),
+        "loop_lease": _lease_payload,
         "dynamic_spacing_active": await is_dynamic_spacing_active(),
         "avg_swing_spacing_active": await is_avg_swing_spacing_active(),
         "grid_spacing_override": await get_live_grid_spacing_override(),
