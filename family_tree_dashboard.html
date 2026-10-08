@@ -8776,6 +8776,11 @@ async function renderGridHarvest() {
 // that sells changes a branch's basis and therefore its floor.
 let _rsPreviewed = null;   // total the preview last reported
 let _rsRan = false;        // a live right-size completed this session
+// And the same for Deploy, which did not have one until 2026-10-08.
+// Cleared by a live right-size, because that changes every branch's basis
+// and therefore the plan: a preview taken before it must not authorise a
+// run after it.
+let _depPreviewed = null;  // total the deploy preview last reported
 
 async function renderGridFreeCash() {
     const wrap = document.getElementById('grid-freecash-wrap');
@@ -8977,6 +8982,7 @@ uiTrace('rs_apply_sending');
     }
     document.getElementById('rs-detail').innerHTML = lines.join('');
     _rsRan = freed > 0;
+    _depPreviewed = null;   // the plan just changed - re-preview before deploying
 uiTrace('rs_apply_ok', Math.round(freed));
     _rsEnable('rs-deploy-btn', _rsRan);
     _rsSay(`\u2705 Freed <strong>${fmtUsd(freed)}</strong>. No order was placed
@@ -8994,22 +9000,47 @@ uiTrace('dep_apply_no_free');
     _rsEnable('rs-deploy-btn', false);
     _rsSay('Previewing the deploy\u2026 nothing is being moved.');
     try {
-uiTrace('dep_apply_sending');
-        const pre = await postGuarded(
-            API_BASE + '/idle-capital/deploy-cash?dry_run=true', {});
-        const adds = (pre && pre.adds) || [];
-        if (!adds.length) {
-uiTrace('dep_apply_empty', 0);
-            _rsSay('\u2139\uFE0F ' + escText(String((pre && pre.detail) ||
-                   'Nothing to deploy right now.')));
+        // TWO PRESSES, LIKE THE RIGHT-SIZE BESIDE IT.
+        //
+        // Until 2026-10-08 this ran the preview and then fired the live
+        // deploy in the same press, with nothing in between. The button
+        // beside it has always previewed, stopped, and waited for a second
+        // press - and the two sit next to each other, so one of them was
+        // teaching the wrong lesson about what pressing a button here does.
+        //
+        // What it moves is not small: measured the same night, the plan
+        // after a right-size came to roughly $3,000 of claim across nine
+        // branches. A figure that size gets looked at before it is sent.
+        if (_depPreviewed === null) {
+uiTrace('dep_preview_sending');
+            const pre = await postGuarded(
+                API_BASE + '/idle-capital/deploy-cash?dry_run=true', {});
+            const padds = (pre && pre.adds) || [];
+            if (!padds.length) {
+uiTrace('dep_preview_empty', 0);
+                _rsSay('\u2139\uFE0F ' + escText(String((pre && pre.detail) ||
+                       'Nothing to deploy right now.')));
+                _rsEnable('rs-deploy-btn', true);
+                return;
+            }
+            document.getElementById('rs-detail').innerHTML = padds.map(a =>
+                `<div>${escText(a.product_id)}: ${fmtUsd(a.allocated_before)}
+                 \u2192 ${fmtUsd(a.allocated_after)} (+${fmtUsd(a.usd)})</div>`).join('');
+            _depPreviewed = Number(pre.total_usd || 0);
+uiTrace('dep_preview_ok', Math.round(_depPreviewed));
             _rsEnable('rs-deploy-btn', true);
+            _rsSay(`\u2705 Preview done, <strong>nothing moved</strong>. Would put
+                    <strong>${fmtUsd(_depPreviewed)}</strong> to work across
+                    ${padds.length} branch(es), after a
+                    ${fmtUsd(pre.reserve_usd)} reserve. Press "Put it to work"
+                    again to do it.`);
             return;
         }
-        document.getElementById('rs-detail').innerHTML = adds.map(a =>
-            `<div>${escText(a.product_id)}: +${fmtUsd(a.usd)}</div>`).join('');
+uiTrace('dep_apply_sending');
         const live = await postGuarded(
             API_BASE + '/idle-capital/deploy-cash?dry_run=false', {});
         const done = (live && live.added) || [];
+        _depPreviewed = null;   // spent - the next deploy previews again
 uiTrace('dep_apply_ok', done.length);
         _rsSay(`\u2705 Put <strong>${fmtUsd(live && live.added_usd)}</strong> to
                 work across ${done.length} branch(es). No order was placed \u2014
