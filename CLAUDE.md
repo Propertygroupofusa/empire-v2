@@ -14449,3 +14449,76 @@ written.
 
 This is about repetition, not about the items. Nothing on the list has been
 dropped and none of it has been done.
+
+## The overspent branches are NOT a third bug. I went looking and disproved it.
+
+I told the owner I would check whether ETH's $127.41 and SOL's $99.00 of
+"coin past its own allocation" were the same claim-withdrawal arithmetic I
+had just found in the drawdown breaker. They are not, and the retraction
+belongs on the record beside the suspicion.
+
+FIRST, THE NUMBER SPLITS IN TWO AND ONLY HALF OF IT IS EVEN ANOMALOUS.
+Measured 21:55Z. Adopted coin inflates a branch's basis without spending a
+dollar of its allocation, so it has to come out first:
+
+  coin      allocated  bought basis  adopted basis  over(all)  over(BOUGHT)
+  ETH-USD      386.69        514.10           0.00     127.41       127.41
+  HBAR-USD     357.70        242.84         168.91      54.05      -114.86
+  JASMY-USD    179.29        184.16           0.00       4.87         4.87
+  SOL-USD      130.13        153.28          32.12      55.27        23.15
+  XLM-USD      710.71        740.72           0.00      30.01        30.01
+
+HBAR'S OVERSPEND IS ENTIRELY ADOPTED COIN - its bought coin is $114.86
+UNDER its allocation. It was never anomalous. That leaves $185.44 across
+four branches, 69% of it ETH.
+
+SECOND, EVERY PATH THAT CAN LOWER AN ALLOCATION IS ALREADY GUARDED, and I
+checked all four rather than assuming the one I suspected:
+
+  withdraw_from_grid_branch (L3703)      refuses a branch that is not FLAT
+  reallocate_grid_cash_across_adaptive_
+    fleet (L3965)                        ALSO refuses a non-FLAT source
+                                         (L3920) - this is the one I
+                                         wrongly expected to be missing
+                                         the check
+  branch_rightsize.apply_one             asserts floor = max(coin_basis,
+                                         $15) and REFUSES the write
+  scale_grid_bot_capital                 refuses scale_factor <= 1.0, so
+                                         it can only ever raise
+
+So nothing took claim out from under the coin. THE COIN WAS BOUGHT ABOVE
+THE ALLOCATION, ON PURPOSE. adopted_rung_usd (L654) sizes a dip buy on an
+adopted branch off an even share of the DEPLOYABLE WALLET, deliberately not
+off allocated_usd / num_levels, because an adopted branch's allocation is
+the market value of coin already owned and not a cash budget. Its own
+docstring has the measurement that forced it: under allocation-based sizing
+ZEC alone wanted 68.5% of the wallet and the other nine branches starved.
+ETH's slice 137 sitting at exactly $256.30 against today's $128.90 rung is
+the signature of a wallet-sized buy, not of a withdrawal.
+
+WHAT IS STILL TRUE, AND IT IS A MEASUREMENT GAP RATHER THAN A MONEY GAP.
+`equity = allocated_usd + unrealized`, so a wallet-sized buy permanently
+understates that branch's equity by however far it exceeded the allocation,
+and the 25% breaker divides by that equity:
+
+  coin      peak    equity   dd now   unclaimed   dd counting its own coin
+  ETH     409.04    354.17    13.4%      127.41    0% (equity exceeds peak)
+  XLM     717.23    635.62    11.4%       30.01    7.2%
+  SOL     129.08    116.88     9.5%       23.15    0% (equity exceeds peak)
+  JASMY   194.67    161.75    16.9%        4.87    14.4%
+
+NONE OF THE FOUR IS FROZEN, SO THE COST TODAY IS ZERO DOLLARS. What they
+carry is a false handicap: ETH has 11.6 points of margin to the breaker
+where counting its own coin gives it the full 25, and JASMY has 8.1.
+
+AND THE FIX IS NOT MINE TO MAKE. Teaching the breaker to count coin held
+beyond the claim makes it fire LESS often, which is loosening a circuit
+breaker, and the standing instruction is to preserve them. Reported, not
+changed.
+
+THE PATTERN ACROSS ALL THREE OF TODAY'S FINDINGS is one column doing two
+jobs. allocated_usd is a cost-basis budget figure and is correct as one;
+the breaker needs "what is this branch worth" and reads the budget instead.
+Same shape as peak_after_withdrawal preserving a dollar gap for a
+percentage test, and as get_real_free_cash_usd's docstring describing a
+subtraction the code does not make.
