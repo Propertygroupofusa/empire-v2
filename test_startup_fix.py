@@ -41,6 +41,22 @@ import slice_reconcile  # noqa: E402
 import startup_fix  # noqa: E402
 from models import CryptoGridBranch, CryptoGridSlice, TradingBotState  # noqa: E402
 
+# THE SHIPPED DEFAULT IS EMPTY, AND THESE SCENARIOS TEST THE MECHANISM.
+#
+# LEVELS was emptied 2026-10-08 at the account owner's instruction: both of
+# its entries had been overtaken by the fleet, and the LINK one would have
+# LOWERED that branch from 10 levels to 6. See startup_fix's note on it,
+# and test_startup_fix_levels_emptied.py, which pins the default itself.
+#
+# Everything below exercises the level-writing MACHINERY - the cold-fleet
+# retry, the unspent ticket, the refusal logging - which must keep working
+# for any future deliberate change. So these scenarios state their own
+# request rather than inheriting whatever the shipped default happens to
+# be. The default is asserted from the SOURCE further down, so overriding
+# the attribute here cannot hide a change to it.
+MECHANISM_LEVELS = {"XRP-USD": 10, "LINK-USD": 6}
+startup_fix.LEVELS = dict(MECHANISM_LEVELS)
+
 fail = 0
 
 
@@ -371,8 +387,10 @@ for bad in ("place_order", "create_order", "market_order", "place_market",
 assigns = sorted(set(re.findall(r"^\s*row\.(\w+)\s*=", src, re.M)))
 ok("the only row attributes written are num_levels, qty and base_capital",
    assigns == ["base_capital", "num_levels", "qty"], assigns)
-ok("the levels it would write are exactly XRP 10 and LINK 6",
-   startup_fix.LEVELS == {"XRP-USD": 10, "LINK-USD": 6}, startup_fix.LEVELS)
+ok("the SHIPPED default requests no level change at all",
+   re.search(r"^LEVELS = \{\}\s*$", src, re.M) is not None,
+   "LEVELS is not empty in the file - a level change was put back into the "
+   "startup ticket; read startup_fix's note on why it was emptied")
 ok("the attempt is claimed before the work, not after",
    src.index("_claim_attempt(grid.get_session_factory") < src.index("apply_levels(grid)"),
    "an attempt counted after the work would let a crash loop re-run forever")

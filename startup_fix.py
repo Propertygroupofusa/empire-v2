@@ -127,7 +127,20 @@ DONE = -1.0
 
 # The level changes, named here so they are in the diff and reviewable,
 # never read from the environment. Measured parked on 2026-10-03.
-LEVELS = {"XRP-USD": 10, "LINK-USD": 6}
+#
+# EMPTIED 2026-10-08, at the account owner's instruction. Both entries had
+# already been overtaken by the fleet: XRP-USD was at 10 levels, so writing
+# 10 was a no-op, and LINK-USD had been raised to 10, so writing 6 would
+# have LOWERED it - removing four empty rungs the owner never asked to
+# give up, and leaving it parked at 6 slices against 6 levels. Worse, the
+# set-levels button is unreachable in the same way the reconcile button is
+# (see this module's docstring), so that reduction could not have been
+# undone from the dashboard afterwards.
+#
+# The ticket now does ONE thing: the slice reconcile. A level change that
+# is wanted later belongs in a diff of its own, measured against the fleet
+# as it is on that day, not carried along inside an unrelated fix.
+LEVELS = {}
 
 # A plan larger than this means the wallet reading collapsed, not that the
 # fleet over-claims by that much. The audited plan was $1,157.41.
@@ -232,6 +245,25 @@ async def apply_levels(grid, wanted=None):
     from models import CryptoGridBranch
 
     want = dict(wanted if wanted is not None else LEVELS)
+
+    # NOTHING REQUESTED IS SETTLED, AND IT MUST NOT WAIT TO FIND THAT OUT.
+    #
+    # status_with() tests `want and want <= seen`, so an empty request can
+    # never satisfy it: it would burn READY_TRIES x READY_SLEEP_SECONDS -
+    # five minutes of boot - and then return UNKNOWN, which run_at_boot
+    # reads as unsettled and which would leave the ticket unspent and
+    # retrying on all five attempts. An empty request is not an unreadable
+    # fleet; it is a request with nothing in it.
+    if not want:
+        log.warning("[startup-fix] levels: nothing requested - skipped, settled")
+        return {"requested": {}, "applied": [], "settled": True,
+                "not_applied": None, "refused": None, "missing": None,
+                "plans": [], "rows_written": 0, "places_no_order": True,
+                "status": "NOTHING_REQUESTED",
+                "detail": ("no level change is requested by this ticket, so none was "
+                           "planned and none was written. Settled: re-running could "
+                           "not do better.")}
+
     status, ready = await status_with(grid, want.keys())
     if not ready:
         return {"requested": want, "rows_written": 0, "settled": False,

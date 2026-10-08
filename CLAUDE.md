@@ -13975,3 +13975,79 @@ its block now answers for itself, so the wrong number cannot be quoted
 against the right question - by me, by the dashboard, or by a guard
 prompt. `test_backing_row_says_which_question.py` pins the ALGO case
 both ways.
+
+## The startup ticket now does the reconcile and nothing else
+
+The reconcile and set-levels dashboard buttons do not reach the server.
+Established before 2026-10-08 and recorded in `startup_fix.py`'s own
+docstring: they "record NOTHING server-side when tapped - not a write
+attempt, not even the GET beacon placed as the first statement of each
+handler - across a cleared cache, an incognito window and three deploys."
+
+RE-CONFIRMED 2026-10-08, three independent ways, after the owner reported
+the ZEC reconcile as done for the fourth time:
+
+* The activity feed holds ZERO rows of `event_type == "RECONCILE"` back to
+  2026-10-07T04:47. The endpoint's "Wrote off" line is written there on
+  the applied path only, so `applied` has never once been non-empty.
+* ZEC's slice rows still carry their ORIGINAL primary keys 53, 57 and 68.
+  A deleted-and-rebuilt row returns with a new id; these were never
+  deleted.
+* `executeGridReconcile` in family_tree_dashboard.html renders
+  "Nothing was changed. The server applied no correction." when `applied`
+  is empty, and the string "Wrote off" appears nowhere in that file. The
+  text the owner saw cannot have come from the reconcile.
+
+So the only working path is `startup_fix.py`, which runs the identical
+write in-process at boot - no page, no fetch, no token - armed only by
+STARTUP_FIX_TICKET, which only the account owner can set.
+
+### LEVELS emptied, and why that mattered
+
+`LEVELS = {"XRP-USD": 10, "LINK-USD": 6}` was measured on 2026-10-03 and
+both entries had been overtaken by the fleet by 2026-10-08. XRP-USD was
+already at 10, so writing 10 was a no-op. LINK-USD had been raised to 10,
+and `branch_levels.plan` refuses only `levels_after < open_slices` - 6 is
+not below LINK's 6 open slices, so the entry would have PASSED the guard
+and lowered LINK from 10 levels to 6, removing four empty rungs the owner
+never agreed to give up and parking it. Because the set-levels button is
+unreachable in the same way, that reduction could not have been undone
+from the dashboard.
+
+`LEVELS = {}` now, and `apply_levels` short-circuits an empty request to
+`settled: True` without calling `status_with`. That short-circuit is
+load-bearing, not tidiness: `status_with` tests `want and want <= seen`,
+which an empty request can never satisfy, so it would burn
+READY_TRIES x READY_SLEEP_SECONDS - five minutes of boot - and return
+UNKNOWN, which `run_at_boot` reads as unsettled, leaving the ticket
+unspent and retrying on all five attempts.
+
+`test_startup_fix.py` asserted the old pair. Its scenarios exercise the
+level-writing MACHINERY (cold-fleet retry, unspent ticket, refusal
+logging), which must keep working for a future deliberate change, so they
+now state their own request via `MECHANISM_LEVELS` and the shipped default
+is asserted from the SOURCE instead - overriding the attribute in a test
+cannot hide a change to the file.
+
+### What arming the ticket would write, measured 2026-10-08 15:53Z
+
+On matched grid-status and census readings taken together - $839.48 of
+tracked cost basis across four branches:
+
+| branch | units written off | cost basis | actions |
+|---|---|---|---|
+| ZEC-USD | 0.378166652152 | $622.05 | 3 REMOVE |
+| SOL-USD | 0.77595005 | $96.36 | 2 REMOVE / 1 REDUCE |
+| LINK-USD | 5.88 | $87.82 | 2 REMOVE / 1 REDUCE |
+| ACH-USD | 5345.2 | $33.25 | 1 REMOVE |
+
+Under the $2,000 MAX_WRITEOFF_USD ceiling, so it would apply.
+
+A FIRST DRY RUN OF THIS PLAN WAS WRONG AND IS WORTH REMEMBERING. It
+reported a fifth branch - QNT-USD, 0.24502677 units, $61.69 - because it
+paired a 15:52Z grid-status with a 15:29Z census, and QNT had bought slice
+216 in between. QNT owns 0.66897323 against a 0.668 claim and is not short
+at all. The planner cannot tell a stale wallet reading from a real
+shortfall, so the two sides must be read together; `apply_reconcile`
+fetches its own census immediately before planning, and the ceiling is the
+backstop for the case where that still slips.
