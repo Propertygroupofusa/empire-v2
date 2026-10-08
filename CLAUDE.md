@@ -14341,3 +14341,95 @@ test earlier the same day: do not tune toward a faster trade.
 TIA at +0.0962% on 233 observations is NOT a signal to concentrate into.
 It is one coin a tenth of a percent above zero, and acting on it is the
 textbook fit-to-noise.
+
+## ITEM 14 is not one mystery. It is three, with a signature.
+
+Measured 2026-10-08 21:45Z against the exchange's own fill record
+(/coinbase-statement, 48h window 10-06T21:45Z to 10-08T21:45Z, 139 fills,
+107 orders, one page, not truncated) compared unit-by-unit with
+/grid-status/trade-history.
+
+THE EXCHANGE RECORDED 43 SPOT CLOSES. OUR LEDGER RECORDED 36. The seven
+split into three already-known cases and a pattern nobody had named:
+
+  reconciled    SOL 0.77595005, ACH 5,345.20, LINK 5.88 - exactly what
+                the 15:58:40Z reconcile wrote off. Cleaned up; the fleet
+                now reads 100% backed, $0.00 not in wallet.
+  known         FLOKI-USD $30.63, the ITEM 17 orphan.
+  THE PATTERN   three assets, below.
+
+EVERY ASSET THAT WAS SITTING LOCKED AT THE 00:17Z BASELINE HAS BEEN SOLD,
+AND NOT ONE OF THOSE SALES IS IN OUR LEDGER. Three for three, to the unit:
+
+  asset  exchange sold   our ledger   unrecorded   locked at 00:17Z
+  BTC     0.01186009     0.00022058   0.01163951   0.01163951  EXACT
+  NEAR   63.44700000    47.49600000  15.95100000  15.951       EXACT
+  LINK    8.76000000     2.13000000   6.63000000   6.63         EXACT
+
+  $976.94 + $81.33 + $87.07 = $1,145.34 of coin sold in 48 hours with no
+  close recorded anywhere in this system.
+
+AND ALGO IS THE CONTROL THAT MAKES IT A PATTERN RATHER THAN A COINCIDENCE.
+It is the one asset still holding locked units (1,134.30). Its 888.70 sold
+units reconcile to the unit - gap 0.000000. The asset that stayed locked
+is the asset whose record is perfect.
+
+THE FEE RATE SAYS THESE WERE TAKER FILLS, AND THIS GRID HAS NEVER TAKEN ON
+A SELL. Subtract what the grid's own recorded legs should have paid at the
+measured 0.35% maker rate and the residual lands on the unrecorded volume
+at:
+
+  BTC   $7.33 on $976.94 = 0.750%
+  NEAR  $0.57 on  $81.33 = 0.699%
+  LINK  $0.65 on  $87.07 = 0.748%
+
+Three independent assets, all within half a basis point of each other, all
+at roughly twice the maker rate. The fleet is measured 99.42% maker (343 of
+345 legs) and `maker_only_holds` independently reports 23 of 241 recent
+fills as TAKER with the newest 6.1h old.
+
+SO THE GUARD'S OWN BASELINE LINE IS CONTRADICTED AND MUST BE RETRACTED:
+"Locked coin at re-base: ALGO 1,134.30, LINK 6.63, NEAR 15.951 - all three
+are BRANCH coins and are the fleet's own resting sells." The first half may
+hold; the second does not. The fleet's own resting sells are maker orders
+and their fills land in the ledger. These were taker fills and none landed.
+ITEM 0's retraction was right that resting orders held the coin and wrong
+about whose orders they were.
+
+WHAT IS NOT TRUE, and must not be said: no money is missing. The proceeds
+are in the wallet - cash $3,265.44, coin $6,271.13, total $9,536.57 at
+21:43:20Z. What is missing is the RECORD. None of that $1,145.34 of sales
+touched realized_own_usd, so the banked figure of $132.92 across 245 closes
+is blind to it. The owner judges this system by banked profit and banked
+profit cannot see a sixth of the account being sold.
+
+WHO DID IT IS STILL NOT ESTABLISHED and this does not name anyone. It is
+consistent with ITEM 16's finding that something outside empire-v2 trades
+this account (58 of 216 fills quote-sized in a window the grid cannot
+produce), but consistent-with is not proof. Only Coinbase's Orders page and
+the API-key / connected-app settings can name it, and both are the owner's.
+This is now the third and strongest reason that audit is worth doing.
+
+## stop_loss re-measured on the new sample, and the answer did not change
+
+ITEM 11 rejected removing the stop on three slices' worth of candles 10-05
+($1.49). Four more fired on 10-08 - APE -$9.89, TON -$7.22, ONDO -$2.19,
+BTC -$1.01, together -$20.31 - so the sample is no longer three, and the
+honest move was to re-measure rather than re-propose from memory.
+
+Against the 21:15Z marks, holding instead of stopping would have been worth
+about $3.10 in total: TON +$2.46, ONDO +$0.74, BTC +$0.17, and APE -$0.27
+the other way. THREE OF THE FOUR RECOVERED ABOVE THE STOP PRICE, which
+looks like evidence until the second half is stated: NONE recovered above
+its own ENTRY. All three would still be open, still underwater, still
+unsold. Five and a half hours of hindsight on four slices is not a finding,
+and the rule stays as it is.
+
+What IS worth saying plainly, because the owner reads banked profit: the
+rule is 9 closes, 9 negatives, -$50.50 lifetime - it has never once booked
+a gain - while profit_target is 105 closes with zero negatives (+$114.59)
+and parked_sell is 49 with zero negatives (+$49.28). On 10-08, 20 of 24
+closes made +$16.52 and the four stops cost -$20.31. One rule turned a
+green day red. That is the measurement; whether to keep a rule that sells
+at a loss against a standing instruction not to is the owner's call, and
+proposing the change is still off the table under ITEM 11.
