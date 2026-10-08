@@ -60,6 +60,44 @@ COINBASE_HOST = os.getenv("COINBASE_HOST", "api.coinbase.com")
 PUBLIC_HOST = "api.exchange.coinbase.com"
 ACCOUNTS_PATH = "/api/v3/brokerage/accounts"
 MAX_ACCOUNT_PAGES = 20
+
+# WHY THE ACCOUNTS READ COMES BACK UNREADABLE, AND WHAT TO DO ABOUT IT.
+#
+# Measured 2026-09-28 13:53Z: four of ten consecutive /account-census
+# calls returned `available: false, error: "accounts HTTP 429"`. A 40%
+# refusal rate is not an exotic failure, it is the normal weather on this
+# endpoint, and every caller that treats a refusal as "unknown" is
+# therefore unknown roughly half the time. On 2026-10-08 12:44:58Z that
+# cost real money: the grid's backing gate reads this map, a single
+# refusal made it pass, and a branch bought coin it was short of.
+#
+# A 429 is the venue asking us to wait, not telling us the account is
+# unreadable. So wait, briefly and a bounded number of times, honouring
+# Retry-After when the venue sends one. Only a refusal that survives
+# every attempt is reported as a refusal.
+#
+# Bounded on purpose: this runs inside a trading cycle. Three attempts
+# with these gaps cannot add more than ACCOUNTS_RETRY_BUDGET_SECONDS to
+# a page fetch, and the function keeps its never-raises contract.
+ACCOUNTS_RETRY_STATUSES = (429, 500, 502, 503, 504)
+ACCOUNTS_RETRY_ATTEMPTS = 3
+ACCOUNTS_RETRY_BACKOFF_SECONDS = (0.5, 1.5)
+ACCOUNTS_RETRY_BUDGET_SECONDS = 6.0
+
+
+def _retry_after_seconds(resp, fallback):
+    """The venue's own Retry-After, clamped to the retry budget."""
+    raw = None
+    try:
+        raw = resp.headers.get("Retry-After")
+    except Exception:
+        raw = None
+    if raw:
+        try:
+            return max(0.0, min(float(str(raw).strip()), ACCOUNTS_RETRY_BUDGET_SECONDS))
+        except (TypeError, ValueError):
+            pass
+    return fallback
 PRICE_CONCURRENCY = 8
 
 # Assets that ARE dollars. Priced at 1.0 rather than looked up, because a
@@ -90,14 +128,36 @@ async def fetch_balances(session) -> dict:
     try:
         while pages < MAX_ACCOUNT_PAGES:
             q = "?limit=250" + (f"&cursor={cursor}" if cursor else "")
-            async with session.get(f"https://{COINBASE_HOST}{ACCOUNTS_PATH}{q}",
-                                   headers=_auth_headers("GET", ACCOUNTS_PATH),
-                                   timeout=25) as r:
-                if r.status != 200:
-                    return {"available": False,
-                            "error": f"accounts HTTP {r.status}",
-                            "detail": (await r.text())[:300]}
-                body = await r.json()
+            body = None
+            refusal = None
+            for attempt in range(ACCOUNTS_RETRY_ATTEMPTS):
+                async with session.get(f"https://{COINBASE_HOST}{ACCOUNTS_PATH}{q}",
+                                       headers=_auth_headers("GET", ACCOUNTS_PATH),
+                                       timeout=25) as r:
+                    if r.status == 200:
+                        body = await r.json()
+                        refusal = None
+                        break
+                    refusal = {"available": False,
+                               "error": f"accounts HTTP {r.status}",
+                               "detail": (await r.text())[:300],
+                               "attempts": attempt + 1}
+                    # A status the venue will not reconsider is final on
+                    # the first look - retrying a 401 only delays the bad
+                    # news and burns cycle time.
+                    if r.status not in ACCOUNTS_RETRY_STATUSES:
+                        break
+                    if attempt >= ACCOUNTS_RETRY_ATTEMPTS - 1:
+                        break
+                    wait = _retry_after_seconds(
+                        r, ACCOUNTS_RETRY_BACKOFF_SECONDS[
+                            min(attempt, len(ACCOUNTS_RETRY_BACKOFF_SECONDS) - 1)])
+                log.info(f"[CENSUS] accounts HTTP {refusal['error'][-3:]} - "
+                         f"attempt {attempt + 1}/{ACCOUNTS_RETRY_ATTEMPTS}, "
+                         f"waiting {wait:.1f}s")
+                await asyncio.sleep(wait)
+            if refusal is not None:
+                return refusal
             accounts.extend(body.get("accounts") or [])
             pages += 1
             cursor = body.get("cursor") or None

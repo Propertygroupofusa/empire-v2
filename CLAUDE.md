@@ -13894,12 +13894,60 @@ points under the line. The strict test needs no new arithmetic - every
 `rows` entry already carries `short_usd`, and `MATERIAL_GAP_USD` ($5.00)
 already keeps a venue's rounding from tripping it.
 
-It is left alone deliberately. `test_backing_gate.py`'s
-`test_fifty_percent_exactly_is_backed` asserts the present behaviour on
-purpose, so moving the line is a policy change for the account owner to
-decide, not a bug fix to slip in beside one. One constant answering two
-different questions is the finding; which answer the gate should take is
-his call.
+CHANGED 2026-10-08, by the account owner, in his words: "fix all if
+that's the case to where we don't have to fix it... get it do right the
+first time no more mishaps." The gate now refuses ANY confirmed material
+shortfall. It still derives no percentage of its own - it reads
+`rows`, which already carries `short_usd` per branch, against
+slice_backing's own `MATERIAL_GAP_USD` ($5.00), so a venue's rounding
+cannot trip it and the threshold still lives in one module.
+`test_fifty_percent_exactly_is_backed` asserted the old policy and has
+been rewritten as `test_a_material_shortfall_is_refused_at_any_percentage`,
+with the live SOL and ACH readings pinned beside it.
+
+ZEC, SOL, LINK and ACH therefore stop buying until their books are
+reconciled. The other seventeen branches are untouched: ALGO reads
+174.285% and NEAR 642.926% on owned units, short 0.0, so coin sitting
+under the fleet's own resting order still buys normally.
+
+## Why the balance was unreadable at all, and the three layers now in front of it
+
+The memory above is the BACKSTOP. It should almost never be reached,
+because the unreadability itself was fixable and account_census had
+already written down how.
+
+THE WEATHER, measured 2026-09-28 13:53Z and recorded in
+account_census: four of ten consecutive calls returned
+`available: false, error: "accounts HTTP 429"`. A 40% refusal rate is
+normal on that endpoint. The LINK buy was therefore not a freak event -
+it was the expected outcome of a gate that treats every refusal as
+permission.
+
+LAYER 1 - the read retries. `fetch_balances` surrendered on the first
+non-200. It now retries 429 and 5xx up to `ACCOUNTS_RETRY_ATTEMPTS`,
+honouring the venue's `Retry-After` clamped to
+`ACCOUNTS_RETRY_BUDGET_SECONDS` so a venue asking for five minutes
+cannot stall a trading cycle. A status the venue will not reconsider -
+a 401 - is still final on the first look. The never-raises contract is
+unchanged, and a refusal surviving every attempt is still reported as a
+refusal, now carrying `attempts`.
+
+LAYER 2 - a stale reading is still a reading. This is account_census's
+own doctrine, written for `census_cached`: "a reading with an age, which
+is not the same as a fallback - a reading from 40 seconds ago IS the
+account, near enough." `wallet_owned_units` never got that treatment,
+and it is the read the buy gate depends on. It now serves the last real
+reading when the venue will not answer, up to
+`WALLET_UNITS_STALE_CEILING_SECONDS` (900s), logging the age every time.
+Nothing is invented: it returns a map the venue really served, or None.
+Past the ceiling it refuses as before - an old reading must never
+masquerade as a current one.
+
+LAYER 3 - the memory, above.
+
+`test_wallet_read_survives_rate_limit.py` covers layers 1 and 2 and
+replays the 12:44:58Z buy against all three. Each layer was mutation-
+tested: reverting any one of them fails its own tests.
 
 ### ALGO is not short, and a report of mine said it was
 
@@ -13915,3 +13963,15 @@ report of mine on 2026-10-08 listed "ALGO 279.353611" in a list of
 shortfalls; that was the AVAILABLE figure quoted against the OWNED
 question, which is the exact confusion ITEM 0 was retracted for. The
 owned shortfalls are four: ZEC, SOL, LINK, ACH.
+
+FIXED STRUCTURALLY, not just corrected. The block always said this
+correctly in its top-level `note`; the ROW did not, and the row is what
+got quoted. Every row `assess()` emits now carries its own `units_are`,
+its own `question`, and a `shortfall_is` that spells out, on the
+available reading, that its gap is "units the venue will not release
+right now... NOT evidence the coin is missing; read the owned block for
+that question". `unknown` rows carry the basis too. A row lifted out of
+its block now answers for itself, so the wrong number cannot be quoted
+against the right question - by me, by the dashboard, or by a guard
+prompt. `test_backing_row_says_which_question.py` pins the ALGO case
+both ways.

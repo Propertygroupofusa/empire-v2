@@ -76,6 +76,26 @@ def assess(branches, held_units_by_asset, *, unreadable_assets=(),
     fixed in the numbers.
     """
     _units_are = "owned" if str(units_are).lower().strip() == "owned" else "available"
+    # EVERY ROW CARRIES ITS OWN BASIS, not just the block around it.
+    #
+    # 2026-10-08: a report listed "ALGO 279.353611" among the fleet's
+    # shortfalls. ALGO claims 1150.9 units and OWNS 2005.846389 - 174% -
+    # and reads short only in the AVAILABLE block, because 1134.3 of its
+    # units sit under the fleet's own resting sell order. The block said
+    # so correctly in its top-level `note`; the row did not, and the row
+    # is what got quoted. That is the same owned-versus-available
+    # confusion that forced one retraction already.
+    #
+    # A row lifted out of its block now still answers for itself, so the
+    # wrong number cannot be quoted against the right question.
+    _row_question = ("does this coin EXIST at all" if _units_are == "owned"
+                     else "can this branch place a sell RIGHT NOW")
+    _shortfall_is = (
+        "coin that is genuinely not in the account" if _units_are == "owned" else
+        "units the venue will not release right now - coin under a resting "
+        "order or staked reads short here while the account owns every unit "
+        "claimed. NOT evidence the coin is missing; read the owned block for "
+        "that question")
     held = {str(k).upper(): _f(v) for k, v in (held_units_by_asset or {}).items()}
     unreadable = {str(a).upper() for a in (unreadable_assets or ())}
 
@@ -108,6 +128,8 @@ def assess(branches, held_units_by_asset, *, unreadable_assets=(),
                            if asset in unreadable else
                            "asset absent from the balance reading"),
                 "this_is_unknown_not_unbacked": True,
+                "units_are": _units_are,
+                "question": _row_question,
             })
             continue
 
@@ -127,6 +149,11 @@ def assess(branches, held_units_by_asset, *, unreadable_assets=(),
 
         rows.append({
             "product_id": pid, "asset": asset,
+            # WHICH held figure this row was measured against. Lifted out
+            # of its block, a row still answers for itself.
+            "units_are": _units_are,
+            "question": _row_question,
+            "shortfall_is": _shortfall_is,
             "claimed_units": claim_units, "held_units": have,
             "backed_pct": pct, "backed": backed,
             "short_units": short_units, "short_usd": short_usd,

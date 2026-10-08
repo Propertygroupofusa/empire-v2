@@ -177,16 +177,34 @@ class TestItStillRefusesWhatItAlwaysDid(BackingMemoryCase):
         self.assertTrue(ok)
         self.assertEqual(why, "backed")
 
-    def test_the_threshold_still_belongs_to_slice_backing(self):
-        """This gate must not grow its own percentage. The boundary case
-        from test_backing_gate.py, re-asserted here so a change to the
-        memory cannot quietly move it."""
-        self.assertTrue(run(g.branch_backing_verdict(
+    def test_any_material_shortfall_is_refused(self):
+        """The policy the owner set on 2026-10-08: a shortfall is a
+        shortfall, at any percentage. Re-asserted here so a change to
+        the memory cannot quietly move it back."""
+        self.assertFalse(run(g.branch_backing_verdict(
             "X-USD", [{"qty": 2.0, "entry_price": 100.0}], 100.0,
-            {"X": 1.0}))[0])
+            {"X": 1.0}))[0], 'half a claim is half a claim')
         self.assertFalse(run(g.branch_backing_verdict(
             "X-USD", [{"qty": 2.0, "entry_price": 100.0}], 100.0,
             {"X": 0.99}))[0])
+
+    def test_the_gate_still_derives_no_percentage_of_its_own(self):
+        """The strict test must not become a hand-rolled threshold."""
+        import ast
+        import os
+        src = open(os.path.join(os.path.dirname(__file__) or '.',
+                                'crypto_grid_bot.py')).read()
+        tree = ast.parse(src)
+        body = ''
+        for n in ast.walk(tree):
+            if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and n.name == 'branch_backing_verdict'):
+                body = ast.get_source_segment(src, n) or ''
+        self.assertTrue(body)
+        for forbidden in ('BACKED_ENOUGH', '>= 50', '< 50', '* 100', '/ claim'):
+            self.assertNotIn(forbidden, body,
+                             'the backed threshold belongs to slice_backing')
+        self.assertIn('slice_backing.MATERIAL_GAP_USD', body)
 
 
 if __name__ == "__main__":

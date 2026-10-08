@@ -197,15 +197,59 @@ class TestItRefusesTheRealThing(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(why, "backed")
 
-    def test_fifty_percent_exactly_is_backed(self):
-        """BACKED_ENOUGH_PCT is the boundary and it belongs to slice_backing,
-        not to this gate - so the gate must not invent its own."""
-        ok, _ = run(g.branch_backing_verdict(
+    def test_a_material_shortfall_is_refused_at_any_percentage(self):
+        """POLICY CHANGED 2026-10-08, by the account owner, and this test
+        asserted the old one.
+
+        It used to read `test_fifty_percent_exactly_is_backed` and assert
+        that a branch holding half its claim was fine to buy into,
+        because BACKED_ENOUGH_PCT is 50 and the threshold belongs to
+        slice_backing. The threshold does still belong to slice_backing -
+        the gate re-derives no percentage - but the gate was reading the
+        wrong one of its outputs. `unbacked` answers "is this branch's
+        reported gain real money"; this gate's own harm is "cash spent
+        into a branch that cannot sell what it claims", which lands at
+        ANY confirmed shortfall.
+
+        What that cost: on 2026-10-08 SOL sat 0.77595005 units short at
+        66.736% backed and ACH 5345.195404960 short at 64.715%. Both
+        passed this gate for weeks. LINK was caught only because it
+        happened to sit 1.534 points under the line.
+
+        A branch holding half its claim is short half its claim. It is
+        refused."""
+        ok, why = run(g.branch_backing_verdict(
             "X-USD", [{"qty": 2.0, "entry_price": 100.0}], 100.0, {"X": 1.0}))
-        self.assertTrue(ok)
+        self.assertFalse(ok, 'a branch holding half its claim was allowed to buy')
+        self.assertIn("reconcile-slices", why)
         ok2, _ = run(g.branch_backing_verdict(
             "X-USD", [{"qty": 2.0, "entry_price": 100.0}], 100.0, {"X": 0.99}))
         self.assertFalse(ok2)
+
+    def test_the_two_thirds_backed_branches_that_used_to_pass(self):
+        """The live SOL and ACH readings, 2026-10-08 14:17Z on owned
+        units. Both were outside `unbacked` and both were short."""
+        sol, _why = run(g.branch_backing_verdict(
+            "SOL-USD", [{"qty": 2.33270305, "entry_price": 120.0}], 112.05,
+            {"SOL": 1.556753}))
+        self.assertFalse(sol, 'SOL at 66.736% backed still passes the gate')
+        ach, _why2 = run(g.branch_backing_verdict(
+            "ACH-USD", [{"qty": 15148.6, "entry_price": 0.00621}], 0.005728,
+            {"ACH": 9803.40459504}))
+        self.assertFalse(ach, 'ACH at 64.715% backed still passes the gate')
+
+    def test_a_venues_rounding_is_still_not_a_shortfall(self):
+        """The floor that makes the strict test safe is slice_backing's
+        own MATERIAL_GAP_USD, not a percentage. A branch a hair under its
+        claim must still buy, or every branch in the fleet stops on a
+        rounding difference."""
+        import slice_backing as sb
+        ok, why = run(g.branch_backing_verdict(
+            "X-USD", [{"qty": 1.0, "entry_price": 100.0}], 100.0,
+            {"X": 0.999}))
+        self.assertTrue(ok, 'a $0.10 rounding gap refused the buy')
+        self.assertEqual(why, "backed")
+        self.assertEqual(sb.MATERIAL_GAP_USD, 5.0)
 
     def test_a_confirmed_zero_balance_is_refused(self):
         ok, why = run(g.branch_backing_verdict(

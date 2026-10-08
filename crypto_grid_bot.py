@@ -2721,6 +2721,23 @@ async def account_market_book(max_age_seconds=ACCOUNT_BOOK_TTL_SECONDS):
 _WALLET_UNITS_CACHE = {"units": None, "at": 0.0}
 WALLET_UNITS_TTL_SECONDS = 60.0
 
+# HOW LONG A READING STAYS A READING AFTER THE VENUE STOPS ANSWERING.
+#
+# account_census already settled this question for the census and wrote
+# the doctrine down: "a reading with an age, which is not the same as a
+# fallback - a reading from 40 seconds ago IS the account, near enough."
+# The accounts endpoint refused four of ten consecutive calls when that
+# was measured, a 40% refusal rate, so a read that turns every refusal
+# into UNKNOWN is UNKNOWN about half the time.
+#
+# This one read never got that treatment, and it is the read the buy
+# gate depends on. Owned units move on FILLS, not on seconds: a map from
+# four minutes ago is a real measurement of what the account holds, and
+# vastly better than the nothing that let a short branch buy on
+# 2026-10-08. Past the ceiling it is refused as before - an old reading
+# must never masquerade as a current one.
+WALLET_UNITS_STALE_CEILING_SECONDS = 900.0
+
 # A SHORTFALL THIS GATE HAS ALREADY CONFIRMED, held across the cycles
 # where the balance cannot be read at all.
 #
@@ -2790,13 +2807,39 @@ async def wallet_owned_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
             _bal = await account_census.fetch_balances(_s)
         units = account_census.owned_units_map(_bal)
     except Exception as exc:
-        log.warning(f"[GRID] wallet units unreadable ({type(exc).__name__}: {exc}) - "
-                    f"backing not checked this cycle")
-        return None
+        return _wallet_units_fallback(
+            now, f"{type(exc).__name__}: {exc}")
     if units is None:
-        return None
+        return _wallet_units_fallback(now, "venue refused the accounts read")
     _WALLET_UNITS_CACHE.update(units=units, at=now)
     return units
+
+
+def _wallet_units_fallback(now, why):
+    """The last good reading, if it is still young enough to be one.
+
+    None only when there is nothing to fall back to - no cached reading
+    at all, or one past WALLET_UNITS_STALE_CEILING_SECONDS. Nothing is
+    invented here and no figure is guessed: this returns a map the venue
+    really served, or it returns None and the caller treats it as
+    UNKNOWN exactly as before.
+    """
+    cached = _WALLET_UNITS_CACHE.get("units")
+    if cached is None:
+        log.warning(f"[GRID] wallet units unreadable ({why}) and no cached "
+                    f"reading to stand in - backing not checked this cycle")
+        return None
+    age = now - _WALLET_UNITS_CACHE["at"]
+    if age >= WALLET_UNITS_STALE_CEILING_SECONDS:
+        log.warning(f"[GRID] wallet units unreadable ({why}) and the last "
+                    f"reading is {age:.0f}s old, past the "
+                    f"{WALLET_UNITS_STALE_CEILING_SECONDS:.0f}s ceiling - "
+                    f"backing not checked this cycle")
+        return None
+    log.warning(f"[GRID] wallet units unreadable ({why}) - serving the last "
+                f"real reading, {age:.0f}s old. Owned units move on fills, "
+                f"not on seconds.")
+    return cached
 
 
 async def branch_backing_verdict(product_id, slices, price,
@@ -2862,7 +2905,32 @@ async def branch_backing_verdict(product_id, slices, price,
         "total_unrealized_net_usd": 0.0,
     }]
     out = slice_backing.assess(probe, units)
-    for row in (out.get("unbacked") or ()):
+    # THIS GATE'S QUESTION IS NOT THE PAGE'S QUESTION.
+    #
+    # slice_backing's `unbacked` list is drawn at its own backed-share
+    # line, and that line is right for what its docstring asks: can a
+    # branch's reported GAIN be taken to the venue. This gate's harm is
+    # the one named at the top of this function - "cash spent into a
+    # branch that cannot sell what it claims" - and that lands at ANY
+    # confirmed shortfall, not only a majority one.
+    #
+    # Measured 2026-10-08 14:17Z on owned units, with the old test: SOL
+    # sat 0.77595005 units short at 66.736% backed and ACH
+    # 5345.195404960 short at 64.715%. Neither was on the `unbacked`
+    # list, both were short real coin, and both were free to keep
+    # buying. LINK was caught only because it happened to sit 1.534
+    # points under the line. The account owner decided on 2026-10-08
+    # that a shortfall is a shortfall.
+    #
+    # The arithmetic is still slice_backing's and no percentage is
+    # re-derived here: every `rows` entry already carries short_usd, and
+    # MATERIAL_GAP_USD is slice_backing's own floor for "a gap worth a
+    # reader's attention", which is what keeps a venue's rounding from
+    # tripping this. rows arrive sorted by short_usd, so the first match
+    # is the worst one.
+    for row in (out.get("rows") or ()):
+        if (row.get("short_usd") or 0.0) < slice_backing.MATERIAL_GAP_USD:
+            continue
         _why = (
             f"{row['backed_pct']:.3f}% backed - books claim "
             f"{row['claimed_units']:.8f} {row['asset']}, wallet holds "
