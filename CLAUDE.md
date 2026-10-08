@@ -14522,3 +14522,59 @@ the breaker needs "what is this branch worth" and reads the budget instead.
 Same shape as peak_after_withdrawal preserving a dollar gap for a
 percentage test, and as get_real_free_cash_usd's docstring describing a
 subtraction the code does not make.
+
+## "Is it making money" and "are we gaining capital" have DIFFERENT answers
+
+Asked 2026-10-08 23:40Z, and I had been answering only the first one for
+hours. Both are measured, both are true, and they point opposite ways.
+
+TRADING PROFIT: +$133.78 banked across 247 own closes over 23 trading
+days, about $5.82 per trading day. That is real and it is the figure I
+had been quoting.
+
+CAPITAL: FALLING. /growth-curve records account_total_usd, and over the
+500 readings it holds (2026-10-04T09:21Z to 2026-10-08T23:36Z, 110.2
+hours):
+
+  account total   $10,023.20 -> $9,579.27    -$443.93   (-$96.64 / day)
+  cash             $5,059.71 -> $3,328.77  -$1,730.94
+  coin at market   $4,963.50 -> $6,250.51  +$1,287.01
+  high $10,149.26   low $9,381.08   now $9,579.27
+
+  day        first      last    change
+  10-04   10,023.20 10,149.26   +126.06
+  10-05   10,149.26 10,112.32    -36.94
+  10-06   10,097.06 10,003.90    -93.16
+  10-07    9,957.18  9,741.73   -215.45
+  10-08    9,741.73  9,579.27   -162.46
+
+One up day, four down. The arithmetic closes exactly: cash fell
+$1,730.94, coin rose $1,287.01, and the $443.93 difference IS the decline
+in the account total. Money moved out of cash and into coin, and the coin
+is currently worth that much less than the cash that bought it.
+
+SO THE ENGINE EARNS ~$5.82 A DAY WHILE THE CAPITAL LOSES ~$96.64 A DAY.
+The trading is not the problem and fixing the trading cannot fix this.
+
+WHAT THIS IS, STATED FAIRLY. It is almost entirely UNREALISED mark on coin
+still held, and it is what a dip-buying grid does in a falling market: it
+buys the dip, the market keeps falling, the mark keeps dropping, and it
+buys again. That is the design operating as designed, not a defect. If
+prices recover the mark recovers with them. If they do not, it does not.
+The recorder's own verdict is unchanged across the whole window:
+bottleneck NO_EDGE, first reading and last.
+
+WHAT I MUST NOT DO WITH THIS. Not propose selling - the owner has said
+repeatedly to stop, and a falling mark is not a reason to raise it. Not
+present realised plus unrealised as "the loss". Not treat it as a bug to
+fix in the engine.
+
+THE WINDOW IS 4.6 DAYS AND THAT IS ALL IT IS. The recorder starts
+2026-10-04; it says nothing about before that. Quote the window every
+time.
+
+AND THE REPORTING LESSON. Leading with "+$133.78 banked, $5.82 a day" is
+true and was the wrong headline, because the owner's actual question for
+weeks has been whether the pile is growing. Lead with account_total_usd
+from /growth-curve, then the trading figure beside it - never the trading
+figure alone.
