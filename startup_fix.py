@@ -119,6 +119,12 @@ TICKET_ENV = "STARTUP_FIX_TICKET"
 # reports NOT_ARMED and settles, so it changes nothing whatever about a
 # ticket armed only for the reconcile.
 RIGHTSIZE_ENV = "STARTUP_FIX_RIGHTSIZE"
+
+# THE FLAT-BRANCH WITHDRAW, ARMED ON ITS OWN. A third money step on one
+# ticket is exactly how the stale LINK level change rode along with the
+# reconcile on 2026-10-08, so it gets its own switch like the right-size
+# did and inherits nobody's consent.
+FLAT_WITHDRAW_ENV = "STARTUP_FIX_FLAT_WITHDRAW"
 MARKER_PREFIX = "startup_fix:"
 
 # How many boots a single ticket may spend trying. Counted before the work.
@@ -167,6 +173,11 @@ MAX_WRITEOFF_USD = 2000.0
 # an instruction to obey. The plan measured 2026-10-08 16:16Z was $961.97.
 MAX_RIGHTSIZE_USD = 3000.0
 
+# Ceiling for the flat-branch withdraw. ZEC-USD needs $1,752.76; anything
+# far past that is a fleet this code has not seen and should stop, not
+# improvise.
+MAX_FLAT_WITHDRAW_USD = 4000.0
+
 # The last run's report, for GET /startup-fix.
 _LAST = None
 
@@ -190,6 +201,33 @@ def rightsize_armed():
     """
     raw = (os.getenv(RIGHTSIZE_ENV) or "").strip().strip('"').strip("'").lower()
     return raw in ("1", "true", "yes", "on")
+
+def flat_withdraw_target():
+    """The ONE branch to free, by name, or None.
+
+    THIS CARRIES A BRANCH NAME, NOT A YES. The first version of this step
+    took a boolean and swept every flat branch above the floor. A dry
+    replay against the live 2026-10-08 20:42Z fleet showed what that
+    means: it would have taken ZEC-USD's $1,752.76 - correct, the branch
+    is dead - AND stripped ONDO-USD from $86.02 to $15.00, a working
+    branch with 9 closes that happened to be flat because it had sold two
+    hours earlier.
+
+    Nothing in the payload tells those two apart. out_of_reach reports
+    ONDO, TIA and ZEC all "confirmed_zero", because a flat branch holds no
+    coin BY DEFINITION - that signal says "flat", not "dead". The real
+    difference is history, and a rule that decides on its own which
+    branches are dead is exactly the kind of sweep that orphaned FLOKI and
+    moved LINK's rungs unasked.
+
+    So the owner names the branch. Blast radius: one row he chose.
+    """
+    raw = (os.getenv(FLAT_WITHDRAW_ENV) or "").strip().strip('"').strip("'")
+    # A bare yes is NOT a target. It used to arm a fleet-wide sweep, so it
+    # must refuse loudly rather than quietly mean something new.
+    if raw.lower() in ("", "1", "true", "yes", "on", "0", "false", "no", "off"):
+        return None
+    return raw
 
 
 async def _claim_attempt(session_factory, key):
@@ -659,6 +697,160 @@ async def apply_reconcile(grid, census_fn=None, max_writeoff_usd=MAX_WRITEOFF_US
                 f"slice row could be found to write. The books are unchanged.")}
 
 
+async def apply_flat_withdraw(grid, max_free_usd=MAX_FLAT_WITHDRAW_USD):
+    """Free a FLAT branch's stranded claim. In-process, no browser.
+
+    WHAT IS STRANDED, measured 2026-10-08 20:42Z. crypto_grid_21 (ZEC-USD)
+    holds $1,767.76 of allocation against ZERO coin, ZERO open slices and
+    zero completed closes in 39 days. Its trading balance is a confirmed
+    zero and it refused 199 sell attempts in three hours. It is 26% of the
+    grid's entire budget and it is attached to nothing. That is not a
+    ranking judgement about a coin - the branch holds nothing at all.
+
+    WHY IT WAS NOT ALREADY FREED. The right-size refuses a flat branch by
+    design; branch_rightsize.plan names withdraw_from_grid_branch as "the
+    tested path" instead. And withdraw_from_grid_branch had exactly one
+    caller, behind the write-guarded POST - the dashboard Withdraw button,
+    on a page whose write buttons do not reach the server from the owner's
+    tab. Tested, correct, and unreachable. The right-size had the same
+    shape until it was given an in-process path; this is that same fix.
+
+    IT PLACES NO ORDER AND SELLS NO COIN. There is no coin to sell. Only
+    allocated_usd comes down, and get_real_free_cash_usd() already
+    subtracts every branch's allocation from the real wallet balance, so
+    shrinking the claim IS what makes the cash spendable again.
+
+    *** IT NEVER DELETES A BRANCH. *** withdraw_from_grid_branch deletes a
+    branch it drains below a cent, and its own log says why that is
+    dangerous: "Its coin is now owned by no branch: no grid rule will sell
+    it, no breaker watches it, and any resting order against it stands
+    unmanaged." FLOKI-USD proved it - deleted 2026-10-04, ~$43 of coin
+    orphaned, sold by something on 10-07 in 8 fills with no buy side, and
+    nothing reported it for three days. The owner's instruction is flat:
+    "Don't delete any losing branches. Not none of them."
+
+    So this withdraws DOWN TO the keep-alive floor and stops. allow_delete
+    is never passed, and no amount is ever computed that would trip the
+    floor. ZEC ends at $15.00, alive and watched, with $1,752.76 freed.
+
+    THE FLOOR IS READ FROM THE ENGINE, never carried here.
+    GRID_KEEP_BRANCH_ALIVE_USD is MIN_TRADE_USD * 3 and has moved before; a
+    step holding its own copy of a money constant can disagree with the
+    module it is calling, which is the whole failure this codebase keeps
+    re-learning. Unreadable is NO_FLOOR and writes nothing.
+    """
+    target = flat_withdraw_target()
+    if not target:
+        log.warning(f"[startup-fix] flat-withdraw: {FLAT_WITHDRAW_ENV} names no branch - skipped")
+        return {"status": "NOT_ARMED", "rows_written": 0, "settled": True,
+                "freed_usd": 0.0, "planned_usd": 0.0, "not_applied": [], "target": None,
+                "detail": (f"{FLAT_WITHDRAW_ENV} does not name a branch, so no claim was "
+                           f"freed. It takes a bot_name (crypto_grid_21), not a yes: this "
+                           f"step moves budget off a branch, it is armed on its own, and "
+                           f"it acts on exactly the one row it is given.")}
+
+    floor = getattr(grid, "GRID_KEEP_BRANCH_ALIVE_USD", None)
+    if not isinstance(floor, (int, float)) or floor <= 0:
+        log.warning("[startup-fix] flat-withdraw: keep-alive floor unreadable - refusing")
+        return {"status": "NO_FLOOR", "rows_written": 0, "settled": False,
+                "freed_usd": 0.0, "planned_usd": 0.0, "not_applied": [],
+                "detail": ("GRID_KEEP_BRANCH_ALIVE_USD could not be read from the grid "
+                           "module. Withdrawing against an assumed floor is how a branch "
+                           "gets deleted by accident, so nothing was written.")}
+    floor = float(floor)
+
+    status = await grid.get_grid_status()
+    plan = []
+    for b in (status.get("branches") or []):
+        name = b.get("bot_name")
+        alloc = b.get("allocated_usd")
+        if not name or not isinstance(alloc, (int, float)):
+            continue
+        if name != target:
+            continue
+        # FLAT only. An open slice is real coin bought against this
+        # allocation; pulling the budget out from under it desyncs the
+        # branch's books from what is genuinely deployed.
+        if (b.get("open_slices") or 0) > 0:
+            continue
+        if b.get("locked"):
+            continue
+        amount = round(float(alloc) - floor, 2)
+        if amount <= 0:
+            continue          # at or under the floor - only a delete empties it
+        plan.append({"bot_name": name, "product_id": b.get("product_id"),
+                     "allocated_usd": float(alloc), "withdraw_usd": amount,
+                     "leaves_usd": round(float(alloc) - amount, 2)})
+
+    if not plan:
+        log.warning(f"[startup-fix] flat-withdraw: {target} is not eligible")
+        return {"status": "NOTHING_TO_DO", "rows_written": 0, "settled": True,
+                "freed_usd": 0.0, "planned_usd": 0.0, "not_applied": [], "target": target,
+                "detail": (f"{target} is not flat, unlocked and above the keep-alive "
+                           f"floor - or no branch by that name exists - so nothing was "
+                           f"freed. An open slice is real coin bought against that "
+                           f"allocation and this step will not pull budget out from "
+                           f"under one.")}
+
+    planned = round(sum(p["withdraw_usd"] for p in plan), 2)
+    if planned > max_free_usd:
+        log.warning(f"[startup-fix] flat-withdraw: REFUSED - ${planned:,.2f} "
+                    f"over the ${max_free_usd:,.2f} ceiling")
+        return {"status": "REFUSED_OVER_CEILING", "rows_written": 0, "settled": False,
+                "freed_usd": 0.0, "planned_usd": planned, "not_applied": [],
+                "plan": plan,
+                "detail": (f"the plan would free ${planned:,.2f}, over this step's "
+                           f"${max_free_usd:,.2f} ceiling. Nothing was written. A fleet "
+                           f"this far outside what the step was built for should stop, "
+                           f"not improvise.")}
+
+    plan.sort(key=lambda p: -p["withdraw_usd"])     # biggest first
+    applied, not_applied, freed = [], [], 0.0
+    for p in plan:
+        try:
+            # NO allow_delete. Not as a default, not as a flag, not ever.
+            # The amount above already stops at the floor.
+            res = await grid.withdraw_from_grid_branch(p["bot_name"], p["withdraw_usd"])
+        except Exception as e:
+            not_applied.append({**p, "error": f"{type(e).__name__}: {e}"})
+            log.warning(f"[startup-fix] flat-withdraw {p['bot_name']} FAILED "
+                        f"{type(e).__name__}: {e}")
+            continue
+        if not res or (isinstance(res, dict) and res.get("ok") is False):
+            not_applied.append({**p, "error": (res or {}).get("reason") if isinstance(res, dict) else "refused"})
+            continue
+        applied.append(p)
+        freed += p["withdraw_usd"]
+        log.warning(f"[startup-fix] flat-withdraw: freed ${p['withdraw_usd']:,.2f} from "
+                    f"{p['bot_name']} ({p['product_id']}) - allocation "
+                    f"${p['allocated_usd']:,.2f} -> ${p['leaves_usd']:,.2f}, branch KEPT")
+        try:
+            await grid._log_activity_safe(
+                "grid_fleet", p["product_id"], "FLAT_WITHDRAW",
+                f"Freed ${p['withdraw_usd']:,.2f} of claim from a branch holding no coin "
+                f"and no open slice. Allocation ${p['allocated_usd']:,.2f} -> "
+                f"${p['leaves_usd']:,.2f}; the branch is KEPT alive at the keep-alive "
+                f"floor, not deleted. No order placed, no coin sold - there was none.")
+        except Exception:
+            pass
+
+    freed = round(freed, 2)
+    return {
+        "status": "APPLIED" if applied else "NOTHING_WRITTEN",
+        "rows_written": len(applied),
+        # Nothing written with a candidate standing means a retry could do
+        # better, so the ticket must stay unspent.
+        "settled": bool(applied),
+        "freed_usd": freed, "planned_usd": planned,
+        "applied": applied, "not_applied": not_applied,
+        "floor_used": floor, "target": target,
+        "detail": (f"freed ${freed:,.2f} of claim from {len(applied)} flat branch(es); "
+                   f"every one was left standing at ${floor:,.2f}, none deleted."
+                   if applied else
+                   "every flat branch refused or raised, so nothing was freed."),
+    }
+
+
 async def run_at_boot(grid, tkt=None, census_fn=None):
     """The whole one-shot. Returns a report; never raises into the lifespan."""
     global _LAST
@@ -736,16 +928,29 @@ async def run_at_boot(grid, tkt=None, census_fn=None):
                             "detail": "the right-size raised, so nothing is claimed for it."}
         log.warning(f"[startup-fix] rightsize FAILED {type(e).__name__}: {e}")
 
-    failed = [k for k in ("levels", "reconcile", "rightsize")
+    # FOURTH AND LAST, and after the right-size on purpose: a right-size can
+    # hand a parked branch a free rung, which changes what "flat" means for
+    # this step, so planning it earlier would measure a fleet about to move.
+    try:
+        out["flat_withdraw"] = await apply_flat_withdraw(grid)
+    except Exception as e:
+        out["flat_withdraw"] = {"status": "FAILED", "rows_written": 0,
+                                "settled": False, "freed_usd": 0.0,
+                                "error": f"{type(e).__name__}: {e}",
+                                "detail": "the flat-withdraw raised, so nothing is claimed for it."}
+        log.warning(f"[startup-fix] flat-withdraw FAILED {type(e).__name__}: {e}")
+
+    failed = [k for k in ("levels", "reconcile", "rightsize", "flat_withdraw")
               if (out[k] or {}).get("status") == "FAILED"]
-    unsettled = [k for k in ("levels", "reconcile", "rightsize")
+    unsettled = [k for k in ("levels", "reconcile", "rightsize", "flat_withdraw")
                  if not (out[k] or {}).get("settled")]
     out["failed_steps"] = failed or None
     out["unsettled_steps"] = unsettled or None
     lv = (out["levels"] or {}).get("rows_written") or 0
     rc = (out["reconcile"] or {}).get("rows_written") or 0
     rs = (out["rightsize"] or {}).get("rows_written") or 0
-    out["rows_written_total"] = lv + rc + rs
+    fw = (out["flat_withdraw"] or {}).get("rows_written") or 0
+    out["rows_written_total"] = lv + rc + rs + fw
     if failed or unsettled:
         why = []
         if failed:
