@@ -500,7 +500,11 @@ async def apply_rightsize(grid, max_free_usd=MAX_RIGHTSIZE_USD):
     for b in rows:
         try:
             r = await branch_rightsize.apply_one(
-                grid, b["bot_name"], amount_usd=None, dry_run=False)
+                grid, b["bot_name"], amount_usd=None, dry_run=False,
+                # The branch's own live mark, carried through the plan so
+                # the write keeps the drawdown breaker reading the same
+                # percentage it read before. None is honoured as None.
+                price=b.get("current_price"))
         except Exception as e:
             not_applied.append({"product_id": b.get("product_id"),
                                 "bot_name": b["bot_name"],

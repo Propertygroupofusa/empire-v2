@@ -176,6 +176,11 @@ async def plan(grid):
             "parked": bool(slices) and len(_tradeable_of(b)) >= int(b.get("num_levels") or 1),
             "freeable_usd": round(amount, 2),
             "why_not": why_not,
+            # Carried so apply_one can price the position and keep the
+            # drawdown READING unchanged across the write - see
+            # crypto_grid_bot.peak_after_withdrawal. None stays None: an
+            # unpriced branch takes the old subtraction, never a guess.
+            "current_price": b.get("current_price"),
         })
         total += amount
     rows.sort(key=lambda r: -r["freeable_usd"])
@@ -193,7 +198,7 @@ async def plan(grid):
     }
 
 
-async def apply_one(grid, bot_name, amount_usd=None, dry_run=True):
+async def apply_one(grid, bot_name, amount_usd=None, dry_run=True, price=None):
     """Lower ONE branch's allocated_usd toward its coin basis.
 
     amount_usd=None frees everything above the floor. A smaller amount is
@@ -204,6 +209,13 @@ async def apply_one(grid, bot_name, amount_usd=None, dry_run=True):
     Everything is re-derived from fresh rows inside the transaction. The
     caller's plan may be seconds old, and a slice that sold in between
     raises the basis and therefore the floor.
+
+    `price` is the branch's live mark, used for ONE thing: pricing the
+    open position so the drawdown breaker reads the same percentage after
+    this write as before it. Omitted or unreadable, the peak falls back to
+    the older subtraction - the behaviour every caller had before this
+    parameter existed. It is never used to size the withdrawal, which
+    stays on cost basis for the reasons in coin_basis().
     """
     from sqlalchemy import select
 
@@ -283,6 +295,21 @@ async def apply_one(grid, bot_name, amount_usd=None, dry_run=True):
         if dry_run:
             return result
 
+        # Unrealized P&L on the rows this transaction actually loaded, so
+        # it cannot disagree with the basis the floor was computed from.
+        # None (no price, or an unparseable one) means the helper takes
+        # its old subtraction path rather than inventing an equity.
+        _unreal = None
+        try:
+            if price is not None:
+                _px = float(price)
+                if _px == _px and _px not in (float("inf"), float("-inf")):
+                    _unreal = round(sum(
+                        float(s.qty) * (_px - float(s.entry_price))
+                        for s in slices
+                        if s.qty is not None and s.entry_price is not None), 2)
+        except (TypeError, ValueError):
+            _unreal = None
         branch.allocated_usd = new_alloc
         # Freeing budget a branch cannot spend is not a drawdown. The
         # grid's breaker measures peak_equity against allocated_usd, so
@@ -290,10 +317,12 @@ async def apply_one(grid, bot_name, amount_usd=None, dry_run=True):
         # LTC-USD measured 10.08% before and would have read 66.63%
         # after, straight past the 25% breaker. See
         # crypto_grid_bot.peak_after_withdrawal for the full reasoning.
-        _new_peak = grid.peak_after_withdrawal(branch.peak_equity, alloc, new_alloc)
+        _new_peak = grid.peak_after_withdrawal(branch.peak_equity, alloc,
+                                               new_alloc, unrealized=_unreal)
         if _new_peak is not None:
             branch.peak_equity = _new_peak
             result["peak_equity_after"] = _new_peak
+            result["unrealized_used"] = _unreal
         await db.commit()
 
     log.warning(f"[rightsize] {result['product_id']}: freed ${take:,.2f}, "

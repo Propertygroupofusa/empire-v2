@@ -54,23 +54,24 @@ def run(coro):
 PLAN = {
     "total_freeable_usd": 961.97,
     "branches": [
-        {"bot_name": "crypto_grid_6", "product_id": "XRP-USD",
+        {"bot_name": "crypto_grid_6", "current_price": 1.378100, "product_id": "XRP-USD",
          "allocated_usd": 2041.23, "floor_usd": 1268.48, "freeable_usd": 772.75,
          "parked": True, "why_not": None},
-        {"bot_name": "crypto_grid_19", "product_id": "LTC-USD",
+        {"bot_name": "crypto_grid_19", "current_price": 63.013000, "product_id": "LTC-USD",
          "allocated_usd": 196.50, "floor_usd": 74.24, "freeable_usd": 122.26,
          "parked": True, "why_not": None},
-        {"bot_name": "crypto_grid_9", "product_id": "SHIB-USD",
+        {"bot_name": "crypto_grid_9", "current_price": 0.000005, "product_id": "SHIB-USD",
          "allocated_usd": 347.58, "floor_usd": 320.01, "freeable_usd": 27.57,
          "parked": True, "why_not": None},
-        {"bot_name": "crypto_grid_11", "product_id": "ALGO-USD",
+        {"bot_name": "crypto_grid_11", "current_price": 0.119250, "product_id": "ALGO-USD",
          "allocated_usd": 172.74, "floor_usd": 151.23, "freeable_usd": 21.51,
          "parked": True, "why_not": None},
-        {"bot_name": "crypto_grid_3", "product_id": "PRIME-USD",
+        {"bot_name": "crypto_grid_3", "current_price": 0.226250, "product_id": "PRIME-USD",
          "allocated_usd": 65.06, "floor_usd": 47.18, "freeable_usd": 17.88,
          "parked": True, "why_not": None},
         # Flat: plan() reports it with freeable 0 and points elsewhere.
-        {"bot_name": "crypto_grid_21", "product_id": "ZEC-USD",
+        {"bot_name": "crypto_grid_21", "current_price": None,
+         "product_id": "ZEC-USD",
          "allocated_usd": 1789.11, "floor_usd": 15.0, "freeable_usd": 0.0,
          "parked": False,
          "why_not": ("branch is flat; withdraw_from_grid_branch already handles "
@@ -103,9 +104,14 @@ class _Patched:
         async def _plan(_grid):
             return self.plan_data
 
-        async def _apply(_grid, bot_name, amount_usd=None, dry_run=True):
+        async def _apply(_grid, bot_name, amount_usd=None, dry_run=True,
+                         price=None):
+            # `price` is recorded, not ignored: the step must carry each
+            # branch's own live mark through from the plan so the write
+            # keeps the drawdown breaker reading the same percentage it
+            # read before. See crypto_grid_bot.peak_after_withdrawal.
             self.calls.append({"bot_name": bot_name, "amount_usd": amount_usd,
-                               "dry_run": dry_run})
+                               "dry_run": dry_run, "price": price})
             if bot_name in self.raise_on:
                 raise RuntimeError("row vanished")
             if bot_name in self.refuse:
@@ -280,6 +286,70 @@ class TestItRunsAfterTheReconcile(unittest.TestCase):
                                 'startup_fix.py')).read()
         self.assertIn('"rightsize"', src)
         self.assertIn('out["rows_written_total"] = lv + rc + rs', src)
+
+
+
+
+class TheLiveMarkIsCarriedThrough(unittest.TestCase):
+    """Each branch's own price must reach apply_one, or the breaker lies.
+
+    THE BUG THIS GUARDS, measured live 2026-10-08 21:15Z. The right-size
+    lowers allocated_usd, and the drawdown breaker reads
+    `(peak_equity - equity) / peak_equity` with equity = allocated_usd +
+    unrealized. Lowering the peak by exactly what left keeps the DOLLAR
+    gap but shrinks the denominator, so the same unchanged loss reads as a
+    bigger percentage. LTC-USD came out of its 19:54:08Z right-size at
+    32.80% on an -$8.57 unrealized that was 14.67% before the write, and
+    its buys were frozen by a 25% breaker.
+
+    peak_after_withdrawal can hold the reading steady, but only if it is
+    told the position's unrealized P&L - which means apply_one needs the
+    price, which means THIS step has to carry it. Without the price the
+    helper silently falls back to the old subtraction and the freeze comes
+    back, with nothing failing anywhere. Hence a test on the wiring.
+    """
+
+    def test_every_branch_gets_its_own_price_not_a_shared_one(self):
+        with _Patched() as p:
+            run(sfx.apply_rightsize(_Grid(), max_free_usd=3000.0))
+        got = {c["bot_name"]: c["price"] for c in p.calls}
+        want = {"crypto_grid_6": 1.3781, "crypto_grid_19": 63.013,
+                "crypto_grid_9": 0.000005, "crypto_grid_11": 0.11925,
+                "crypto_grid_3": 0.22625}
+        self.assertEqual(got, want)
+
+    def test_the_flat_branch_is_not_called_at_all(self):
+        # It has freeable 0, so it never reaches apply_one - and its None
+        # price must not be substituted with a number by anything.
+        with _Patched() as p:
+            run(sfx.apply_rightsize(_Grid(), max_free_usd=3000.0))
+        self.assertNotIn("crypto_grid_21",
+                         [c["bot_name"] for c in p.calls])
+
+    def test_a_missing_price_is_passed_as_none_never_invented(self):
+        # An unpriced branch must reach apply_one with price=None, so the
+        # helper takes its conservative subtraction instead of a guess.
+        import copy
+        plan = copy.deepcopy(PLAN)
+        for b in plan["branches"]:
+            b.pop("current_price", None)
+        with _Patched(plan=plan) as p:
+            run(sfx.apply_rightsize(_Grid(), max_free_usd=3000.0))
+        self.assertTrue(p.calls, "the step must still run without prices")
+        self.assertTrue(all(c["price"] is None for c in p.calls))
+
+    def test_plan_publishes_the_price_so_there_is_something_to_carry(self):
+        # The other half of the wiring: branch_rightsize.plan() must put
+        # current_price on every row it returns.
+        import ast
+        tree = ast.parse(open("branch_rightsize.py").read())
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "plan")
+        keys = [k.value for n in ast.walk(fn) if isinstance(n, ast.Dict)
+                for k in n.keys if isinstance(k, ast.Constant)]
+        self.assertIn("current_price", keys)
+
+
 
 
 if __name__ == "__main__":

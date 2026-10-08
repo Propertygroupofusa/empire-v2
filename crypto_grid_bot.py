@@ -6272,7 +6272,8 @@ def _pick_parked_slice_to_sell(slices: list, price: float, round_trip_fee_rate: 
     return best, best_pct
 
 
-def peak_after_withdrawal(peak_equity, allocated_before, allocated_after):
+def peak_after_withdrawal(peak_equity, allocated_before, allocated_after,
+                          unrealized=None):
     """The branch's high-water mark after money is deliberately taken OUT.
 
     THE BUG THIS EXISTS FOR, 2026-10-05. The drawdown breaker measures
@@ -6312,17 +6313,82 @@ def peak_after_withdrawal(peak_equity, allocated_before, allocated_after):
     reached.
 
     Floors at 0.0 rather than at the remaining equity on purpose. If the
-    subtraction undershoots current equity the ratchet in
+    adjustment undershoots current equity the ratchet in
     run_grid_branch_cycle lifts it straight back up on the next pass,
     which is the same self-healing path a NULL takes - one place that
     decides what a peak may be, not two.
+
+    THE SECOND HALF OF THE SAME BUG, measured live 2026-10-08 21:15Z.
+    Subtracting what left keeps the DOLLAR gap `peak - equity` intact,
+    and the first version of this function stopped there because that
+    gap is the real market loss. But the breaker does not compare
+    dollars - it compares `(peak - equity) / peak` against 25%. Lower
+    the peak and the same unchanged dollar loss is divided by a smaller
+    number, so the branch becomes more sensitive to the market by
+    exactly the fraction of itself that was withdrawn. The instant
+    breach was fixed; a hair-trigger was left behind.
+
+    Two live branches were sitting in it, both frozen out of buying:
+
+      LTC-USD  right-sized 19:54:08Z, $195.04 -> $74.24. Peak fell
+               $218.53 -> $97.73, so an unrealized -$8.57 - which was
+               3.9% of the old peak and is 11.5% of the branch's own
+               $74.24 of coin - arrived as a 32.80% drawdown. The gap
+               was $32.06 before the right-size and $32.06 after it.
+               Only the denominator moved.
+      BTC-USD  frozen at 25.1% on -$0.81 of unrealized against $36.14
+               of coin. Eighty-one cents of market loss, reading as a
+               quarter of the branch.
+
+    So the invariant a PERCENTAGE breaker needs is the percentage, not
+    the dollar: a deliberate withdrawal must leave the drawdown reading
+    exactly where it was. Scaling the peak by the same ratio the equity
+    shrank is what delivers that, and `unrealized` is what makes the
+    equity knowable - pass the branch's live unrealized P&L and the
+    reading is preserved to the cent.
+
+    WITHOUT `unrealized` THE OLD SUBTRACTION STILL RUNS. Every existing
+    caller keeps its exact behaviour, so this cannot change a path that
+    has not been updated to measure the branch first.
+
+    IT CANNOT BLUNT THE BREAKER. The ratio is below 1 whenever money
+    leaves, so the peak only ever moves DOWN - never up - and a branch
+    already past 25% keeps the same reading and stays breached. A
+    genuine crash still breaches: a branch really down 40% on its coin
+    reads 60% after a withdrawal under this rule, the same as before.
+    No threshold is touched; 25% is still 25%.
     """
     if peak_equity is None or allocated_before is None or allocated_after is None:
         return None
-    withdrawn = float(allocated_before) - float(allocated_after)
+    before, after = float(allocated_before), float(allocated_after)
+    withdrawn = before - after
     if withdrawn <= 0:
         return None
-    return max(0.0, round(float(peak_equity) - withdrawn, 2))
+    peak = float(peak_equity)
+    subtracted = max(0.0, round(peak - withdrawn, 2))
+
+    # No measurement of the position means no scaling - fall back to the
+    # old subtraction rather than guess at an equity.
+    if unrealized is None:
+        return subtracted
+    try:
+        unreal = float(unrealized)
+    except (TypeError, ValueError):
+        return subtracted
+    if unreal != unreal or unreal in (float("inf"), float("-inf")):
+        return subtracted
+
+    equity_before = before + unreal
+    equity_after = after + unreal
+    # A branch whose equity is already at or below zero has no percentage
+    # to preserve - dividing by it would invent one. The subtraction is
+    # the conservative answer there, so take it.
+    if equity_before <= 0 or equity_after <= 0:
+        return subtracted
+
+    scaled = round(peak * (equity_after / equity_before), 2)
+    # Belt and braces: never let this RAISE a peak, whatever the inputs.
+    return max(0.0, min(scaled, peak))
 
 
 def peak_for_flat_branch(peak_equity, allocated_usd, slices):
