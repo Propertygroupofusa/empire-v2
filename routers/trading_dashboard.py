@@ -9897,6 +9897,92 @@ async def withdraw_grid_branch_endpoint(bot_name: str, payload: WithdrawGridBran
     return result
 
 
+class AddCashGridBranchRequest(BaseModel):
+    amount: float
+
+
+@router.post("/grid-status/{bot_name}/add-cash")
+async def add_cash_grid_branch_endpoint(bot_name: str, payload: AddCashGridBranchRequest):
+    """Adds claim to ONE named grid branch - the missing half of the pair.
+
+    WHY THIS DID NOT EXIST, AND WHY THAT WAS A GAP. withdraw_from_grid_branch
+    has had a named endpoint since the owner asked to pull money out of a
+    flat STX branch. add_cash_to_grid_branch, its exact opposite, had none:
+    traced 2026-10-08, the only live callers were rotation_task (which is
+    off) and /idle-capital/deploy-cash, and BOTH choose the branch
+    themselves. fund-from-tree can target a named grid branch but needs a
+    flat TREE branch as the source, and both tree branches read $0.00.
+    So there was no way to say "put $35 into TIA" at all.
+
+    It came up because TIA-USD sat at $14.49 against the $15.00 keep-alive
+    floor while running 11 trades at a 100% win rate. Levels are
+    allocated // MIN_TRADE_USD capped at 10, so a branch under $50 cannot
+    hold a full ladder no matter how well it trades. The owner asked twice
+    to raise it and the answer both times was that no route existed.
+
+    THIS IS BOOKKEEPING, NOT A PURCHASE. add_cash_to_grid_branch raises
+    allocated_usd and recomputes num_levels and nothing else - it places no
+    order, touches no CryptoGridSlice row, and leaves reference_price alone,
+    so an open position keeps its real entry and quantity exactly. Only
+    future slice sizing changes.
+
+    THE GUARD THE RAW FUNCTION DOES NOT HAVE, AND THE REASON FOR IT. The
+    module function refuses only a non-positive amount or an unknown
+    bot_name - it will happily allocate a million dollars of claim against a
+    three-thousand-dollar wallet, because every one of its existing callers
+    had already done its own sizing. An endpoint is not that; it takes a
+    number from outside. So this one refuses an amount larger than
+    get_real_free_cash_usd(), the same real figure the "New grid branch"
+    button is gated on, and FAILS CLOSED when that figure cannot be read -
+    an unreadable balance is UNKNOWN, and allocating against UNKNOWN is the
+    class of bug this file has spent the most time removing.
+
+    Deliberately NOT gated on free cash MINUS the reserve. The reserve is a
+    floor the BUY path respects at order time; claim is not cash leaving the
+    wallet, and gating here as well would refuse a branch its ladder on the
+    strength of a rule that is already enforced where it belongs.
+    """
+    if crypto_grid_bot_module is None:
+        raise HTTPException(status_code=500, detail=_module_unavailable_detail("crypto_grid_bot"))
+    if payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+
+    free = await crypto_grid_bot_module.get_real_free_cash_usd()
+    if free is None:
+        raise HTTPException(
+            status_code=503,
+            detail=("real free cash could not be read, so whether this "
+                    "allocation is covered is UNKNOWN. Refusing rather than "
+                    "allocating against a figure nobody has."))
+    if payload.amount > free:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"${payload.amount:.2f} exceeds the ${free:.2f} of real "
+                    f"unclaimed cash. Claim beyond the wallet is a number "
+                    f"the branch can never spend."))
+
+    try:
+        branch = await crypto_grid_bot_module.add_cash_to_grid_branch(
+            bot_name, payload.amount,
+            caller="dashboard POST /grid-status/{bot_name}/add-cash")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "bot_name": branch.bot_name,
+        "product_id": branch.product_id,
+        "allocated_usd": round(branch.allocated_usd, 2),
+        "num_levels": branch.num_levels,
+        "slice_usd": round(branch.allocated_usd / branch.num_levels, 2) if branch.num_levels else None,
+        "added_usd": round(payload.amount, 2),
+        "free_cash_before": round(free, 2),
+        "placed_no_order": True,
+        "note": ("Bookkeeping only - allocated_usd and num_levels moved. No "
+                 "order was placed, no slice was touched, and reference_price "
+                 "is unchanged, so any open position keeps its real entry."),
+    }
+
+
 class MoveCashBetweenGridBranchesRequest(BaseModel):
     from_bot_name: str
     amount: float

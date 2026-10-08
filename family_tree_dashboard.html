@@ -3790,6 +3790,17 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
     const realized = restated ? (_ownB + _adB) : h.total_realized_pnl;
     // The trade count follows the figure. 200 trades beside a number built
     // from the grid's own closes counts the inherited exits twice over.
+    //
+    // The restated case had the opposite fault and kept it until 2026-10-08:
+    // the headline adds the inherited exits in, the count leaves them out,
+    // and the caption then says every one of those trades was a round trip
+    // "this grid chose both ends of" - which is false for four of them. The
+    // owner read the card, saw +$434.51 over 222 own trades, and asked why
+    // the account had been up "the other day", because nothing on the line
+    // said four of the closes behind that number were not the grid's. The
+    // count stays own-only, since that is what the win rate beside it
+    // measures; the caption now names the inherited exits out loud instead
+    // of quietly folding them into a sentence that excludes them.
     const tradeCount = (restated && h.realized_own_trades != null)
         ? h.realized_own_trades : (h.total_trade_count || 0);
     const winRate = h.overall_win_rate || 0;
@@ -3828,7 +3839,7 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
             🏆 Banked — real money, all-time: ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
         </div>
         <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
-            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} ${restated ? 'this grid chose both ends of' : 'across every Grid Bot branch ever run'} ·
+            ${tradeCount} real completed trade${tradeCount === 1 ? '' : 's'} ${restated ? 'this grid chose both ends of' : 'across every Grid Bot branch ever run'}${restated && _nB > 0 ? `, plus ${_nB} inherited exit${_nB === 1 ? '' : 's'} it did not` : ''} ·
             ${winRate.toFixed(0)}% win rate — high by design, since a NORMAL exit only sells above its own entry.
             This figure moves only when a trade closes.
         </div>
