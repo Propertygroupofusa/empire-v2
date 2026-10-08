@@ -3311,7 +3311,34 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
         `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
 
     const content = document.getElementById('grid-content');
-    const branches = data.branches || [];
+    // IN THE ORDER A PERSON COUNTS, NOT THE ORDER A STRING SORTS.
+    //
+    // The server returns branches ordered by bot_name, which is a STRING
+    // sort: crypto_grid_1, _10, _11 ... _19, _2, _20 ... _23, _3, _4.
+    // The account owner photographed that and asked why they were not in
+    // order. They were in order - alphabetical order - which is not the
+    // order anybody reads a numbered list in.
+    //
+    // SORTED HERE, FOR DISPLAY ONLY, AND DELIBERATELY NOT AT THE SOURCE.
+    // crypto_grid_bot.get_grid_branches() carries that same ORDER BY and
+    // has fourteen callers, among them the trading cycle itself. The loop
+    // is sequential over branches and a single resting maker order can
+    // hold it for its whole budget, so the order branches are visited in
+    // decides who gets served first when the loop is slow. Re-sorting
+    // there to tidy a page would be a money change wearing a cosmetic
+    // hat. This sorts the copy the page renders and nothing else.
+    const branchNum = (b) => {
+        const m = /(\d+)\s*$/.exec(String((b && b.bot_name) || ''));
+        // No trailing number is UNKNOWN, not zero: a zero would sort an
+        // unnumbered branch to the top of the page as though it were first.
+        return m ? parseInt(m[1], 10) : Number.MAX_SAFE_INTEGER;
+    };
+    const branches = (data.branches || []).slice().sort((a, b) => {
+        const d = branchNum(a) - branchNum(b);
+        // Equal or unnumbered falls back to the name, so the order is
+        // total and a redraw never shuffles two cards past each other.
+        return d !== 0 ? d : String(a.bot_name || '').localeCompare(String(b.bot_name || ''));
+    });
     if (branches.length === 0) {
         content.innerHTML = '<div class="empty">No real grid branches yet - tap "New grid branch" above to start one.</div>';
         return;
