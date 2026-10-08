@@ -222,8 +222,27 @@ ok("the card says realized only moves on a completed sell",
    "only moves on a completed sell" in page)
 ok("and that unrealized is not a loss until a slice is sold below entry",
    "sold below its entry" in page)
-ok("the headline still adds both halves rather than hiding the red one",
-   "(lastUnrealizedProfit || 0) + (lastRealizedProfit || 0)" in page)
+# UPDATED 2026-10-08. This check was written to stop ONE thing - the open
+# book being HIDDEN because it made the card red - and it enforced that by
+# pinning the literal sum. The sum turned out to be the other half of the
+# same fault: on 2026-10-08 the headline read -$7.32, which was +$132.61 of
+# really banked money plus $297.78 of restatement on inherited rows plus a
+# -$437.71 price mark, added together and painted red on a grid that had
+# never booked a losing sell. The owner circled it and wrote "fix".
+#
+# So the headline no longer adds them - and the thing this check actually
+# exists to protect is unchanged and now asserted directly: the open book
+# is still rendered, still carries its percentage, and is still impossible
+# to miss. Hiding it would be the opposite mistake and remains forbidden.
+ok("the open book is still rendered - hiding it stays forbidden",
+   "lastUnrealizedProfit" in page and "Open book" in page)
+ok("and still carries the denominator it is measured against",
+   "lastDeployedCoin" in page and "unrealized / dep * 100" in page)
+ok("the headline is banked money alone, never a sum of the two",
+   "(lastUnrealizedProfit || 0) + (lastRealizedProfit || 0)" not in page
+   and "const headline =" in page)
+ok("and the card says so in words, so the change is legible on the page",
+   "not added" in page)
 
 # --- a gateway blip must not look like data --------------------------------
 #

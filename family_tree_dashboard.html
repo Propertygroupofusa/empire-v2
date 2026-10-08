@@ -1156,12 +1156,16 @@
 
     <div class="kpi-row">
         <div class="kpi profit" id="stat-profit-card">
-            <div class="label">💰 Total Profit</div>
+            <div class="label">💰 Banked profit</div>
             <div class="value" id="stat-profit">—</div>
             <div class="profit-breakdown" id="stat-profit-breakdown"></div>
         </div>
         <div class="kpi"><div class="label">Grid branches / coins</div><div class="value" id="stat-count">—</div></div>
-        <div class="kpi"><div class="label">Total allocated (grid)</div><div class="value" id="stat-total">—</div></div>
+        <div class="kpi"><div class="label">Total allocated (grid)</div><div class="value" id="stat-total">—</div>
+            <div id="stat-total-note" style="font-size:0.72em; color:var(--text-dim); margin-top:4px; line-height:1.3;">
+                Budget the branches claim, not money you hold. When a right-size or a harvest frees
+                stranded claim this figure goes DOWN and your spendable cash goes UP - that is
+                <strong>not a loss</strong>.</div></div>
         <div class="kpi gold">
             <div class="label">🔒 Locked Profit</div>
             <div class="value" id="stat-locked">—</div>
@@ -1170,6 +1174,7 @@
         </div>
         <div class="kpi"><div class="label">Refreshed</div><div class="value" id="stat-refreshed" style="font-size:1em">—</div></div>
     </div>
+    <div id="money-map"></div>
 
     <!-- ================= ADVANCED CHARTS =================
          Candlesticks + SMA/EMA overlay, RSI and MACD, in the Coinbase
@@ -3313,6 +3318,9 @@ function renderGridStatus(data, tradeHistoryByBot, historyTotals, tradeHistoryBy
 
     document.getElementById('grid-total-allocated').textContent =
         `${fmtUsd(data.total_allocated_usd)} total real capital across ${data.branch_count} grid branch${data.branch_count === 1 ? '' : 'es'}`;
+
+    // Same payload, no extra request - see renderMoneyMap.
+    try { renderMoneyMap(data); } catch (e) { /* a panel must never break the page */ }
 
     const content = document.getElementById('grid-content');
     // IN THE ORDER A PERSON COUNTS, NOT THE ORDER A STRING SORTS.
@@ -10712,6 +10720,88 @@ let lastDeployedCoin = null;
 let lastLockedProfit = null;
 let lastKnownBranches = [];
 
+// WHERE YOUR MONEY IS - the question this page could not answer.
+//
+// The owner asked it in plain words on 2026-10-08: "What's really going on
+// with all this make sense of this more better." The page showed four
+// different totals that disagreed, and none of them said how much of his
+// account was actually in the game. Measured that day: of $9,558, about
+// $4,756 was working and about $4,985 was not - $3,287 in cash, $1,464 of
+// BTC inside a branch whose slices claimed $36 of it, and $233 of coin in
+// assets with no branch at all.
+//
+// READS ONLY WHAT THE PAGE ALREADY FETCHED. No request of its own: the
+// /grid-status payload carries allocation_backing and backing_owned, and
+// the census behind backing_owned rate-limits, so asking again would be
+// paying twice for a number already in hand.
+//
+// OWNED, NOT AVAILABLE. The surplus line asks "does this coin exist beyond
+// what the slices claim", which is the OWNED question. `backing` answers
+// "can it be sold this second" and would count the fleet's own resting
+// sell orders as a shortfall - the mistake that once put $541.37 behind a
+// red badge while every unit was owned in full.
+function renderMoneyMap(d) {
+    const el = document.getElementById('money-map');
+    if (!el || !d) return;
+    const ab = d.allocation_backing || {};
+    const cash = Number(ab.wallet_cash_usd);
+    const claimed = Number(ab.deployed_coin_usd);
+
+    // Coin owned beyond what any slice claims, valued at each branch's own
+    // current price. A branch missing a price contributes NOTHING rather
+    // than a guess, and says so in the caveat below.
+    let surplus = 0, unpriced = 0;
+    const owned = ((d.backing_owned || {}).rows) || [];
+    const priceOf = {};
+    (d.branches || []).forEach(b => { if (b && b.current_price != null) priceOf[b.product_id] = b.current_price; });
+    owned.forEach(r => {
+        const px = priceOf[r.product_id];
+        const held = Number(r.held_units), claim = Number(r.claimed_units);
+        if (px == null || !isFinite(held) || !isFinite(claim)) { unpriced += 1; return; }
+        const extra = (held - claim) * px;
+        if (isFinite(extra) && extra > 0) surplus += extra;
+    });
+
+    const rows = [
+        ['Cash in the wallet', cash, 'Not in the market at all.'],
+        ['Coin the branches are working', claimed, 'What the open slices cost - entry price times quantity.'],
+        ['Coin owned beyond the claim', surplus, 'You hold it; no slice is working it. Counts only coin ABOVE the claim - see the note below.'],
+    ];
+    const total = rows.reduce((a, r) => a + (isFinite(r[1]) ? r[1] : 0), 0);
+    const bar = (v) => (total > 0 && isFinite(v)) ? (v / total * 100) : 0;
+
+    el.innerHTML = `
+      <div class="panel" style="margin-bottom:14px;">
+        <div class="panel-title" style="margin-bottom:4px;">💵 Where your money is</div>
+        <div class="panel-sub" style="margin-bottom:10px;">Measured, not remembered. Only the middle
+          row is in the game.</div>
+        ${rows.map(([label, v, why]) => `
+          <div style="margin-bottom:9px;">
+            <div style="display:flex; justify-content:space-between; font-size:0.86em; gap:10px;">
+              <span>${escText(label)}</span>
+              <strong style="font-variant-numeric:tabular-nums;">${isFinite(v) ? fmtUsd(v) : 'unreadable'}</strong>
+            </div>
+            <div style="height:6px; border-radius:3px; background:var(--border); margin:4px 0 3px;">
+              <div style="height:6px; border-radius:3px; width:${bar(v).toFixed(1)}%;
+                          background:var(--blue, #3b82f6);"></div>
+            </div>
+            <div style="font-size:0.72em; color:var(--text-dim);">${escText(why)}</div>
+          </div>`).join('')}
+        <div style="font-size:0.74em; color:var(--text-dim); margin-top:8px; line-height:1.4;
+                    border-top:1px solid var(--border); padding-top:7px;">
+          <strong>These three do not add up to the account, on purpose.</strong> The last row counts
+          only coin ABOVE what the slices claim; where a branch claims MORE than is owned that is an
+          open-book loss on coin already being worked, not negative surplus, so it is left to the
+          open book rather than netted off here. Measured 2026-10-08: $1,688.97 of coin sits above
+          every claim while the same rows net to $1,279.91 - the gap is that difference, and showing
+          one number for both questions is what this panel exists to stop. Nothing here is part of
+          the profit figures above.
+          ${unpriced ? escText(' ' + unpriced + ' branch coin(s) could not be priced and are left OUT of the last row rather than guessed.') : ''}
+        </div>
+      </div>`;
+}
+
+
 function renderTotalProfit() {
     const card = document.getElementById('stat-profit-card');
     const valueEl = document.getElementById('stat-profit');
@@ -10732,10 +10822,29 @@ function renderTotalProfit() {
     // to be, which is why this card once disagreed with every live panel
     // on the page. It has its own clearly-labelled closed-book section at
     // the bottom instead.
-    const total = (lastUnrealizedProfit || 0) + (lastRealizedProfit || 0);
-    const cls = total >= 0 ? 'pos' : 'neg';
+    // THE HEADLINE IS BANKED MONEY. IT USED TO BE A SUM OF TWO UNLIKE
+    // THINGS, AND THE COMMENT BELOW IT SAID SO IN CAPITALS WHILE IT DID IT.
+    //
+    // On 2026-10-08 it read -$7.32 and the owner circled it and wrote
+    // "fix". That figure was +$132.61 of really banked money, plus $297.78
+    // of bookkeeping restatement on four inherited rows, plus a -$437.71
+    // price mark on coin he already owned. Three kinds of number, added,
+    // painted red, on a grid that had never booked a losing sell.
+    //
+    // So the headline is now the BANKED figure alone - the grid's own
+    // closes when a restatement is in play, the whole realised line when
+    // it is not. The open book keeps its place directly underneath, with
+    // its percentage, labelled as what it is and explicitly NOT added in.
+    // Hiding it would be the opposite mistake and is pinned against.
+    const headline = (lastRealizedIsRestated && lastRealizedOwn != null)
+        ? lastRealizedOwn
+        : (lastRealizedProfit || 0);
+    // The colour follows the headline for the same reason. A red tile
+    // reporting a price move told him he was losing money he had in fact
+    // made.
+    const cls = headline >= 0 ? 'pos' : 'neg';
     valueEl.className = 'value ' + cls;
-    valueEl.textContent = (total >= 0 ? '+' : '-') + fmtUsd(Math.abs(total));
+    valueEl.textContent = (headline >= 0 ? '+' : '-') + fmtUsd(Math.abs(headline));
     card.classList.remove('pos', 'neg');
     card.classList.add(cls);
 
@@ -10773,8 +10882,8 @@ function renderTotalProfit() {
         const dep = Number(lastDeployedCoin);
         const pct = (isFinite(dep) && dep > 0) ? (unrealized / dep * 100) : null;
         const unrealLabel = pct === null
-            ? 'Unrealized'
-            : `Unrealized (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% of ${fmtUsd(dep)} of coin)`;
+            ? 'Open book'
+            : `Open book (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% of ${fmtUsd(dep)} of coin)`;
 
         // SAY WHICH BASIS PRODUCED THE NUMBER. A corrected figure presented
         // as though it had always read that way is the same fault as the
@@ -10801,10 +10910,13 @@ function renderTotalProfit() {
               + '</div>'
             : '')
         + '<div style="font-size:0.78em; color:var(--text-dim); margin-top:6px; line-height:1.4;">'
-        + 'Realized is banked and only moves on a completed sell. Unrealized marks coin that '
-        + 'was already owned - a branch on it reports the price move, it does not add one, so '
-        + 'this half grows as more coin is put to work and is not money lost unless a slice is '
-        + 'sold below its entry.</div>';
+        + 'The headline above is <strong>banked money only</strong>: realized, and it '
+        + 'only moves on a completed sell. It is <strong>not added</strong> to the open '
+        + 'book beside it. The '
+        + 'open book marks coin that was already owned: a branch on it reports the price move, '
+        + 'it does not create one, so that half grows as more coin is put to work and is not '
+        + 'money lost unless a slice is sold below its entry. Adding the two would be a sum of '
+        + 'cash and a price mark, which is not a profit figure.</div>';
     }
 }
 
