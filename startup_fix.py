@@ -104,6 +104,21 @@ import os
 log = logging.getLogger(__name__)
 
 TICKET_ENV = "STARTUP_FIX_TICKET"
+
+# THE RIGHT-SIZE IS ARMED SEPARATELY, ON PURPOSE.
+#
+# 2026-10-08 taught this the hard way. The ticket was armed to run the
+# reconcile, and a level change that had been sitting in LEVELS from an
+# older plan rode along with it and lowered LINK-USD from 10 rungs to 6 -
+# a change the account owner had not asked for and, with the set-levels
+# button unreachable, could not undo from the dashboard.
+#
+# So a SECOND money operation does not inherit the first one's consent.
+# The right-size lowers budget claim across several branches; it gets its
+# own switch, and the ticket alone will not run it. Unset, the step
+# reports NOT_ARMED and settles, so it changes nothing whatever about a
+# ticket armed only for the reconcile.
+RIGHTSIZE_ENV = "STARTUP_FIX_RIGHTSIZE"
 MARKER_PREFIX = "startup_fix:"
 
 # How many boots a single ticket may spend trying. Counted before the work.
@@ -146,6 +161,12 @@ LEVELS = {}
 # fleet over-claims by that much. The audited plan was $1,157.41.
 MAX_WRITEOFF_USD = 2000.0
 
+# The same kind of bound for the right-size. Freeing budget places no order
+# and sells nothing, but a plan far larger than the fleet means a reading
+# went wrong, and a reading that went wrong is a measurement to check, not
+# an instruction to obey. The plan measured 2026-10-08 16:16Z was $961.97.
+MAX_RIGHTSIZE_USD = 3000.0
+
 # The last run's report, for GET /startup-fix.
 _LAST = None
 
@@ -158,6 +179,17 @@ def last_report():
 def ticket():
     raw = (os.getenv(TICKET_ENV) or "").strip().strip('"').strip("'")
     return raw or None
+
+
+def rightsize_armed():
+    """True only for an explicit affirmative. Anything else is off.
+
+    Quotes are stripped for the same reason ticket() strips them: a value
+    pasted with them is the bug class that once stopped a whole module
+    from importing and took the fleet off the air.
+    """
+    raw = (os.getenv(RIGHTSIZE_ENV) or "").strip().strip('"').strip("'").lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 async def _claim_attempt(session_factory, key):
@@ -347,6 +379,128 @@ async def apply_levels(grid, wanted=None):
         "NOTHING WAS WRITTEN. No level plan was applicable - see plans for why.")
     log.warning(f"[startup-fix] levels {out['detail']}")
     return out
+
+
+async def apply_rightsize(grid, max_free_usd=MAX_RIGHTSIZE_USD):
+    """Free budget that PARKED branches cannot spend. In-process, no browser.
+
+    WHY THIS EXISTS. The reconcile correctly deleted $839.48 of phantom coin
+    basis on 2026-10-08 at 15:58:40Z, and in doing so converted it into
+    phantom CASH claim: a branch's unspendable reserve is
+    allocated_usd - coin_basis, so removing basis RAISES it. ZEC alone went
+    from claiming $1,167.06 of cash it could not spend to claiming the full
+    $1,789.11. Within the hour the fleet's reserves exceeded the wallet and
+    free cash read negative. Writing off the coin without releasing the
+    budget behind it is half an operation.
+
+    The other half is the right-size, and it was reachable ONLY through the
+    write-guarded POST - one caller, no in-process path, no script. The same
+    dashboard that could not deliver the reconcile four times is the only
+    way to reach it, which is not a way to reach it.
+
+    IT PLACES NO ORDER AND SELLS NO COIN. allocated_usd comes down toward
+    the branch's own coin cost basis; the account holds exactly the same
+    coins and the same dollars afterwards.
+
+    EVERY INVARIANT STAYS WHERE IT WAS TESTED. This delegates each branch to
+    branch_rightsize.apply_one rather than writing rows itself, so the three
+    guards that matter are re-derived inside apply_one's own transaction,
+    against fresh rows, exactly as the endpoint gets them:
+      the branch must still be PARKED - a slice that sold since the plan
+        gives it a free rung, and a branch with a free rung will spend its
+        budget, so the write refuses;
+      allocated_usd never ends below the coin's cost basis;
+      allocated_usd never ends below $15.00, the row-deletion floor.
+    apply_one also carries peak_equity down with the allocation, because the
+    drawdown breaker measures peak against allocated - without it a
+    right-size would freeze the branch it just freed. That is its logic and
+    it is not re-implemented here.
+
+    A FLAT BRANCH IS NOT IN SCOPE and plan() already excludes it, pointing
+    at withdraw_from_grid_branch instead. ZEC-USD is flat with $1,789.11
+    allocated and this step will not touch it - that is a separate write
+    with separate reasoning, and bundling two money operations into one
+    ticket is how the LINK level change rode along unnoticed earlier today.
+    """
+    if not rightsize_armed():
+        log.warning(f"[startup-fix] rightsize: {RIGHTSIZE_ENV} is not set - skipped")
+        return {"status": "NOT_ARMED", "rows_written": 0, "settled": True,
+                "freed_usd": 0.0, "planned_usd": 0.0,
+                "detail": (f"{RIGHTSIZE_ENV} is not set, so no budget was freed. "
+                           f"This step does not inherit the ticket's consent - it "
+                           f"lowers budget claim across several branches and is "
+                           f"armed on its own.")}
+
+    import branch_rightsize
+
+    plan = await branch_rightsize.plan(grid)
+    rows = [b for b in (plan.get("branches") or [])
+            if (b.get("freeable_usd") or 0) > 0 and b.get("bot_name")]
+    if not rows:
+        log.warning("[startup-fix] rightsize: nothing is parked above its floor")
+        return {"status": "NOTHING_TO_DO", "rows_written": 0, "settled": True,
+                "freed_usd": 0.0, "planned_usd": 0.0,
+                "detail": ("no parked branch claims budget above its own coin "
+                           "basis - nothing to free.")}
+
+    planned = round(sum(b["freeable_usd"] for b in rows), 2)
+    if planned > max_free_usd:
+        log.warning(f"[startup-fix] rightsize REFUSED: ${planned:,.2f} planned is "
+                    f"over the ${max_free_usd:,.2f} ceiling")
+        return {"status": "REFUSED_OVER_CEILING", "rows_written": 0,
+                "settled": False, "freed_usd": 0.0, "planned_usd": planned,
+                "branch_count": len(rows),
+                "detail": (f"the plan would free ${planned:,.2f}, over the "
+                           f"${max_free_usd:,.2f} ceiling. A plan that size means a "
+                           f"reading is wrong, which is a measurement to check, not "
+                           f"an instruction to obey. Nothing was written.")}
+
+    # Biggest first, so a refusal part-way through has already banked the
+    # one that mattered most.
+    rows.sort(key=lambda b: -b["freeable_usd"])
+    applied, not_applied = [], []
+    for b in rows:
+        try:
+            r = await branch_rightsize.apply_one(
+                grid, b["bot_name"], amount_usd=None, dry_run=False)
+        except Exception as e:
+            not_applied.append({"product_id": b.get("product_id"),
+                                "bot_name": b["bot_name"],
+                                "reason": f"{type(e).__name__}: {e}"})
+            log.warning(f"[startup-fix] rightsize {b['bot_name']} raised "
+                        f"{type(e).__name__}: {e}")
+            continue
+        if r and r.get("ok"):
+            applied.append(r)
+        else:
+            not_applied.append({"product_id": b.get("product_id"),
+                                "bot_name": b["bot_name"],
+                                "reason": (r or {}).get("reason") or "refused"})
+
+    freed = round(sum(a.get("freed_usd") or 0.0 for a in applied), 2)
+    log.warning(f"[startup-fix] rightsize COMMITTED {len(applied)} branch(es), "
+                f"${freed:,.2f} freed ({len(not_applied)} not written)")
+    for a in not_applied:
+        await _activity(grid, a.get("product_id"), "RIGHTSIZE",
+                        f"Budget NOT freed: {a.get('reason')}")
+
+    # SETTLED means re-running could not do better. apply_one logs its own
+    # activity line per branch, so a write is auditable without this report.
+    return {"status": "APPLIED" if applied else "NOTHING_WRITTEN",
+            "settled": bool(applied),
+            "branch_count": len(rows),
+            "applied": applied, "not_applied": not_applied or None,
+            "planned_usd": planned, "freed_usd": freed,
+            "rows_written": len(applied),
+            "places_no_order": True, "sells_no_coin": True,
+            "flat_branches_are_not_in_scope": True,
+            "detail": (
+                f"{len(applied)} branch(es) right-sized, ${freed:,.2f} of unspendable "
+                f"budget released against ${planned:,.2f} planned. No order was placed "
+                f"and no coin was sold."
+                if applied else
+                "NOTHING WAS WRITTEN. No parked branch could be right-sized - see "
+                "not_applied for each reason.")}
 
 
 async def _activity(grid, product_id, kind, message):
@@ -568,16 +722,30 @@ async def run_at_boot(grid, tkt=None, census_fn=None):
                             "error": f"{type(e).__name__}: {e}",
                             "detail": "the reconcile raised, so nothing is claimed for it."}
         log.warning(f"[startup-fix] reconcile FAILED {type(e).__name__}: {e}")
+    # RIGHT-SIZE RUNS LAST, AND THAT ORDER IS THE POINT. The reconcile
+    # changes coin basis, and a branch's floor IS its coin basis - so a
+    # right-size planned before it would measure against a basis that is
+    # about to change. apply_one re-derives the floor inside its own
+    # transaction either way, but planning after the reconcile is the
+    # honest order.
+    try:
+        out["rightsize"] = await apply_rightsize(grid)
+    except Exception as e:
+        out["rightsize"] = {"status": "FAILED", "rows_written": 0,
+                            "error": f"{type(e).__name__}: {e}",
+                            "detail": "the right-size raised, so nothing is claimed for it."}
+        log.warning(f"[startup-fix] rightsize FAILED {type(e).__name__}: {e}")
 
-    failed = [k for k in ("levels", "reconcile")
+    failed = [k for k in ("levels", "reconcile", "rightsize")
               if (out[k] or {}).get("status") == "FAILED"]
-    unsettled = [k for k in ("levels", "reconcile")
+    unsettled = [k for k in ("levels", "reconcile", "rightsize")
                  if not (out[k] or {}).get("settled")]
     out["failed_steps"] = failed or None
     out["unsettled_steps"] = unsettled or None
     lv = (out["levels"] or {}).get("rows_written") or 0
     rc = (out["reconcile"] or {}).get("rows_written") or 0
-    out["rows_written_total"] = lv + rc
+    rs = (out["rightsize"] or {}).get("rows_written") or 0
+    out["rows_written_total"] = lv + rc + rs
     if failed or unsettled:
         why = []
         if failed:

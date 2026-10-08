@@ -14051,3 +14051,83 @@ at all. The planner cannot tell a stale wallet reading from a real
 shortfall, so the two sides must be read together; `apply_reconcile`
 fetches its own census immediately before planning, and the ceiling is the
 backstop for the case where that still slips.
+
+## The right-size, reachable without a browser
+
+THE HALF-DONE OPERATION. The reconcile ran at 2026-10-08 15:58:40Z and
+correctly deleted $839.48 of phantom coin basis. A parked branch's
+unspendable reserve is `allocated_usd - coin_basis`, so removing basis
+RAISES it: ZEC went from claiming $1,167.06 of cash it could not spend to
+claiming the full $1,789.11. Within the hour the fleet's reserves
+($3,028.96) exceeded the wallet ($3,028.87) and `free_cash_usd` read
+-$21.78, with money-check flagging `cash_overdrawn` at severity bad.
+
+Writing off the coin without releasing the budget behind it is half an
+operation. The other half - the right-size - was reachable ONLY through
+the write-guarded POST: `branch_rightsize.apply_one` had exactly one
+caller in the repository, no in-process path, no script, no scheduled
+task. That is the same dashboard that could not deliver the reconcile
+four times, which is not a way to reach it.
+
+`startup_fix.apply_rightsize` now does it in-process at boot. It does not
+re-implement the write: it hands each branch to `branch_rightsize.apply_one`,
+so all three invariants are re-derived inside that function's own
+transaction against fresh rows - still PARKED, never below coin basis,
+never below the $15 row-deletion floor - and `peak_equity` is carried down
+with the allocation by apply_one's own logic. That last part is not
+cosmetic: the breaker measures peak against allocated, and LTC-USD
+measured 10.08% before a right-size and would have read 66.63% after,
+straight past the 25% breaker, without it.
+
+Biggest first, so a refusal part-way through has already banked the
+largest. Bounded by MAX_RIGHTSIZE_USD. Runs AFTER the reconcile, because
+a branch's floor IS its coin basis and the reconcile moves it.
+
+### A flat branch is out of scope, deliberately
+
+ZEC-USD is flat with $1,789.11 allocated. `branch_rightsize.plan` gives it
+`freeable_usd: 0.0` and names the remedy itself: "branch is flat;
+withdraw_from_grid_branch already handles a flat branch and is the tested
+path". That is a separate write with separate reasoning and it is NOT
+bundled here - see below for why.
+
+### ARMED SEPARATELY, and this is the lesson of the day
+
+STARTUP_FIX_RIGHTSIZE gates it, independently of STARTUP_FIX_TICKET.
+Unset, the step reports NOT_ARMED and settles, changing nothing about a
+ticket armed only for the reconcile.
+
+The reason is concrete. The ticket was armed for the reconcile on
+2026-10-08, and `LEVELS`, carrying a plan measured five days earlier, rode
+along with it and lowered LINK-USD from 10 rungs to 6 at 15:58:29Z -
+eleven seconds before the reconcile, and before the commit that emptied
+LEVELS had deployed. The owner had not asked for it, and with the
+set-levels button unreachable in the same way as the reconcile button, he
+could not have undone it from the dashboard. A second money operation
+does not inherit the first one's consent.
+
+That gate also resolved a real test failure honestly rather than by
+editing assertions: adding a third step to `run_at_boot` left six
+scenarios in test_startup_fix.py unsettled, because the new step did real
+work against their fake fleet and the ticket was therefore never marked
+done. Gated, `run_at_boot`'s behaviour is unchanged unless armed, and all
+of test_startup_fix.py passes again.
+
+`test_startup_fix_rightsize.py` adds 16 tests: that it delegates rather
+than opening its own session (the fake grid's session factory raises), that
+it asks for everything above the floor with dry_run false, biggest first,
+that the flat branch is never passed to the writer, that a plan over the
+ceiling writes nothing, that every branch refusing is NOT settled while
+nothing-to-do IS, that one branch raising does not stop the others, that
+only an explicit affirmative arms it (a quoted value still does), and that
+the call order in run_at_boot puts the reconcile first.
+
+### Still open
+
+LINK-USD read 10 levels / 5 slices after that write logged "Raised the
+rung limit from 10 to 6". Either the write did not persist or something
+restored it; the cause is NOT established and the activity feed holds no
+second LEVELS row. Note `GRID_LEVEL_SPACING_CANDIDATES` carries a
+`num_levels` per override label and `grid_spacing_override` reads
+"3_levels_2.5pct", so a computed level cap is one place to look before
+concluding the DB value is what the status reports.
