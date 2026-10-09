@@ -41,10 +41,17 @@ def section(start_marker, end_marker):
 
 print("\nall three sections exist on the page people actually open")
 
-for wrap in ("holdings-watch-wrap", "league-wrap", "alert-queue-wrap"):
+# THE ALERT-QUEUE PANEL IS GONE ON PURPOSE - d123996, "Take the
+# undeliverable email alerts off the dashboard". Its removal has its own
+# test, test_alert_noise_is_off_the_page.py, which asserts the panel is
+# absent AND that a note sits where it was saying trading did not change and
+# how to bring delivery back. Two tests asserting opposite things about the
+# same markup is worse than either, so the removal is owned there and this
+# file no longer claims the panel exists.
+for wrap in ("holdings-watch-wrap", "league-wrap"):
     ok(f"  #{wrap} is in the markup", f'id="{wrap}"' in HTML)
 for fn in ("runHoldingsWatch", "renderHoldingsWatch", "runLeague",
-           "renderLeague", "loadAlertQueue"):
+           "renderLeague"):
     ok(f"  {fn}() is defined", f"function {fn}(" in HTML)
 
 print("\nTHE NOT-AN-ORDER WARNING SURVIVES INTO THE MARKUP")
@@ -104,8 +111,13 @@ ok("and that alerts are HELD, not lost", "held" in alarm.lower())
 ok("and explains why they are not marked sent",
    "worse than an empty one" in alarm)
 ok("it surfaces the diagnosis when there is one", "channel_diagnosis" in alarm)
-ok("including similar variable names, to catch a typo",
-   "similar_variables_seen" in alarm)
+# The alarm panel's own section is dead code now: loadAlertQueue is still
+# defined but nothing calls it (family_tree_dashboard.html carries the note
+# "loadAlertQueue() is no longer called - both panels it fed are gone"). The
+# checks above still pass against that function body, so they are left as a
+# guard on it until the function itself is removed. This one is dropped
+# because similar_variables_seen never reached the markup and the panel it
+# would have appeared in is not rendered.
 ok("it never prints a webhook value",
    "webhook_url" not in alarm and "g.value" not in alarm,
    "this page is behind no auth worth the name")
@@ -132,8 +144,16 @@ for expr in ("escText(r.asset)", "escText(a.message)", "escText(mi.asset)",
 
 print("\nthe alarm loads itself; the two expensive panels do not")
 
-ok("loadAlertQueue runs on page load", re.search(r"^loadAlertQueue\(\);", HTML, re.M) is not None)
-ok("and on an interval", "setInterval(loadAlertQueue" in HTML)
+# NOT CALLED ANY MORE, AND THAT IS THE POINT. These asserted that the alarm
+# polled itself on load and on a timer; the panel it fed was removed in
+# d123996, so a call on load would now be a fetch feeding nothing. The
+# assertion is inverted rather than deleted, so re-adding the poll without
+# re-adding the panel fails here.
+ok("the removed alarm does NOT poll on load",
+   re.search(r"^loadAlertQueue\(\);", HTML, re.M) is None,
+   "the panel it fed is gone - a poll on load now fetches for nothing")
+ok("and is not on an interval either",
+   "setInterval(loadAlertQueue" not in HTML)
 ok("the watch is button-triggered", 'onclick="runHoldingsWatch()"' in HTML)
 ok("the league is button-triggered", 'onclick="runLeague()"' in HTML)
 ok("neither expensive panel is on a timer",

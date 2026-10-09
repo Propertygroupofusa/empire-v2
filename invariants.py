@@ -525,7 +525,7 @@ MARKET_ORDER_PATHS = (
 
 
 def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
-                     maker_only_active=True):
+                     maker_only_active=True, mode_unreadable_because=None):
     """Is the market fallback firing while maker-only is on?
 
     This check used to be permanently UNKNOWN, and its own detail text told
@@ -548,11 +548,29 @@ def maker_only_holds(taker_fills, classified_fills, newest_taker_at, armed_at,
     a real bug. Every taker fill stamped before it is history the window
     happens to still reach.
 
-    UNKNOWN is kept for exactly one case: a missing arming time. It is then
-    reported WITH the newest taker fill's age, because that is the fact
-    that makes it actionable - a taker fill minutes old is worth chasing
-    whatever the arming time turns out to be.
+    UNKNOWN is kept for two cases. One is a missing arming time, reported
+    WITH the newest taker fill's age, because that is the fact that makes it
+    actionable - a taker fill minutes old is worth chasing whatever the
+    arming time turns out to be.
+
+    The other is `maker_only_active=None`: the mode itself could not be read.
+    That used to be impossible to express, and `if not maker_only_active`
+    caught it alongside False and answered "maker-only is off - the market
+    fallback is allowed" - an OK verdict, on a question nobody had managed to
+    ask. The caller had the same hole: the endpoint read the mode as
+    `except Exception: _maker_only = False`, so one unreadable DB flag made
+    this check report a clean pass. A mode that cannot be read is the one
+    state where a taker fill matters most and is least explicable.
     """
+    if maker_only_active is None:
+        why = str(mode_unreadable_because or "").strip() or "no reason recorded"
+        seen = (f"{int(_num(taker_fills) or 0)} of "
+                f"{int(_num(classified_fills) or 0)} recent fills were TAKER")
+        return {"name": "maker_only_holds", "status": UNKNOWN,
+                "detail": (f"whether maker-only is armed could not be read "
+                           f"({why}), so a taker fill cannot be judged against "
+                           f"it. {seen}. Not reported as a pass: this is the "
+                           f"one state where a taker fill is least explicable.")}
     if not maker_only_active:
         return {"name": "maker_only_holds", "status": OK,
                 "detail": "maker-only is off - the market fallback is allowed"}

@@ -27,6 +27,7 @@ Two separate faults, both fixed here:
 
 Run: python3 test_invariant_blind_sample.py
 """
+import ast
 import os
 import re
 import sys
@@ -41,15 +42,33 @@ def ok(label, cond):
     checks.append((label, bool(cond)))
 
 
-# Isolate the invariant block so a match elsewhere cannot stand in for one here.
-start = SRC.index("measured_leg = None\n        blind_because = None")
-block = SRC[start:start + 5200]
+# ISOLATE THE ENDPOINT BY ITS REAL EXTENT, NOT BY A CHARACTER COUNT.
+#
+# This was `SRC[start:start + 5200]` from a marker line. The endpoint is now
+# 14k characters, so the window covered about a third of it and the indexes
+# below raised ValueError on code that was present the whole time - the same
+# failure that broke three checks in test_invariants.py. A window cannot be
+# made "big enough": the next check added moves it again, and a window that
+# is too large silently starts matching whatever function comes next. The
+# parser knows exactly where the function ends, so it is asked.
+_ENDPOINT = "grid_invariants_endpoint"
+for _n in ast.walk(ast.parse(SRC)):
+    if (isinstance(_n, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and _n.name == _ENDPOINT):
+        block = ast.get_source_segment(SRC, _n)
+        break
+else:
+    raise AssertionError(f"{_ENDPOINT} not found - renamed or removed, which "
+                         f"is itself the thing to look at")
 CODE = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
 
 # --- the binding ----------------------------------------------------------
 assign = CODE.index("_maker_only = await g.is_maker_only_active()")
-use_guard = CODE.index("if _maker_only and fills.get(")
-use_check = CODE.index("if _maker_only:")
+# The mode is three-state now, so both readers test it by identity. These
+# indexes used to look for `if _maker_only and fills.get(` and
+# `if _maker_only:` - the bare truthiness that made UNKNOWN behave as OFF.
+use_guard = CODE.index("if _maker_only is True and fills.get(")
+use_check = CODE.index("if _maker_only is not False:")
 ok("the mode is read before it is used as a guard", assign < use_guard)
 ok("and before the maker_only_holds check", assign < use_check)
 
@@ -60,8 +79,24 @@ ok("fills is bound before the request too", CODE.index("fills = {}") < CODE.inde
 ok("it is bound to a mapping, so .get() is safe on the starved path",
    re.search(r"fills\s*=\s*\{\}", CODE))
 
-ok("the mode read still fails closed to False",
-   re.search(r"except Exception:\s*\n\s*_maker_only = False", CODE))
+# THIS ASSERTION USED TO READ:
+#
+#   ok("the mode read still fails closed to False",
+#      re.search(r"except Exception:\s*\n\s*_maker_only = False", CODE))
+#
+# which pinned the bug in place and called it a virtue. Defaulting to False
+# is fail-OPEN, not fail-closed: False is a definite claim that maker-only is
+# disarmed, and on that claim the fee comparison silently switched to the
+# maker/taker blend and inv.maker_only_holds was skipped entirely - the check
+# whose whole job is to notice a taker fill under maker-only left the page.
+# None is the only honest default, and the handler must bind its exception so
+# there is a cause to report.
+ok("an unreadable mode is UNKNOWN, not 'off'",
+   re.search(r"_maker_only = None", CODE))
+ok("and it is never defaulted to False",
+   not re.search(r"_maker_only = False", CODE))
+ok("the handler binds the exception, so the cause can be reported",
+   re.search(r"except Exception as e:\s*\n\s*_maker_only_why", CODE))
 ok("the mode is read exactly once", CODE.count("_maker_only = await") == 1)
 
 # --- the wording ----------------------------------------------------------
@@ -77,8 +112,19 @@ ok("one fill is not '1 fills'", "'' if _classified == 1 else 's'" in block)
 ok("a starved sample still blinds the two fee checks, not passes them",
    "A starved sample is UNKNOWN, not a pass" in block)
 ok("an UNKNOWN still carries its cause", 'r["blind_because"] = blind_because' in CODE)
-ok("maker_only_holds still only runs when the mode is on",
-   CODE.index("if _maker_only:") < CODE.index("inv.maker_only_holds("))
+# THIS ONE CHANGED ON PURPOSE. It read "maker_only_holds still only runs when
+# the mode is on", gated on `if _maker_only:`. That is the skip: an unreadable
+# mode took the same path as a disarmed one and the row left the page, so the
+# check that watches for a taker fill under maker-only reported nothing at all
+# - and an absent check reads as nothing to report. It now runs unless the
+# mode is known to be OFF, and reports UNKNOWN when the mode cannot be read.
+ok("maker_only_holds is skipped only when the mode is KNOWN off",
+   CODE.index("if _maker_only is not False:") < CODE.index("inv.maker_only_holds("))
+ok("and it is not gated on bare truthiness any more",
+   not re.search(r"if _maker_only:\s*\n", CODE))
+ok("the mode and its cause are both handed to the check",
+   re.search(r"maker_only_active=_maker_only", CODE)
+   and re.search(r"mode_unreadable_because=_maker_only_why", CODE))
 ok("its own exception handler is still there",
    '"name": "maker_only_holds", "status": inv.UNKNOWN' in CODE)
 

@@ -40,10 +40,22 @@ import crypto_grid_bot as grid  # noqa: E402
 # fills a rung. BCH-USD read 3/3 PARKED on a third "slice" worth $0.00007
 # and spent 200 attempts offering it as its own escape route.
 #
-# Asserted on tradeable_slices specifically, so a regression back to the
-# raw count fails here rather than silently re-locking a branch.
+# Asserted by CALLING the rule, not by matching the cycle's text. The literal
+# moved again when the rule was lifted into grid.branch_is_parked, so that
+# five readers of it (the dashboard, trigger_model, capital_map's two rules
+# and scripts/fleet_watchdog) could stop keeping their own copies - two of
+# which had already drifted back to the raw count and were reporting a stuck
+# branch as able to sell at the +1.0% parked floor. A text match on the
+# executor cannot see any of that; calling the rule can.
 ok("parked is counted on TRADEABLE slices, not the raw list",
-   "len(tradeable_slices(slices)) >= (branch.num_levels or 0)" in CYCLE)
+   grid.branch_is_parked(
+       [{"qty": 1.0, "entry_price": 40.0}, {"qty": 1.0, "entry_price": 40.0},
+        {"qty": 2.2e-07, "entry_price": 309.32}], 3) is False,
+   "a remnant the venue will not sell is filling a rung again")
+ok("and three real slices on three rungs still park the branch",
+   grid.branch_is_parked([{"qty": 1.0, "entry_price": 40.0}] * 3, 3) is True)
+ok("the executor reads that one rule rather than its own copy",
+   "_parked = branch_is_parked(slices, branch.num_levels)" in CYCLE)
 ok("the buy gate counts tradeable slices too, so dust cannot block a rung",
    "len(tradeable_slices(slices)) < branch.num_levels" in CYCLE)
 ok("the dust floor is defined and below the smallest rung the engine buys",
@@ -120,6 +132,23 @@ ok("the gate compares against the floor, not against zero",
 # code the cycle never reaches. Re-pointing a guard at moved logic is the
 # job; weakening it because the string moved is how a real protection dies.
 PARKED_PICK = fn("_pick_parked_slice_to_sell")
+
+
+class _Slice:
+    """The attribute shape _pick_parked_slice_to_sell reads off an ORM row."""
+
+    def __init__(self, qty, entry_price, adopted=False, product_id="AAA-USD"):
+        self.qty = qty
+        self.entry_price = entry_price
+        self.adopted = adopted
+        self.product_id = product_id
+        self.entry_fee_rate = None
+
+
+def _pick_parked(slices, price, round_trip_fee_rate=None, floor_pct=0.0):
+    return grid._pick_parked_slice_to_sell(
+        slices, price, round_trip_fee_rate=round_trip_fee_rate,
+        floor_pct=floor_pct)
 PARKED_LOGIC = CYCLE + "\n" + PARKED_PICK
 ok("the cycle actually calls the parked picker, so it is not dead code",
    "_pick_parked_slice_to_sell(" in CYCLE)
@@ -130,20 +159,41 @@ ok("the constant exists at module level", "GRID_PARKED_MIN_NET_PCT" in SRC)
 ok("it is 1.0% by default", abs(grid.GRID_PARKED_MIN_NET_PCT - 0.010) < 1e-9)
 ok("comfortably above the repo's own fee floor",
    grid.GRID_PARKED_MIN_NET_PCT > 0.009)
-# UPDATED 2026-10-09. The picker now measures an ADOPTED slice against
-# sell_basis_for_slice - what was actually paid - instead of its
-# adoption-day entry_price, which answered the wrong question. The net
-# calculation and the per-basis share are unchanged in substance, only in
-# variable name, so these two assert the substance and then assert the
-# improvement, rather than matching a literal that moved.
+# MEASURED BY CALLING IT. Both of these were text matches -
+# "_grid_slice_net_pnl(s.qty, s.entry_price, price," and "net / basis" - and
+# both broke on a deliberate improvement: the picker now measures against
+# sell_basis_for_slice (the owner's declared TRUE cost basis, GRID_TRUE_COST_BASIS)
+# rather than an adopted slice's adoption-day entry_price, and names the
+# denominator _basis_usd. The properties held; only the spelling moved.
+#
+# NET OF FEES: a slice up 0.5% gross cannot clear a 1.0% floor once a ~0.7%
+# maker round trip is taken out of it. A gross measure would pass it.
+_fee = 0.007
+_slice = _Slice(qty=10.0, entry_price=100.0)
+_gross_only = _pick_parked(
+    [_slice], 100.5, round_trip_fee_rate=_fee, floor_pct=0.010)
 ok("it is measured NET of fees, not gross",
-   "_grid_slice_net_pnl(s.qty, _sell_basis, price," in PARKED_LOGIC)
+   _gross_only[0] is None,
+   "a slice +0.5% gross cleared a 1.0% floor - the fee is not being deducted")
+# And the same slice DOES clear once the real move is big enough to pay the
+# fee and the floor, which keeps the check above from passing vacuously.
+_clears = _pick_parked([_Slice(qty=10.0, entry_price=100.0)], 102.0,
+                       round_trip_fee_rate=_fee, floor_pct=0.010)
+ok("and a genuinely profitable slice still clears", _clears[0] is not None,
+   "nothing can clear the floor - the check above proves nothing")
+
+# A SHARE OF BASIS, NOT DOLLARS: two slices with the same percentage gain and
+# very different sizes must score the same. On a dollar measure the big one
+# wins every time and a 1.0% floor becomes a dollar threshold in disguise.
+_small = _pick_parked([_Slice(qty=1.0, entry_price=100.0)], 102.0,
+                      round_trip_fee_rate=_fee, floor_pct=0.010)
+_big = _pick_parked([_Slice(qty=1000.0, entry_price=100.0)], 102.0,
+                    round_trip_fee_rate=_fee, floor_pct=0.010)
 ok("and as a share of the slice's own basis, not dollars",
-   "pct = net / _basis_usd" in PARKED_LOGIC)
-ok("an adopted slice is judged against what was PAID, not its "
-   "adoption-day mark",
-   "sell_basis_for_slice(s" in PARKED_LOGIC
-   and "_grid_slice_net_pnl(s.qty, s.entry_price, price," not in PARKED_LOGIC)
+   _small[1] is not None and _big[1] is not None
+   and abs(_small[1] - _big[1]) < 1e-9,
+   f"a 1x and a 1000x slice at the same percentage scored "
+   f"{_small[1]} vs {_big[1]} - that is a dollar measure")
 ok("a zero basis cannot divide", "basis <= 0" in PARKED_LOGIC)
 ok("it is settable", "GRID_PARKED_MIN_NET_PCT" in SRC and "os.getenv" in SRC)
 

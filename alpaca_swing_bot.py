@@ -539,6 +539,26 @@ async def get_account_balance(session):
         return None, None
 
 
+async def _excluded_hedges():
+    """Falling-market bets (SH/DOG/RWM...) the main bot currently excludes.
+
+    Owner, 2026-10-09: these must earn a top-N ROI spot before trading, on
+    the whole account - not only in prop_bot. This bot reads the same
+    exclusion set so both agree. If it cannot be read, every falling-market
+    bet is treated as excluded: the owner chose to sit them out, so an
+    unknown means no new hedge, never a free pass.
+    """
+    bearish = {p for p in (c["proxy"] for c in SWING_SYMBOLS.values())
+               if market_direction.direction(p) == "bear"}
+    try:
+        import prop_bot
+        excluded = await prop_bot.get_effective_excluded_symbols()
+        return {p for p in bearish if p in excluded}
+    except Exception as e:
+        log.warning(f"Could not read the hedge exclusion list ({e}) - no new falling-market bets this cycle")
+        return bearish
+
+
 async def get_open_positions(session):
     """Every open position, keyed by real ticker - or None if UNREADABLE.
 
@@ -731,9 +751,13 @@ async def run_intraday_check():
                      f" | notional ${open_notional:,.2f} of ${notional_budget:,.2f} budget")
 
             held_now = list(open_positions)
+            excluded_hedges = await _excluded_hedges()
             for strength, symbol, config, rsi, price in intraday_setups[:slots]:
                 proxy = config["proxy"]
                 if proxy in open_positions:
+                    continue
+                if proxy in excluded_hedges:
+                    log.info(f"  {symbol} ({proxy}) is a falling-market bet outside the top ROI ranks - skipping")
                     continue
                 opposing = market_direction.opposing_holdings(proxy, held_now)
                 if opposing:
@@ -951,6 +975,7 @@ async def run_swing_check():
             log.info(f"\n📈 Open positions: {current_count}/{MAX_CONCURRENT_SWING}")
 
             held_now = list(open_positions)
+            excluded_hedges = await _excluded_hedges()
             for confidence, symbol, config, rsi, price in setups[:slots_available]:
                 # Real, always-tradable ticker - never the internal
                 # SWING_SYMBOLS key (see PROXY_TO_KEY's own docstring for
@@ -962,6 +987,9 @@ async def run_swing_check():
                 # Never bet against a position already held - see
                 # market_direction.py. Counted before the order is placed,
                 # so two opposite setups in one cycle cannot both open.
+                if proxy in excluded_hedges:
+                    log.info(f"  {symbol} ({proxy}) is a falling-market bet outside the top ROI ranks - skipping")
+                    continue
                 opposing = market_direction.opposing_holdings(proxy, held_now)
                 if opposing:
                     log.info(f"  {symbol} ({proxy}) would bet against {', '.join(opposing)} already held - skipping")
