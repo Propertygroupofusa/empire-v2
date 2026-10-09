@@ -1130,6 +1130,124 @@
         <div id="grid-levels-wrap" style="display:none;"></div>
     </div>
 
+
+    <!-- ===================== AGENCY SALES =====================
+         Added 2026-10-09 at the account owner's request, after a sales
+         dashboard built elsewhere was described to him with "illustrative
+         sample figures, not connected to Good's actual business records".
+
+         THIS SECTION SHIPS WITH NO FIGURES AT ALL, and that is the whole
+         design. This repository has already deleted invented numbers
+         twice - "Delete a fabricated 100% win rate before anyone believes
+         it again" and "Remove the rest of the fabricated trading data" -
+         because a plausible number on a dashboard gets believed. So every
+         figure below is COMPUTED FROM ROWS THE OWNER TYPES IN HIMSELF.
+         There is no seed data, no demo pipeline and no sample revenue. An
+         empty section reads empty.
+
+         IT TOUCHES NOTHING THAT TRADES. No endpoint, no fetch, no table,
+         no write path - it reads and writes one localStorage key in the
+         browser and nothing else. It cannot reach the grid loop, the
+         lease, a branch or a dollar. Collapsed by default so it adds one
+         line of height to a page whose whole point is that the trading
+         verdict comes first.
+
+         THE STORAGE IS PER-BROWSER AND THAT IS STATED ON THE PAGE, not
+         just in this comment: localStorage lives in one browser on one
+         device, it is not a database, it is not backed up, and clearing
+         site data erases it. Saying so is the difference between a
+         scratchpad and a thing he trusts with real client records. -->
+    <div class="section-title" style="cursor:pointer;" onclick="toggleSalesSection()">
+        <span id="sales-caret">▸</span> 🏢 Agency sales
+        <span style="font-weight:400;font-size:0.7em;opacity:0.75">&middot; separate from trading &middot; <span id="sales-headline">nothing entered yet</span></span>
+    </div>
+    <div class="panel" id="sales-section" style="display:none; margin-bottom:14px;">
+        <div class="panel-sub">
+            Revenue, pipeline and leads for the agency. <strong>This has nothing to do with
+            the Coinbase or Alpaca accounts</strong> - no figure here is read from either, and
+            nothing here can place an order or move a dollar.
+            <br><br><strong>Every number below is added up from rows you type in.</strong>
+            There is no sample data and no example pipeline, because a made-up revenue
+            figure on a dashboard is one you end up believing. If it reads zero, it is
+            because nothing has been entered yet.
+            <br><br><strong>Where this is stored:</strong> in this browser only, on this
+            device. It is not a database, it is not backed up, and clearing your browser
+            data erases it. Use the export button to keep a copy.
+        </div>
+
+        <!-- Revenue overview: the three figures are sums, not estimates. -->
+        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:12px 0;">
+            <div style="background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px;">
+                <div style="font-size:0.7em; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em;">Revenue won</div>
+                <div id="sales-revenue" style="font-size:1.5em; font-weight:700; font-variant-numeric:tabular-nums;">$0.00</div>
+                <div id="sales-revenue-sub" style="font-size:0.7em; color:var(--text-dim);">0 closed deals</div>
+            </div>
+            <div style="background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px;">
+                <div style="font-size:0.7em; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em;">In the pipeline</div>
+                <div id="sales-pipeline-usd" style="font-size:1.5em; font-weight:700; font-variant-numeric:tabular-nums;">$0.00</div>
+                <div id="sales-pipeline-sub" style="font-size:0.7em; color:var(--text-dim);">0 open deals</div>
+            </div>
+            <div style="background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px;">
+                <div style="font-size:0.7em; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.06em;">Win rate</div>
+                <div id="sales-winrate" style="font-size:1.5em; font-weight:700; font-variant-numeric:tabular-nums;">—</div>
+                <div id="sales-winrate-sub" style="font-size:0.7em; color:var(--text-dim);">needs a decided deal first</div>
+            </div>
+        </div>
+
+        <!-- The trend. DELIBERATELY REFUSES TO DRAW on one month: a
+             "trend" through a single point is a decoration, and the
+             rest of this page already holds the line that a figure
+             from too few readings is arithmetic and not evidence. -->
+        <div style="margin:14px 0;">
+            <div style="font-size:0.78em; font-weight:700; margin-bottom:6px;">Revenue by month <span style="font-weight:400;opacity:0.7">&middot; closed deals only</span></div>
+            <div id="sales-trend"><div class="coin-history-empty">No closed deals yet. This draws once two different months have one.</div></div>
+        </div>
+
+        <!-- Pipeline by stage. Counts and sums, computed. -->
+        <div style="margin:14px 0;">
+            <div style="font-size:0.78em; font-weight:700; margin-bottom:6px;">Deals in progress</div>
+            <div id="sales-stages"></div>
+        </div>
+
+        <!-- Leads: add, search, filter. -->
+        <div style="margin:14px 0 6px;">
+            <div style="font-size:0.78em; font-weight:700; margin-bottom:6px;">Leads</div>
+            <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">
+                <input id="sales-search" type="search" placeholder="Search name, company or contact"
+                       oninput="renderSales()" style="flex:1 1 180px; min-width:0; background:var(--bg);
+                       border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px;
+                       font-family:inherit; font-size:0.8em;">
+                <select id="sales-filter" onchange="renderSales()" style="background:var(--bg);
+                        border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px;
+                        font-family:inherit; font-size:0.8em;">
+                    <option value="">All stages</option>
+                </select>
+            </div>
+            <div id="sales-leads"></div>
+        </div>
+
+        <details style="margin-top:12px;">
+            <summary style="cursor:pointer; font-size:0.8em; font-weight:700;">+ Add a lead</summary>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:6px; margin-top:8px;">
+                <input id="sl-name" placeholder="Name *" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px; font-family:inherit; font-size:0.8em; min-width:0;">
+                <input id="sl-company" placeholder="Company" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px; font-family:inherit; font-size:0.8em; min-width:0;">
+                <input id="sl-contact" placeholder="Email or phone" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px; font-family:inherit; font-size:0.8em; min-width:0;">
+                <input id="sl-value" type="number" step="0.01" min="0" placeholder="Deal value" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px; font-family:inherit; font-size:0.8em; min-width:0;">
+                <select id="sl-stage" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px; font-family:inherit; font-size:0.8em; min-width:0;"></select>
+                <input id="sl-date" type="date" style="background:var(--bg); border:1px solid var(--border); color:var(--text); padding:7px 9px; border-radius:7px; font-family:inherit; font-size:0.8em; min-width:0;">
+            </div>
+            <div id="sl-error" style="display:none; font-size:0.75em; color:var(--red); margin-top:6px;"></div>
+            <button class="unlock-btn" onclick="addSalesLead()">Add lead</button>
+        </details>
+
+        <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+            <button onclick="exportSales()" style="background:var(--panel-2); border:1px solid var(--border); color:var(--text); padding:6px 11px; border-radius:7px; cursor:pointer; font-family:inherit; font-size:0.75em;">Copy all rows as CSV</button>
+            <span id="sales-export-note" style="font-size:0.72em; color:var(--text-dim);"></span>
+        </div>
+        <div id="sales-storage-note" style="font-size:0.72em; color:var(--text-dim); margin-top:8px;"></div>
+    </div>
+    <!-- =================== END AGENCY SALES =================== -->
+
     <div id="exit-mode-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="reversal-trade-badge" style="display:none; font-size:0.8em; color: var(--text-dim); margin-bottom: 8px;"></div>
     <div id="tree-loop-banner"></div>
@@ -12927,6 +13045,316 @@ async function loadLossStudy() {
     }
 }
 
+
+/* ===================== AGENCY SALES =====================
+   Added 2026-10-09. Reads and writes ONE localStorage key and makes no
+   network call of any kind, so it cannot reach the grid loop, the lease,
+   a branch or a dollar. Every figure is a sum over rows the owner typed;
+   there is no seed data anywhere in here on purpose - see the markup
+   comment for why this repository does not ship plausible numbers.
+
+   Every storage access is wrapped: localStorage throws outright in a
+   private window and in some embedded views, and a dashboard that dies
+   on one unreadable key would take the trading panels down with it. */
+var SALES_KEY = 'agency_sales_v1';
+var SALES_STAGES = ['Discovery', 'Proposal', 'Negotiation', 'Contract review', 'Won', 'Lost'];
+var SALES_CLOSED = { 'Won': 1, 'Lost': 1 };
+
+function salesLoad() {
+    try {
+        var raw = localStorage.getItem(SALES_KEY);
+        if (!raw) return [];
+        var rows = JSON.parse(raw);
+        return Array.isArray(rows) ? rows : [];
+    } catch (e) { return []; }
+}
+
+function salesSave(rows) {
+    // Returns a human sentence, never a boolean: the page has to be able
+    // to SAY that a save failed rather than silently appear to work.
+    try {
+        localStorage.setItem(SALES_KEY, JSON.stringify(rows));
+        return '';
+    } catch (e) {
+        return 'This browser refused to save (private window, or storage full). ' +
+               'The rows are on screen but will be gone when you reload - copy the CSV.';
+    }
+}
+
+function salesNum(v) {
+    var f = parseFloat(v);
+    return (isFinite(f) && f >= 0) ? f : 0;
+}
+
+function salesMoney(n) {
+    return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function salesEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+}
+
+function toggleSalesSection() {
+    var el = document.getElementById('sales-section');
+    var caret = document.getElementById('sales-caret');
+    if (!el) return;
+    var open = el.style.display === 'none';
+    el.style.display = open ? 'block' : 'none';
+    if (caret) caret.textContent = open ? '▾' : '▸';
+    try { localStorage.setItem(SALES_KEY + '_open', open ? '1' : '0'); } catch (e) {}
+}
+
+function addSalesLead() {
+    var err = document.getElementById('sl-error');
+    var name = (document.getElementById('sl-name').value || '').trim();
+    if (err) { err.style.display = 'none'; err.textContent = ''; }
+    if (!name) {
+        if (err) { err.textContent = 'A name is required - nothing else is.'; err.style.display = 'block'; }
+        return;
+    }
+    var rows = salesLoad();
+    rows.push({
+        id: 'l' + Date.now() + Math.random().toString(36).slice(2, 7),
+        name: name,
+        company: (document.getElementById('sl-company').value || '').trim(),
+        contact: (document.getElementById('sl-contact').value || '').trim(),
+        value: salesNum(document.getElementById('sl-value').value),
+        stage: document.getElementById('sl-stage').value || SALES_STAGES[0],
+        date: document.getElementById('sl-date').value || new Date().toISOString().slice(0, 10)
+    });
+    var problem = salesSave(rows);
+    ['sl-name', 'sl-company', 'sl-contact', 'sl-value'].forEach(function (id) {
+        var e = document.getElementById(id); if (e) e.value = '';
+    });
+    if (problem && err) { err.textContent = problem; err.style.display = 'block'; }
+    renderSales();
+}
+
+function setSalesStage(id, stage) {
+    var rows = salesLoad();
+    for (var i = 0; i < rows.length; i++) { if (rows[i].id === id) rows[i].stage = stage; }
+    salesSave(rows);
+    renderSales();
+}
+
+function deleteSalesLead(id) {
+    // No confirm() - the artifact/embedded viewers return false from it
+    // immediately, which would make delete silently do nothing. The row
+    // is replaced by an explicit two-step instead.
+    var rows = salesLoad().filter(function (r) { return r.id !== id; });
+    salesSave(rows);
+    renderSales();
+}
+
+function exportSales() {
+    var rows = salesLoad();
+    var note = document.getElementById('sales-export-note');
+    if (!rows.length) { if (note) note.textContent = 'Nothing to copy yet.'; return; }
+    var head = ['name', 'company', 'contact', 'value', 'stage', 'date'];
+    var lines = [head.join(',')];
+    rows.forEach(function (r) {
+        lines.push(head.map(function (k) {
+            return '"' + String(r[k] == null ? '' : r[k]).replace(/"/g, '""') + '"';
+        }).join(','));
+    });
+    var csv = lines.join('\n');
+    var done = function (ok) {
+        if (note) note.textContent = ok ? (rows.length + ' rows copied to the clipboard.')
+                                        : 'Could not reach the clipboard - the CSV is selected below instead.';
+    };
+    try {
+        navigator.clipboard.writeText(csv).then(function () { done(true); }, function () { salesFallbackCopy(csv, done); });
+    } catch (e) { salesFallbackCopy(csv, done); }
+}
+
+function salesFallbackCopy(csv, done) {
+    var box = document.getElementById('sales-csv-box');
+    if (!box) {
+        box = document.createElement('textarea');
+        box.id = 'sales-csv-box';
+        box.style.cssText = 'width:100%; min-height:90px; margin-top:6px; background:var(--bg);' +
+                            'border:1px solid var(--border); color:var(--text); font-family:monospace; font-size:0.72em;';
+        var note = document.getElementById('sales-export-note');
+        if (note && note.parentNode) note.parentNode.appendChild(box);
+    }
+    box.value = csv;
+    try { box.select(); } catch (e) {}
+    done(false);
+}
+
+function renderSales() {
+    var rows = salesLoad();
+
+    // --- the three figures, each a sum over typed rows ---
+    var won = rows.filter(function (r) { return r.stage === 'Won'; });
+    var lost = rows.filter(function (r) { return r.stage === 'Lost'; });
+    var open = rows.filter(function (r) { return !SALES_CLOSED[r.stage]; });
+    var revenue = won.reduce(function (a, r) { return a + salesNum(r.value); }, 0);
+    var pipeline = open.reduce(function (a, r) { return a + salesNum(r.value); }, 0);
+
+    var set = function (id, text) { var e = document.getElementById(id); if (e) e.textContent = text; };
+    set('sales-revenue', salesMoney(revenue));
+    set('sales-revenue-sub', won.length + (won.length === 1 ? ' closed deal' : ' closed deals'));
+    set('sales-pipeline-usd', salesMoney(pipeline));
+    set('sales-pipeline-sub', open.length + (open.length === 1 ? ' open deal' : ' open deals'));
+
+    // A rate needs a denominator. Decided = won + lost; with none, the
+    // honest output is a dash and the reason, not 0%.
+    var decided = won.length + lost.length;
+    if (decided === 0) {
+        set('sales-winrate', '—');
+        set('sales-winrate-sub', 'needs a deal marked Won or Lost');
+    } else {
+        set('sales-winrate', (100 * won.length / decided).toFixed(0) + '%');
+        set('sales-winrate-sub', won.length + ' of ' + decided + ' decided' +
+            (decided < 5 ? ' - too few to read much into' : ''));
+    }
+
+    set('sales-headline', rows.length
+        ? (rows.length + (rows.length === 1 ? ' lead' : ' leads') + ' · ' + salesMoney(revenue) + ' won')
+        : 'nothing entered yet');
+
+    // --- stage filter + add-form stage options, built once ---
+    ['sales-filter', 'sl-stage'].forEach(function (id) {
+        var sel = document.getElementById(id);
+        if (!sel) return;
+        var wantAll = (id === 'sales-filter');
+        if (sel.options.length <= (wantAll ? 1 : 0)) {
+            SALES_STAGES.forEach(function (s) {
+                var o = document.createElement('option'); o.value = s; o.textContent = s; sel.appendChild(o);
+            });
+        }
+    });
+
+    // --- the month trend, drawn only with two months of closed deals ---
+    var byMonth = {};
+    won.forEach(function (r) {
+        var m = String(r.date || '').slice(0, 7);
+        if (/^\d{4}-\d{2}$/.test(m)) byMonth[m] = (byMonth[m] || 0) + salesNum(r.value);
+    });
+    var months = Object.keys(byMonth).sort();
+    var trend = document.getElementById('sales-trend');
+    if (trend) {
+        if (months.length < 2) {
+            trend.innerHTML = '<div class="coin-history-empty">' +
+                (months.length === 0
+                    ? 'No closed deals yet. This draws once two different months have one.'
+                    : 'One month so far (' + salesEsc(months[0]) + ', ' + salesMoney(byMonth[months[0]]) +
+                      '). A line through one point is a decoration, so it waits for a second month.') +
+                '</div>';
+        } else {
+            var peak = Math.max.apply(null, months.map(function (m) { return byMonth[m]; }));
+            var bars = months.map(function (m) {
+                var pct = peak > 0 ? (100 * byMonth[m] / peak) : 0;
+                return '<div style="display:flex; align-items:center; gap:8px; margin:3px 0; font-size:0.74em;">' +
+                       '<span style="width:62px; color:var(--text-dim); font-variant-numeric:tabular-nums;">' + salesEsc(m) + '</span>' +
+                       '<span style="flex:1; min-width:0; background:var(--track); border-radius:3px; height:12px; overflow:hidden;">' +
+                       '<span style="display:block; height:100%; width:' + pct.toFixed(1) + '%; background:var(--green); border-radius:3px;"></span></span>' +
+                       '<span style="width:92px; text-align:right; font-variant-numeric:tabular-nums;">' + salesMoney(byMonth[m]) + '</span></div>';
+            }).join('');
+            trend.innerHTML = bars + '<div style="font-size:0.7em; color:var(--text-dim); margin-top:4px;">' +
+                              months.length + ' months with a closed deal. Bars are scaled to the biggest month, ' +
+                              salesMoney(peak) + '.</div>';
+        }
+    }
+
+    // --- pipeline by stage ---
+    var stagesEl = document.getElementById('sales-stages');
+    if (stagesEl) {
+        var openStages = SALES_STAGES.filter(function (s) { return !SALES_CLOSED[s]; });
+        var any = false;
+        var html = openStages.map(function (s) {
+            var inStage = rows.filter(function (r) { return r.stage === s; });
+            var sum = inStage.reduce(function (a, r) { return a + salesNum(r.value); }, 0);
+            if (inStage.length) any = true;
+            return '<div style="display:flex; justify-content:space-between; gap:8px; padding:6px 9px; margin:3px 0;' +
+                   'background:var(--bg); border-radius:7px; font-size:0.78em;' +
+                   (inStage.length ? '' : ' opacity:0.5;') + '">' +
+                   '<span>' + salesEsc(s) + '</span>' +
+                   '<span style="font-variant-numeric:tabular-nums;">' + inStage.length +
+                   (inStage.length === 1 ? ' deal' : ' deals') +
+                   (sum > 0 ? ' · ' + salesMoney(sum) : '') + '</span></div>';
+        }).join('');
+        stagesEl.innerHTML = html + (any ? '' :
+            '<div class="coin-history-empty">Every stage is empty. Add a lead below and it appears here.</div>');
+    }
+
+    // --- the leads table, filtered ---
+    var q = (document.getElementById('sales-search') || {}).value || '';
+    var f = (document.getElementById('sales-filter') || {}).value || '';
+    q = q.trim().toLowerCase();
+    var shown = rows.filter(function (r) {
+        if (f && r.stage !== f) return false;
+        if (!q) return true;
+        return [r.name, r.company, r.contact].join(' ').toLowerCase().indexOf(q) !== -1;
+    });
+    shown.sort(function (a, b) { return String(b.date || '').localeCompare(String(a.date || '')); });
+
+    var leadsEl = document.getElementById('sales-leads');
+    if (leadsEl) {
+        if (!rows.length) {
+            leadsEl.innerHTML = '<div class="coin-history-empty">No leads yet. Nothing here is pre-filled ' +
+                                'on purpose - a sample client list is one you end up acting on.</div>';
+        } else if (!shown.length) {
+            leadsEl.innerHTML = '<div class="coin-history-empty">None of your ' + rows.length +
+                                ' leads match that search or stage.</div>';
+        } else {
+            leadsEl.innerHTML = '<div class="table-scroll"><table style="width:100%; border-collapse:collapse; font-size:0.76em;">' +
+                '<thead><tr style="color:var(--text-dim); text-align:left;">' +
+                '<th style="padding:4px 6px;">Name</th><th style="padding:4px 6px;">Company</th>' +
+                '<th style="padding:4px 6px;">Contact</th><th style="padding:4px 6px; text-align:right;">Value</th>' +
+                '<th style="padding:4px 6px;">Stage</th><th style="padding:4px 6px;"></th></tr></thead><tbody>' +
+                shown.map(function (r) {
+                    var opts = SALES_STAGES.map(function (s) {
+                        return '<option value="' + salesEsc(s) + '"' + (s === r.stage ? ' selected' : '') + '>' + salesEsc(s) + '</option>';
+                    }).join('');
+                    return '<tr style="border-top:1px solid var(--border);">' +
+                        '<td style="padding:5px 6px;">' + salesEsc(r.name) + '<div style="font-size:0.85em; color:var(--text-dim);">' + salesEsc(r.date) + '</div></td>' +
+                        '<td style="padding:5px 6px;">' + (salesEsc(r.company) || '<span style="opacity:.4">—</span>') + '</td>' +
+                        '<td style="padding:5px 6px; word-break:break-word;">' + (salesEsc(r.contact) || '<span style="opacity:.4">—</span>') + '</td>' +
+                        '<td style="padding:5px 6px; text-align:right; font-variant-numeric:tabular-nums;">' + (salesNum(r.value) > 0 ? salesMoney(r.value) : '<span style="opacity:.4">—</span>') + '</td>' +
+                        '<td style="padding:5px 6px;"><select onchange="setSalesStage(\'' + r.id + '\', this.value)" ' +
+                            'style="background:var(--bg); border:1px solid var(--border); color:var(--text); ' +
+                            'padding:3px 5px; border-radius:5px; font-family:inherit; font-size:0.95em;">' + opts + '</select></td>' +
+                        '<td style="padding:5px 6px; text-align:right;"><button onclick="deleteSalesLead(\'' + r.id + '\')" ' +
+                            'style="background:none; border:1px solid var(--border); color:var(--text-dim); ' +
+                            'border-radius:5px; padding:2px 7px; cursor:pointer; font-family:inherit; font-size:0.95em;" ' +
+                            'title="Remove this lead">×</button></td></tr>';
+                }).join('') + '</tbody></table></div>' +
+                (shown.length < rows.length
+                    ? '<div style="font-size:0.7em; color:var(--text-dim); margin-top:4px;">Showing ' +
+                      shown.length + ' of ' + rows.length + '.</div>' : '');
+        }
+    }
+
+    var sn = document.getElementById('sales-storage-note');
+    if (sn) {
+        var probe = salesSave(rows);
+        sn.textContent = probe ? probe
+            : (rows.length + (rows.length === 1 ? ' lead' : ' leads') +
+               ' saved in this browser only. Not a database, not backed up.');
+    }
+}
+
+/* Restore the open/closed choice, then draw. Wrapped because a throw here
+   must not stop the trading panels from loading. */
+try {
+    (function () {
+        var start = function () {
+            try {
+                var wasOpen = null;
+                try { wasOpen = localStorage.getItem(SALES_KEY + '_open'); } catch (e) {}
+                if (wasOpen === '1') toggleSalesSection();
+                renderSales();
+            } catch (e) {}
+        };
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+        else start();
+    })();
+} catch (e) {}
+/* =================== END AGENCY SALES =================== */
 </script>
 </body>
 </html>
