@@ -328,6 +328,124 @@ class TheIndexCannotCallALosingBookStable(unittest.TestCase):
         self.assertIsNone(r["grade"])
 
 
+class TheTrappedPenaltyMustRankDangerCorrectly(unittest.TestCase):
+    """A COUNT is the wrong unit, and the duplication with blocked_exits
+    is the symptom rather than the defect. These three cases are the
+    argument."""
+
+    BASE = dict(drawdown_pct=0.0, broker_rejects=0, profit_factor=1.0)
+
+    # (label, blocked, count, trapped_usd, oldest_minutes)
+    TRIVIAL = ("trivial", 2, 2, 20.0, 2)
+    LIVE = ("live", 2, 2, 372.73, 364)
+    SEVERE = ("severe", 1, 1, 900.0, 4320)
+    EQUITY = 974.47
+
+    def _count(self, case):
+        _, be, tc, _usd, _m = case
+        return tg.capital_growth_index(**self.BASE, blocked_exits=be,
+                                       trapped_capital_count=tc)["index"]
+
+    def _exposure(self, case):
+        _, be, tc, usd, m = case
+        return tg.capital_growth_index(
+            **self.BASE, blocked_exits=be, trapped_capital_count=tc,
+            trapped_model="exposure", trapped_usd=usd, equity=self.EQUITY,
+            oldest_lock_minutes=m)["index"]
+
+    def test_the_count_model_cannot_tell_trivial_from_real(self):
+        self.assertEqual(self._count(self.TRIVIAL), self._count(self.LIVE),
+                         "$20 for 2 minutes and $372.73 for 6 hours score "
+                         "identically under a count - both are 'two "
+                         "positions'")
+
+    def test_the_count_model_ranks_the_worst_case_as_the_healthiest(self):
+        """One position holding 92% of the account for three days scores
+        BETTER than two holding $20 for two minutes, because one beats
+        two. This is the defect, not the double count."""
+        self.assertGreater(self._count(self.SEVERE),
+                           self._count(self.TRIVIAL))
+        self.assertGreater(self._count(self.SEVERE), self._count(self.LIVE))
+
+    def test_the_exposure_model_orders_them_correctly(self):
+        trivial = self._exposure(self.TRIVIAL)
+        live = self._exposure(self.LIVE)
+        severe = self._exposure(self.SEVERE)
+        self.assertGreater(trivial, live, "trivial must score best")
+        self.assertGreater(live, severe, "severe must score worst")
+
+    def test_the_trivial_lock_barely_registers(self):
+        self.assertLess(
+            tg.trapped_exposure_penalty(20.0, 974.47, 2), 1.0,
+            "$20 held for two minutes is a pending order, not a crisis")
+
+    def test_the_live_book_scores_the_measured_penalty(self):
+        # 30 * (372.73/974.47) * min(2.0, 364/120) = 30 * .38250 * 2.0
+        self.assertAlmostEqual(
+            tg.trapped_exposure_penalty(372.73, 974.47, 364), 22.95,
+            places=2)
+
+    def test_it_is_capped_so_one_position_cannot_zero_the_index(self):
+        self.assertEqual(
+            tg.trapped_exposure_penalty(100000.0, 974.47, 99999),
+            tg.TRAPPED_MAX_POINTS)
+
+    def test_inside_the_backstop_there_is_no_age_surcharge(self):
+        at = tg.trapped_exposure_penalty(372.73, 974.47, 120)
+        under = tg.trapped_exposure_penalty(372.73, 974.47, 10)
+        self.assertAlmostEqual(at, under, places=6,
+                               msg="a lock inside the backstop is a normal "
+                                   "pending order at any age")
+        self.assertAlmostEqual(at, 30 * (372.73 / 974.47), places=2)
+
+    def test_the_age_surcharge_doubles_and_stops(self):
+        one = tg.trapped_exposure_penalty(372.73, 974.47, 120)
+        two = tg.trapped_exposure_penalty(372.73, 974.47, 240)
+        ten = tg.trapped_exposure_penalty(372.73, 974.47, 1200)
+        # one is rounded to cents before doubling, so 11.47 * 2 = 22.94
+        # against a directly-rounded 22.95. A cent of rounding, not a
+        # behaviour difference - compared with that tolerance rather
+        # than loosened to places=1, which would hide a real drift.
+        self.assertLessEqual(abs(two - one * 2), 0.01,
+                             "past the backstop the surcharge doubles")
+        self.assertAlmostEqual(ten, two, places=2, msg="capped at 2x")
+
+    def test_nothing_trapped_costs_nothing(self):
+        self.assertEqual(tg.trapped_exposure_penalty(0.0, 974.47, 500), 0.0)
+
+    def test_an_unreadable_equity_returns_none_not_zero(self):
+        self.assertIsNone(tg.trapped_exposure_penalty(372.73, None, 364))
+        self.assertEqual(tg.trapped_exposure_penalty(372.73, 0.0, 364), 0.0)
+
+    def test_the_two_terms_stop_measuring_the_same_thing(self):
+        r = tg.capital_growth_index(
+            **self.BASE, blocked_exits=2, trapped_capital_count=2,
+            trapped_model="exposure", trapped_usd=372.73, equity=974.47,
+            oldest_lock_minutes=364)
+        self.assertIsNone(r["double_counted"],
+                          "under the exposure model there is no duplication")
+        self.assertEqual(r["trapped_model"], "exposure")
+        # blocked_exits is now the EVENT marker at 5 points, not 10.
+        self.assertAlmostEqual(r["breakdown"]["blocked_exits"], -10.0)
+
+    def test_the_count_model_stays_the_default(self):
+        """A formula the owner specified is not silently replaced."""
+        r = tg.capital_growth_index(**self.BASE, blocked_exits=2,
+                                    trapped_capital_count=2)
+        self.assertEqual(r["trapped_model"], "count")
+        self.assertAlmostEqual(r["breakdown"]["blocked_exits"], -20.0)
+        self.assertAlmostEqual(r["breakdown"]["trapped_capital"], -16.0)
+        self.assertIsNotNone(r["double_counted"])
+
+    def test_exposure_without_its_inputs_falls_back_and_says_so(self):
+        r = tg.capital_growth_index(**self.BASE, blocked_exits=2,
+                                    trapped_capital_count=2,
+                                    trapped_model="exposure")
+        self.assertEqual(r["trapped_model"], "count")
+        self.assertIn("fell back", r["model_note"])
+        self.assertIsNotNone(r["double_counted"])
+
+
 # ═══ [6] THE CONTRACTS ════════════════════════════════════════════════
 
 class DerivedFieldsComeFromTheLiveRules(unittest.TestCase):

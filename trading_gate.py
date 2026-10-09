@@ -96,10 +96,89 @@ class TradingDecision:
                 "timestamp": self.timestamp, "may_trade": self.may_trade}
 
 
+# ── WHAT TRAPPED CAPITAL ACTUALLY COSTS ───────────────────────────────
+#
+# The spec scores trapped capital as a COUNT, at 8 points each. A count
+# cannot tell two positions trapped for two minutes holding $20 apart
+# from one position holding $900 for three days - and once it is a count,
+# it IS blocked_exits, which is why the two terms duplicate. The
+# duplication is the symptom; the unit is the defect.
+#
+# AND THE REASON IT MATTERS IS NOT THE ONE IT LOOKS LIKE.
+#
+# The obvious reading is opportunity cost: trapped money cannot be
+# deployed, so growth suffers. On THIS account that reading is false.
+# Alpaca's measured edge is mean -$0.1557 per sell with a 95% CI of
+# -$0.4438 to +$0.1324 (ITEM 4, re-run on the corrected 196-sell
+# window) - it straddles zero. Capital deployed into a strategy with no
+# edge earns nothing in expectation, so freeing $372.73 to trade is not
+# a growth action, and an index that penalises trapped capital as lost
+# yield would be telling the owner to deploy into noise.
+#
+# The real cost is this: A POSITION THAT CANNOT EXIT CANNOT STOP
+# LOSING. The 1.5% mean-reversion stop is an exit. If the shares are
+# held, the stop cannot fire either. DOG and RWM are fine right now at
+# -0.21% and -0.33%, but if either fell 5% the protection would not
+# execute. Trapped capital is a DISARMED STOP-LOSS, and that is what
+# deserves index points.
+#
+# So the penalty is the share of equity whose risk controls are
+# currently unenforceable, escalating with how long that has been true.
+# Independent of blocked_exits by construction: that one counts the
+# EVENT (an execution failure happened, a reliability signal), this one
+# measures the EXPOSURE (how much money is unprotected, for how long).
+TRAPPED_MAX_POINTS = 30.0
+BLOCKED_EXIT_EVENT_POINTS = 5.0
+
+
+def trapped_exposure_penalty(trapped_usd, equity, oldest_lock_minutes=None,
+                             backstop_minutes=120):
+    """Index points to subtract for capital whose stops cannot fire.
+
+    share  = trapped_usd / equity, the fraction of the account that
+             cannot be protected
+    age    = 1.0 at or under the backstop, rising to 2.0 at twice it and
+             capped there. Inside the backstop a lock is a normal
+             pending order; past it, the exit has failed.
+    """
+    try:
+        t = float(trapped_usd)
+        eq = float(equity)
+    except (TypeError, ValueError):
+        return None
+    if eq <= 0 or t <= 0:
+        return 0.0
+    share = min(1.0, t / eq)
+    age_mult = 1.0
+    if oldest_lock_minutes is not None and backstop_minutes:
+        try:
+            ratio = float(oldest_lock_minutes) / float(backstop_minutes)
+            age_mult = max(1.0, min(2.0, ratio))
+        except (TypeError, ValueError, ZeroDivisionError):
+            age_mult = 1.0
+    return round(min(TRAPPED_MAX_POINTS,
+                     TRAPPED_MAX_POINTS * share * age_mult), 2)
+
+
 def capital_growth_index(drawdown_pct=None, blocked_exits=None,
                          trapped_capital_count=None, broker_rejects=None,
-                         profit_factor=None, peak_is_trusted=True):
-    """0-100, with an itemised breakdown and a profit-factor gate."""
+                         profit_factor=None, peak_is_trusted=True,
+                         trapped_model="count", trapped_usd=None,
+                         equity=None, oldest_lock_minutes=None,
+                         backstop_minutes=120):
+    """0-100, with an itemised breakdown and a profit-factor gate.
+
+    trapped_model picks how trapped capital is scored:
+      "count"    - the spec's version, 8 points per trapped position.
+                   THE DEFAULT, because a formula the owner specified is
+                   not silently replaced.
+      "exposure" - the recommended version: share of equity whose stops
+                   cannot fire, escalating with age, and blocked_exits
+                   drops to a 5-point event marker so the two terms stop
+                   measuring the same thing. Needs trapped_usd, equity
+                   and oldest_lock_minutes; falls back to "count" and
+                   says so if they are missing.
+    """
     missing = [n for n, v in (("drawdown_pct", drawdown_pct),
                               ("blocked_exits", blocked_exits),
                               ("trapped_capital_count", trapped_capital_count),
@@ -110,13 +189,28 @@ def capital_growth_index(drawdown_pct=None, blocked_exits=None,
                 "gated_by": None, "breakdown": {},
                 "why": f"cannot index: {', '.join(missing)} unreadable"}
 
-    dd = 0.0 if not peak_is_trusted else float(drawdown_pct)
     pf = float(profit_factor)
+    model = trapped_model
+    model_note = None
+    trapped_pts = None
+    if model == "exposure":
+        trapped_pts = trapped_exposure_penalty(
+            trapped_usd, equity, oldest_lock_minutes, backstop_minutes)
+        if trapped_pts is None:
+            model = "count"
+            model_note = ("trapped_model='exposure' needs trapped_usd and "
+                          "equity; fell back to the count model")
+    if model == "exposure":
+        blocked_pts = -float(blocked_exits) * BLOCKED_EXIT_EVENT_POINTS
+        trapped_term = -trapped_pts
+    else:
+        blocked_pts = -float(blocked_exits) * 10
+        trapped_term = -float(trapped_capital_count) * 8
     items = {
         "base": 100.0,
         "drawdown": -float(drawdown_pct) * 3 if peak_is_trusted else 0.0,
-        "blocked_exits": -float(blocked_exits) * 10,
-        "trapped_capital": -float(trapped_capital_count) * 8,
+        "blocked_exits": blocked_pts,
+        "trapped_capital": trapped_term,
         "broker_rejects": -float(broker_rejects) * 2,
         "profit_factor": max(0.0, (pf - 1) * 20),
     }
@@ -143,15 +237,21 @@ def capital_growth_index(drawdown_pct=None, blocked_exits=None,
                 "known stale and would subtract points for a loss that "
                 "did not happen.")
 
-    return {"index": idx, "grade": grade, "unknown": False,
-            "gated_by": gated, "breakdown": {k: round(v, 2)
-                                             for k, v in items.items()},
-            "raw_before_clamp": round(raw, 2),
-            "double_counted": (
-                "blocked_exits and trapped_capital describe the same "
-                "condition; each such position costs 10 + 8 = 18 points"
-                if blocked_exits and trapped_capital_count else None),
-            "why": why}
+    double = None
+    if model == "count" and blocked_exits and trapped_capital_count:
+        double = ("blocked_exits and trapped_capital describe the same "
+                  "condition; each such position costs 10 + 8 = 18 "
+                  "points. trapped_model='exposure' separates them.")
+    out = {"index": idx, "grade": grade, "unknown": False,
+           "gated_by": gated, "breakdown": {k: round(v, 2)
+                                            for k, v in items.items()},
+           "raw_before_clamp": round(raw, 2),
+           "trapped_model": model,
+           "double_counted": double,
+           "why": why}
+    if model_note:
+        out["model_note"] = model_note
+    return out
 
 
 def _grade(idx):
