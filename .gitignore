@@ -29,3 +29,4 @@ kalshi_polymarket_data.jsonl
 # read by CI to surface it as an annotation. Never a committed fact; the
 # committed one is test_baseline.txt.
 test_failures_last_run.txt
+.deploy_watch_baseline.json
