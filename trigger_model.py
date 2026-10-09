@@ -32,12 +32,29 @@ PARKED_FLOOR_PCT = 0.010
 
 
 def is_parked(branch):
-    """crypto_grid_bot.py:7004 - full on rungs OR every slice adopted."""
-    slices = branch.get("slices") or []
-    if not slices:
-        return False
-    levels = branch.get("num_levels") or 0
-    return len(slices) >= levels or all(s.get("adopted") for s in slices)
+    """The executor's own rule, imported - the FOURTH re-derivation failed too.
+
+    This read:
+
+        return len(slices) >= levels or all(s.get("adopted") for s in slices)
+
+    while the executor had moved to counting TRADEABLE slices, because a rung
+    filled by a sub-$1 remnant the venue will not sell is stuck, not full -
+    BCH-USD placed a sell for 0.00000022 BCH every ~10 minutes for 200
+    attempts before that landed. So this file, written to stop readers
+    re-deriving the rule after three separate times that sent wrong advice to
+    the owner, re-derived it wrong a fourth time in the one function it exists
+    to provide. test_trigger_consistency could not see it, because its own
+    reference model had been written from a reader instead of the executor.
+
+    So the rule is not written here any more. The import sits inside the
+    function to keep this module light for the scripts that read it, and it is
+    allowed to RAISE: a reader that cannot load the rule has to say so rather
+    than answer from a copy, which is the entire history above.
+    """
+    import crypto_grid_bot as _grid
+    return _grid.branch_is_parked(branch.get("slices"),
+                                  branch.get("num_levels"))
 
 
 def can_buy(branch):

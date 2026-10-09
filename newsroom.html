@@ -258,7 +258,7 @@
       <div class="body" id="matrix"><div class="muted">Loading the cross-rates…</div></div>
     </section>
 
-    <section class="desk span2">
+    <section class="desk span2 seg" data-seg="copy">
       <h2><span>COPY DESK</span><em>every figure re-derived from source</em></h2>
       <div class="body" id="copy"></div>
     </section>
@@ -294,6 +294,13 @@ const SEGMENTS = [
   ['account','WHOLE ACCOUNT'], ['studio','MAIN STUDIO'], ['risk','RISK DESK'],
   ['league','LEAGUE'], ['quant','QUANT DESK'], ['notes','PRODUCER NOTES'],
   ['capital','CAPITAL FLOW'], ['matrix','MATRIX DESK'], ['script','REPORTER SCRIPT'],
+  // COPY DESK was the one desk TV mode could not hide. 58e2df5 converted every
+  // other desk to `seg` with a data-seg name and missed this one, so with
+  // `body.tv .seg{display:none}` it was never hidden and sat on screen through
+  // every rotation. Adding the class alone would have been the opposite bug -
+  // hidden by default and never turned on, because showSegment only reveals a
+  // desk whose data-seg appears in THIS list.
+  ['copy','COPY DESK'],
 ];
 const TV = new URLSearchParams(location.search).has('tv');
 let segIdx = 0;

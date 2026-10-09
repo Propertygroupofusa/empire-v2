@@ -8,6 +8,7 @@ busy" into "I am making money", which is the single worst thing this
 dashboard could imply.
 """
 import json
+import re
 from pathlib import Path
 
 import trade_tape as T
@@ -128,9 +129,70 @@ ok("prints appear oldest-first within a batch",
 
 print("\nmotion is optional")
 
-ok("there is a float animation", "@keyframes tape-float" in HTML)
-ok("and it is disabled under prefers-reduced-motion",
-   "prefers-reduced-motion: reduce" in HTML and ".tape-print { animation: none" in HTML)
+# ASSERTED ON THE RULE, NOT THE NAME. These matched "@keyframes tape-float"
+# and ".tape-print { animation: none", and both broke on changes that were
+# improvements: the animation was renamed tape-lane, and reduced motion now
+# swaps to a tape-lane-still variant instead of `animation: none`. The swap
+# is the better behaviour - a print still has to clear the lane for the next
+# one, and `none` would leave them stacked on screen forever - so the test
+# follows the code rather than the other way round.
+#
+# The property is what matters: a print is animated, and under
+# prefers-reduced-motion whatever animation it gets MOVES NOTHING.
+_print_anim = re.search(r"\.tape-print\s*\{[^}]*animation:\s*([\w-]+)", HTML)
+ok("there is a tape-print animation", _print_anim is not None,
+   "nothing animates a print, so nothing clears the lane")
+
+def _block(text, start):
+    """The balanced {...} body beginning at the first brace at/after start.
+
+    Brace-matched rather than regex-windowed. A `.*?` to a guessed indent is
+    the same fixed-window mistake that broke five checks in test_invariants.py
+    - CSS nests, and the page has more than one reduced-motion block.
+    """
+    i = text.find("{", start)
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1:j]
+    return ""
+
+
+# Every reduced-motion block on the page, because there is more than one and
+# only the tape's is relevant here.
+_reduced_anim = None
+for _m in re.finditer(r"@media\s*\(prefers-reduced-motion:\s*reduce\)", HTML):
+    _body = _block(HTML, _m.end())
+    _hit = re.search(r"\.tape-print\s*\{[^}]*animation:\s*([\w-]+)", _body)
+    if _hit:
+        _reduced_anim = _hit
+        break
+ok("and prefers-reduced-motion overrides it", _reduced_anim is not None,
+   "the reduced-motion preference is not honoured for the tape")
+
+if _reduced_anim:
+    _name = _reduced_anim.group(1)
+    if _name == "none":
+        ok("and that override moves nothing", True)
+    else:
+        _kf = re.search(r"@keyframes\s+" + re.escape(_name) + r"\s*\{(.*?)\n\s*\}",
+                        HTML, re.S)
+        ok(f"the reduced-motion keyframes ({_name}) exist", _kf is not None)
+        # Compared in Python, not with a lookahead: `\s*(?!none)` backtracks
+        # to zero spaces and then happily matches " none".
+        _moves = [t.strip() for t in
+                  (re.findall(r"transform:\s*([^;}]+)", _kf.group(1)) if _kf else [])
+                  if t.strip() not in ("none", "")]
+        ok("and they move nothing - only opacity changes",
+           not _moves, f"reduced motion still animates {_moves}")
+        ok("while the ordinary animation DOES move, so the two really differ",
+           _name != _print_anim.group(1), f"both are {_name}")
 
 print("\nan error says so instead of showing a stale window")
 
