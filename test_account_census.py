@@ -138,8 +138,24 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DASH = open(os.path.join(HERE, "routers", "trading_dashboard.py"), encoding="utf-8").read()
 HTML = open(os.path.join(HERE, "family_tree_dashboard.html"), encoding="utf-8").read()
 ok("the endpoint exists and is a GET", '@router.get("/account-census")' in DASH)
-ok("it passes what the bots track, so a gap can be computed",
-   "tracked_usd=tracked" in DASH)
+# THE GAP IS STILL COMPUTED; IT IS COMPUTED LATER.
+#
+# This used to assert the literal "tracked_usd=tracked", which was the
+# old call shape: the endpoint computed `tracked` FIRST and handed it to
+# census(). That ordering was the second accounts walk - get_real_free_
+# cash_usd fetched the wallet, then census fetched it again - and it is
+# gone. The census now reads first (or is served from its 45s cache) and
+# the comparison is applied to the result.
+#
+# So the mechanism changed and the OUTCOME did not, which is what this
+# check is named for. Asserting the outcome is also strictly stronger
+# than the old string: "tracked_usd=tracked" only proved an argument was
+# passed somewhere, while these two prove the figure is computed AND
+# applied to the payload the endpoint actually returns.
+ok("it still computes what the bots track",
+   "tracked = grid_coin + cash" in DASH)
+ok("and applies it to the returned census, so a gap can be computed",
+   "apply_tracked(out, tracked)" in DASH)
 ok("the panel is mounted", 'id="account-census-panel"' in HTML)
 ok("and rendered", "renderAccountCensus()" in HTML)
 ok("it fetches on its own, off the status path",
