@@ -2593,3 +2593,60 @@ and it should never again read as a problem in my reports.
   59/63, `test_newsroom` 75/76, `test_trade_tape` 48/50,
   `test_live_ops_render` 58/59. Verified by stashing and re-running on a clean
   checkout, which is the only way to tell "mine" from "already broken".
+
+### The parked rule, 2026-10-09 — five copies, two already drifted
+
+Fixed in e0ce495. The rule is now `crypto_grid_bot.branch_is_parked` and
+nothing keeps a copy: `trigger_model.is_parked` delegates, and
+`scripts/capital_map.py` (two rules) and `scripts/fleet_watchdog.py` import
+it. Each import RAISES rather than falling back to a local copy.
+
+**Live effect today: ZERO branches.** Measured against `/grid-status` after
+the fix — 0 of 20 branches-with-slices change route. The one sub-$1 remnant
+on the fleet is still BCH-USD's ($0.000068 basis), and BCH sits at 6 slices
+against 10 levels, so neither the old rule nor the new one calls it parked.
+The fix is PREVENTIVE: it bites the moment BCH fills its rungs, which is
+exactly the state that produced 200 sell attempts for 0.00000022 BCH. Do not
+report this as having corrected a live misreport — it did not.
+
+- **A differential test whose reference model was written from one of the
+  things it compares is not a differential test.** `test_trigger_consistency`
+  compares the executor against four readers across 4,000 generated branches
+  and reported no disagreement for as long as it ran, because
+  `reference_can_sell` had been written from a reader's copy of the rule.
+  Corrected, the same comparison found 105 mismatches in fleet_watchdog and
+  163 each in capital_map and trigger_model. **Write the model from the thing
+  that ACTS, never from another observer of it.**
+- **The fixtures have to contain the state that distinguishes the rules.** Its
+  generated slices carried no `qty` or `entry_price`, so every slice was
+  identical under the dust floor and the raw count and the tradeable count
+  could never disagree. The fixture made the drift unreachable. Basis values
+  now straddle $1.00 deliberately.
+- **`trigger_model.py` exists to stop readers re-deriving the sell rule, and
+  its docstring lists three previous times that went wrong with advice going
+  out. It had gone wrong a fourth time, inside the one function it exists to
+  provide.** A module named "written once" is not self-enforcing. The test
+  that watches it has to call it, not read it.
+- **`getattr` on a dict does not raise, it answers the default.**
+  `slice_paid_no_entry_fee` was `getattr(slice_row, "adopted", False)` —
+  correct for the ORM rows the executor passes, silently "not adopted" for
+  every dict, while its siblings already used `_slice_field` for exactly this
+  reason. On an adopted-only branch that is the difference between the parked
+  route and a rise trigger it will never reach.
+- **A magic count hides what the check was built to catch.** newsroom pinned
+  its segments at 8; a desk was added, the count failed on 9, and the real
+  miss went unseen for ten days — COPY DESK had no `seg` class, so under
+  `body.tv .seg{display:none}` it was the one desk TV mode could never hide
+  and sat on screen through every rotation. Compare SETS, write no number.
+- **Two tests asserting opposite things about the same markup is worse than
+  either.** `test_dashboard_risk_panels` required the alert-queue panel while
+  `test_alert_noise_is_off_the_page` required its absence. Ownership goes to
+  the test that matches the code, and the other inverts its assertion so the
+  removal cannot be undone silently.
+- **A fixture that has drifted from its producer tests the fallback.**
+  live_ops_render's census fixture was three fields behind
+  `capital_census.coinbase_holdings()`, so every run exercised the renderer's
+  "priced ? of ?" path, which production never reaches. Its own comment said
+  it was copied from the producer's return statement.
+- **`\s*(?!none)` backtracks to zero spaces and then matches " none".** Do the
+  comparison in Python.
