@@ -3326,7 +3326,7 @@ async def get_grid_holdings_market_value():
     return round(total, 2), complete
 
 
-async def get_real_free_cash_usd():
+async def get_real_free_cash_usd(usd_balance=None):
     """Real, honest 'how much can I actually deploy into a NEW grid
     branch right now' figure - per the account owner's own direct
     complaint about creating branches "blindly" with no idea what's
@@ -3346,8 +3346,31 @@ async def get_real_free_cash_usd():
     agree on - never a separately, independently computed figure that
     could quietly disagree with the other. Returns None on a real
     balance-fetch failure, never a fabricated number."""
-    async with engine.aiohttp.ClientSession() as session:
-        real_balance, _err = await engine.get_usd_balance(session)
+    # usd_balance INJECTED, not cached. A caller that has ALREADY read
+    # the wallet this request may hand the figure in instead of making
+    # a second accounts walk for it.
+    #
+    # /account-census was doing exactly that: its census read walks the
+    # accounts, and then this function walked them again for the same
+    # USD number. Two venue calls per request on the most-polled page in
+    # the system, which is half of what produced the 429 storm measured
+    # 2026-10-09 03:36Z.
+    #
+    # A MODULE-LEVEL CACHE WAS THE WRONG FIX AND WAS NOT TAKEN. This
+    # function is also called by the trading loop, which must size
+    # against a live balance - caching here would have quietly handed
+    # the deployer a stale number to SPEND against, which is a trading
+    # change wearing a rate-limit fix's clothes. Injection has no such
+    # reach: a caller that passes nothing gets exactly the behaviour it
+    # had before, a fresh read, every time.
+    #
+    # `is None`, not falsiness: a wallet holding 0.00 is a real reading
+    # and must not be mistaken for an absent argument.
+    if usd_balance is None:
+        async with engine.aiohttp.ClientSession() as session:
+            real_balance, _err = await engine.get_usd_balance(session)
+    else:
+        real_balance = usd_balance
     if real_balance is None:
         return None
 

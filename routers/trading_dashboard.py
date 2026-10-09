@@ -1205,22 +1205,22 @@ async def get_account_census(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"census unavailable: {e}")
 
-    # What the bot-facing figure believes, built the same way it is built:
-    # USD cash plus coin the branches themselves hold.
-    tracked = None
-    try:
-        from models import CryptoGridBranch, CryptoGridSlice
-        slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
-        grid_coin = sum((s.entry_price or 0) * (s.qty or 0) for s in slices)
-        cash = 0.0
-        if crypto_grid_bot_module is not None:
-            try:
-                cash = float(await crypto_grid_bot_module.get_real_free_cash_usd() or 0)
-            except Exception:
-                cash = 0.0
-        tracked = grid_coin + cash
-    except Exception as e:
-        log.warning(f"[census] tracked figure unavailable: {type(e).__name__}: {e}")
+    # THE VENUE IS READ ONCE, AND THE SECOND READER IS FED FROM IT.
+    #
+    # This used to compute `tracked` FIRST, which called
+    # get_real_free_cash_usd(), which walked the accounts - and then the
+    # census below walked them again for the same data. Two venue calls
+    # per request, on the most-polled page in the system.
+    #
+    # Inverted: the census reads (or is served from its 45s cache), and
+    # the USD balance it already carries is handed to
+    # get_real_free_cash_usd instead of being fetched again. The
+    # comparison is then applied with apply_tracked, which is why that
+    # was split out of census() in the first place.
+    #
+    # Nothing is cached that the TRADING loop reads. The loop calls
+    # get_real_free_cash_usd() with no argument and still gets a live
+    # read, exactly as before.
 
     # census_cached, NOT census. This endpoint is the most-polled read in
     # the system - the dashboard calls it, every open browser tab calls
@@ -1242,10 +1242,58 @@ async def get_account_census(db: AsyncSession = Depends(get_db)):
     # an unavailable page.
     try:
         async with engine.aiohttp.ClientSession() as session:
-            out = await account_census.census_cached(session, tracked_usd=tracked)
+            out = await account_census.census_cached(session, tracked_usd=None)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"census failed: {type(e).__name__}: {e}")
-    return out
+
+    if not out.get("available"):
+        # The venue refused and there was no reading recent enough to
+        # serve. Do NOT fall back to a fresh get_real_free_cash_usd()
+        # here - that is another call to the endpoint that just refused.
+        return out
+
+    # THE USD ROW, NOT cash_usd, AND available_units, NOT units.
+    #
+    # Two traps, both live in this account tonight:
+    #
+    #   cash_usd sums the STABLE set - USD, USDC, USDT, DAI, PYUSD,
+    #   USDS. It reads $403.76 while the USD wallet holds $102.50,
+    #   because $301.26 is USDC. get_usd_balance matches currency ==
+    #   "USD" alone, so handing it cash_usd would make this page report
+    #   free cash the bot can never reach - papering over the exact
+    #   denomination gap that is currently keeping the fleet parked.
+    #
+    #   `units` is available + hold; get_usd_balance reads
+    #   available_balance. Using units would feed the deployer a figure
+    #   that counts coin the venue will not release - the OWNED vs
+    #   AVAILABLE mistake this repository has already paid for twice.
+    _usd = None
+    for _row in (out.get("holdings") or []):
+        if _row.get("asset") == "USD":
+            _usd = _row.get("available_units")
+            break
+    if _usd is None:
+        # No USD row at all means a zero USD wallet, which is a real
+        # reading on this account right now - not a missing one.
+        _usd = 0.0
+
+    tracked = None
+    try:
+        from models import CryptoGridBranch, CryptoGridSlice
+        slices = (await db.execute(select(CryptoGridSlice))).scalars().all()
+        grid_coin = sum((s.entry_price or 0) * (s.qty or 0) for s in slices)
+        cash = 0.0
+        if crypto_grid_bot_module is not None:
+            try:
+                cash = float(await crypto_grid_bot_module
+                             .get_real_free_cash_usd(usd_balance=float(_usd)) or 0)
+            except Exception:
+                cash = 0.0
+        tracked = grid_coin + cash
+    except Exception as e:
+        log.warning(f"[census] tracked figure unavailable: {type(e).__name__}: {e}")
+
+    return account_census.apply_tracked(out, tracked)
 
 
 @router.get("/coinbase-statement")

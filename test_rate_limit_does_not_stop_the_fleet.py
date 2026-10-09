@@ -35,6 +35,7 @@ Run: python3 -m unittest test_rate_limit_does_not_stop_the_fleet
 """
 
 import asyncio
+import inspect
 import unittest
 
 import account_census as ac
@@ -299,6 +300,134 @@ class TheWalletReadSurvivesARateLimit(unittest.TestCase):
         class _H:
             headers = {}
         self.assertEqual(self.cb._retry_after_seconds(_H(), 1.5), 1.5)
+
+
+# ═══ [6] THE SECOND ACCOUNTS WALK, REMOVED BY INJECTION ═══════════════
+
+class TheBalanceIsInjectedNotCached(unittest.TestCase):
+    """/account-census used to read the venue TWICE: once for the census
+    and once more inside get_real_free_cash_usd for the same USD number.
+
+    A module-level cache would have fixed the page and broken the
+    trading loop, which calls the same function and must size against a
+    live balance. Injection has no such reach."""
+
+    def test_the_signature_takes_an_injected_balance(self):
+        import inspect
+        import crypto_grid_bot as g
+        sig = inspect.signature(g.get_real_free_cash_usd)
+        self.assertIn("usd_balance", sig.parameters)
+        self.assertIsNone(sig.parameters["usd_balance"].default,
+                          "the default must be None so an un-passed "
+                          "caller behaves exactly as before")
+
+    def test_an_injected_balance_skips_the_venue_entirely(self):
+        import crypto_grid_bot as g
+        src = inspect.getsource(g.get_real_free_cash_usd)
+        i_guard = src.index("if usd_balance is None:")
+        i_fetch = src.index("get_usd_balance")
+        self.assertLess(i_guard, i_fetch,
+                        "the venue call must sit INSIDE the None branch")
+
+    def test_it_tests_is_none_not_falsiness(self):
+        """A wallet holding 0.00 is a real reading. `if not usd_balance`
+        would re-fetch on a genuinely empty wallet - the one case where
+        the answer matters most."""
+        import crypto_grid_bot as g
+        src = inspect.getsource(g.get_real_free_cash_usd)
+        self.assertIn("if usd_balance is None:", src)
+        self.assertNotIn("if not usd_balance", src)
+
+    def test_the_trading_loop_path_is_unchanged(self):
+        """No argument -> fresh read. That is the whole safety argument
+        for injection over caching."""
+        import crypto_grid_bot as g
+        src = inspect.getsource(g.get_real_free_cash_usd)
+        self.assertIn("async with engine.aiohttp.ClientSession() as session:",
+                      src)
+        self.assertIn("await engine.get_usd_balance(session)", src)
+
+
+class TheEndpointFeedsTheRightNumber(unittest.TestCase):
+    """Both traps, pinned. Either one silently produces a wrong figure
+    on a page whose whole job is to be the honest one."""
+
+    ENDPOINT = None
+
+    @staticmethod
+    def _code_only(text):
+        """Strip comments and docstrings before asserting on the code.
+
+        The first run of this class failed three ways, and all three
+        were the test's fault: the endpoint's own comments explain why
+        NOT to use cash_usd and why NOT to call get_real_free_cash_usd()
+        bare, so searching the raw text found the warnings against the
+        very things it was checking for. A test that trips on the
+        comment explaining it is testing the prose, not the program.
+        """
+        out = []
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            out.append(line)
+        body = "\n".join(out)
+        # Drop the function docstring too.
+        if body.count('"""') >= 2:
+            a = body.index('"""')
+            b = body.index('"""', a + 3)
+            body = body[:a] + body[b + 3:]
+        return body
+
+    def setUp(self):
+        import io as _io
+        self.src = _io.open("routers/trading_dashboard.py",
+                            encoding="utf-8").read()
+        i = self.src.index('@router.get("/account-census")')
+        j = self.src.index('@router.get("/coinbase-statement")')
+        self.body = self._code_only(self.src[i:j])
+
+    def test_it_does_not_hand_over_cash_usd(self):
+        """cash_usd sums the STABLE set. On this account it reads $403.76
+        against a $102.50 USD wallet, because $301.26 is USDC - the gap
+        currently keeping the fleet parked."""
+        # Matched as a dict ACCESS, not as a bare substring: the
+        # function name get_real_free_cash_usd contains "cash_usd", so
+        # a substring assertion fails on the correct code. Caught on the
+        # second run of this test.
+        for access in ('["cash_usd"]', ".get(\"cash_usd\")",
+                       "['cash_usd']", ".get('cash_usd')"):
+            self.assertNotIn(access, self.body,
+                             "cash_usd sums the STABLE set and includes "
+                             "USDC; get_usd_balance matches USD alone")
+
+    def test_it_reads_available_units_not_units(self):
+        self.assertIn('_row.get("available_units")', self.body)
+        self.assertNotIn('_row.get("units")', self.body,
+                         "units is available + hold - the OWNED vs "
+                         "AVAILABLE mistake, a third time")
+
+    def test_it_matches_on_the_usd_row_specifically(self):
+        self.assertIn('_row.get("asset") == "USD"', self.body)
+
+    def test_it_passes_the_balance_in(self):
+        self.assertIn("get_real_free_cash_usd(usd_balance=", self.body)
+        self.assertNotIn("get_real_free_cash_usd()", self.body,
+                         "an un-passed call here is the second accounts "
+                         "walk this change exists to remove")
+
+    def test_a_refused_census_does_not_call_the_venue_again(self):
+        i_guard = self.body.index('if not out.get("available"):')
+        i_call = self.body.index("get_real_free_cash_usd(")
+        self.assertLess(i_guard, i_call,
+                        "on a refusal, return before making another call "
+                        "to the endpoint that just refused")
+
+    def test_the_comparison_is_applied_after_the_read(self):
+        self.assertIn("account_census.apply_tracked(out, tracked)", self.body)
+        self.assertIn("tracked_usd=None", self.body,
+                      "the shared reading is fetched WITHOUT a caller's "
+                      "comparison baked into it")
 
 
 if __name__ == "__main__":
