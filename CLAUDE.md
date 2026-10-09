@@ -14578,3 +14578,51 @@ true and was the wrong headline, because the owner's actual question for
 weeks has been whether the pile is growing. Lead with account_total_usd
 from /growth-curve, then the trading figure beside it - never the trading
 figure alone.
+
+## I have been calling a SUBSET "the account". The owner's app proved it.
+
+2026-10-09 01:02Z. He sent a screenshot of his Coinbase app and said "Im
+losing." Both halves of that are right, and the second half is a
+correction I owe rather than a reading I made.
+
+  item            his app        my system          gap
+  crypto        11,595.94         6,298.57      5,297.37
+  cash           3,274.28         3,273.38          0.90
+  stocks & ETF      10.20         not seen            -
+  predictions       -0.25         not seen            -
+  TOTAL         14,880.17         9,571.95      5,308.22
+
+THE CASH AGREES TO NINETY CENTS, which is what makes the rest of it
+trustworthy: the Advanced Trade read is accurate about what it reads. It
+is the SCOPE that was wrong, not the arithmetic. $5,297.37 of his crypto
+is not in the Advanced Trade account at all - almost certainly staked -
+plus a stocks/ETF holding and a predictions balance that live on other
+Coinbase products entirely.
+
+The system already said so and I did not carry it into my reporting:
+out_of_reach_usd is None, out_of_reach_is_declared_not_measured is true,
+unset_means_unknown_not_zero is true, and the note reads "A staked balance
+is not in the Advanced Trade account - not as held, not as hold, not as a
+zero." I quoted "account total $9,532.18" to him repeatedly anyway.
+
+SO EVERY TOTAL I GAVE HIM TONIGHT WAS A SUBSET. The $9,547.88, the
+$9,532.18, and the capital-curve finding ($10,023.20 -> $9,579.27 over 4.6
+days) are all the Advanced Trade slice, not his Coinbase account. The
+finding itself stands for that slice; the label was too broad.
+
+HIS APP'S OWN ALL-TIME FIGURE: -$5,112.06, -25.58%. That is Coinbase's
+number on his whole account against its own cost basis, not mine, and it
+should always be attributed to them.
+
+WHAT IT IS NOT. It is not the grid's trading. That is +$133.78 across 247
+own closes and has never been the thing losing money. The decline is the
+market value of coin held against what was paid - and the largest single
+block of that coin, $5,297.37 of it, the bot has never touched, cannot
+sell, cannot protect and does not appear in any loss figure either of us
+has quoted.
+
+FROM NOW ON, say which book. "Advanced Trade" or "the tradeable account"
+when quoting census/grid figures; "his Coinbase account" only for a figure
+that includes the staked and non-spot products, which this system cannot
+read at all. GRID_OUT_OF_REACH_USD exists precisely so that number can be
+declared; it is unset.
