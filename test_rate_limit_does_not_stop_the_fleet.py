@@ -348,6 +348,116 @@ class TheBalanceIsInjectedNotCached(unittest.TestCase):
         self.assertIn("await engine.get_usd_balance(session)", src)
 
 
+class TheInjectedBalanceIsActuallyHONOURED(unittest.TestCase):
+    """BEHAVIOUR, not source text.
+
+    Every other injection test in this file inspects the source - the
+    signature, the guard, the call site. Those prove the code SAYS the
+    right thing. This one CALLS it and checks the arithmetic, because a
+    deployment checklist asked for coverage of the injection path and
+    zero-balance handling, and reading the source is not that.
+
+    The venue is stubbed to RAISE. If injection ever stops short-
+    circuiting the fetch, these fail loudly instead of quietly making a
+    network call in a unit test.
+    """
+
+    def setUp(self):
+        import crypto_grid_bot as g
+        self.g = g
+
+        class _Boom:
+            class aiohttp:
+                @staticmethod
+                def ClientSession():
+                    raise AssertionError(
+                        "the venue was read despite an injected balance")
+
+            @staticmethod
+            async def get_usd_balance(session):
+                raise AssertionError("get_usd_balance called on the "
+                                     "injected path")
+
+        self._engine = g.engine
+        g.engine = _Boom
+
+        class _Res:
+            def scalars(self):
+                return self
+            def all(self):
+                return []
+
+        class _DB:
+            async def execute(self, *a, **k):
+                return _Res()
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+
+        self._factory = g.get_session_factory
+        g.get_session_factory = lambda: (lambda: _DB())
+
+        self._reserve = g.get_grid_undeployed_reserve_total
+        async def _zero_reserve():
+            return 0.0
+        g.get_grid_undeployed_reserve_total = _zero_reserve
+
+        import sys, types
+        self._tree = sys.modules.get("crypto_family_tree_bot")
+        fake = types.ModuleType("crypto_family_tree_bot")
+        async def _locked():
+            return 0.0
+        fake.get_locked_usd = _locked
+        sys.modules["crypto_family_tree_bot"] = fake
+
+    def tearDown(self):
+        import sys
+        self.g.engine = self._engine
+        self.g.get_session_factory = self._factory
+        self.g.get_grid_undeployed_reserve_total = self._reserve
+        if self._tree is None:
+            sys.modules.pop("crypto_family_tree_bot", None)
+        else:
+            sys.modules["crypto_family_tree_bot"] = self._tree
+
+    def test_an_injected_balance_is_the_one_used(self):
+        got = run(self.g.get_real_free_cash_usd(usd_balance=102.50))
+        self.assertAlmostEqual(got, 102.50, places=2)
+
+    def test_zero_is_honoured_and_not_re_fetched(self):
+        """THE CASE THE CHECKLIST ASKED FOR. A wallet holding 0.00 is a
+        real reading. `if not usd_balance` would re-fetch here - and the
+        venue stub raises, so this test is what proves it does not."""
+        got = run(self.g.get_real_free_cash_usd(usd_balance=0.0))
+        self.assertEqual(got, 0.0,
+                         "0.00 must be used as a balance, not treated as "
+                         "a missing argument")
+
+    def test_the_live_pair_of_figures(self):
+        """The two numbers actually on this account tonight: the USD
+        wallet reads 102.50 while cash_usd reads 403.76. Feeding the
+        wrong one would overstate deployable cash by $301.26 of USDC."""
+        usd = run(self.g.get_real_free_cash_usd(usd_balance=102.50))
+        stable = run(self.g.get_real_free_cash_usd(usd_balance=403.76))
+        self.assertAlmostEqual(stable - usd, 301.26, places=2)
+
+    def test_reserves_are_still_subtracted(self):
+        async def _reserve():
+            return 1000.0
+        self.g.get_grid_undeployed_reserve_total = _reserve
+        got = run(self.g.get_real_free_cash_usd(usd_balance=102.50))
+        self.assertAlmostEqual(got, -897.50, places=2,
+                               msg="injection must not bypass the reserve "
+                                   "arithmetic - only the fetch")
+
+    def test_a_none_balance_still_reaches_for_the_venue(self):
+        """The trading loop's path. The stub raises, which IS the
+        assertion: no argument means a live read is attempted."""
+        with self.assertRaises(AssertionError):
+            run(self.g.get_real_free_cash_usd())
+
+
 class TheEndpointFeedsTheRightNumber(unittest.TestCase):
     """Both traps, pinned. Either one silently produces a wrong figure
     on a page whose whole job is to be the honest one."""
