@@ -1567,7 +1567,16 @@ TOP_N_ELIGIBLE_SYMBOLS = _safe_int_env("PROP_TOP_N_SYMBOLS", "5")
 # genuinely, persistently losing money on its own terms (not just "not
 # top-5 right now"), that's real evidence worth acting on and this
 # exemption doesn't shield it from that.
-INDEX_HEDGE_SYMBOLS = {"SH", "DOG", "RWM"}  # PSQ removed Sept 10: 25% win rate, -$427/4 trades
+#
+# REMOVED 2026-10-09 by the owner ("Yes, remove it"). In a rising market the
+# exemption kept SH/DOG/RWM in rotation while they ranked near the bottom -
+# they lost money under every exit rule the exit-rule comparison tested -
+# and, since the opposing-position guard (market_direction.py), a held
+# falling-market bet also blocks every long stock entry. They now earn a
+# top-N spot like everything else and return on their own once a decline
+# shows in their backtest ROI. Kept as an empty set so the exemption can be
+# restored deliberately by naming symbols here again.
+INDEX_HEDGE_SYMBOLS = set()  # was {"SH", "DOG", "RWM"}; PSQ removed Sept 10
 
 
 async def _compute_top_ranked_symbols():

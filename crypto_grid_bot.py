@@ -644,6 +644,37 @@ def tradeable_slices(slices) -> list:
     return [s for s in (slices or []) if slice_is_tradeable(s)]
 
 
+def branch_is_parked(slices, num_levels) -> bool:
+    """Is this branch on the parked-sell route rather than the rise trigger?
+
+    ONE DEFINITION, BECAUSE TWO HAD DISAGREED. The executor counts TRADEABLE
+    slices - a rung filled by a remnant the venue will not sell is stuck, not
+    full, and BCH-USD placed a sell for 0.00000022 BCH every ~10 minutes for
+    200 attempts before that was fixed. scripts/fleet_watchdog.py kept its own
+    copy counting RAW slices, so the two parted company silently:
+
+        3 rungs, 2 real slices, 1 sub-$1 remnant
+          executor -> not full on TRADEABLE rungs -> rise trigger, needs the
+                      whole grid_pct move off the branch reference
+          watchdog -> full on RAW rungs -> "parked-sell floor", and reports
+                      the branch as able to sell at +1.0%
+
+    The watchdog's output is advice, and its own docstring records what wrong
+    advice here already cost: it "called that slice ready and named a resting
+    order as the thing blocking it, and I told the owner to cancel that order.
+    It would have freed the coin and produced no sale."
+
+    test_trigger_consistency exists to catch precisely this drift and could
+    not, because its reference model had been written from the watchdog's copy
+    rather than from the executor. Both callers now come here.
+    """
+    slices = slices or []
+    if not slices:
+        return False
+    return (len(tradeable_slices(slices)) >= (num_levels or 0)
+            or branch_is_adopted_only(slices))
+
+
 def branch_is_adopted_only(slices) -> bool:
     """True when EVERY open slice on this branch was adopted.
 
@@ -2077,8 +2108,18 @@ def slice_paid_no_entry_fee(slice_row) -> bool:
     one. Zero-is-unknown is right for a real buy (a leg with no recorded
     rate still paid something) and wrong for an adopted one, which is
     exactly why this needs its own marker rather than a magic value.
+
+    READS A DICT TOO. This was a bare `getattr(slice_row, "adopted", False)`,
+    which is correct for the ORM rows the executor passes and silently False
+    for every dict - and `getattr` on a dict does not raise, it just answers
+    "not adopted". Its siblings slice_qty and slice_basis_usd already go
+    through _slice_field for exactly this reason ("from an ORM row or a dict,
+    without caring which"); this one did not, so the moment a reader handed it
+    a /grid-status branch every adopted slice came back as an ordinary bought
+    one. On an adopted-only branch that is the difference between the parked
+    route and a rise trigger it will never reach.
     """
-    return bool(getattr(slice_row, "adopted", False))
+    return bool(_slice_field(slice_row, "adopted"))
 
 
 async def slice_round_trip_fee_rate(slice_row, exit_leg_rate: float = None) -> float:
@@ -8114,9 +8155,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     # not full, it is stuck, and calling it parked sent it to an escape
     # hatch that could only offer that same remnant. BCH-USD placed a sell
     # for 0.00000022 BCH every ~10 minutes for 200 attempts this way.
-    _parked = bool(slices) and (
-        len(tradeable_slices(slices)) >= (branch.num_levels or 0)
-        or branch_is_adopted_only(slices))
+    # Via branch_is_parked, so the watchdog that reports this rule to the
+    # owner reads the same function rather than its own copy of it.
+    _parked = branch_is_parked(slices, branch.num_levels)
     _parked_sell = False
     _parked_slice = None
     if _parked and _stop_slice is None:

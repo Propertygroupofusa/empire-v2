@@ -8,6 +8,7 @@ broadcast.
 These tests exist to keep every desk tied to a measurement.
 """
 import ast
+import re
 import json
 
 import newsroom_brief as N
@@ -225,7 +226,35 @@ ok("TV mode is opt-in by query string", "has('tv')" in HTML)
 ok("it scales the type up", "body.tv{font-size:20px}" in HTML)
 ok("and the lead story most of all", "body.tv .story{font-size:30px" in HTML)
 ok("only the active segment shows", "body.tv .seg{display:none}" in HTML)
-ok("every desk is a segment", HTML.count('class="desk span2 seg"') + HTML.count('class="desk seg"') == 8)
+# EVERY DESK IS A SEGMENT, COUNTED STRUCTURALLY RATHER THAN PINNED AT 8.
+#
+# This was `count('class="desk span2 seg"') + count('class="desk seg"') == 8`.
+# A desk was added, the total became 9, and the check failed on its own magic
+# number - which hid what it was built to catch: COPY DESK carried no `seg`
+# class at all. 58e2df5 converted every other desk to `seg` with a data-seg
+# name and missed that one, so under `body.tv .seg{display:none}` it was the
+# one desk TV mode could never hide and it sat on screen through every
+# rotation. The count going stale is what stopped anyone seeing it.
+#
+# Both directions matter and both are checked: a desk outside the rotation is
+# permanently visible, and a rotation entry with no desk is a segbar tab that
+# shows nothing. So the two SETS must match, and no number is written down.
+_desks = re.findall(r'<section class="desk([^"]*)"([^>]*)>', HTML)
+ok("every desk carries the seg class", all("seg" in cls for cls, _ in _desks),
+   f"{sum(1 for cls, _ in _desks if 'seg' not in cls)} desk(s) are not segments "
+   f"- under body.tv .seg{{display:none}} those are never hidden")
+_desk_names = {re.search(r'data-seg="([^"]+)"', attrs).group(1)
+               for cls, attrs in _desks if 'data-seg="' in attrs}
+ok("every desk names its segment",
+   len(_desk_names) == len(_desks), f"{len(_desk_names)} names for {len(_desks)} desks")
+_rotation = set(re.findall(r"\['([a-z]+)','[A-Z ]+'\]", HTML))
+ok("and the rotation list matches the desks exactly, in both directions",
+   _desk_names == _rotation,
+   f"desks not in the rotation (never shown in TV mode): "
+   f"{sorted(_desk_names - _rotation)}; rotation entries with no desk "
+   f"(an empty tab): {sorted(_rotation - _desk_names)}")
+ok("there is more than one desk, so the checks above are not vacuous",
+   len(_desks) > 1, str(len(_desks)))
 ok("the account desk is one of them", 'data-seg="account"' in HTML)
 ok("it cycles on a timer", "setInterval(() => showSegment(segIdx + 1), 12000)" in HTML)
 ok("twelve seconds, not two - a wall is read slowly", "12000" in HTML)

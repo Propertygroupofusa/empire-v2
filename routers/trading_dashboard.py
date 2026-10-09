@@ -10533,10 +10533,23 @@ async def grid_invariants_endpoint():
         # even when no fill carries a label, and that is exactly the case
         # where the reader most needs to know it.
         fills = {}
+        # UNREADABLE IS NOT "OFF". This was `except Exception: _maker_only =
+        # False`, and False is a definite claim that the mode is disarmed.
+        # One unreadable DB flag then did two things, neither of them visible:
+        #   * the fee comparison below fell through to real_leg_fee_rate, the
+        #     maker/taker BLEND - the exact category error that
+        #     test_the_maker_only_floor_is_compared_against_the_maker_billed_rate
+        #     exists to prevent, reported as an ordinary disagreement;
+        #   * inv.maker_only_holds was SKIPPED rather than reported UNKNOWN,
+        #     so the check that notices a taker fill under maker-only left the
+        #     page entirely with nothing saying it had gone.
+        # None is UNKNOWN, and both readers below now handle it as such.
+        _maker_only = None
+        _maker_only_why = None
         try:
             _maker_only = await g.is_maker_only_active()
-        except Exception:
-            _maker_only = False
+        except Exception as e:
+            _maker_only_why = f"{type(e).__name__}: {e}"
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
@@ -10550,9 +10563,20 @@ async def grid_invariants_endpoint():
                 # 0.006137 only because pure-taker fills (XRP and XYO at
                 # 0.0075, ARB at 0.0062) are mixed in. The blend is still the
                 # right number when the fallback exists, so the mode picks.
-                if _maker_only and fills.get("maker_leg_fee_rate") is not None:
+                # `is True`, not truthiness: the mode is now three-state, and
+                # an UNKNOWN mode must not pick a rate. Picking either one
+                # would report a confident comparison built on a guess about
+                # which of two different questions was being asked.
+                if _maker_only is True and fills.get("maker_leg_fee_rate") is not None:
                     measured_leg = fills.get("maker_leg_fee_rate")
                     blind_because = None
+                elif _maker_only is None:
+                    measured_leg = None
+                    blind_because = (
+                        f"whether maker-only is armed could not be read "
+                        f"({_maker_only_why or 'no reason recorded'}), so there "
+                        f"is no way to know whether the floor should be "
+                        f"compared against the maker leg or the blended rate")
                 else:
                     measured_leg = fills.get("real_leg_fee_rate")
             else:
@@ -10593,13 +10617,23 @@ async def grid_invariants_endpoint():
         # the newest TAKER fill's timestamp, and when the current run of
         # maker-only started - so inv.maker_only_holds returns a verdict.
         try:
-            if _maker_only:
+            # A CHECK THAT LEAVES THE PAGE IS NOT A PASSING CHECK. This was
+            # `if _maker_only:`, so an unreadable mode dropped the row
+            # silently - and the row's whole job is to notice a taker fill
+            # under maker-only. An absent check reads as nothing to report.
+            #
+            # The UNKNOWN verdict is built by inv.maker_only_holds rather than
+            # here, because a hand-built verdict in the router is free to
+            # drift from the check it is impersonating - which is what
+            # test_maker_only_holds asserts against, and rightly.
+            if _maker_only is not False:
                 results.append(inv.maker_only_holds(
                     fills.get("taker_fills"),
                     fills.get("classified_fills"),
                     fills.get("newest_taker_fill"),
-                    await g.maker_only_armed_at(),
-                    maker_only_active=True))
+                    await g.maker_only_armed_at() if _maker_only else None,
+                    maker_only_active=_maker_only,
+                    mode_unreadable_because=_maker_only_why))
         except Exception as exc:
             results.append({"name": "maker_only_holds", "status": inv.UNKNOWN,
                             "detail": f"could not be checked: {type(exc).__name__}: {exc}"})

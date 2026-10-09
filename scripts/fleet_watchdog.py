@@ -51,6 +51,23 @@ findings = []
 gaps = []
 
 
+def _parked_rule(slices, num_levels):
+    """crypto_grid_bot.branch_is_parked - the executor's own rule, imported.
+
+    Imported lazily and from the repo root, because this script is run from
+    scripts/ and the bot module is a heavy import. It RAISES when it cannot
+    be loaded rather than falling back to a local copy of the rule: a local
+    copy is exactly what drifted, and every verdict this script prints about
+    whether a branch can sell depends on getting this right. A watchdog that
+    cannot read the rule must say so, not guess it.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import crypto_grid_bot as _grid
+    return _grid.branch_is_parked(slices, num_levels)
+
+
 def flag(level, code, msg):
     findings.append({"level": level, "code": code, "message": msg})
 
@@ -158,7 +175,15 @@ def _exit_threshold(branch):
     ref = branch.get("reference_price")
     px = branch.get("current_price")
     adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
-    parked = len(sl) >= lv or adopted_only
+    # THE EXECUTOR'S OWN FUNCTION, not a copy of it. This read
+    # `parked = len(sl) >= lv or adopted_only`, counting RAW slices, while the
+    # executor had moved to counting TRADEABLE ones - a rung filled by a
+    # sub-$1 remnant the venue will not sell is stuck, not full. So a branch
+    # with 3 rungs, 2 real slices and 1 remnant was reported HERE as on the
+    # parked route and able to sell at +1.0%, while the executor still wanted
+    # the whole grid_pct move off the reference. This file's output is advice,
+    # and the docstring above records what wrong advice here already cost.
+    parked = _parked_rule(sl, lv)
     readable = bool(gp and ref and px)
     if readable and px >= ref * (1 + gp):
         return True, "grid rise trigger", None

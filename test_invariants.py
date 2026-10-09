@@ -225,11 +225,82 @@ def test_no_check_is_incapable_of_failing():
     checked = {r["name"] for r in must_fail}
     public = {n for n in dir(inv)
               if not n.startswith("_") and callable(getattr(inv, n))
-              and n not in ("summarize",)}
+              and n not in NOT_CHECKS}
     assert checked == public, f"a check has no failing test: {public - checked}"
 
 
+#: Public callables in invariants.py that are NOT checks, each with its reason.
+#: A check answers a question with a verdict and can come back FAIL; these
+#: return data and have no verdict to fail. This was an inline ("summarize",)
+#: tuple, which went stale the moment branch_rows was added - the meta-test
+#: then reported a derivation as "a check with no failing test".
+NOT_CHECKS = {
+    "summarize": "folds a list of results others produced into one summary",
+    # A DERIVATION. It turns raw /grid-status branches into the row shape the
+    # capital checks read, and returns a list of rows - no name, no status.
+    # It exists because two readers of the same data derived it differently
+    # and /parked-capital filed $3,234.93 as unreadable.
+    "branch_rows": "derives the row shape the capital checks read",
+}
+
+
+def test_every_exclusion_really_has_no_verdict_to_fail():
+    """The list above is a claim, so it gets checked. If a real check were
+    parked in it, it would stop being tested and nothing would say so."""
+    for name, why in NOT_CHECKS.items():
+        fn = getattr(inv, name, None)
+        assert fn is not None, f"{name} is excluded but no longer exists - drop it"
+        assert str(why).strip(), f"{name} is excluded with no reason given"
+    # branch_rows, called for real: rows, not a verdict.
+    rows = inv.branch_rows({"branches": [
+        {"product_id": "QNT-USD", "allocated_usd": 100.0, "num_levels": 3,
+         "slices": [{"unrealized_net_pct": 0.55}, {"unrealized_net_pct": None}]},
+    ]})
+    assert isinstance(rows, list), type(rows)
+    assert rows and "status" not in rows[0], rows
+    assert rows[0]["open_slices"] == 2, rows
+    # The unreadable slice is dropped, not read as 0.00%. Compared with a
+    # tolerance because the derivation multiplies by 100 in float and
+    # 0.55 * 100 is 55.00000000000001 - pinning the exact literal would make
+    # this test about float representation rather than the dropped slice.
+    assert abs(rows[0]["best_slice_net_pct"] - 55.0) < 1e-9, rows
+    blind = inv.branch_rows({"branches": [
+        {"product_id": "X-USD", "allocated_usd": 1.0, "num_levels": 3,
+         "slices": [{"unrealized_net_pct": None}]}]})
+    assert blind[0]["best_slice_net_pct"] is None, blind
+
+
 # ------------------------------- an UNKNOWN must say why it could not look
+#
+# THESE THREE READ THE ENDPOINT'S REAL BODY, VIA AST.
+#
+# They used to read `src[i:i + 4000]` - a fixed character window starting at
+# the function's name. The endpoint is now 13,804 characters, so the window
+# covered the first 29% of it and all three failed: 1 of the 4 blind_because
+# assignments was inside it, the `except ... as e` handler was not, and
+# neither was the UNKNOWN condition. Every property they guard was intact.
+#
+# A window cannot be made "big enough" - the next person to add a check moves
+# it again, and a window that is too LARGE silently starts asserting against
+# whatever function follows. The function's real extent is a fact the parser
+# knows exactly, so it is asked instead of guessed.
+
+def _endpoint_body(name="grid_invariants_endpoint"):
+    """The complete source of one endpoint, exactly as far as it goes."""
+    import ast
+    import os
+    import pathlib
+    src = pathlib.Path(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "routers", "trading_dashboard.py")
+                       ).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+                and node.name == name):
+            return node, ast.get_source_segment(src, node)
+    raise AssertionError(f"{name} not found - it was renamed or removed, "
+                         f"which is itself the thing to look at")
+
+
 def test_the_endpoint_records_why_a_check_went_blind():
     """Found live 2026-09-28 01:41Z: fee_rate_agreement and
     spacing_evidence_current BOTH read UNKNOWN while
@@ -241,39 +312,108 @@ def test_the_endpoint_records_why_a_check_went_blind():
     A blind check is worse than a failing one - it looks like silence. So
     the cause is captured and attached to the verdict.
     """
-    import os
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
-    i = src.index("async def grid_invariants_endpoint")
-    block = src[i:i + 4000]
-    assert "blind_because" in block
-    # the bare swallow must be gone
-    assert "except Exception:\n            measured_leg = None" not in block
-    assert "except Exception as e:" in block
-    assert 'f"{type(e).__name__}: {e}"' in block
+    import ast
+    node, body = _endpoint_body()
+    assert "blind_because" in body, "the cause is no longer captured at all"
+    # The bare swallow must be gone: every handler that exists has to bind
+    # its exception, because a handler that does not cannot report a cause.
+    handlers = [h for h in ast.walk(node) if isinstance(h, ast.ExceptHandler)]
+    assert handlers, "no exception handler at all in the endpoint"
+    unnamed = [h for h in handlers if h.name is None]
+    assert not unnamed, (
+        f"{len(unnamed)} handler(s) swallow the exception without binding it, "
+        f"so they cannot say what went wrong (line(s) "
+        f"{[h.lineno for h in unnamed]})")
     # and a starved sample is distinguished from a thrown call
-    assert "classified_fills" in block
+    assert "classified_fills" in body
 
 
 def test_a_starved_sample_and_a_thrown_call_are_different_causes():
-    import os
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
-    i = src.index("async def grid_invariants_endpoint")
-    block = src[i:i + 4000]
-    assigns = block.count("blind_because = ")
-    assert assigns >= 3, "expected: init, starved-sample, exception"
+    """Three distinct causes, counted as real assignments rather than as
+    occurrences of a string: an initial value, a starved sample, and a
+    thrown call. One value for all three would make them indistinguishable."""
+    import ast
+    node, _ = _endpoint_body()
+    assigns = 0
+    for n in ast.walk(node):
+        targets = (n.targets if isinstance(n, ast.Assign)
+                   else [n.target] if isinstance(n, (ast.AnnAssign, ast.AugAssign))
+                   else [])
+        for t in targets:
+            if isinstance(t, ast.Name) and t.id == "blind_because":
+                assigns += 1
+    assert assigns >= 3, (
+        f"expected at least 3 assignments to blind_because (init, "
+        f"starved-sample, exception); found {assigns}")
+
+
+def test_an_unreadable_maker_only_mode_is_unknown_and_not_off():
+    """Found while fixing the three tests above. The mode was read as:
+
+        try:    _maker_only = await g.is_maker_only_active()
+        except Exception: _maker_only = False
+
+    False is a definite claim that the mode is disarmed, and one unreadable DB
+    flag then did two invisible things: the fee comparison fell through to the
+    maker/taker BLEND (the category error the test below exists to prevent),
+    and inv.maker_only_holds was skipped rather than reported - so the row that
+    notices a taker fill under maker-only left the page with nothing saying so.
+    An absent check reads as nothing to report.
+
+    Asserted structurally: the mode starts as None, and both readers test it
+    against True or None explicitly rather than for truthiness.
+    """
+    import ast
+    node, body = _endpoint_body()
+    assert "_maker_only = False" not in body, (
+        "an unreadable maker-only mode is being recorded as OFF again")
+    assert "_maker_only = None" in body, (
+        "the mode must start UNKNOWN, so a failed read cannot look disarmed")
+    # Every branch on the mode compares identity against True/None. A bare
+    # `if _maker_only` is what made UNKNOWN behave as OFF.
+    bare = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.If) and isinstance(n.test, ast.Name) \
+                and n.test.id == "_maker_only":
+            bare.append(n.lineno)
+    assert not bare, (
+        f"line(s) {bare} branch on the truthiness of a three-state mode, so "
+        f"UNKNOWN takes the same path as OFF")
+    assert "_maker_only_why" in body, "no cause is captured for the failed read"
+    # And the skip is gone: the check runs on an UNKNOWN mode too. Asserted on
+    # the VERDICT, not on the router - the router correctly does not
+    # hand-build it, because a verdict built there is free to drift from the
+    # check it impersonates, which is what test_maker_only_holds guards.
+    blind = inv.maker_only_holds(3, 85, "2026-10-01T00:00:00+00:00", None,
+                                 maker_only_active=None,
+                                 mode_unreadable_because="HTTP 500")
+    assert blind["status"] == inv.UNKNOWN, blind
+    assert blind["name"] == "maker_only_holds", blind
+    assert "could not be read" in blind["detail"], blind
+    assert "HTTP 500" in blind["detail"], blind
+    # The old behaviour, which must not come back: None fell into the
+    # `not maker_only_active` arm and answered OK, "maker-only is off".
+    assert "is off" not in blind["detail"], blind
+    off = inv.maker_only_holds(3, 85, None, None, maker_only_active=False)
+    assert off["status"] == inv.OK and "is off" in off["detail"], off
 
 
 def test_the_cause_is_only_attached_to_unknowns_not_to_fails():
     """A FAIL already carries its arithmetic; appending a cause to it would
-    bury the number under plumbing."""
-    import os
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
-    i = src.index("async def grid_invariants_endpoint")
-    block = src[i:i + 4000]
-    assert 'r["status"] == inv.UNKNOWN and blind_because' in block
+    bury the number under plumbing. Asserted as a real `and` of an UNKNOWN
+    comparison with the cause, so the guard survives a reflow."""
+    import ast
+    node, _ = _endpoint_body()
+    found = False
+    for n in ast.walk(node):
+        if not (isinstance(n, ast.BoolOp) and isinstance(n.op, ast.And)):
+            continue
+        txt = " ".join(ast.unparse(v) for v in n.values)
+        if "UNKNOWN" in txt and "blind_because" in txt:
+            found = True
+            break
+    assert found, ("no condition gates the cause on an UNKNOWN verdict - a "
+                   "cause attached to a FAIL buries its arithmetic")
 
 
 # ================= like-for-like: maker-only floor vs maker-billed rate
@@ -290,11 +430,9 @@ def test_the_maker_only_floor_is_compared_against_the_maker_billed_rate():
     Comparing those two makes the check cry wolf on correct behaviour, which
     is how a check stops being read.
     """
-    import os
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
-    i = src.index("async def grid_invariants_endpoint")
-    block = src[i:i + 6000]
+    # The endpoint's real extent, not a 6000-character window. Three tests
+    # above failed on exactly that window after the function grew past it.
+    _, block = _endpoint_body()
     assert "is_maker_only_active" in block
     assert 'fills.get("maker_leg_fee_rate")' in block
     # the blend is still used when the fallback exists
@@ -304,11 +442,7 @@ def test_the_maker_only_floor_is_compared_against_the_maker_billed_rate():
 def test_a_taker_fill_under_maker_only_is_its_own_finding():
     """It must not hide inside a blended rate. get_fill_mix's own note says
     a taker leg counted while maker-only is on is a bug."""
-    import os
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "routers", "trading_dashboard.py"), encoding="utf-8").read()
-    i = src.index("async def grid_invariants_endpoint")
-    block = src[i:i + 7000]
+    _, block = _endpoint_body()
     assert '"name": "maker_only_holds"' in block
     assert "taker_fills" in block
 

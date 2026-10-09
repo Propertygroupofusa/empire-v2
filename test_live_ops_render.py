@@ -36,8 +36,17 @@ js = js.replace("tick();", "").replace("setInterval(tick, REFRESH_MS);", "")
 
 # --- payloads, copied from the producing functions' own return statements ---
 # capital_census.coinbase_holdings() / alpaca_account()
+# coin_holdings_count / coin_priced_count / coin_usd_readable were MISSING
+# here while capital_census.coinbase_holdings() emits all three (lines
+# 229-231). This fixture's own comment says it is copied from the producing
+# function's return statement, and it had fallen behind - so the renderer took
+# its `?` fallback ("priced ? of ? holdings") on every run, a path production
+# never reaches. A fixture that has drifted from its producer tests the
+# fallback and nothing else.
 COINBASE_OK = {"venue": "Coinbase", "status": "OK", "usd_cash": 0.29, "coin_usd": 512.40,
                "coin_balances": {"BTC": 0.00684381}, "unpriced": ["DOT"],
+               "coin_holdings_count": 2, "coin_priced_count": 1,
+               "coin_usd_readable": True,
                "source": "X / Y", "note": ""}
 ALPACA_OK = {"venue": "Alpaca", "status": "OK", "equity": 936.01, "usd_cash": 936.01,
              "buying_power": 1872.02, "endpoint": "https://api.alpaca.markets",
@@ -202,7 +211,16 @@ def ok(label, cond):
 a = text(res["both venues readable"])
 ok("Coinbase USD renders its real value", "$0.29" in a)
 ok("Coinbase coin value renders", "$512.40" in a)
-ok("unpriced coins are named, not silently dropped", "DOT" in a and "could not be priced" in a)
+# The PROPERTY: an unpriced coin is named, and the figure beside it is
+# marked incomplete. The wording moved - "could not be priced" is now the
+# all-unreadable branch, and a partial read says "priced 1 of 2 holdings —
+# excludes DOT", which is more precise, not less. Pinning the old sentence
+# failed a better message.
+ok("unpriced coins are named, not silently dropped", "DOT" in a)
+ok("and the coin figure beside them is marked incomplete",
+   "excludes" in a or "could not be priced" in a)
+ok("and it says how many of how many were priced", "1 of 2" in a)
+ok("the counts are real, not the renderer's ? fallback", "? of ?" not in a)
 ok("Alpaca equity renders", "$936.01" in a)
 ok("Alpaca buying power renders", "$1,872.02" in a)
 ok("verified cash renders", "$936.30" in a)

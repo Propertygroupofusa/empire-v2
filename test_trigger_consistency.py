@@ -61,10 +61,22 @@ def ok(name, cond, extra=""):
 # observer, so agreeing with it is evidence and not a tautology.
 # ---------------------------------------------------------------------------
 PARKED_FLOOR_PCT = 0.010  # GRID_PARKED_MIN_NET_PCT
+DUST_SLICE_USD = 1.00     # GRID_DUST_SLICE_USD
 
 
 def reference_can_sell(b):
-    """crypto_grid_bot.py:7050 and :7004, as the bot actually evaluates them."""
+    """The executor's two triggers, written out from ITS source.
+
+    THIS MODEL WAS WRONG, AND THAT IS WHY THE DRIFT SURVIVED. The parked arm
+    read `len(slices) >= levels`, counting every slice. The executor counts
+    TRADEABLE slices - qty x entry >= $1.00 - because a rung filled by a
+    remnant the venue will not sell is stuck, not full. The model had been
+    written from the watchdog's copy of the rule rather than the executor's,
+    so the 4,000-case comparison below agreed with the observer it was
+    supposed to be auditing and reported no mismatch for as long as it ran.
+    The only thing that failed was a source regex, and a regex is not what
+    this file is for.
+    """
     slices = b.get("slices") or []
     if not slices:
         return False
@@ -75,7 +87,10 @@ def reference_can_sell(b):
         return True
     levels = b.get("num_levels") or 0
     adopted_only = all(x.get("adopted") for x in slices)
-    if bool(slices) and (len(slices) >= levels or adopted_only):
+    tradeable = [x for x in slices
+                 if (x.get("qty") or 0) * (x.get("entry_price") or 0)
+                 >= DUST_SLICE_USD]
+    if len(tradeable) >= levels or adopted_only:
         return max((x.get("unrealized_net_pct") or 0) for x in slices) >= PARKED_FLOOR_PCT
     return False
 
@@ -87,6 +102,12 @@ def gen_branch(rnd):
     gp = rnd.choice([0.02, 0.025, 0.03, 0.04])
     # Straddle the trigger deliberately - most random prices miss it entirely.
     px = ref * rnd.choice([0.90, 0.99, 1 + gp - 1e-9, 1 + gp, 1 + gp + 1e-9, 1.30])
+    # Slices now carry qty and entry_price, because the parked rule turns on
+    # whether a slice is big enough for the venue to sell. Basis values
+    # straddle the $1.00 dust floor on purpose - without a sub-$1 remnant in
+    # the fixtures the raw count and the tradeable count never disagree, and
+    # the drift this file exists to catch is invisible.
+    basis = rnd.choice([0.0000002, 0.22, 0.99, 1.00, 1.01, 40.0, 250.0])
     return {
         "product_id": "AAA-USD",
         "num_levels": levels,
@@ -95,6 +116,8 @@ def gen_branch(rnd):
         "current_price": px,
         "allocated_usd": 100.0,
         "slices": [{"adopted": rnd.random() < 0.5,
+                    "qty": basis / ref,
+                    "entry_price": ref,
                     "unrealized_net_pct": rnd.choice(
                         [-0.20, -0.01, 0.0, 0.0099, 0.010, 0.0101, 0.07])}
                    for _ in range(n)],
@@ -103,23 +126,56 @@ def gen_branch(rnd):
 
 print("the executor's formula is a FRACTION, and the source still says so")
 src = open(os.path.join(HERE, "crypto_grid_bot.py")).read()
+WATCHDOG_SRC = open(os.path.join(HERE, "scripts", "fleet_watchdog.py")).read()
+os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+import crypto_grid_bot as _grid
 ok("crypto_grid_bot.py still computes the rise trigger as (1 + grid_pct)",
    "price >= branch.reference_price * (1 + grid_pct)" in src,
    "the execution rule moved - every observer below is now unverified")
 ok("and NOT as (1 + grid_pct / 100), which is the same rule off by 100x",
    "reference_price * (1 + grid_pct / 100)" not in src)
-# UPDATED 2026-10-09. The rule moved from len(slices) to
-# len(tradeable_slices(slices)), which is the correction, not a drift: a
-# dust remnant is not a rung, and counting it as one is what had BCH-USD
-# placing a sell for 0.00000022 BCH every ten minutes. The regex now
-# REQUIRES the tradeable_slices form, so reverting to a bare len() fails
-# here rather than passing quietly.
-ok("the parked rule is still full-on-rungs OR adopted-only",
-   re.search(r"len\(tradeable_slices\(slices\)\) >= \(branch\.num_levels or 0\)\s*\n\s*or branch_is_adopted_only\(slices\)",
-             src) is not None)
-ok("and it counts TRADEABLE slices, never a raw len() that a dust "
-   "remnant would inflate",
-   re.search(r"_parked = bool\(slices\) and \(\s*\n\s*len\(slices\) >=", src) is None)
+# THE PARKED RULE, CHECKED BY CALLING IT.
+#
+# This was a two-line source regex expecting
+# `len(slices) >= (branch.num_levels or 0)\n or branch_is_adopted_only(...)`.
+# It broke when the executor moved to counting TRADEABLE slices - a real and
+# deliberate change (BCH-USD placed a sell for 0.00000022 BCH every ~10
+# minutes for 200 attempts when a remnant was allowed to fill a rung). The
+# regex was the only thing that noticed, and what it reported was its own
+# staleness, not the fact that the watchdog had been left behind.
+#
+# The rule now lives in one function that both the executor and the watchdog
+# call, so it is checked by calling it, and the source check is reduced to
+# the one thing a regex is actually good for: that neither caller has gone
+# back to keeping its own copy.
+ok("the executor routes the parked decision through branch_is_parked",
+   "_parked = branch_is_parked(slices, branch.num_levels)" in src,
+   "the executor has its own copy of the rule again")
+ok("and the watchdog routes it through the shared rule",
+   "_parked_rule(sl, lv)" in WATCHDOG_SRC,
+   "scripts/fleet_watchdog.py is deciding parked some other way - that drift "
+   "reported a stuck branch as able to sell at +1.0%")
+ok("the canonical reader does not keep a private copy either",
+   "_grid.branch_is_parked(" in open(
+       os.path.join(HERE, "trigger_model.py")).read(),
+   "trigger_model.is_parked has re-derived the rule again - that has now "
+   "happened four times, three of which sent wrong advice out")
+
+ok("a sub-$1 remnant does NOT fill a rung",
+   _grid.branch_is_parked(
+       [{"qty": 1.0, "entry_price": 40.0, "adopted": False},
+        {"qty": 1.0, "entry_price": 40.0, "adopted": False},
+        {"qty": 0.0000002, "entry_price": 1.0, "adopted": False}], 3) is False,
+   "a remnant the venue will not sell is counting as a filled rung")
+ok("three real slices on three rungs IS parked",
+   _grid.branch_is_parked(
+       [{"qty": 1.0, "entry_price": 40.0, "adopted": False}] * 3, 3) is True)
+ok("an adopted-only branch is parked however many rungs are free",
+   _grid.branch_is_parked(
+       [{"qty": 1.0, "entry_price": 40.0, "adopted": True,
+         "entry_fee_usd": 0.0}], 3) is True)
+ok("and an empty branch is never parked",
+   _grid.branch_is_parked([], 3) is False)
 
 print()
 print("fleet_watchdog._exit_threshold agrees with the executor")

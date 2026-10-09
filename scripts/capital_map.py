@@ -48,6 +48,26 @@ CONCENTRATION_CEILING_PCT = 20.0
 # the error that twice told the owner to cancel a protective ALGO order.
 PARKED_FLOOR_PCT = 0.010
 
+
+def _parked_rule(branch):
+    """trigger_model.is_parked - the canonical reader, imported not copied.
+
+    Both rules in this file read `len(sl) >= levels or adopted_only`, counting
+    every slice, while the executor counts TRADEABLE ones: a rung filled by a
+    sub-$1 remnant the venue will not sell is stuck, not full. That made this
+    file report a stuck branch as parked and therefore sellable at the +1.0%
+    floor, when the executor still wanted the whole grid_pct move off the
+    reference. Five copies of this rule existed; this was two of them.
+
+    Raises rather than falling back to a local copy - a local copy is the bug.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    import trigger_model
+    return trigger_model.is_parked(branch)
+
+
 # Below this many closed round trips a band is reported but never quoted as
 # the benchmark. Chosen before looking at which band it would exclude.
 MIN_TRIPS_TO_QUOTE = 15
@@ -122,10 +142,8 @@ def branch_can_buy(b):
     counted JASMY and ONDO as able to trade when both had stopped buying,
     which overstated the tradeable pile by $108.98.
     """
-    sl = b.get("slices") or []
-    levels = b.get("num_levels") or 0
-    adopted_only = bool(sl) and all(x.get("adopted") for x in sl)
-    parked = len(sl) >= levels or adopted_only
+    # Via the shared rule, not a copy of it - see _parked_rule above.
+    parked = _parked_rule(b)
     blocked = bool(b.get("buys_paused") or b.get("drawdown_breached"))
     return (not parked) and (not blocked)
 
@@ -153,9 +171,7 @@ def branch_can_sell(b):
         return None  # UNKNOWN is the third verdict, never folded into False
     if px >= ref * (1 + gp):
         return True
-    levels = b.get("num_levels") or 0
-    adopted_only = all(x.get("adopted") for x in sl)
-    if len(sl) >= levels or adopted_only:
+    if _parked_rule(b):
         # A parked branch may still clear the parked-sell floor.
         return max((x.get("unrealized_net_pct") or 0) for x in sl) >= PARKED_FLOOR_PCT
     return False
