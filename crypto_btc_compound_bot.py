@@ -53,6 +53,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 from database import get_session_factory
 from models import BotPosition
+# Pure, no I/O, no circular import: it decides whether a size is legal to
+# sell and which of five things is true when it is not.
+import slice_execution
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("crypto_btc_compound_bot")
@@ -704,6 +707,120 @@ async def get_product_size_decimals(session, product_id: str) -> int:
     except Exception as e:
         log.warning(f"[BTC-COMPOUND] size-precision fetch failed for {product_id}, defaulting to 8 decimals: {e}")
         return 8
+
+
+async def get_product_rules(session, product_id: str):
+    """The venue's full trading rules for one product. ({...}, None) or (None, why).
+
+    The sibling of get_product_size_decimals, and deliberately NOT a
+    replacement for it - that one is still used by the buy and market-sell
+    paths and changing them is not this change. The differences that matter:
+
+      * it returns the increment ITSELF, not a count of its decimal places. A
+        count cannot express an increment that is not a power of ten, so a
+        0.05 grid becomes "2 decimals" and 0.03 passes a check the venue
+        rejects. ALGO's is 0.1 and QNT's is 0.001, which is why nobody has
+        been bitten by this yet.
+      * it carries base_min_size and the quote minimum, neither of which was
+        read anywhere. `quote_min_size` does not appear in this repo at all,
+        so an order above the increment and worth $0.15 went to a venue with
+        a $1 floor.
+      * it FAILS CLOSED. get_product_size_decimals returns 8 on a failed
+        fetch - the most permissive value on Coinbase - on the one input that
+        decides whether an order is legal at all.
+    """
+    path = f"/api/v3/brokerage/products/{product_id}"
+    try:
+        async with session.get(COINBASE_BASE_URL + path,
+                               headers=_auth_headers("GET", path),
+                               timeout=15) as r:
+            if r.status != 200:
+                body = (await r.text())[:200]
+                return None, f"HTTP {r.status} reading {product_id} rules: {body}"
+            data = await r.json()
+    except asyncio.TimeoutError:
+        return None, f"timeout reading {product_id} trading rules"
+    except Exception as e:
+        return None, f"{type(e).__name__} reading {product_id} rules: {str(e)[:150]}"
+    if not data.get("base_increment"):
+        # The one field with no safe default. Absent means the size grid is
+        # unknown, and an unknown size grid is not a permissive one.
+        return None, (f"{product_id} rules came back without a base_increment "
+                      f"- the legal size grid is unknown")
+    return {
+        "base_increment": data.get("base_increment"),
+        "base_min_size": data.get("base_min_size"),
+        "quote_min_size": data.get("quote_min_size"),
+        "quote_increment": data.get("quote_increment"),
+        "trading_disabled": data.get("trading_disabled"),
+        "status": data.get("status"),
+    }, None
+
+
+async def get_asset_balance_detail(session, currency: str):
+    """(available, hold, None) or (None, None, why) for one currency.
+
+    get_asset_balance returns only `available_balance` and discards `hold`,
+    and `hold` is the field that separates two completely different problems
+    that have been sharing one log line:
+
+        ALGO  held 1134.346389, HOLD 1134.3, available 0.046389
+              -> the coin exists; another order is sitting on it
+        QNT   held 0.00097323,  HOLD 0.0,    available 0.00097323
+              -> against a ledger claiming 0.675982. The coin is not there.
+
+    Both printed "nothing sellable". One is a resting order doing its job;
+    the other is $169 of inventory on the books that the account does not
+    hold, marked +55%.
+    """
+    path = "/api/v3/brokerage/accounts"
+    cursor = None
+    try:
+        while True:
+            params = {"limit": 250}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                headers = _auth_headers("GET", path)
+            except ValueError as e:
+                return None, None, f"Auth header build failed: {str(e)}"
+            async with session.get(COINBASE_BASE_URL + path, headers=headers,
+                                   params=params, timeout=15) as r:
+                if r.status != 200:
+                    body = (await r.text())[:200]
+                    return None, None, f"HTTP {r.status}: {body}"
+                data = await r.json()
+                for account in data.get("accounts", []):
+                    if account.get("currency") != currency:
+                        continue
+                    avail = account.get("available_balance") or {}
+                    held = account.get("hold") or {}
+                    # The hold is reported separately from the balance and can
+                    # be missing on its own. Missing stays None - UNKNOWN - so
+                    # the classifier refuses rather than reading it as "nothing
+                    # is reserved", which would turn a resting order into an
+                    # accusation that the books are wrong.
+                    try:
+                        a = float(avail["value"])
+                    except (KeyError, TypeError, ValueError):
+                        return None, None, (f"{currency} account gave no readable "
+                                            f"available balance")
+                    try:
+                        h = float(held["value"])
+                    except (KeyError, TypeError, ValueError):
+                        h = None
+                    return a, h, None
+                if not data.get("has_next") or not data.get("cursor"):
+                    break
+                cursor = data.get("cursor")
+        return None, None, f"no {currency} account found on this key"
+    except asyncio.TimeoutError:
+        return None, None, "Coinbase API timeout"
+    except aiohttp.ClientError as e:
+        return None, None, f"Coinbase connection failed: {type(e).__name__}"
+    except Exception as e:
+        log.exception(f"Exception in get_asset_balance_detail for {currency}")
+        return None, None, f"{type(e).__name__}: {str(e)[:150]}"
 
 
 async def _fetch_candles(session, product_id: str):
@@ -1427,7 +1544,11 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
     # reached it is 0.0, and recording that as the requested size would say
     # nothing at all.
     _asked_qty = qty
-    real_balance, _bal_err = await get_asset_balance(session, base_currency)
+    # WHAT THE WALLET HAS, AND WHAT IS HOLDING IT. The hold is read now
+    # because it is the single field that separates a resting order from a
+    # ledger that is wrong, and those two were sharing one log line.
+    real_balance, _hold_units, _bal_err = await get_asset_balance_detail(
+        session, base_currency)
     if real_balance is None:
         # Same rule, no exception. This is the opportunistic maker path and
         # there is always a next cycle, so there is never a reason to rest an
@@ -1436,50 +1557,20 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
             f"[GRID] {product_id}: REFUSING to rest a maker sell - the real "
             f"{base_currency} balance could not be read ({_bal_err}). Not "
             f"placed; retried next cycle.")
+        _last_order_error[product_id] = f"balance unreadable: {_bal_err}"
         _last_order_rested[product_id] = False
         # available_units deliberately absent: the read FAILED, so there is
         # no figure to record. An absent key is UNKNOWN; a 0.0 here would be
         # the unreadable-balance-as-zero bug this path exists to prevent.
         _last_order_block[product_id] = {"requested_qty": _asked_qty}
         return None
-    if real_balance < qty:
-        qty = real_balance
-    decimals = await get_product_size_decimals(session, product_id)
-    factor = 10 ** decimals
-    qty = math.floor(qty * factor) / factor
-    if qty <= 0:
-        # NOTHING WAS PLACED. Said out loud because the caller's own
-        # message for a None return is "maker sell did not fill", and
-        # "did not fill" is false here - no order ever existed to fill.
-        # That wording sent a four-hour investigation after a resting
-        # order that was never resting: 441 QNT rows and 429 ALGO rows in
-        # one day. Attributing all of them to THIS branch was an inference
-        # from the balances (ALGO available 0.046 of 1134.3, QNT dust), not
-        # a measurement - the rows themselves could not say. GridMakerExpiry
-        # now carries order_rested, so the split is read rather than
-        # reasoned; until those rows accumulate, the attribution is a strong
-        # inference and nothing more.
-        log.warning(
-            f"[GRID] {product_id}: NO MAKER SELL PLACED - after clamping to "
-            f"the available {base_currency} balance ({real_balance:.10f}) and "
-            f"flooring to {decimals} decimals there is nothing sellable. This "
-            f"is not an unfilled order; no order was created. Usually means "
-            f"the coin is reserved by a resting order, or the branch holds "
-            f"less than one tradeable unit.")
-        _last_order_error[product_id] = (
-            f"nothing sellable: available {real_balance:.10f} floors to 0 at "
-            f"{decimals} decimals")
-        _last_order_rested[product_id] = False
-        _last_order_block[product_id] = {
-            "available_units": real_balance,
-            "size_decimals": decimals,
-            "requested_qty": _asked_qty,
-        }
-        return None
 
+    # The order book, read before the size is decided rather than after,
+    # because the venue's minimum order VALUE cannot be checked without a
+    # price and that check had been missing entirely.
     bid, ask = await get_best_bid_ask(session, product_id)
     if ask is None:
-        # Also not a fill failure - the book could not be read at all.
+        # Not a fill failure - the book could not be read at all.
         log.warning(
             f"[GRID] {product_id}: NO MAKER SELL PLACED - the order book was "
             f"unreadable, so there is no ask to rest at. No order created.")
@@ -1487,17 +1578,85 @@ async def place_maker_sell(session, qty: float, product_id: str = PRODUCT_ID, wa
         _last_order_rested[product_id] = False
         _last_order_block[product_id] = {
             "available_units": real_balance,
-            "size_decimals": decimals,
+            "wallet_hold": _hold_units,
             "requested_qty": _asked_qty,
         }
         return None
+
+    # THE VENUE'S OWN RULES, OR NOTHING. Fetched rather than inferred from a
+    # decimal count, and a failed fetch refuses the order instead of falling
+    # back to the most permissive precision on the exchange.
+    _rules, _rules_err = await get_product_rules(session, product_id)
+
+    # ONE DECISION, WITH EVERY NUMBER THAT WENT INTO IT.
+    #
+    # This block used to be: clamp qty down to the wallet, floor it to a
+    # decimal count, and if the result was 0 call it "nothing sellable" while
+    # guessing out loud between two causes ("usually means the coin is
+    # reserved by a resting order, or the branch holds less than one tradeable
+    # unit"). Measured on 2026-09-29, that one sentence was covering three
+    # different states on three different coins:
+    #
+    #   QNT   ledger 0.675982, wallet 0.00097323, hold 0.0  -> UNBACKED
+    #   ALGO  ledger 279.4,    wallet 0.046389,   hold 1134.3 -> RESERVED
+    #   LINK  one slice of 0.00999 on a 0.01 increment       -> DUST
+    #
+    # The clamp is what hid it: setting qty = real_balance silently accepts
+    # the wallet's version of events, so $169 of QNT the account does not hold
+    # sat on the books marked +55% and reported only as a rounding outcome.
+    _verdict = slice_execution.classify_sell(
+        product_id, _asked_qty, real_balance, _rules,
+        price=ask, wallet_hold=_hold_units,
+        # The slice qty IS our claim. Passing it explicitly so the comparison
+        # against the wallet happens BEFORE any clamp, which is the only point
+        # at which a divergence is still visible.
+        ledger_qty=_asked_qty)
+    if _verdict["decision"] != slice_execution.EXECUTE:
+        # Every one of these means NO ORDER REACHED THE VENUE. _last_order_rested
+        # False is what keeps them out of MAKER_EXPIRED, the one benign cause -
+        # the conflation that put ~2,600 phantom attempts a day into the funnel.
+        _last_order_rested[product_id] = False
+        _last_order_error[product_id] = (
+            f"{_verdict['decision']}/{_verdict['reason']}: {_verdict['detail']}")
+        _last_order_block[product_id] = {
+            "available_units": real_balance,
+            "wallet_hold": _hold_units,
+            "requested_qty": _asked_qty,
+            "decision": _verdict["decision"],
+            "reason": _verdict["reason"],
+            "base_increment": _verdict["base_increment"],
+            "base_min_size": _verdict["base_min_size"],
+            "quote_minimum": _verdict["quote_minimum"],
+            "executable_qty": (None if _verdict["executable_qty"] is None
+                               else float(_verdict["executable_qty"])),
+            "rules_error": _rules_err,
+        }
+        # UNBACKED is the only one of these that means our own books are
+        # wrong, so it is the only one that gets a siren. The others are the
+        # system declining to do something it should decline to do.
+        _say = (log.error if _verdict["decision"] == slice_execution.UNBACKED
+                else log.warning)
+        _say(f"[GRID] NO MAKER SELL PLACED - "
+             f"{slice_execution.log_line(_verdict)} :: {_verdict['detail']}")
+        return None
+    # THE SIZE GOES TO THE VENUE AS THE EXACT MULTIPLE IT WAS COMPUTED AS.
+    #
+    # This used to be f"{qty:.{decimals}f}" - the Decimal rendered through a
+    # float at a decimal-place count. Both halves of that are a way to send a
+    # number that is not on the venue's grid: the float round-trip can move
+    # the last digit, and the count cannot express an increment that is not a
+    # power of ten. format(d, 'f') is the multiple itself, with no exponent
+    # form for small sizes (str() would give "5E-3" for 0.005, which Coinbase
+    # reads as an invalid size).
+    _size_str = format(_verdict["sendable_qty"], "f")
+    qty = float(_verdict["sendable_qty"])
 
     order = {
         "client_order_id": str(uuid.uuid4()),
         "product_id": product_id,
         "side": "SELL",
         "order_configuration": {"limit_limit_gtc": {
-            "base_size": f"{qty:.{decimals}f}",
+            "base_size": _size_str,
             "limit_price": f"{ask:.10f}".rstrip("0").rstrip("."),
             "post_only": True,
         }},

@@ -1385,3 +1385,64 @@ green nor a red from one is worth much on its own.
   branch that named its own 8% stop — it has a stop, but is not adopted and must
   not be described as armed. The property is `resolved is not None and stop_pct
   > 0`. Too broad fails correct code; pin the exact fact.
+
+## LIVE AND UNRESOLVED — QNT's ledger claims coin the account does not hold
+
+Measured 2026-09-29, still open. **This is the owner's to decide, not mine.**
+
+    QNT-USD  wallet: held 0.00097323, HOLD 0.0, available 0.00097323
+             ledger: 2 slices x 0.337991076667 @ $161.01, marked +55% at $249.93
+             -> 0.675982 QNT ($169) on the books, not in the account, and
+                nothing reserving it.
+
+Nothing is wrong with the wallet read (`accounts_seen: 114`, `readable: true`,
+`reads_disagree: null`). The hold is 0.0, so this is not a resting order. Three
+possibilities and I cannot tell them apart from here: the slices were sold and
+never retired, the coin moved off this key, or the rows were written against a
+fill that did not happen. **Do not "fix" this by deleting the slice rows** —
+that writes off $169 of cost basis and silently changes realized P&L. It needs
+the venue's own fill history for QNT, which needs a credential this session
+does not hold.
+
+Until it reconciles, the branch's unrealized P&L is measured against coin that
+is not there, so the fleet unrealized figure is wrong by an unknown amount in
+the favourable direction.
+
+Two others on the same read, both benign and both previously sharing QNT's log
+line: **ALGO** held 1134.346389 with 1134.3 on HOLD (a resting order; the coin
+exists) and **LINK** held 6.85 with 6.63 on hold, whose 0.00999-unit slice is
+genuine dust on a 0.01 increment.
+
+### Standing lesson from it
+
+- **"Clamp to what the wallet has" is how a book that lies stays quiet.**
+  `place_maker_sell` set `qty = real_balance` and then reported the floor of
+  that as "nothing sellable", so a ledger claiming seven hundred times the
+  wallet reported as a rounding outcome. Ask whether the books AGREE with the
+  venue before clamping to it — after the clamp the divergence is gone.
+- **The brief's named bug was not the bug.** "available 0.0009732300 floors to
+  0 at 3 decimals -> remove the hard-coded precision assumption": the
+  precision was never hard-coded, `get_product_size_decimals` fetches QNT's
+  real `base_increment` and it really is 0.001, so that line was true. Three
+  measured reads (venue metadata, wallet detail, slice ledger) found the real
+  fault two layers above it. **Measure the premise before building to it** —
+  the fix for the stated bug would have been a no-op on correct code.
+- **A decimal-place count cannot express an increment that is not a power of
+  ten.** 0.05 becomes "2 decimals" and passes 0.03, which the venue rejects;
+  2.5 becomes "1 decimal" and passes 0.1. Nothing has been bitten yet only
+  because every live increment happens to be 0.1, 0.01 or 0.001. Divide by the
+  increment.
+- **`str()` on a Decimal is not a safe order size.** `str(Decimal("0.00000005"))`
+  is `"5E-8"`, which Coinbase reads as invalid. `format(d, "f")` always.
+- **`quote_min_size` appeared nowhere in this repo.** Every product carries a
+  $1 minimum order value and nothing checked it, so a legal-on-increment order
+  worth $0.74 went to the venue and was refused there.
+- **A fixture patched at the wrong seam makes a test pass vacuously.** Moving
+  the sell path from `get_asset_balance` to `get_asset_balance_detail` left
+  two of three named cases (`NO_SELLABLE_INVENTORY`, `NO_ASK`) travelling
+  through the unreadable-balance branch instead. All 73 checks still passed
+  and had stopped testing their own names. Each case now also pins the branch
+  it must reach.
+- **Six new ways to refuse an order need one test that an order still goes.**
+  The EXECUTE-path test caught a `NameError` on `decimals` that would have
+  broken every real maker sell on the fleet.

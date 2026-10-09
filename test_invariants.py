@@ -221,12 +221,53 @@ def test_no_check_is_incapable_of_failing():
               "available_units": 0.04638900, "price": 0.125905}]),
     ]
     assert [r["status"] for r in must_fail] == [inv.FAIL] * 9
-    # and every public check is represented above
+    # and every public CHECK is represented above
     checked = {r["name"] for r in must_fail}
     public = {n for n in dir(inv)
               if not n.startswith("_") and callable(getattr(inv, n))
-              and n not in ("summarize",)}
+              and n not in NOT_CHECKS}
     assert checked == public, f"a check has no failing test: {public - checked}"
+
+
+#: Public callables in invariants.py that are NOT checks, each with its reason.
+#: A check answers a question with a verdict and can come back FAIL; these
+#: return data and have no verdict to fail. This was an inline ("summarize",)
+#: tuple, which went stale the moment branch_rows was added - the meta-test
+#: then reported a derivation as "a check with no failing test".
+NOT_CHECKS = {
+    "summarize": "folds a list of results others produced into one summary",
+    # A DERIVATION. It turns raw /grid-status branches into the row shape the
+    # capital checks read, and returns a list of rows - no name, no status.
+    # It exists because two readers of the same data derived it differently
+    # and /parked-capital filed $3,234.93 as unreadable.
+    "branch_rows": "derives the row shape the capital checks read",
+}
+
+
+def test_every_exclusion_really_has_no_verdict_to_fail():
+    """The list above is a claim, so it gets checked. If a real check were
+    parked in it, it would stop being tested and nothing would say so."""
+    for name, why in NOT_CHECKS.items():
+        fn = getattr(inv, name, None)
+        assert fn is not None, f"{name} is excluded but no longer exists - drop it"
+        assert str(why).strip(), f"{name} is excluded with no reason given"
+    # branch_rows, called for real: rows, not a verdict.
+    rows = inv.branch_rows({"branches": [
+        {"product_id": "QNT-USD", "allocated_usd": 100.0, "num_levels": 3,
+         "slices": [{"unrealized_net_pct": 0.55}, {"unrealized_net_pct": None}]},
+    ]})
+    assert isinstance(rows, list), type(rows)
+    assert rows and "status" not in rows[0], rows
+    assert rows[0]["open_slices"] == 2, rows
+    # The unreadable slice is dropped, not read as 0.00%. Compared with a
+    # tolerance because the derivation multiplies by 100 in float and
+    # 0.55 * 100 is 55.00000000000001 - pinning the exact literal would make
+    # this test about float representation rather than about the dropped slice.
+    assert abs(rows[0]["best_slice_net_pct"] - 55.0) < 1e-9, rows
+    blind = inv.branch_rows({"branches": [
+        {"product_id": "X-USD", "allocated_usd": 1.0, "num_levels": 3,
+         "slices": [{"unrealized_net_pct": None}]}]})
+    assert blind[0]["best_slice_net_pct"] is None, blind
 
 
 # ------------------------------- an UNKNOWN must say why it could not look

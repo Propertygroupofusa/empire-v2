@@ -43,6 +43,7 @@ import sys
 import crypto_btc_compound_bot as engine
 import crypto_grid_bot as grid
 import order_outcome as oo
+import slice_execution as sx
 
 PID = "TEST-USD"
 
@@ -304,38 +305,90 @@ def test_a_real_expiry_is_still_benign_and_still_carries_its_window():
 # the real engine flag is put through the real classifier directly.
 # ─────────────────────────────────────────────────────────────────────────
 
+# A 0.01-increment product with a $1 minimum order value - LINK-USD's real
+# rules, fetched from Coinbase. Passed as the rules dict the sell path now
+# reads instead of a decimal count.
+RULES = {"base_increment": "0.01", "base_min_size": None,
+         "quote_min_size": "1", "quote_increment": "0.001"}
+
+# NOTE ON WHAT THESE PATCH. The sell path reads get_asset_balance_DETAIL (for
+# the hold) and get_product_RULES (for the increment and the value floor).
+# These cases used to patch get_asset_balance and get_product_size_decimals,
+# which the path no longer calls - so NO_SELLABLE_INVENTORY and NO_ASK were
+# both falling through the unreadable-balance branch and passing VACUOUSLY.
+# The assertions still held; they had simply stopped testing their own names.
+# Each case now also pins the DECISION it must reach, which is what makes a
+# future rewiring fail here instead of going quietly green.
+# (label, requested qty, expected decision, engine patches)
+#
+# THE REQUESTED QTY IS PART OF THE CASE. My first version asked to sell
+# 1134.3 out of a 0.0046 wallet and expected DUST; the classifier said
+# UNBACKED and was right - a book claiming 1134.3 against 0.0046 free with
+# nothing on hold is a divergence, not a rounding outcome. Dust is when the
+# claim and the wallet AGREE and both are below one tradeable unit.
 SELL_CASES = (
     # BALANCE_READ_FAILED - the wallet could not be read, so no order is
     # sized off a number nothing confirmed.
-    ("BALANCE_READ_FAILED",
-     dict(get_asset_balance=aval((None, "HTTP 500 from /accounts")),
-          get_product_size_decimals=aval(2),
+    ("BALANCE_READ_FAILED", 1134.3, None,
+     dict(get_asset_balance_detail=aval((None, None, "HTTP 500 from /accounts")),
+          get_product_rules=aval((RULES, None)),
           get_best_bid_ask=aval((100.0, 100.1)))),
-    # NO_SELLABLE_INVENTORY - the balance floors to zero at the product's
-    # own precision, so there is nothing to sell.
-    ("NO_SELLABLE_INVENTORY",
-     dict(get_asset_balance=aval((0.0046, None)),
-          get_product_size_decimals=aval(2),
+    # NO_SELLABLE_INVENTORY - the branch holds 0.0046 and that is all it
+    # claims. Floors to zero on a 0.01 grid, so there is nothing to sell.
+    ("NO_SELLABLE_INVENTORY", 0.0046, sx.DUST,
+     dict(get_asset_balance_detail=aval((0.0046, 0.0, None)),
+          get_product_rules=aval((RULES, None)),
           get_best_bid_ask=aval((100.0, 100.1)))),
     # NO_ASK - the book would not read, so there is no ask to rest at.
-    ("NO_ASK",
-     dict(get_asset_balance=aval((10.0, None)),
-          get_product_size_decimals=aval(2),
+    ("NO_ASK", 10.0, None,
+     dict(get_asset_balance_detail=aval((10.0, 0.0, None)),
+          get_product_rules=aval((RULES, None)),
           get_best_bid_ask=aval((None, None)))),
+    # RESERVED - the coin exists and another order is sitting on it. ALGO's
+    # real live shape: 1134.3 on hold, 0.046389 free, 279.4 claimed.
+    ("RESERVED", 279.4, sx.RESERVED,
+     dict(get_asset_balance_detail=aval((0.046389, 1134.3, None)),
+          get_product_rules=aval((RULES, None)),
+          get_best_bid_ask=aval((100.0, 100.1)))),
+    # UNBACKED - the books claim coin the wallet does not hold and nothing is
+    # holding it. QNT's real live shape, to the digit.
+    ("UNBACKED", 0.675982153333, sx.UNBACKED,
+     dict(get_asset_balance_detail=aval((0.00097323, 0.0, None)),
+          get_product_rules=aval((RULES, None)),
+          get_best_bid_ask=aval((100.0, 100.1)))),
+    # BLOCKED - the venue's rules could not be read. Fails CLOSED; the old
+    # path defaulted to 8 decimals, the most permissive value on Coinbase.
+    ("NO_PRODUCT_RULES", 2000.0, sx.BLOCKED,
+     dict(get_asset_balance_detail=aval((2000.0, 0.0, None)),
+          get_product_rules=aval((None, "HTTP 503 reading product rules")),
+          get_best_bid_ask=aval((100.0, 100.1)))),
+    # A HOLD THAT COULD NOT BE READ. The shortfall is real but whether it is
+    # reserved or missing is UNKNOWN, and guessing either way is wrong.
+    ("HOLD_UNREADABLE", 279.4, sx.BLOCKED,
+     dict(get_asset_balance_detail=aval((0.046389, None, None)),
+          get_product_rules=aval((RULES, None)),
+          get_best_bid_ask=aval((100.0, 100.1)))),
 )
 
 
-def test_none_of_the_three_sell_side_classes_becomes_a_maker_expiry():
-    for label, patches in SELL_CASES:
+def test_none_of_the_sell_side_classes_becomes_a_maker_expiry():
+    for label, ask_qty, want_decision, patches in SELL_CASES:
         print(f"\n  [{label}]")
         with patched(engine, **patches):
             engine._last_order_rested.pop(PID, None)
+            engine._last_order_block.pop(PID, None)
             fill = asyncio.run(engine.place_maker_sell(
-                FakeSession(), 1134.3, PID, wait_seconds=240))
+                FakeSession(), ask_qty, PID, wait_seconds=240))
         ok(f"{label}: place_maker_sell returns None", fill is None)
         rested = engine._last_order_rested.get(PID, "absent")
         ok(f"{label}: the real engine recorded order_rested False",
            rested is False, f"was {rested!r}")
+        # The guard against this test going vacuous again: the case must have
+        # travelled through the branch its own name describes.
+        got = (engine._last_order_block.get(PID) or {}).get("decision")
+        ok(f"{label}: reached the {want_decision or 'pre-classifier'} branch, "
+           f"not another one", got == want_decision,
+           f"decision was {got!r}, expected {want_decision!r}")
         cause = oo.cause_for_maker_only_no_fill(rested)
         ok(f"{label}: does NOT classify as MAKER_EXPIRED",
            cause != oo.MAKER_EXPIRED, f"cause was {cause!r}")
@@ -346,6 +399,80 @@ def test_none_of_the_three_sell_side_classes_becomes_a_maker_expiry():
            oo.is_execution_fault(cause) is True)
         ok(f"{label}: the durable event is not MAKER_EXPIRED",
            oo.event_for(cause, 25.0, detail="x")[0] != "MAKER_EXPIRED")
+
+
+def test_a_legitimate_sell_still_reaches_the_venue():
+    """THE REGRESSION THAT MATTERS MOST. Six new ways to refuse an order are
+    worth nothing if one of them also catches the orders that should go. This
+    asserts the EXECUTE path end to end: the order is built, it is post-only,
+    and its size is the venue-legal floor rather than the raw request."""
+    sent = {}
+
+    async def _capture(session, order, wait_seconds):
+        sent["order"] = order
+        sent["wait"] = wait_seconds
+        return (float(order["order_configuration"]["limit_limit_gtc"]["base_size"]),
+                100.1)
+
+    with patched(engine,
+                 get_asset_balance_detail=aval((6.85, 6.63, None)),
+                 get_product_rules=aval((RULES, None)),
+                 get_best_bid_ask=aval((100.0, 100.1)),
+                 _place_maker_order=_capture):
+        engine._last_order_rested.pop(PID, None)
+        engine._last_order_block.pop(PID, None)
+        # Asking for 0.227 out of 0.22 free: clamps to the wallet, then floors
+        # onto the 0.01 grid. Within the drift tolerance, so not UNBACKED.
+        fill = asyncio.run(engine.place_maker_sell(
+            FakeSession(), 0.2201, PID, wait_seconds=240))
+
+    ok("an executable sell is not refused", fill is not None, repr(fill))
+    ok("it actually reached the order builder", "order" in sent, str(sent))
+    if "order" not in sent:
+        return
+    cfg = sent["order"]["order_configuration"]["limit_limit_gtc"]
+    ok("it is still POST-ONLY - maker policy intact",
+       cfg.get("post_only") is True, str(cfg))
+    ok("the side is SELL", sent["order"]["side"] == "SELL")
+    ok("the size is floored onto the venue's 0.01 grid, not the raw request",
+       cfg["base_size"] == "0.22", cfg["base_size"])
+    ok("no refusal was recorded for it",
+       (engine._last_order_block.get(PID) or {}).get("decision") is None,
+       str(engine._last_order_block.get(PID)))
+    ok("and the caller's wait window is passed through", sent["wait"] == 240,
+       str(sent["wait"]))
+
+
+def test_the_value_floor_can_refuse_an_order_the_old_path_would_have_sent():
+    """0.05 LINK at $14.986 is $0.74 against a $1 venue minimum. The size is
+    legal on the increment, so the old path submitted it and Coinbase refused
+    it. `quote_min_size` appeared nowhere in this repo."""
+    sent = {}
+
+    async def _capture(session, order, wait_seconds):
+        sent["order"] = order
+        return (1.0, 100.0)
+
+    with patched(engine,
+                 get_asset_balance_detail=aval((0.05, 0.0, None)),
+                 get_product_rules=aval((RULES, None)),
+                 get_best_bid_ask=aval((14.98, 14.986)),
+                 _place_maker_order=_capture):
+        engine._last_order_rested.pop(PID, None)
+        engine._last_order_block.pop(PID, None)
+        fill = asyncio.run(engine.place_maker_sell(
+            FakeSession(), 0.05, PID, wait_seconds=240))
+
+    ok("the $0.74 order is refused", fill is None, repr(fill))
+    ok("and nothing was sent to the venue", "order" not in sent, str(sent))
+    blk = engine._last_order_block.get(PID) or {}
+    ok("it is DUST, not a rejection", blk.get("decision") == sx.DUST, str(blk))
+    ok("named as the value floor",
+       blk.get("reason") == sx.BELOW_QUOTE_MINIMUM, str(blk.get("reason")))
+    ok("the legal-on-increment size is still reported, not zeroed",
+       blk.get("executable_qty") == 0.05, str(blk.get("executable_qty")))
+    ok("and the floor itself is recorded", blk.get("quote_minimum") == "1",
+       str(blk.get("quote_minimum")))
 
 
 def test_maker_expired_is_the_only_benign_cause():
