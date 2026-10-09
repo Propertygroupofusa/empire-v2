@@ -2539,3 +2539,57 @@ completed round trip. The negative is unsold inventory it is DELIBERATELY
 refusing to dump at a loss - the parked-sell floor demands +1.0% net over a
 slice's own basis before it lets go. That is the design working, not failing,
 and it should never again read as a problem in my reports.
+
+## Session lessons, 2026-10-09
+
+- **CHECK WHETHER MAIN MOVED BEFORE BUILDING ANYTHING.** The most expensive
+  mistake of the session. My working branch was 10 days and 328 commits stale.
+  I measured the fleet, found the QNT/ALGO/LINK precision-and-inventory
+  problem, built `slice_execution.py` with 138 checks, wired it into
+  `place_maker_sell`, retargeted the fixtures and ran the full sweep — and
+  only when the push to main was REJECTED did I look and find
+  `execution_quantity.py` already there, doing the same job better (a rules
+  cache, a `dust_cooldown` module, `order_size_string`, EXECUTE/DUST/REFUSED).
+  `exchange_truth_recorder.py` had already found my "new" discovery too, and
+  quantified it larger: 8 unbacked branches, $1,168.59, measured 2026-10-01,
+  with a `reconciliation_status` gate built on it. The whole build was a
+  duplicate. `git fetch` and `git log HEAD..origin/main` costs one second and
+  would have saved all of it. **A rejected push is too late to find out.**
+  The work is parked on `claude/maker-only-cause-split` (d3bb467); it should
+  NOT be merged.
+- **A fixed character window into source ages out and then lies.** Five tests
+  read the invariants endpoint as `src[i:i + 4000]` (and 5200, 6000, 7000).
+  The endpoint grew to 13,804 characters, so they asserted against its first
+  third and failed on code that was present all along. A window cannot be made
+  big enough — the next check moves it — and one that is too LARGE silently
+  starts asserting against the next function. Ask the parser for the
+  function's real extent: `ast.get_source_segment` on the matching
+  `FunctionDef`. This is the source-matching lesson again with a new failure
+  mode: not the wording moving, but the window sliding off it.
+- **A test can pin a bug in place and call it a virtue.**
+  `test_invariant_blind_sample` asserted `"the mode read still fails closed to
+  False"` over `except Exception: _maker_only = False`. Defaulting a safety
+  flag to "off" is fail-OPEN: False is a definite claim that maker-only is
+  disarmed, and on it the fee check silently compared against the blended rate
+  while `maker_only_holds` was skipped entirely — the row that watches for a
+  taker fill under maker-only left the page. **Read what an assertion
+  guarantees, not what its label says it guarantees.**
+- **An absent check reads as nothing to report.** `if _maker_only:` dropped
+  the row rather than reporting UNKNOWN. A check that leaves the page is not a
+  passing check — the same shape as "a coverage figure whose healthy value and
+  whose broken value are the same number".
+- **Put the UNKNOWN verdict in the check, not in the caller.** The router's
+  own test forbids hand-built `maker_only_holds` dicts, and it is right:
+  a verdict built in the caller drifts from the check it impersonates. Making
+  `maker_only_holds` three-state fixed the router AND closed the same
+  fail-open inside the check, where `if not maker_only_active` had been
+  answering OK, "maker-only is off", to a question nobody could ask.
+- **Six new ways to refuse an order need one test that an order still goes.**
+  That test caught a `NameError` on a variable I had removed, which would have
+  broken every real maker sell on the fleet. Carried forward even though the
+  change it guarded is being discarded, because the habit is the point.
+- **Pre-existing red, on main, not mine and still worth someone's time:**
+  `test_trigger_consistency` (the parked rule), `test_dashboard_risk_panels`
+  59/63, `test_newsroom` 75/76, `test_trade_tape` 48/50,
+  `test_live_ops_render` 58/59. Verified by stashing and re-running on a clean
+  checkout, which is the only way to tell "mine" from "already broken".
