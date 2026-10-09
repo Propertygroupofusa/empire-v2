@@ -3794,6 +3794,53 @@ async def run_prop_cycle():
 
         candidates.sort(key=lambda c: -c[0])  # strongest (furthest past threshold) first
 
+        # ENTRIES ARE HALTED - SAY SO ONCE, AND DO NOT WALK THE LOOP.
+        #
+        # try_open() has always refused while entries_halted is set, so no
+        # entry was ever placed here. But the refusal happened at the END of
+        # the walk, and two things went wrong on the way.
+        #
+        # 1. THE LOG LIED BY OMISSION. Each candidate still printed
+        #    "READY ... attempting entry..." at INFO, and the only line that
+        #    explained the outcome was try_open's market-closed branch at
+        #    DEBUG - which the deployed log level never prints. Measured on
+        #    the live service 2026-10-09 20:30-20:39Z: MSFT, AAPL, M2K, MYM
+        #    and MGC each logged "attempting entry..." on every cycle for
+        #    nine minutes after the 20:00Z close, with no fill and no refusal
+        #    line after any of them. From the log alone a reader cannot tell
+        #    a halted bot from a broken one, which is exactly the question
+        #    the account owner was trying to answer.
+        #
+        # 2. THE ROTATION COULD SELL FOR NOTHING. A candidate reaching the
+        #    position cap takes the rotation branch below, which closes the
+        #    weakest LOSING position to free a slot and only then calls
+        #    try_open - which refuses. Under a kill condition or a manual
+        #    entries-pause the market is OPEN, so that close really executes:
+        #    a loss realised to make room for an entry that could never
+        #    follow. The account owner's standing instruction is that nothing
+        #    is sold at a loss; this closes the one path that could do it by
+        #    accident.
+        #
+        # ONE LINE PER CYCLE, NOT ONE PER SYMBOL. The DEBUG call this
+        # replaces was deliberately quiet because "every symbol, every cycle,
+        # all night" is real spam - sixteen symbols against a closed market
+        # is sixteen lines of nothing. Naming the halt once, with the count
+        # it deferred, keeps that restraint and still answers the question.
+        #
+        # try_open's own check is LEFT IN PLACE as the backstop. It is the
+        # one chokepoint for new risk and every other caller still goes
+        # through it; this guard is an addition, never a replacement.
+        if entries_halted and candidates:
+            _halt_kind = ("market closed" if entries_halted.startswith(MARKET_CLOSED_PREFIX)
+                          else "KILL CONDITION")
+            log.info(
+                f"[APEX_589296] ⏸️  {len(candidates)} signal(s) deferred - {_halt_kind}: "
+                f"{entries_halted}. No entry is attempted and nothing is rotated out "
+                f"while entries are halted; every exit path for a position already held "
+                f"is unaffected."
+            )
+            candidates = []
+
         for _, contract, config, side, price, rsi, trend in candidates:
             # Professional risk management: stop new entries if daily 2% loss limit hit
             if is_hitting_daily_loss_limit:
