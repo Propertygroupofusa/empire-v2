@@ -5408,13 +5408,36 @@ async def money_check() -> dict:
 
     deployed = 0.0
     unpriced_slices = 0
+    # The SAME coin valued the other way: qty x the branch's live price.
+    # Cost answers "what did we pay", market answers "what is it worth
+    # now", and the two must never be subtracted from one another. They
+    # were, in capital_tree: the venue reports coin at market, this figure
+    # was at cost, and "coin no branch holds" came out short by exactly
+    # the fleet's unrealised loss - $382.12 on 2026-10-09, which made
+    # $1,916.36 of unbranched coin read as $1,534.24. Both bases are
+    # published here so the tree can subtract like for like.
+    deployed_market = 0.0
+    unpriced_market_slices = 0
     for b in branches:
+        _px = b.get("current_price")
+        try:
+            _px = float(_px) if _px is not None else None
+        except (TypeError, ValueError):
+            _px = None
         for sl in (b.get("slices") or []):
             cost = _slice_cost(sl)
             if cost is None:
                 unpriced_slices += 1
             else:
                 deployed += cost
+            try:
+                _qty = float(sl.get("qty"))
+            except (TypeError, ValueError, AttributeError):
+                _qty = None
+            if _px is None or _qty is None:
+                unpriced_market_slices += 1
+            else:
+                deployed_market += _px * _qty
 
     # What those same branches have EARMARKED, which is the bigger number
     # and the one that was being printed as coin. Kept and labelled rather
@@ -5565,8 +5588,15 @@ async def money_check() -> dict:
         "allocated_usd": round(allocated, 2),
         # COIN, at what the slices cost. Not the allocation behind them.
         "deployed_usd": round(deployed, 2),
+        # The same coin at the live mark. Use THIS one against any figure
+        # the venue reports, which is always market. Never subtract the
+        # cost figure from a market figure: the difference is unrealised
+        # P&L, not unbranched coin.
+        "deployed_market_usd": round(deployed_market, 2),
+        "deployed_unrealized_usd": round(deployed_market - deployed, 2),
         "earmarked_behind_slices_usd": round(earmarked_behind_slices, 2),
         "unpriced_slices": unpriced_slices,
+        "unpriced_market_slices": unpriced_market_slices,
         "idle_usd": round(total_idle, 2),
         "working_usd": round(deployed, 2),
         "free_cash_usd": round(free_cash, 2) if free_cash is not None else None,

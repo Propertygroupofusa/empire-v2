@@ -448,7 +448,17 @@ def capital_tree(census, money):
     total = census.get("total_usd")
     reserve = money.get("reserve_usd")
     free = money.get("free_cash_usd")
-    deployed = money.get("deployed_usd")
+    # COST basis - what the open slices were bought for.
+    deployed_cost = money.get("deployed_usd")
+    # MARKET basis - what that same coin is worth now. census["coin_usd"]
+    # is a market figure, so this is the only one that may be subtracted
+    # from it. Falls back to cost when a caller predates the field, which
+    # restores the old (understated) arithmetic rather than returning
+    # None - but the tree then says so in coin_basis.
+    deployed_market = money.get("deployed_market_usd")
+    deployed_basis = "market"
+    if deployed_market is None:
+        deployed_market, deployed_basis = deployed_cost, "cost (market unavailable)"
     earmarked = money.get("earmarked_behind_slices_usd")
     unpriced = census.get("assets_unpriced")
 
@@ -465,8 +475,23 @@ def capital_tree(census, money):
         "other_cash_usd": sub(sub(cash, reserve), free),
         "cash_usd": cash,
         "coin_usd": coin,
-        "branch_held_coin_usd": deployed,
-        "coin_no_branch_holds_usd": sub(coin, deployed),
+        # BOTH BASES, because subtracting one from the other is the bug
+        # this block exists to prevent. The venue reports coin at market,
+        # so the branch-held figure subtracted from it must be at market
+        # too. Using the cost figure understated unbranched coin by the
+        # fleet's whole unrealised loss - $382.12 on 2026-10-09, turning
+        # $1,916.36 into $1,534.24 and making the gap look smaller than
+        # it is, which is the flattering direction and therefore the
+        # dangerous one.
+        "branch_held_coin_usd": deployed_market,
+        "branch_held_coin_cost_usd": deployed_cost,
+        "branch_held_unrealized_usd": sub(deployed_market, deployed_cost),
+        "coin_basis": deployed_basis,
+        "coin_no_branch_holds_usd": sub(coin, deployed_market),
+        "coin_note": ("branch_held_coin_usd is at the live mark so it can be "
+                      "subtracted from the venue's market coin total. The cost "
+                      "basis is kept beside it; their difference is unrealised "
+                      "P&L, never unbranched coin."),
         "unpriced_assets": unpriced,
         "unpriced_note": ("Assets the census could not price are NOT in the venue "
                           "total and must never be deployed. The real total is "
@@ -727,7 +752,18 @@ def classify_every_dollar(census, money, short_usd=0.0):
     total = census.get("total_usd")
     free = money.get("free_cash_usd")
     reserve = money.get("reserve_usd")
-    deployed = money.get("deployed_usd")
+    # MARKET basis, because census["coin_usd"] is market and UNRESOLVED is
+    # built by subtracting one from the other. deployed_usd is COST; using
+    # it here booked the fleet's unrealised loss as verified coin and shrank
+    # UNRESOLVED by the same amount - on 2026-10-09 that was $382.12, which
+    # showed $1,534.24 of unbranched coin where $1,916.36 was real. The
+    # error flattered the account, which is the direction that gets
+    # believed. Falls back to cost when the caller predates the field, and
+    # says which basis it used rather than letting a reader assume.
+    deployed = money.get("deployed_market_usd")
+    coin_basis = "market"
+    if deployed is None:
+        deployed, coin_basis = money.get("deployed_usd"), "cost (market unavailable)"
     if cash is None or coin is None or free is None or reserve is None or deployed is None:
         return {"readable": False, "unknown_reason":
                 ("one of cash, coin, free cash, reserve or deployed is unreadable "
@@ -740,9 +776,9 @@ def classify_every_dollar(census, money, short_usd=0.0):
     # the cash that exists, so reading claim here would overstate the
     # account by thousands.
     branch_cash = round(cash - free - reserve, 2)
-    # Coin a branch holds and the wallet confirms. The short figure is
-    # subtracted because coin a branch CLAIMS but does not hold is not
-    # verified coin by any reading.
+    # Coin a branch holds and the wallet confirms, AT THE LIVE MARK. The
+    # short figure is subtracted because coin a branch CLAIMS but does not
+    # hold is not verified coin by any reading.
     verified_coin = round(max(0.0, deployed - (short_usd or 0.0)), 2)
     unresolved = round(coin - verified_coin, 2)
 
@@ -760,8 +796,14 @@ def classify_every_dollar(census, money, short_usd=0.0):
         "RESERVED": "cash held by the account owner's floor",
         "BRANCH_ALLOCATED": ("cash a branch has claimed for a rung it has not bought "
                              "yet. A RESIDUAL of cash, never read from the allocation "
-                             "table - claim exceeds the cash that exists"),
-        "VERIFIED_COIN": "coin a branch holds and the wallet confirms",
+                             "table - claim exceeds the cash that exists. IT CAN GO "
+                             "NEGATIVE, and a negative is information, not a fault: it "
+                             "means the spendable cash plus the floor already exceed the "
+                             "wallet, so the branches are claiming cash that is not "
+                             "there. Read a minus here as an overclaim of that size"),
+        "VERIFIED_COIN": ("coin a branch holds and the wallet confirms, valued at the "
+                          "live mark so it can be subtracted from the venue's market "
+                          "coin total"),
         "UNRESOLVED": ("coin no branch holds, coin a branch claims but the wallet "
                        "does not have, and anything the census could not price. "
                        "NEVER buys, NEVER routes, NEVER counts as available"),
@@ -773,6 +815,11 @@ def classify_every_dollar(census, money, short_usd=0.0):
         "venue_total_usd": total,
         "sum_of_buckets_usd": summed,
         "residual_usd": residual,
+        "coin_basis": coin_basis,
+        "coin_basis_note": ("VERIFIED_COIN and the venue coin total are both at market, "
+                            "so UNRESOLVED is a like-for-like difference. If this reads "
+                            "'cost', UNRESOLVED is understated by the fleet's unrealised "
+                            "loss and must not be quoted as unbranched coin."),
         # Five buckets each rounded to the cent can carry up to two and a
         # half cents of rounding between them, so the tolerance is a few
         # cents and not zero. Anything larger is a real disagreement

@@ -201,6 +201,39 @@ ok("unpriced assets are flagged as never-deploy", "never be deployed" in tree["u
 ok("an unreadable input yields None, never a zero that reads as 'none trapped'",
    cv.capital_tree({}, {})["deployable_now_usd"] is None)
 
+# THE BASIS BUG, measured on the live fleet at 2026-10-09T15:52:17Z.
+# venue coin 6010.91 (market) - branch coin 4476.67 (COST) read as
+# 1534.24 of unbranched coin. The honest figure subtracts market from
+# market: 6010.91 - 4094.55 = 1916.36. The 382.12 difference is the
+# fleet's unrealised loss, and it was being reported as branch coverage.
+live = cv.capital_tree(
+    {"cash_usd": 3766.57, "coin_usd": 6010.91, "total_usd": 9777.49,
+     "assets_unpriced": 3},
+    {"reserve_usd": 1000.0, "free_cash_usd": 2816.20,
+     "deployed_usd": 4476.67, "deployed_market_usd": 4094.55,
+     "earmarked_behind_slices_usd": 4854.18})
+ok("unbranched coin subtracts market from market, not cost from market",
+   abs(live["coin_no_branch_holds_usd"] - 1916.36) < 0.01)
+ok("the cost basis is kept beside the market one, not replaced",
+   live["branch_held_coin_usd"] == 4094.55
+   and live["branch_held_coin_cost_usd"] == 4476.67)
+ok("the gap between the two bases is named as unrealised P&L",
+   abs(live["branch_held_unrealized_usd"] + 382.12) < 0.01)
+ok("the basis in use is stated, so a reader never has to guess",
+   live["coin_basis"] == "market")
+ok("the old understated figure is exactly the unrealised loss away",
+   abs((live["coin_no_branch_holds_usd"] - 382.12) - 1534.24) < 0.01)
+# A caller that predates the field must not crash or return None; it
+# falls back to cost and SAYS so, so the old number is never silently
+# passed off as the corrected one.
+legacy = cv.capital_tree(
+    {"cash_usd": 3766.57, "coin_usd": 6010.91, "total_usd": 9777.49},
+    {"reserve_usd": 1000.0, "free_cash_usd": 2816.20, "deployed_usd": 4476.67,
+     "earmarked_behind_slices_usd": 4854.18})
+ok("a caller without the market field degrades to cost and labels it",
+   abs(legacy["coin_no_branch_holds_usd"] - 1534.24) < 0.01
+   and legacy["coin_basis"].startswith("cost"))
+
 section("[9] THE GATE - velocity may not route capital until it earns it")
 # Six branches, ranks perfectly preserved across the split: the strongest
 # case the real book could produce.
@@ -381,6 +414,35 @@ ok("a residual the buckets cannot explain is REPORTED, never absorbed",
    bad["balances"] is False and "residual_warning" in bad)
 ok("a missing input is UNKNOWN rather than a bucket built on a guess",
    cv.classify_every_dollar({}, {})["readable"] is False)
+
+# THE SAME BASIS BUG IN THE FIVE-BUCKET PANEL, on the live 2026-10-09
+# reading. VERIFIED_COIN must be at market, or the fleet's unrealised
+# loss is booked as coin a branch holds and UNRESOLVED shrinks by it.
+live5 = cv.classify_every_dollar(
+    {"cash_usd": 3766.57, "coin_usd": 6010.91, "total_usd": 9777.49},
+    {"reserve_usd": 1000.0, "free_cash_usd": 2816.20,
+     "deployed_usd": 4476.67, "deployed_market_usd": 4094.55,
+     "earmarked_behind_slices_usd": 4854.18})
+ok("VERIFIED_COIN is the live mark, not what the slices cost",
+   live5["buckets"]["VERIFIED_COIN"] == 4094.55)
+ok("UNRESOLVED is market minus market, so it is the full unbranched figure",
+   abs(live5["buckets"]["UNRESOLVED"] - 1916.36) < 0.01)
+ok("the buckets still sum to the venue total after the basis fix",
+   live5["balances"] and abs(live5["residual_usd"]) <= 0.05)
+ok("the coin side alone accounts for every coin dollar the venue reports",
+   abs((live5["buckets"]["VERIFIED_COIN"] + live5["buckets"]["UNRESOLVED"]) - 6010.91) < 0.01)
+ok("a negative BRANCH_ALLOCATED is carried, not clamped - it is a real overclaim",
+   abs(live5["buckets"]["BRANCH_ALLOCATED"] + 49.63) < 0.01)
+ok("and the note tells the reader a minus means an overclaim, not a fault",
+   "NEGATIVE" in live5["notes"]["BRANCH_ALLOCATED"])
+ok("the basis in force is published beside the buckets",
+   live5["coin_basis"] == "market")
+legacy5 = cv.classify_every_dollar(
+    {"cash_usd": 3766.57, "coin_usd": 6010.91, "total_usd": 9777.49},
+    {"reserve_usd": 1000.0, "free_cash_usd": 2816.20, "deployed_usd": 4476.67})
+ok("a caller without the market field still balances, and labels the basis",
+   legacy5["balances"] and legacy5["coin_basis"].startswith("cost")
+   and abs(legacy5["buckets"]["UNRESOLVED"] - 1534.24) < 0.01)
 
 section("[16] the recycle ledger - one row per completed sell")
 T1 = datetime(2026, 10, 1, 12, 0, 0)
