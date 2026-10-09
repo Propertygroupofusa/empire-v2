@@ -7171,6 +7171,79 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
         return False, reason
 
 
+# ── SAY IT WHEN IT CHANGES, NOT EVERY FIFTY SECONDS ──────────────────
+#
+# THE MEASUREMENT. A branch cycles about every 50 seconds, so one
+# per-branch line is 1,728 lines a day. Counted on the live fleet
+# 2026-10-09: ADOPTED STOP ARMED on 13 branches, the per-branch stop line
+# on 8, the drawdown breaker on 2, the rise-trigger-found-nothing line on
+# 3, and ZEC's exit notice on 1 - 46,656 lines a day between them, none of
+# which said anything the previous one had not.
+#
+# WHAT THAT COST, SPECIFICALLY. On 2026-10-09 at 19:51:22Z, 1,134.30 ALGO
+# left the account on a taker sell with no ledger row. Three CRITICAL
+# alerts had fired about ALGO in the hours before it. None of it was
+# visible, because the signal was one line in a log printing forty-six
+# thousand lines a day of unchanged state. The account owner's words
+# looking at that log: "Fix this."
+#
+# WHY NOT JUST DROP THE REPEATS. Because silence and health look
+# identical, and this repository has already been bitten by exactly that
+# (see ITEM 17 - a branch left, its coin was sold three days later, and
+# nothing reported any of it). So an unchanged state is RE-ASSERTED on a
+# cadence: quiet, but never silent. A reader who scrolls back an hour
+# still finds the current state stated in full.
+#
+# IT DEDUPLICATES ON A FINGERPRINT, NOT ON THE PRINTED LINE. This is the
+# whole trap, and the first version of this helper fell straight into it.
+# Three of the five repeaters embed a number that moves every cycle:
+#
+#   ADOPTED STOP ARMED ... 6.00x its own 5.81% daily volatility
+#   real equity $412.07 is down 22% from its own $531.14 peak
+#   real rise trigger fired ($0.4412 >= $0.4488) but no open slice ...
+#
+# Volatility is remeasured each cycle, equity moves with the mark, and the
+# price is the price. Compare whole lines and every one of them is "new"
+# every 50 seconds - the suppressor runs, costs a dict write, and changes
+# nothing. So the caller passes a FINGERPRINT of the state (the stop
+# source and size in tenths, the drawdown in whole percent, the slice
+# count) and prints whatever full line it likes. Live numbers belong in
+# the message; they must never reach the fingerprint.
+#
+# PURE, so it is testable without a server, a database or a clock that
+# cannot be controlled. The caller passes the time; nothing here reads it.
+_STATE_LINE_SEEN: dict = {}
+GRID_STATE_REASSERT_SECONDS = env_int("GRID_STATE_REASSERT_SECONDS", 3600)
+
+
+def should_say_state(key: str, state: str, now_epoch: float,
+                     reassert_seconds: int = None, seen: dict = None) -> bool:
+    """True when this state line is worth printing: the state CHANGED, or it
+    has been long enough that restating it keeps the log honest.
+
+    `key` identifies the LINE, not the branch - one branch has several
+    independent states (its stop, its breaker, its trigger), and a change in
+    one must not suppress another. Callers pass "bot_name:tag".
+
+    `state` is a fingerprint, NOT the message. It must hold only facts that
+    stay put while the state does: a stop source, a bucketed percentage, a
+    slice count. Put a live price, an equity or a remeasured volatility in
+    here and the line prints every cycle again, which is the defect this
+    exists to remove.
+
+    Returns True for a state never seen under that key, so nothing is
+    swallowed on the first pass after a restart.
+    """
+    if reassert_seconds is None:
+        reassert_seconds = GRID_STATE_REASSERT_SECONDS
+    store = _STATE_LINE_SEEN if seen is None else seen
+    prev = store.get(key)
+    if prev is None or prev[0] != state or (now_epoch - prev[1]) >= reassert_seconds:
+        store[key] = (state, now_epoch)
+        return True
+    return False
+
+
 def stop_report_line(bot_name: str, stop_pct: float, resolved, has_slices: bool):
     """(level, message) saying what stop an ADOPTED branch actually ended up with.
 
@@ -7543,7 +7616,8 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             if row:
                 row.grid_pct = new_grid_pct
                 await db.commit()
-        log.info(f"[GRID] {branch.bot_name}: dynamic spacing {branch.grid_pct*100:.2f}% -> {new_grid_pct*100:.2f}% ({spacing_log_note})")
+        log.info(f"[GRID] {branch.bot_name}: dynamic spacing {branch.grid_pct*100:.4f}% -> "
+                 f"{new_grid_pct*100:.4f}% ({spacing_log_note})")
         branch.grid_pct = new_grid_pct
     if new_grid_pct is not None:
         grid_pct = branch.grid_pct
@@ -7555,21 +7629,29 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     # position walks DOWN through strength instead of being bought back.
     _sell_only = bool(getattr(branch, "buys_paused", False))
     if _sell_only and not drawdown_breached:
-        log.info(
-            f"[GRID] {branch.bot_name}: SELL-ONLY - this branch may sell its slices but "
-            f"never buy more. Set at adoption because the position was over the 20% rule, "
-            f"so every sale banks profit AND reduces the concentration."
-        )
+        if should_say_state(f"{branch.bot_name}:sellonly", "sell-only", time.time()):
+            log.info(
+                f"[GRID] {branch.bot_name}: SELL-ONLY - this branch may sell its slices but "
+                f"never buy more. Set at adoption because the position was over the 20% rule, "
+                f"so every sale banks profit AND reduces the concentration."
+            )
     if drawdown_breached or _sell_only:
         # Only the breaker gets the drawdown message. A sell-only branch
         # at a fresh peak reading "equity is down 0% from its peak" would
         # be an alarm about nothing.
         if drawdown_breached:
-            log.info(
+            _dd_msg = (
                 f"[GRID] {branch.bot_name}: 🛑 real equity ${equity:.2f} is down {drawdown_pct*100:.0f}% from its own "
                 f"${stored_peak_equity:,.2f} peak (breaker at {GRID_DRAWDOWN_BREAKER_PCT*100:.0f}%) - new buys paused, "
                 f"existing slices still sell normally"
             )
+            # Whole percent of drawdown, which is what the line prints.
+            # The equity and the peak go in the message, never the
+            # fingerprint - they move with every mark.
+            if should_say_state(f"{branch.bot_name}:breaker",
+                                f"breached:{round(drawdown_pct * 100)}",
+                                time.time()):
+                log.info(_dd_msg)
     elif (price <= branch.reference_price * (1 - grid_pct)
           and len(tradeable_slices(slices)) < branch.num_levels):
         real_balance, real_balance_err = await engine.get_usd_balance(session)
@@ -7615,7 +7697,9 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         import crypto_grid_bot_exits
         _exit_ok, _exit_reason = crypto_grid_bot_exits.exit_verdict(branch.product_id)
         if not _exit_ok:
-            log.info(f"[GRID] {branch.bot_name}: 🚪 exiting - {_exit_reason}")
+            if should_say_state(f"{branch.bot_name}:exiting",
+                                f"exiting:{_exit_reason}", time.time()):
+                log.info(f"[GRID] {branch.bot_name}: 🚪 exiting - {_exit_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id,
                                         "EXITING", _exit_reason)
             return
@@ -8071,7 +8155,15 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         # never again say ARMED over a reason that says it is not.
         _level, _msg = stop_report_line(
             branch.bot_name, _stop_pct, _resolved, bool(slices))
-        (log.warning if _level == "warning" else log.info)(_msg)
+        # The MESSAGE carries the live volatility; the FINGERPRINT must not.
+        # An adopted stop is sized off a volatility remeasured every cycle,
+        # so the line's own text differs every 50 seconds while the state it
+        # describes has not moved. Bucketed to a tenth of a percent, which is
+        # the precision the line prints.
+        _stop_state = (f"{_level}:{(_resolved or {}).get('source', 'none')}:"
+                       f"{round(_stop_pct * 100, 1)}:{bool(slices)}")
+        if should_say_state(f"{branch.bot_name}:stop", _stop_state, time.time()):
+            (log.warning if _level == "warning" else log.info)(_msg)
     else:
         _stop_pct = GRID_STOP_LOSS_PCT
         try:
@@ -8079,9 +8171,19 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             _resolved = adaptive_stop.resolve(branch.product_id, GRID_STOP_LOSS_PCT, _stop_vol)
             _stop_pct = _resolved["stop_pct"]
             if _resolved["source"] != "fixed":
-                log.info(f"[GRID] {branch.bot_name}: stop - {_resolved['reason']}")
+                if should_say_state(
+                        f"{branch.bot_name}:stop",
+                        f"{_resolved['source']}:{round(_stop_pct * 100, 1)}",
+                        time.time()):
+                    log.info(f"[GRID] {branch.bot_name}: stop - {_resolved['reason']}")
             if _stop_pct == 0 and slices:
-                log.warning(f"[GRID] {branch.bot_name}: 🚨 NO STOP - {_resolved['reason']}")
+                # Live exposure with no trigger at any price. Re-asserted on
+                # the same cadence as everything else rather than dropped:
+                # this is the one state in here nobody should be able to
+                # scroll past, and a reader an hour later still finds it.
+                if should_say_state(f"{branch.bot_name}:nostop",
+                                    f"nostop:{len(slices)}", time.time()):
+                    log.warning(f"[GRID] {branch.bot_name}: 🚨 NO STOP - {_resolved['reason']}")
         except Exception as exc:
             # Keep the configured stop. An error here must never be the
             # thing that leaves an open slice without a downside trigger.
@@ -8186,11 +8288,18 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         else:
             oldest = _pick_profitable_slice_to_sell(slices, price, real_fee_rate, exit_leg_rate)
             if oldest is None:
-                log.info(
-                    f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
-                    f"${branch.reference_price * (1 + grid_pct):,.4f}) but no open slice would net a real "
-                    f"profit at this price - holding every slice, waiting for a genuinely profitable one"
-                )
+                # The price is in the message and NOT in the fingerprint.
+                # What changes state here is the slice count: a branch
+                # holding the same slices and finding none sellable is one
+                # standing condition, not a new event every 50 seconds.
+                if should_say_state(f"{branch.bot_name}:norise",
+                                    f"no-profitable-slice:{len(slices)}",
+                                    time.time()):
+                    log.info(
+                        f"[GRID] {branch.bot_name}: real rise trigger fired (${price:,.4f} >= "
+                        f"${branch.reference_price * (1 + grid_pct):,.4f}) but no open slice would net a real "
+                        f"profit at this price - holding every slice, waiting for a genuinely profitable one"
+                    )
                 return
         fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
