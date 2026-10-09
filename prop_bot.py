@@ -2295,6 +2295,92 @@ async def _sellable_qty(session, symbol):
 _unsellable_logged = {}
 
 
+# ── THE OTHER HALF OF THE GATE: SOMETHING HAS TO CANCEL THE ORDER ─────
+#
+# The gate above is correct and INCOMPLETE. It stops the doomed POST,
+# which ended the retry storm. It does not get the position out. Nothing
+# anywhere in this module cancels the resting order that is holding the
+# shares, so an exit already past its max-hold sits in "refused, logged
+# once" forever - which is not an exit, it is a quieter version of the
+# same stuck position.
+#
+# Live 2026-10-09, third recorded occurrence of this line:
+#   DOG  5.054042 held / 0.000000 available
+#   RWM 18.122486 held / 9.061243 available   (exactly half)
+# both roughly 5.5 hours past the 7,200s mean_reversion backstop.
+#
+# THE ANSWER ALREADY EXISTS IN THIS REPO. routers/trading_dashboard.py
+# closes positions in ten places with the broker's own atomic close:
+#
+#   DELETE /v2/positions/{symbol}?cancel_orders=true
+#
+# which cancels every open order against the symbol AND submits the
+# closing order in one call that cannot interleave. The comment there
+# (trading_dashboard.py:6234) names this exact failure: "an existing
+# open order on this symbol holds the shares Alpaca counts as available
+# and the new sell gets rejected 403." prop_bot.py has never used it -
+# every order this module has ever sent was a POST to /v2/orders.
+#
+# OFF BY DEFAULT, and off is byte-for-byte today's behaviour: the gate
+# logs once and returns False. Armed, the close path is reachable only
+# from a real exit, only when the broker's own position matches what
+# this bot thinks it holds, and it fails CLOSED on every reply the
+# broker does not confirm.
+ALPACA_FORCE_CLOSE_ENV = "ALPACA_FORCE_CLOSE_HELD_EXITS"
+
+# An exit, never an entry. "SELL" in this module is a literal order side,
+# not an exit (see execute_futures_trade's docstring) - a short ENTRY is
+# also a sell. Force-closing a position so an ENTRY could proceed would
+# be the worst bug this file could grow. These are the only three callers
+# that treat a True return as "the tracked position is closed", and they
+# are the only ones that may reach the close path. The other four
+# (entry_pass, branch_entry, idle_cash_sweep, opening_bar_entry) are
+# entries and are excluded by name, not by inference.
+_EXIT_SOURCES = frozenset({"exit_pass", "branch_exit", "opening_bar_exit"})
+
+
+def force_close_held_exits_armed():
+    """True only for an explicit affirmative. Everything else is OFF.
+
+    Unset, empty, "0", "false", "no", "off", a typo, or a value some
+    dashboard helpfully wrapped in quotes - all OFF. A switch that arms
+    live position closing on a value it had to guess at is not a switch.
+    """
+    raw = os.environ.get(ALPACA_FORCE_CLOSE_ENV)
+    if raw is None:
+        return False
+    return raw.strip().strip('"').strip("'").lower() in ("1", "true", "yes", "on")
+
+
+async def _close_whole_position(session, symbol):
+    """(closed, detail) via the broker's own atomic close. Fails CLOSED.
+
+    One DELETE. It cancels the orders holding the shares and submits the
+    close together, so there is no window in which the shares are free
+    and this bot has not claimed them - which is the window a
+    cancel-then-POST version of this would open, and the window that
+    would let the next cycle's gate see them free and double-sell.
+
+    Only a status the broker uses to confirm acceptance counts as closed.
+    A timeout, a 403, a 422, an exception - every one of them reports NOT
+    closed, and the caller then does exactly what it does today. Saying
+    "closed" for a sale that never left would hand exit_pass a full-size
+    P&L for nothing, and that error is worse than the stuck position
+    this whole block exists to clear.
+    """
+    url = f"{get_base_url()}/v2/positions/{symbol}?cancel_orders=true"
+    try:
+        async with session.delete(url, headers=get_headers()) as r:
+            try:
+                body = (await r.text())[:300]
+            except Exception:
+                body = "<unreadable body>"
+            if r.status in (200, 207):
+                return True, f"HTTP {r.status}"
+            return False, f"HTTP {r.status} {body}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
 
 # ── PASS-LEVEL CONCENTRATION LEDGER ───────────────────────────────────
 #
@@ -2479,6 +2565,43 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
                     f"own earlier exit. Re-sending cannot fill. Cancel the "
                     f"open order, or wait for it to fill or expire, and this "
                     f"exit will go through on the next cycle."
+                )
+            # THE ESCAPE HATCH, when armed. Three conditions, all required:
+            #
+            #   1. the switch is explicitly on;
+            #   2. the caller is one of the three real exits, by name;
+            #   3. the broker's own position is the SAME SIZE as the one
+            #      this bot is trying to sell.
+            #
+            # (3) is not belt-and-braces. _close_whole_position closes the
+            # WHOLE broker position. If the account holds more of this
+            # symbol than this bot tracks - a hand-bought lot, a dashboard
+            # entry, a partial fill from before a restart - closing the
+            # whole thing sells shares nobody asked it to sell, and books
+            # a part-size P&L for a full-size sale. A mismatch is exactly
+            # the case where a human should look, so it falls through to
+            # the refusal and the log line above says what is held.
+            _exact = (_owned is not None
+                      and abs(_owned - float(qty)) <= max(1e-6, float(qty) * 1e-6))
+            if (force_close_held_exits_armed()
+                    and source in _EXIT_SOURCES
+                    and _exact):
+                _closed, _detail = await _close_whole_position(session, symbol)
+                if _closed:
+                    _unsellable_logged.pop(symbol, None)
+                    log.warning(
+                        f"\U0001f513 FORCE-CLOSED {symbol} [{source}]: the order "
+                        f"resting against {_owned:.9f} shares was cancelled and "
+                        f"the position closed in one call ({_detail}). "
+                        f"{ALPACA_FORCE_CLOSE_ENV} is armed, the quantities "
+                        f"matched exactly, and the exit is booked."
+                    )
+                    return True
+                log.error(
+                    f"❌ FORCE-CLOSE FAILED for {symbol} [{source}]: "
+                    f"{_detail}. Nothing was sold and nothing is booked - "
+                    f"this exit stays refused, exactly as if the switch were "
+                    f"off. The position is still held."
                 )
             return False
         _unsellable_logged.pop(symbol, None)
