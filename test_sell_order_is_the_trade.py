@@ -183,27 +183,47 @@ class OneSellIsOneTrade(unittest.TestCase):
 
 
 class TheEndpointPublishesTheHonestCount(unittest.TestCase):
+    """THE WINDOW IS THE FUNCTION, NOT 4000 CHARACTERS.
+
+    These three tests used to slice `src[i:i + 4000]` from the start of
+    _alpaca_realized_record. The `avg_per_trade` line sits at offset
+    4040 and has since the DESC-window comment was written, so
+    test_avg_per_trade_divides_by_sells_when_it_can failed while the
+    code it checks was correct and unchanged - measured identical at
+    d546a95 and at HEAD. A test that breaks when a comment is added
+    above the line it checks reports the comment, not the behaviour.
+
+    The body is now taken by AST, from `def` to the end of the
+    function, so it cannot be outgrown.
+    """
+
+    @staticmethod
+    def _function_body(path, name):
+        import ast as _ast
+        with open(path, encoding="utf-8") as fh:
+            src = fh.read()
+        for node in _ast.walk(_ast.parse(src)):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) \
+                    and node.name == name:
+                lines = src.splitlines(keepends=True)
+                return "".join(lines[node.lineno - 1:node.end_lineno])
+        raise AssertionError(f"{name} is not defined in {path}")
 
     def setUp(self):
-        self.src = open("routers/trading_dashboard.py").read()
+        self.body = self._function_body("routers/trading_dashboard.py",
+                                        "_alpaca_realized_record")
 
     def test_win_rate_pct_is_the_sell_level_figure(self):
-        i = self.src.index("async def _alpaca_realized_record")
-        body = self.src[i:i + 4000]
-        self.assertIn('"win_rate_pct": t.get("sell_win_rate_pct")', body,
+        self.assertIn('"win_rate_pct": t.get("sell_win_rate_pct")', self.body,
                       "the headline win rate must be computed on sell orders")
 
     def test_the_old_lot_level_rate_is_kept_under_its_own_name(self):
-        i = self.src.index("async def _alpaca_realized_record")
-        body = self.src[i:i + 4000]
-        self.assertIn('"lot_win_rate_pct"', body,
+        self.assertIn('"lot_win_rate_pct"', self.body,
                       "keep the old figure visible so an older screenshot "
                       "can be reconciled rather than silently contradicted")
 
     def test_avg_per_trade_divides_by_sells_when_it_can(self):
-        i = self.src.index("async def _alpaca_realized_record")
-        body = self.src[i:i + 4000]
-        self.assertIn("round(net / sells, 4) if sells", body)
+        self.assertIn("round(net / sells, 4) if sells", self.body)
 
 
 if __name__ == "__main__":
