@@ -3536,7 +3536,7 @@ async def set_live_grid_spacing_override(label: str):
         await db.commit()
 
 
-async def _effective_num_levels(allocated_usd: float) -> int:
+async def _effective_num_levels(allocated_usd: float, product_id=None) -> int:
     """The real levels count a branch should use right now - today's
     per-allocation default (_safe_num_levels_for_allocation), capped
     further by a real promoted Grid Level/Spacing override's own levels
@@ -3544,10 +3544,48 @@ async def _effective_num_levels(allocated_usd: float) -> int:
     per-allocation default - a promoted candidate can only ever make a
     branch use FEWER, bigger real slices, matching every real candidate's
     own "fewer levels" shape; it never asks a branch to run MORE levels
-    than its own allocation can safely support."""
+    than its own allocation can safely support.
+
+    PRODUCT_ID IS NOT OPTIONAL IN SPIRIT, ONLY IN SIGNATURE, and the
+    default is the bug this parameter exists to close.
+
+    run_grid_branch_cycle already honours GRID_LEVEL_CAP_EXEMPT when it
+    recomputes levels live (see branch_is_level_cap_exempt at the
+    ADOPTED HEADROOM block): an exempt coin keeps its own
+    allocation-derived count and the override's ceiling does not apply.
+    This function could not, because it never saw which coin it was
+    being asked about - so the three paths that WRITE branch.num_levels
+    (create, add-cash, withdraw) applied the ceiling to every branch
+    unconditionally, including the exempt ones the live cycle was
+    deliberately leaving alone.
+
+    Measured on the live fleet 2026-10-09, with the override capping at
+    3 and five exempt branches running 10 levels: adding a single dollar
+    to HBAR-USD would have rewritten num_levels 10 -> 3 while the branch
+    held NINE open slices. A branch whose open slices exceed its levels
+    cannot buy at all (run_grid_branch_cycle only buys while
+    len(tradeable_slices(slices)) < num_levels), so the add-cash meant
+    to fund it would have frozen it instead, and tripled the size of
+    every future rung on the way. BCH-USD (6 of 10) was the same shape.
+    Between them the five exempt branches hold $2,664.38 - 55% of the
+    fleet's claim - and none of them could be funded.
+
+    Passing None keeps the old behaviour exactly, so a caller that
+    genuinely has no branch in hand (a projection, a what-if) is
+    unchanged and still gets the capped answer. Every caller that is
+    about to write the number onto a real branch passes the real
+    product_id.
+    """
     base = _safe_num_levels_for_allocation(allocated_usd)
     override_label = await get_live_grid_spacing_override()
     if override_label == "live_default":
+        return base
+    # Mirrors run_grid_branch_cycle's own exemption, deliberately in the
+    # same shape: the ceiling is skipped, the allocation-derived floor is
+    # NOT. An exempt branch can still never run more levels than its own
+    # capital supports, so this only ever restores levels the branch
+    # would have had with no override at all - it never invents one.
+    if branch_is_level_cap_exempt(product_id):
         return base
     cap = GRID_LEVEL_SPACING_CANDIDATES[override_label]["num_levels"]
     return max(1, min(base, cap))
@@ -3613,7 +3651,7 @@ async def create_grid_branch(product_id: str, allocated_usd: float, skip_free_ca
     if price is None:
         raise ValueError(f"could not fetch a real live price for {product_id} right now - try again shortly")
 
-    num_levels = await _effective_num_levels(allocated_usd)
+    num_levels = await _effective_num_levels(allocated_usd, product_id)
 
     async with get_session_factory()() as db:
         result = await db.execute(select(CryptoGridBranch))
@@ -3660,7 +3698,8 @@ async def add_cash_to_grid_branch(bot_name: str, amount: float, *,
         if branch is None:
             raise ValueError(f"no grid branch named {bot_name}")
         branch.allocated_usd += amount
-        branch.num_levels = await _effective_num_levels(branch.allocated_usd)
+        branch.num_levels = await _effective_num_levels(
+            branch.allocated_usd, branch.product_id)
         await db.commit()
         await db.refresh(branch)
     log.info(f"[GRID] 💰 Added ${amount:.2f} to {bot_name} - now ${branch.allocated_usd:.2f} ({branch.num_levels} real levels) | called by: {_who}")
@@ -3759,7 +3798,8 @@ async def withdraw_from_grid_branch(bot_name: str, amount: float, *,
             log.info(f"[GRID] 💵 Withdrew ${amount:.2f} from {bot_name} - fully drained, branch removed and {product_id} released")
             return {"bot_name": bot_name, "product_id": product_id, "amount": amount, "remaining_allocated_usd": 0.0, "branch_deleted": True, "caller": who}
 
-        branch.num_levels = await _effective_num_levels(branch.allocated_usd)
+        branch.num_levels = await _effective_num_levels(
+            branch.allocated_usd, branch.product_id)
         branch.peak_equity = branch.allocated_usd
         await db.commit()
         await db.refresh(branch)
