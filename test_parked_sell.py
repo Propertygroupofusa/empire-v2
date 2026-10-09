@@ -130,10 +130,20 @@ ok("the constant exists at module level", "GRID_PARKED_MIN_NET_PCT" in SRC)
 ok("it is 1.0% by default", abs(grid.GRID_PARKED_MIN_NET_PCT - 0.010) < 1e-9)
 ok("comfortably above the repo's own fee floor",
    grid.GRID_PARKED_MIN_NET_PCT > 0.009)
+# UPDATED 2026-10-09. The picker now measures an ADOPTED slice against
+# sell_basis_for_slice - what was actually paid - instead of its
+# adoption-day entry_price, which answered the wrong question. The net
+# calculation and the per-basis share are unchanged in substance, only in
+# variable name, so these two assert the substance and then assert the
+# improvement, rather than matching a literal that moved.
 ok("it is measured NET of fees, not gross",
-   "_grid_slice_net_pnl(s.qty, s.entry_price, price," in PARKED_LOGIC)
+   "_grid_slice_net_pnl(s.qty, _sell_basis, price," in PARKED_LOGIC)
 ok("and as a share of the slice's own basis, not dollars",
-   "net / basis" in PARKED_LOGIC)
+   "pct = net / _basis_usd" in PARKED_LOGIC)
+ok("an adopted slice is judged against what was PAID, not its "
+   "adoption-day mark",
+   "sell_basis_for_slice(s" in PARKED_LOGIC
+   and "_grid_slice_net_pnl(s.qty, s.entry_price, price," not in PARKED_LOGIC)
 ok("a zero basis cannot divide", "basis <= 0" in PARKED_LOGIC)
 ok("it is settable", "GRID_PARKED_MIN_NET_PCT" in SRC and "os.getenv" in SRC)
 

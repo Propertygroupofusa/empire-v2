@@ -49,7 +49,6 @@ MIN_TRADES = 20          # rule 1: evidence floor per branch
 SHRINKAGE_K = 30.0       # rule 2: half-weight at n == K
 MAX_BRANCH_SHARE = 0.35  # rule 3/4: concentration ceiling
 MIN_REBALANCE_USD = 5.0  # don't churn for pennies; every move costs fees
-MIN_BRANCH_USD = 0.0     # floor for a funded branch (0 = may be defunded)
 
 
 @dataclass

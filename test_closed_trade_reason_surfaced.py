@@ -137,10 +137,27 @@ ok("NO assignment derives exit_reason from the sign of the P&L",
 def _uses_stop_slice(node):
     return "_stop_slice" in (ast.dump(node) or "")
 
-ok("every exit_reason assignment is derived from _stop_slice",
-   bool(assigns) and all(_uses_stop_slice(a) for a in assigns),
-   "_stop_slice is set only when the stop actually chose the slice, which "
-   "is the only independent fact available here")
+# WIDENED 2026-10-09, and deliberately only this far. The first
+# derivation must still come from _stop_slice. But ADOPTED_EXIT_REASON was
+# added afterwards and RELABELS an already-honest reason using a different
+# independent fact - that the position was inherited, not opened by the
+# grid - so requiring _stop_slice in every assignment failed a correct
+# line. The thing this check exists to forbid is deriving the reason from
+# the SIGN OF THE P&L, and that is still asserted on its own above.
+def _uses_adoption_fact(node):
+    d = ast.dump(node) or ""
+    return "ADOPTED_EXIT_REASON" in d or "slice_paid_no_entry_fee" in d
+
+ok("every exit_reason assignment is derived from _stop_slice, or relabels "
+   "one using the adoption fact",
+   bool(assigns) and all(_uses_stop_slice(a) or _uses_adoption_fact(a)
+                         for a in assigns),
+   "_stop_slice is set only when the stop actually chose the slice; the "
+   "adoption relabel is the one permitted refinement, and it reads the "
+   "inherited-position fact, never the P&L")
+ok("at least one assignment still derives from _stop_slice - the honest "
+   "source has not been replaced wholesale by the relabel",
+   any(_uses_stop_slice(a) for a in assigns))
 
 # THE FORCED EXIT IS A THIRD REASON, NOT AN ABSENT ONE.
 #

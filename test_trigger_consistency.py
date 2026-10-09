@@ -108,9 +108,18 @@ ok("crypto_grid_bot.py still computes the rise trigger as (1 + grid_pct)",
    "the execution rule moved - every observer below is now unverified")
 ok("and NOT as (1 + grid_pct / 100), which is the same rule off by 100x",
    "reference_price * (1 + grid_pct / 100)" not in src)
+# UPDATED 2026-10-09. The rule moved from len(slices) to
+# len(tradeable_slices(slices)), which is the correction, not a drift: a
+# dust remnant is not a rung, and counting it as one is what had BCH-USD
+# placing a sell for 0.00000022 BCH every ten minutes. The regex now
+# REQUIRES the tradeable_slices form, so reverting to a bare len() fails
+# here rather than passing quietly.
 ok("the parked rule is still full-on-rungs OR adopted-only",
-   re.search(r"len\(slices\) >= \(branch\.num_levels or 0\)\s*\n\s*or branch_is_adopted_only\(slices\)",
+   re.search(r"len\(tradeable_slices\(slices\)\) >= \(branch\.num_levels or 0\)\s*\n\s*or branch_is_adopted_only\(slices\)",
              src) is not None)
+ok("and it counts TRADEABLE slices, never a raw len() that a dust "
+   "remnant would inflate",
+   re.search(r"_parked = bool\(slices\) and \(\s*\n\s*len\(slices\) >=", src) is None)
 
 print()
 print("fleet_watchdog._exit_threshold agrees with the executor")

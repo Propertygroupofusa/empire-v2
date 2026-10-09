@@ -82,6 +82,18 @@ ALLOWED = {
     "MAX_RETRIES": "unrelated pipelines",
     "RETRY_DELAY": "unrelated pipelines",
     "DB_PATH": "unrelated youtube pipeline files",
+    "DUST_USD": ("two different questions. account_census 0.50 is a PRESENTATION "
+                 "threshold - the holding is still counted, only the line is "
+                 "collapsed. capital_recycle 1.00 is a VENUE fact: a slice under "
+                 "it cannot be sold at the exchange's size precision at any price"),
+    "FEE_LEG": ("not the same kind of thing. grid_step_backtest, incubator and "
+                "market_state_study hold the 0.0035 maker RATE per leg; "
+                "ledger_correction holds the STRING \"FEE_LEG\", a diagnosis "
+                "label for a row charged commission on the exit leg only"),
+    "SLICE_USD": ("grid_scenario_model 24.16 is a modelled live slice "
+                  "($72.47 / 3 levels). market_state_study 100.0 is a "
+                  "NORMALISER - that study reports dollars per $100 of claim, "
+                  "so it is a denominator, not a slice size"),
 }
 
 
