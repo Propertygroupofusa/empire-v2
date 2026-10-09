@@ -465,14 +465,37 @@ def capital_tree(census, money):
     def sub(a, b):
         return None if a is None or b is None else round(a - b, 2)
 
+    # SAME FLOOR DOUBLE COUNT AS classify_every_dollar, fixed the same
+    # way and for the same reason. free_cash_usd is measured BEFORE the
+    # owner's floor (get_real_free_cash_usd subtracts locked profit, flat
+    # tree branches and unspent rungs, and nothing else); the floor is
+    # applied in crypto_cash_allocator.spend_ceiling as
+    # max(0, free - reserve). Publishing `free` whole as "verified
+    # available" AND the floor beside it counted the floor twice, and the
+    # residual row absorbed it by going negative - -$994.08 on the live
+    # 2026-10-09 reading, against $1,005.92 of cash really claimed.
+    # reserved + available is now exactly `free`, so the rows still sum
+    # to cash and no dollar was created or destroyed moving them.
+    reserved_cash = (None if (free is None or reserve is None)
+                     else round(min(float(reserve), max(0.0, float(free))), 2))
+    spendable = (None if (free is None or reserved_cash is None)
+                 else round(float(free) - reserved_cash, 2))
     tree = {
         "venue_total_usd": total,
-        "verified_available_cash_usd": free,
-        "reserved_cash_usd": reserve,
-        # Cash that is neither spendable now nor fenced as reserve. It is a
-        # real residual, not a rounding gap, and naming it keeps the
-        # buckets honest instead of quietly folding it into "available".
-        "other_cash_usd": sub(sub(cash, reserve), free),
+        # AFTER the floor: what the allocator will actually release.
+        "verified_available_cash_usd": spendable,
+        # The floor at its FUNDED size - never more cash than exists.
+        "reserved_cash_usd": reserved_cash,
+        "reserve_configured_usd": reserve,
+        "reserve_shortfall_usd": (None if (reserve is None or reserved_cash is None)
+                                  else round(max(0.0, float(reserve) - reserved_cash), 2)),
+        "free_cash_before_floor_usd": free,
+        # Cash that is neither spendable now nor fenced as reserve: locked
+        # profit, flat family-tree branches, and the grid's unspent rung
+        # reserve. It is a real residual, not a rounding gap, and naming
+        # it keeps the buckets honest instead of quietly folding it into
+        # "available". It no longer carries the floor.
+        "other_cash_usd": sub(cash, free),
         "cash_usd": cash,
         "coin_usd": coin,
         # BOTH BASES, because subtracting one from the other is the bug
@@ -502,10 +525,20 @@ def capital_tree(census, money):
                        "cash, the extra rungs cannot be funded no matter what the "
                        "branch allocation says - freeing claim does not create "
                        "spendable cash and never has."),
-        "deployable_now_usd": free,
+        # AFTER the floor. The note below says every other number is
+        # "fenced as reserve" or already in coin - which was not true
+        # while this row carried the PRE-floor free figure, because the
+        # fenced dollars were sitting inside this one as well. The row
+        # that answers "what can buy this minute" has to be the figure
+        # the allocator will actually release: max(0, free - reserve).
+        "deployable_now_usd": spendable,
         "deployable_note": ("The only figure here that can buy something this "
-                            "minute. Every other number is either already in coin, "
-                            "fenced as reserve, or a claim with no cash behind it."),
+                            "minute - free cash AFTER the owner's floor, which is "
+                            "what crypto_cash_allocator.spend_ceiling releases. "
+                            "Every other number is either already in coin, fenced "
+                            "as reserve, or a claim with no cash behind it. "
+                            "free_cash_before_floor_usd is the pre-floor figure and "
+                            "is NOT buying power."),
     }
     return tree
 
@@ -770,12 +803,44 @@ def classify_every_dollar(census, money, short_usd=0.0):
                  "on this pass. A bucket built on a missing input would be a "
                  "guess wearing a total's name.")}
 
-    # Cash the branches have claimed is whatever is left once the spendable
-    # part and the floor are taken out. It is a RESIDUAL by construction,
-    # never a figure read from an allocation table - branch claim exceeds
-    # the cash that exists, so reading claim here would overstate the
+    # THE FLOOR IS NOT ALREADY INSIDE free_cash, AND THIS PANEL USED TO
+    # ASSUME IT WAS. get_real_free_cash_usd() subtracts locked profit,
+    # every flat family-tree branch and the grid's still-unspent rung
+    # reserve - and nothing else. The owner's cash floor is applied one
+    # layer further down, in crypto_cash_allocator.spend_ceiling():
+    #     allocatable = max(0.0, float(free_cash_usd) - reserve)
+    # So `free` is a PRE-floor figure. Publishing it whole as
+    # VERIFIED_AVAILABLE while ALSO publishing RESERVED counted the same
+    # floor dollars twice, and the split still balanced only because
+    # BRANCH_ALLOCATED is a residual and silently absorbed the double
+    # count by going negative.
+    #
+    # Measured live on 2026-10-09: cash $3,827.20, free $2,821.28, floor
+    # $2,000.00. The panel published VERIFIED_AVAILABLE $2,821.28,
+    # RESERVED $2,000.00 and BRANCH_ALLOCATED -$994.08, and told the
+    # owner "$2,821.28 can buy something right now" when the allocator
+    # would release $821.28. The branches had really claimed $1,005.92.
+    # Every bucket now lands non-negative on that same reading and the
+    # sum is unchanged, because this moves dollars BETWEEN buckets and
+    # creates none: reserved + spendable is exactly `free`.
+    #
+    # RESERVED is what the floor actually holds, which is never more
+    # cash than there is: a $5,000 floor over $2,821.28 of free cash
+    # fences $2,821.28 and leaves nothing spendable, which is precisely
+    # what the allocator does. reserve_shortfall_usd below names the
+    # unfunded remainder instead of letting the bucket overstate it.
+    reserved_cash = round(min(float(reserve), max(0.0, float(free))), 2)
+    # Subtraction, not max(0, free - reserve): the two cash buckets must
+    # add back to `free` to the cent or the five-bucket sum stops being
+    # a measurement. A negative free cash is a named violation elsewhere
+    # (assert_deployable_is_clean) and is carried here, not hidden.
+    spendable = round(float(free) - reserved_cash, 2)
+    # Cash the branches have claimed is whatever is left once the free
+    # figure is taken out. It is a RESIDUAL by construction, never a
+    # figure read from an allocation table - branch claim exceeds the
+    # cash that exists, so reading claim here would overstate the
     # account by thousands.
-    branch_cash = round(cash - free - reserve, 2)
+    branch_cash = round(cash - free, 2)
     # Coin a branch holds and the wallet confirms, AT THE LIVE MARK. The
     # short figure is subtracted because coin a branch CLAIMS but does not
     # hold is not verified coin by any reading.
@@ -783,8 +848,8 @@ def classify_every_dollar(census, money, short_usd=0.0):
     unresolved = round(coin - verified_coin, 2)
 
     buckets = {
-        "VERIFIED_AVAILABLE": round(free, 2),
-        "RESERVED": round(reserve, 2),
+        "VERIFIED_AVAILABLE": spendable,
+        "RESERVED": reserved_cash,
         "BRANCH_ALLOCATED": branch_cash,
         "VERIFIED_COIN": verified_coin,
         "UNRESOLVED": unresolved,
@@ -792,15 +857,25 @@ def classify_every_dollar(census, money, short_usd=0.0):
     summed = round(sum(buckets.values()), 2)
     residual = round((total if total is not None else cash + coin) - summed, 2)
     notes = {
-        "VERIFIED_AVAILABLE": "cash with nothing claiming it - the only bucket that can buy",
-        "RESERVED": "cash held by the account owner's floor",
+        "VERIFIED_AVAILABLE": ("cash with nothing claiming it AND already clear of "
+                               "the owner's floor - what the allocator will actually "
+                               "release this minute, the only bucket that can buy"),
+        "RESERVED": ("cash held by the account owner's floor. It reads BELOW the "
+                     "configured floor when there is not enough free cash to fund "
+                     "it; the unfunded remainder is reserve_shortfall_usd, never "
+                     "borrowed from another bucket"),
         "BRANCH_ALLOCATED": ("cash a branch has claimed for a rung it has not bought "
-                             "yet. A RESIDUAL of cash, never read from the allocation "
-                             "table - claim exceeds the cash that exists. IT CAN GO "
-                             "NEGATIVE, and a negative is information, not a fault: it "
-                             "means the spendable cash plus the floor already exceed the "
-                             "wallet, so the branches are claiming cash that is not "
-                             "there. Read a minus here as an overclaim of that size"),
+                             "yet, plus locked profit and flat tree branches. A "
+                             "RESIDUAL of cash (wallet cash less the free figure), "
+                             "never read from the allocation table - claim exceeds the "
+                             "cash that exists. IT CAN STILL GO NEGATIVE, and a "
+                             "negative is information, not a fault: it means the free "
+                             "figure itself exceeds the wallet, so something outside "
+                             "this panel is counting cash that is not there. Read a "
+                             "minus here as an overclaim of that size. It is NO LONGER "
+                             "where the owner's floor lands - the floor used to be "
+                             "subtracted here as well as published as RESERVED, which "
+                             "drove this bucket negative by the size of the floor"),
         "VERIFIED_COIN": ("coin a branch holds and the wallet confirms, valued at the "
                           "live mark so it can be subtracted from the venue's market "
                           "coin total"),
@@ -813,6 +888,17 @@ def classify_every_dollar(census, money, short_usd=0.0):
         "buckets": buckets,
         "notes": notes,
         "venue_total_usd": total,
+        # The floor as configured, beside the part of it the wallet can
+        # actually fund. Equal on a healthy account; a shortfall means
+        # the floor is larger than the free cash and nothing is
+        # spendable - the allocator's own `max(0, free - reserve)`.
+        "reserve_configured_usd": round(float(reserve), 2),
+        "reserve_shortfall_usd": round(max(0.0, float(reserve) - reserved_cash), 2),
+        "free_cash_before_floor_usd": round(float(free), 2),
+        "floor_note": ("free_cash_usd is measured BEFORE the owner's floor. "
+                       "VERIFIED_AVAILABLE is after it, so it is the figure that "
+                       "answers 'what can buy right now' and the two differ by the "
+                       "floor by design"),
         "sum_of_buckets_usd": summed,
         "residual_usd": residual,
         "coin_basis": coin_basis,

@@ -191,12 +191,24 @@ tree = cv.capital_tree(
      "assets_unpriced": 4},
     {"reserve_usd": 2000.0, "free_cash_usd": 70.67, "deployed_usd": 3942.72,
      "earmarked_behind_slices_usd": 7625.11})
-ok("deployable now is the FREE cash, not the claim", tree["deployable_now_usd"] == 70.67)
+ok("deployable now is free cash AFTER the floor, not the claim and not the "
+   "pre-floor figure - a $2,000 floor over $70.67 leaves nothing to buy with",
+   tree["deployable_now_usd"] == 0.0)
+ok("the pre-floor figure is still carried, separately and plainly labelled",
+   tree["free_cash_before_floor_usd"] == 70.67)
+ok("the floor row never fences more cash than the wallet holds",
+   tree["reserved_cash_usd"] == 70.67 and tree["reserve_configured_usd"] == 2000.0)
+ok("and the unfunded part of the floor is named rather than borrowed",
+   abs(tree["reserve_shortfall_usd"] - 1929.33) < 0.01)
+ok("the cash rows add back to wallet cash exactly",
+   abs((tree["verified_available_cash_usd"] + tree["reserved_cash_usd"]
+        + tree["other_cash_usd"]) - 3772.47) < 0.01)
 ok("claim exceeding cash is stated as its own number",
    abs(tree["claim_minus_cash_usd"] - 3852.64) < 0.01)
 ok("the coin no branch holds is reported", abs(tree["coin_no_branch_holds_usd"] - 2324.52) < 0.01)
-ok("cash that is neither free nor reserve is named, not folded into available",
-   abs(tree["other_cash_usd"] - 1701.80) < 0.01)
+ok("cash that is neither spendable nor fenced is named, not folded into "
+   "available - and it no longer carries the floor as well",
+   abs(tree["other_cash_usd"] - (3772.47 - 70.67)) < 0.01)
 ok("unpriced assets are flagged as never-deploy", "never be deployed" in tree["unpriced_note"])
 ok("an unreadable input yields None, never a zero that reads as 'none trapped'",
    cv.capital_tree({}, {})["deployable_now_usd"] is None)
@@ -398,7 +410,18 @@ ok("and none of them is called 'unallocated'",
 ok("they sum to the venue total within a few cents of rounding", dc["balances"])
 ok("branch-allocated cash is a RESIDUAL of cash, not the claim figure - "
    "claim exceeds the cash that exists by thousands",
-   abs(dc["buckets"]["BRANCH_ALLOCATED"] - (3772.47 - 70.67 - 2000.0)) < 0.01)
+   abs(dc["buckets"]["BRANCH_ALLOCATED"] - (3772.47 - 70.67)) < 0.01)
+ok("the two cash buckets add back to the pre-floor free figure exactly, so "
+   "the floor moves dollars between buckets and never creates or destroys one",
+   abs((dc["buckets"]["VERIFIED_AVAILABLE"] + dc["buckets"]["RESERVED"]) - 70.67) < 0.01)
+ok("a floor larger than the free cash fences only the cash that exists",
+   dc["buckets"]["RESERVED"] == 70.67 and dc["buckets"]["VERIFIED_AVAILABLE"] == 0.0)
+ok("and the unfunded remainder of the floor is NAMED, never borrowed from "
+   "another bucket", abs(dc["reserve_shortfall_usd"] - (2000.0 - 70.67)) < 0.01)
+ok("the configured floor is published beside the funded part",
+   dc["reserve_configured_usd"] == 2000.0)
+ok("nothing can buy when the floor is not even funded",
+   dc["buckets"]["VERIFIED_AVAILABLE"] == 0.0)
 ok("only the available bucket can buy",
    dc["notes"]["VERIFIED_AVAILABLE"].endswith("the only bucket that can buy"))
 ok("unresolved carries the rule, not just a label",
@@ -431,12 +454,49 @@ ok("the buckets still sum to the venue total after the basis fix",
    live5["balances"] and abs(live5["residual_usd"]) <= 0.05)
 ok("the coin side alone accounts for every coin dollar the venue reports",
    abs((live5["buckets"]["VERIFIED_COIN"] + live5["buckets"]["UNRESOLVED"]) - 6010.91) < 0.01)
-ok("a negative BRANCH_ALLOCATED is carried, not clamped - it is a real overclaim",
-   abs(live5["buckets"]["BRANCH_ALLOCATED"] + 49.63) < 0.01)
+ok("the floor is no longer subtracted from BRANCH_ALLOCATED as well as "
+   "published as RESERVED - the bucket is the real cash claim, not a "
+   "residual driven negative by the size of the floor",
+   abs(live5["buckets"]["BRANCH_ALLOCATED"] - (3766.57 - 2816.20)) < 0.01)
+ok("a negative BRANCH_ALLOCATED is still CARRIED, not clamped, when the free "
+   "figure genuinely exceeds the wallet - that is a real overclaim",
+   abs(cv.classify_every_dollar(
+       {"cash_usd": 100.0, "coin_usd": 0.0, "total_usd": 100.0},
+       {"reserve_usd": 0.0, "free_cash_usd": 150.0,
+        "deployed_market_usd": 0.0})["buckets"]["BRANCH_ALLOCATED"] + 50.0) < 0.01)
 ok("and the note tells the reader a minus means an overclaim, not a fault",
    "NEGATIVE" in live5["notes"]["BRANCH_ALLOCATED"])
 ok("the basis in force is published beside the buckets",
    live5["coin_basis"] == "market")
+# THE DOUBLE-COUNTED FLOOR, on the live 2026-10-09 18:4xZ reading. The
+# owner circled this panel: BRANCH_ALLOCATED -$994.08 beside a $2,000.00
+# floor. free_cash_usd is measured BEFORE the floor (get_real_free_cash_usd
+# subtracts locked, flat tree branches and unspent rungs, and nothing
+# else); the floor lands in crypto_cash_allocator.spend_ceiling as
+# max(0, free - reserve). Publishing free whole AND the floor separately
+# counted the floor twice and pushed the residual bucket negative by it.
+floor5 = cv.classify_every_dollar(
+    {"cash_usd": 3827.20, "coin_usd": 5967.74, "total_usd": 9794.94},
+    {"reserve_usd": 2000.0, "free_cash_usd": 2821.28,
+     "deployed_market_usd": 4416.91})
+ok("the panel now publishes what the allocator will release, not the "
+   "pre-floor figure", floor5["buckets"]["VERIFIED_AVAILABLE"] == 821.28)
+ok("the floor is published once, at its funded size",
+   floor5["buckets"]["RESERVED"] == 2000.0
+   and floor5["reserve_shortfall_usd"] == 0.0)
+ok("the branches' real cash claim replaces the -$994.08 that the double "
+   "count produced", floor5["buckets"]["BRANCH_ALLOCATED"] == 1005.92)
+ok("no bucket is negative on the reading the owner circled",
+   all(v >= 0 for v in floor5["buckets"].values()))
+ok("and the five still sum to the venue total to the cent - dollars moved "
+   "between buckets, none were created",
+   floor5["balances"] and abs(floor5["residual_usd"]) <= 0.05)
+ok("the pre-floor figure is still published, so the two can be told apart",
+   floor5["free_cash_before_floor_usd"] == 2821.28)
+ok("the difference between them is exactly the floor, by construction",
+   abs((floor5["free_cash_before_floor_usd"]
+        - floor5["buckets"]["VERIFIED_AVAILABLE"]) - 2000.0) < 0.01)
+
 legacy5 = cv.classify_every_dollar(
     {"cash_usd": 3766.57, "coin_usd": 6010.91, "total_usd": 9777.49},
     {"reserve_usd": 1000.0, "free_cash_usd": 2816.20, "deployed_usd": 4476.67})
