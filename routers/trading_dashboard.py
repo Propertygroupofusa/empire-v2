@@ -143,6 +143,71 @@ except Exception as e:
 ALPACA_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY", "")
 ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+
+def alpaca_venue() -> dict:
+    """WHICH ALPACA ACCOUNT ARE THESE FIGURES FROM. Published, not inferred.
+
+    NOTHING IN THIS SYSTEM SAID. On 2026-10-09 the account owner was shown
+    an equity of $974.49, a realised -$29.70 and an open SLV position, and
+    had to tell Claude the account was not real. He was right: the default
+    above is the PAPER host, README.md records "Alpaca | Paper account",
+    and the GO LIVE CHECKLIST's "Change ALPACA_BASE_URL to
+    api.alpaca.markets" is unticked. No endpoint published the host, so an
+    hourly guard ran for days on figures nobody could identify.
+
+    WORSE, ONE FIELD READ LIKE AN ANSWER AND WAS NOT.
+    equity_curve.current_is_live_account means "this equity came from a
+    live fetch rather than the last stored point". It is True on a paper
+    account. That is the trap this function exists to close, and the two
+    are deliberately named nothing like each other.
+
+    THE TWO FLAGS CAN DISAGREE, and README.md says so in those words:
+    "Both Alpaca flags required - one alone does nothing". ALPACA_LIVE_TRADE
+    true with ALPACA_BASE_URL still on paper means live-intent orders go to
+    the paper host. So both are reported, plus an explicit verdict for the
+    case where they conflict - which no single boolean could express.
+
+    Publishes the HOST ONLY. Never a key, never a secret, never an account
+    number.
+    """
+    host = (ALPACA_BASE_URL or "").strip()
+    live_flag = os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true"
+    is_paper = "paper-api." in host
+    is_live_host = (not is_paper) and "api.alpaca.markets" in host
+    if is_paper:
+        verdict = "PAPER"
+        detail = ("these figures are SIMULATED - the host is Alpaca's paper "
+                  "endpoint, so no real money is at risk and no real money "
+                  "has been made or lost here")
+        if live_flag:
+            verdict = "PAPER_WITH_LIVE_FLAG"
+            detail = ("CONFLICT: ALPACA_LIVE_TRADE is true but the host is "
+                      "still Alpaca's PAPER endpoint, so live-intent orders "
+                      "are being sent to a simulator. README: 'Both Alpaca "
+                      "flags required - one alone does nothing.' These "
+                      "figures are simulated.")
+    elif is_live_host:
+        verdict = "LIVE" if live_flag else "LIVE_HOST_FLAG_OFF"
+        detail = ("these figures are REAL money" if live_flag else
+                  "the host is live but ALPACA_LIVE_TRADE is false - read "
+                  "both before treating a figure as real")
+    else:
+        verdict = "UNKNOWN"
+        detail = ("the host is neither Alpaca's paper nor its live endpoint. "
+                  "UNKNOWN is a real verdict here: do not read it as either "
+                  "one")
+    return {
+        "host": host or None,
+        "verdict": verdict,
+        "is_paper": is_paper,
+        "live_trade_flag": live_flag,
+        "detail": detail,
+        "not_the_same_as": ("equity_curve.current_is_live_account, which only "
+                            "means the equity was fetched live rather than read "
+                            "from the last stored point, and is True on a paper "
+                            "account"),
+    }
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 
 # Real, unattended position management - per the account owner's explicit
@@ -817,6 +882,9 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "shorting_enabled": shorting_enabled if shorting_enabled is not None else False,
         "margin_min_equity": MARGIN_MIN_EQUITY,
         "live_trading": os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true",
+        # live_trading alone cannot answer "is this real money" - it is one
+        # of the two flags README calls jointly required. This can.
+        "venue": alpaca_venue(),
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
         **order_block,
     }
@@ -6039,6 +6107,9 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
 
     _out = {
         "equity": round(equity, 2),
+        # Immediately beside the equity, because the figure is meaningless
+        # until you know which account it came from.
+        "venue": alpaca_venue(),
         "alpaca_passive_mode": alpaca_passive_mode,
         "alpaca_entries_paused": alpaca_entries_paused,
         "alpaca_entries_paused_means": (
