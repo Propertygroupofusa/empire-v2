@@ -136,7 +136,21 @@ print("== the close reason is computed once, and is in scope where it is read ==
 # everywhere the fleet actually runs.
 _assigns = [n for n in ast.walk(FN) if isinstance(n, ast.Assign)
             and any(isinstance(t, ast.Name) and t.id == "exit_reason" for t in n.targets)]
-ok("exit_reason is assigned exactly once", len(_assigns) == 1, str(len(_assigns)))
+# UPDATED 2026-10-09. Two assignments now, and the second is correct:
+# ADOPTED_EXIT_REASON RELABELS the first when the slice turns out to be an
+# inherited position. The point of this check is that the reason is
+# computed in ONE place and not re-derived per branch or per code path, so
+# it now pins the exact shape: one three-way computation, plus at most one
+# relabel that reads the adoption fact and nothing else.
+ok("exit_reason is assigned at most twice - the three-way, plus the "
+   "adopted relabel", len(_assigns) <= 2, str(len(_assigns)))
+_relabels = [a for a in _assigns
+             if isinstance(a.value, ast.Name) and a.value.id == "ADOPTED_EXIT_REASON"]
+_threeway = [a for a in _assigns if a not in _relabels]
+ok("exactly one of them is the three-way computation",
+   len(_threeway) == 1, str(len(_threeway)))
+ok("and any second assignment is the adopted relabel, nothing else",
+   len(_assigns) - len(_threeway) == len(_relabels), str(len(_assigns)))
 _shadow_ifs = [n for n in ast.walk(FN) if isinstance(n, ast.If)
                and any(isinstance(x, ast.Name) and x.id == "SHADOW_MODE_ENABLED"
                        for x in ast.walk(n.test))]
@@ -149,8 +163,12 @@ ok("  and it has three readers, not three copies", len(_uses) >= 3, str(len(_use
 # The three-way itself must not have been re-spelled anywhere.
 _lits = sum(1 for n in ast.walk(FN) if isinstance(n, ast.Constant)
             and n.value == "parked_sell")
-ok("the parked_sell literal appears once, in that one computation",
-   _lits == 1, str(_lits))
+# The literal now appears twice: once in the three-way, and once in the
+# guard `if exit_reason == "parked_sell" and ...` that decides whether the
+# adopted relabel applies. That is a READ, not a second spelling of the
+# rule. Anything beyond two means the three-way has been duplicated.
+ok("the parked_sell literal appears at most twice - the computation, and "
+   "the adopted guard that reads it", _lits <= 2, str(_lits))
 
 print("== no name is read that production would not have bound ==")
 import builtins
