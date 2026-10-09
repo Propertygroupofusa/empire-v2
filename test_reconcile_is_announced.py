@@ -61,6 +61,8 @@ def ok(label, condition, detail=""):
         print(f"  FAIL {label}{(' - ' + detail) if detail else ''}")
 
 
+LEDGER = []
+
 CORRECTION = {
     "bot_name": "crypto_grid_6",
     "product_id": "XRP-USD",
@@ -145,15 +147,34 @@ class FakeDB:
     async def __aexit__(self, *a): return False
 
 
-def drive(corrections, rows, dry_run, status="OK"):
-    """One run_once pass against a fake book. Returns (report, feed, order)."""
+def drive(corrections, rows, dry_run, status="OK", cash=500.0):
+    """One run_once pass against a fake book.
+
+    Returns (report, feed, order). `order` interleaves COMMIT, FEED: and
+    AUDIT: so the ordering guarantees can be asserted, and `LEDGER` holds
+    the durable rows.
+    """
     order = []
     feed = []
+    LEDGER.clear()
 
     async def sink(bot, product, etype, msg):
         order.append(f"FEED:{etype}")
         feed.append({"bot": bot, "product": product,
                      "type": etype, "message": msg})
+
+    async def audit_sink(c, real_cash):
+        order.append("AUDIT")
+        LEDGER.append({
+            "bot_name": c["bot_name"], "product_id": c["product_id"],
+            "previous_allocated_usd": float(c["before_usd"]),
+            "new_allocated_usd": float(c["new_allocated_usd"]),
+            "delta_usd": round(float(c["new_allocated_usd"])
+                               - float(c["before_usd"]), 2),
+            "coin_basis_usd": float(c.get("coin_basis_usd") or 0.0),
+            "real_cash_usd": real_cash,
+            "reason_detail": rw.reduction_line(c),
+        })
 
     class FakeFactory:
         def __call__(self):
@@ -169,7 +190,8 @@ def drive(corrections, rows, dry_run, status="OK"):
                                           {"status": status})
     try:
         report = asyncio.get_event_loop().run_until_complete(
-            rw.run_once(FakeFactory(), 500.0, dry_run=dry_run, sink=sink))
+            rw.run_once(FakeFactory(), cash, dry_run=dry_run, sink=sink,
+                        audit_sink=audit_sink))
     finally:
         rw._branch_rows, rec.fleet_corrections = real_rows, real_fleet
     return report, feed, order
@@ -242,6 +264,114 @@ def test_a_branch_needing_nothing_is_not_announced():
         [dict(CORRECTION)], [FakeRow("crypto_grid_6", 1268.48)], dry_run=False)
     ok("already at target: nothing applied", report["applied"] == 0, str(report))
     ok("already at target: nothing announced", feed == [], str(feed))
+
+
+# ── THE DURABLE LEDGER. The feed is a notification; this answers
+# "what happened three days ago", which is the question actually asked.
+
+def test_every_reduction_also_lands_in_the_durable_ledger():
+    report, feed, _ = drive(
+        [dict(CORRECTION)], [FakeRow("crypto_grid_6", 2284.84)],
+        dry_run=False, cash=612.40)
+    ok("one durable row per applied correction",
+       report["audited"] == 1 and len(LEDGER) == 1,
+       f"audited={report.get('audited')} rows={len(LEDGER)}")
+    if not LEDGER:
+        return
+    r = LEDGER[0]
+    ok("names the branch and the product",
+       r["bot_name"] == "crypto_grid_6" and r["product_id"] == "XRP-USD",
+       str(r))
+    ok("carries the LIVE before-figure", r["previous_allocated_usd"] == 2284.84,
+       str(r["previous_allocated_usd"]))
+    ok("carries the after-figure", r["new_allocated_usd"] == 1268.48,
+       str(r["new_allocated_usd"]))
+    ok("stores the delta rather than making a reader subtract floats",
+       r["delta_usd"] == -1016.36, str(r["delta_usd"]))
+    ok("carries the coin left untouched, as proof it was",
+       r["coin_basis_usd"] == 1184.24, str(r["coin_basis_usd"]))
+    ok("records what the reconciler measured against",
+       r["real_cash_usd"] == 612.40, str(r["real_cash_usd"]))
+    ok("and the human sentence, identical to the feed and the log",
+       r["reason_detail"] == rw.reduction_line(
+           dict(CORRECTION, before_usd=2284.84)), r["reason_detail"])
+
+
+def test_the_delta_sign_says_a_claim_WENT_DOWN():
+    # A positive delta here would read as money arriving. It never is.
+    drive([dict(CORRECTION)], [FakeRow("crypto_grid_6", 2284.84)],
+          dry_run=False)
+    ok("the delta is negative, because a reduction is a reduction",
+       LEDGER and LEDGER[0]["delta_usd"] < 0,
+       str(LEDGER[0]["delta_usd"] if LEDGER else None))
+
+
+def test_observe_mode_writes_no_ledger_row_either():
+    report, _, _ = drive([dict(CORRECTION)],
+                         [FakeRow("crypto_grid_6", 2284.84)], dry_run=True)
+    ok("a dry run leaves the ledger empty",
+       LEDGER == [] and report.get("audited") in (None, 0),
+       f"rows={len(LEDGER)} audited={report.get('audited')}")
+
+
+def test_the_ledger_row_is_written_after_the_commit():
+    _, _, order = drive([dict(CORRECTION)],
+                        [FakeRow("crypto_grid_6", 2284.84)], dry_run=False)
+    ok("committed before the durable row",
+       "COMMIT" in order and "AUDIT" in order
+       and order.index("COMMIT") < order.index("AUDIT"), str(order))
+
+
+def test_notify_and_persist_do_not_depend_on_each_other():
+    # Either one failing must leave the correction applied and the other
+    # path intact. Neither is allowed to raise into the worker.
+    async def boom_feed(*a, **k):
+        raise RuntimeError("feed down")
+
+    async def boom_audit(*a, **k):
+        raise RuntimeError("database down")
+
+    class FakeFactory:
+        def __call__(self):
+            return lambda: FakeDB([FakeRow("crypto_grid_6", 2284.84)], [])
+
+    async def fake_branch_rows(_sf):
+        return []
+
+    import reconcile as rec
+    real_rows, real_fleet = rw._branch_rows, rec.fleet_corrections
+    rw._branch_rows = fake_branch_rows
+    rec.fleet_corrections = lambda r, c: ([dict(CORRECTION)], {"status": "OK"})
+    try:
+        for label, f, a in (("feed down", boom_feed, None),
+                            ("audit down", None, boom_audit),
+                            ("both down", boom_feed, boom_audit)):
+            try:
+                rep = asyncio.get_event_loop().run_until_complete(
+                    rw.run_once(FakeFactory(), 500.0, dry_run=False,
+                                sink=f, audit_sink=a))
+                ok(f"{label}: the correction still applied and nothing raised",
+                   rep["applied"] == 1, str(rep))
+            except Exception as e:
+                ok(f"{label}: the correction still applied and nothing raised",
+                   False, repr(e))
+    finally:
+        rw._branch_rows, rec.fleet_corrections = real_rows, real_fleet
+
+
+def test_the_table_matches_what_the_worker_writes():
+    # The worker builds the row by keyword. A column renamed in
+    # audit_models without the worker following would raise at runtime on
+    # the first real reduction - which is the worst possible moment.
+    from audit_models import ClaimReductionAudit as T
+    cols = set(T.__table__.columns.keys())
+    for needed in ("bot_name", "product_id", "previous_allocated_usd",
+                   "new_allocated_usd", "delta_usd", "coin_basis_usd",
+                   "real_cash_usd", "reason_code", "reason_detail",
+                   "source_component", "created_at", "id"):
+        ok(f"table has {needed}", needed in cols, str(sorted(cols)))
+    ok("the table is append-only in shape: no updated_at, no status column",
+       "updated_at" not in cols, str(sorted(cols)))
 
 
 def test_zz_nothing_above_failed():

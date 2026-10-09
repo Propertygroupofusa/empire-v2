@@ -155,6 +155,48 @@ async def _announce(bot_name, product_id, event_type, message, sink=None):
                     f"{type(e).__name__}: {e}")
 
 
+async def _audit_reduction(session_factory, c, real_cash_usd, audit_sink=None):
+    """Write one durable row for one claim reduction. NEVER raises.
+
+    THE FEED IS A NOTIFICATION; THIS IS THE LEDGER. The activity feed trims
+    at 500 rows and the grid's gate writes to it far more often than this
+    does, so it answers "what just happened" and cannot answer "what
+    happened three days ago" - which is the question that was actually
+    asked. claim_reduction_audit is append-only and nothing trims it.
+
+    Separate from _announce on purpose: a failure to notify must not cost
+    the durable row, and a failure to persist must not cost the
+    notification. Either one alone is still better than the log line this
+    replaces.
+    """
+    try:
+        if audit_sink is not None:
+            await audit_sink(c, real_cash_usd)
+            return
+        from audit_models import ClaimReductionAudit
+        before = float(c["before_usd"])
+        after = float(c["new_allocated_usd"])
+        async with session_factory()() as db:
+            db.add(ClaimReductionAudit(
+                bot_name=c["bot_name"],
+                product_id=c["product_id"],
+                previous_allocated_usd=before,
+                new_allocated_usd=after,
+                delta_usd=round(after - before, 2),
+                coin_basis_usd=float(c.get("coin_basis_usd") or 0.0),
+                real_cash_usd=(None if real_cash_usd is None
+                               else float(real_cash_usd)),
+                reason_code="UNBACKED_CLAIM",
+                reason_detail=reduction_line(c),
+                source_component="reconcile_worker",
+            ))
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[RECONCILE] audit row failed (non-fatal, the "
+                    f"correction itself is applied, logged and announced): "
+                    f"{type(e).__name__}: {e}")
+
+
 async def _branch_rows(session_factory):
     """Each branch with its own coin basis. Computed from the slices, never
     from allocated_usd - the allocation is the claim being tested, so using
@@ -176,11 +218,14 @@ async def _branch_rows(session_factory):
             for b in branches]
 
 
-async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None):
+async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None,
+                   audit_sink=None):
     """One pass. Returns the report plus what was applied.
 
-    `sink` is the activity-feed writer, injectable so a test can read the
-    exact rows the owner would see without a database.
+    `sink` is the activity-feed writer and `audit_sink` the durable-row
+    writer, both injectable so a test can read the exact rows the owner
+    would see - one on his dashboard, one in the ledger - without a
+    database.
     """
     import reconcile as rec
     rows = await _branch_rows(session_factory)
@@ -220,11 +265,16 @@ async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None):
     # Announced only after the commit. A feed row for a correction that
     # rolled back would be a lie about his money, and the ordering is the
     # only thing that prevents it.
+    audited = 0
     for c in announced:
         await _announce(c["bot_name"], c["product_id"], "CLAIM_REDUCED",
                         reduction_line(c), sink=sink)
+        await _audit_reduction(session_factory, c, real_cash_usd,
+                               audit_sink=audit_sink)
+        audited += 1
     report["applied"] = applied
     report["announced"] = len(announced)
+    report["audited"] = audited
     return report
 
 

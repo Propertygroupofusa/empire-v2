@@ -175,12 +175,55 @@ class BranchControlState(Base):
                         onupdate=datetime.utcnow)
 
 
+class ClaimReductionAudit(Base):
+    """Every time the reconciler wrote a branch's CLAIM down, and by how much.
+
+    WHY THIS TABLE EXISTS. On 2026-10-09 the account owner asked where
+    $1,016.36 of his allocation had gone. The answer was correct behaviour -
+    reconcile_worker had written unbacked claims down to fit the cash that
+    really existed - but its only record was a log line, inside a log
+    printing 46,656 lines a day of unchanged state. The activity feed added
+    in 1f43a7a notifies him; it trims at 500 rows and the gate writes to it
+    far more often, so it cannot answer "what happened three days ago". This
+    can.
+
+    IT RECORDS A CLAIM, NOT A LOSS, and the column names say so. A claim
+    reduction moves no coin, places no order and touches no slice: it
+    removes budget that was never backed by cash. coin_basis_usd is carried
+    on every row precisely so a later reader can see the coin was untouched
+    while the claim moved.
+
+    bot_name is the durable identity, per this module's IDENTITY note - the
+    history must survive the branch row it describes.
+    """
+    __tablename__ = "claim_reduction_audit"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    bot_name = Column(String, nullable=False, index=True)
+    product_id = Column(String, nullable=False, index=True)
+    # The LIVE claim at the moment of the write, never the planned one.
+    previous_allocated_usd = Column(Float, nullable=False)
+    new_allocated_usd = Column(Float, nullable=False)
+    # Stored rather than derived: a reader should not have to subtract two
+    # floats to learn what the owner actually asked about.
+    delta_usd = Column(Float, nullable=False)
+    # The coin the branch still owns. Proof, on the row, that it was untouched.
+    coin_basis_usd = Column(Float, nullable=True)
+    # What the reconciler was measuring against when it decided.
+    real_cash_usd = Column(Float, nullable=True)
+    reason_code = Column(String, nullable=False, default="UNBACKED_CLAIM")
+    reason_detail = Column(String, nullable=True)
+    source_component = Column(String, nullable=False, default="reconcile_worker")
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
 # Composite indexes the dashboard query in the brief actually needs.
 Index("idx_bae_bot_created", BranchAuditEvent.bot_name, BranchAuditEvent.created_at)
 Index("idx_ad_reason_gate", AllocatorDenial.reason_code, AllocatorDenial.gate_failed)
 Index("idx_etf_bot_created", ExchangeTruthFailure.bot_name, ExchangeTruthFailure.created_at)
 Index("idx_eae_bot_created", ExecutionAuthorityEvent.bot_name, ExecutionAuthorityEvent.created_at)
+Index("idx_cra_bot_created", ClaimReductionAudit.bot_name, ClaimReductionAudit.created_at)
 
 AUDIT_TABLES = ("branch_audit_events", "exchange_truth_failures",
                 "execution_authority_events", "allocator_denials",
-                "branch_control_state")
+                "branch_control_state", "claim_reduction_audit")
