@@ -473,16 +473,48 @@ async def census(session, tracked_usd: float = None) -> dict:
             f"NOT in total_usd: {', '.join(u['asset'] for u in unpriced)}. "
             f"The real total is higher than the figure shown by whatever they "
             f"are worth.")
-    if tracked_usd is not None:
-        gap = total - tracked_usd
-        out["tracked_usd"] = round(tracked_usd, 2)
-        out["untracked_usd"] = round(gap, 2)
-        out["tracked_share_pct"] = round(100.0 * tracked_usd / total, 2) if total else None
-        out["reconciliation"] = (
-            f"The bot-facing figure counts ${tracked_usd:,.2f}. The venue reports "
-            f"${total:,.2f}. ${gap:,.2f} - {100.0 * gap / total:.1f}% of the account - "
-            f"belongs to no branch, so nothing monitors, prices, or stops it."
-            if total else "no priced total to reconcile against")
+    return apply_tracked(out, tracked_usd)
+
+
+# ── THE COMPARISON IS PER-CALLER; THE VENUE READING IS SHARED ──────────
+#
+# tracked_usd is the BOT's figure, not the venue's, and different callers
+# pass different ones: /account-census passes the real bot-facing number,
+# while trading_dashboard.py's internal caller passes 0.0. Everything
+# else in a census dict describes the account and is identical for every
+# caller - which is why it can be cached and shared.
+#
+# These four fields cannot. Baking one caller's comparison into a shared
+# cache hands the next caller a reconciliation sentence that was never
+# true of its own figure - and this one reads "$X belongs to no branch,
+# so nothing monitors, prices, or stops it", which is precisely the
+# sentence nobody should ever read a stale or borrowed version of.
+#
+# So they are computed HERE, fresh, on every return path in
+# census_cached, against whatever total the shared reading carries.
+def apply_tracked(out, tracked_usd):
+    """(Re)compute the tracked-vs-venue comparison on a census dict.
+
+    Clears the four fields first, so a dict that arrives carrying
+    ANOTHER caller's comparison cannot keep it when this caller passes
+    tracked_usd=None.
+    """
+    for k in ("tracked_usd", "untracked_usd", "tracked_share_pct",
+              "reconciliation"):
+        out.pop(k, None)
+    if tracked_usd is None:
+        return out
+    total = out.get("total_usd") or 0.0
+    gap = total - tracked_usd
+    out["tracked_usd"] = round(tracked_usd, 2)
+    out["untracked_usd"] = round(gap, 2)
+    out["tracked_share_pct"] = (round(100.0 * tracked_usd / total, 2)
+                                if total else None)
+    out["reconciliation"] = (
+        f"The bot-facing figure counts ${tracked_usd:,.2f}. The venue reports "
+        f"${total:,.2f}. ${gap:,.2f} - {100.0 * gap / total:.1f}% of the account - "
+        f"belongs to no branch, so nothing monitors, prices, or stops it."
+        if total else "no priced total to reconcile against")
     return out
 
 
@@ -526,8 +558,11 @@ async def census_cached(session, tracked_usd: float = None,
     cached = _CENSUS_CACHE.get("census")
     age = now - (_CENSUS_CACHE.get("at") or 0.0)
 
+    # Every served path recomputes the tracked comparison for THIS
+    # caller - see apply_tracked. The cached reading describes the
+    # account; the comparison describes the caller's own books.
     if cached is not None and age < max_age_seconds:
-        out = dict(cached)
+        out = apply_tracked(dict(cached), tracked_usd)
         out["stale"] = True
         out["age_seconds"] = round(age, 1)
         return out
@@ -539,8 +574,11 @@ async def census_cached(session, tracked_usd: float = None,
                  "detail": ""}
 
     if fresh.get("available"):
-        _CENSUS_CACHE.update(census=fresh, at=now)
-        out = dict(fresh)
+        # Stored WITHOUT this caller's comparison, so the next caller
+        # cannot inherit it. apply_tracked strips the four fields on the
+        # way in and puts the right ones back on the way out.
+        _CENSUS_CACHE.update(census=apply_tracked(dict(fresh), None), at=now)
+        out = apply_tracked(dict(fresh), tracked_usd)
         out["stale"] = False
         out["age_seconds"] = 0.0
         return out
@@ -548,7 +586,7 @@ async def census_cached(session, tracked_usd: float = None,
     # The read failed. Serve the last good one WITH ITS AGE, if it is
     # recent enough to still describe the same account.
     if cached is not None and age <= max_stale_seconds:
-        out = dict(cached)
+        out = apply_tracked(dict(cached), tracked_usd)
         out["stale"] = True
         out["age_seconds"] = round(age, 1)
         out["stale_reason"] = fresh.get("error") or "read failed"

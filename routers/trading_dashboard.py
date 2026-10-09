@@ -1222,9 +1222,27 @@ async def get_account_census(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         log.warning(f"[census] tracked figure unavailable: {type(e).__name__}: {e}")
 
+    # census_cached, NOT census. This endpoint is the most-polled read in
+    # the system - the dashboard calls it, every open browser tab calls
+    # it, and both hourly guards call it - and bare census() makes a
+    # fresh paginated accounts walk plus a price fetch on EVERY request.
+    #
+    # Measured 2026-10-09 03:36Z: a dozen of these inside two minutes,
+    # and Coinbase started refusing. The log carried `[CENSUS] accounts
+    # HTTP 429` in a loop, then `HTTP 429 fetching USD`, and that second
+    # one is not cosmetic: it makes get_real_free_cash_usd return None,
+    # which the deployer reads as "do not deploy". Polling this page
+    # could stop the fleet buying.
+    #
+    # The cache and its doctrine were already written and tested here
+    # (test_census_cached.py) and already used by the internal caller
+    # below - this endpoint simply never got switched over. 45s TTL, so
+    # a burst of callers shares ONE venue read; a 900s stale fallback,
+    # so a refusal serves the last real reading with its age rather than
+    # an unavailable page.
     try:
         async with engine.aiohttp.ClientSession() as session:
-            out = await account_census.census(session, tracked_usd=tracked)
+            out = await account_census.census_cached(session, tracked_usd=tracked)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"census failed: {type(e).__name__}: {e}")
     return out

@@ -649,6 +649,57 @@ async def get_supplemental_capital() -> float:
         return 0.0
 
 
+# ── THE ACCOUNTS READ REFUSES OFTEN, AND IT IS NOT A VERDICT ───────────
+#
+# Mirrors account_census's constants deliberately rather than importing
+# them: that module owns the census read, this one owns the wallet read,
+# and a shared import would couple two paths that must be able to fail
+# independently. The VALUES are kept identical on purpose - if one is
+# tuned the other should be looked at.
+_ACCOUNTS_RETRY_STATUSES = (429, 500, 502, 503, 504)
+_ACCOUNTS_RETRY_ATTEMPTS = 3
+_ACCOUNTS_RETRY_BACKOFF_SECONDS = (0.5, 1.5)
+_ACCOUNTS_RETRY_BUDGET_SECONDS = 6.0
+
+
+def _retry_after_seconds(resp, fallback):
+    """The venue's own Retry-After, clamped to the retry budget.
+
+    Clamped because the header is the venue's preference, not an
+    instruction worth blocking a trading cycle on - a Retry-After of 300
+    would stall the loop for five minutes.
+    """
+    raw = None
+    try:
+        raw = resp.headers.get("Retry-After")
+    except Exception:
+        raw = None
+    if raw:
+        try:
+            return max(0.0, min(float(str(raw).strip()),
+                                _ACCOUNTS_RETRY_BUDGET_SECONDS))
+        except (TypeError, ValueError):
+            pass
+    return fallback
+
+
+class _FetchedPage:
+    """One accounts page, already read off the wire.
+
+    The retry loop must consume the response INSIDE its `async with`,
+    because the connection is released on exit. This carries the three
+    things the code below needs - status, parsed json, error text - so
+    that code did not have to be restructured around the retry.
+    """
+
+    __slots__ = ("status", "payload", "body_text")
+
+    def __init__(self, status, payload, body_text):
+        self.status = status
+        self.payload = payload or {}
+        self.body_text = body_text or ""
+
+
 async def get_usd_balance(session):
     """Real Coinbase USD balance available for trading. Returns
     (balance, None) on success, or (None, reason) on any failure (auth
@@ -675,9 +726,66 @@ async def get_usd_balance(session):
             params = {"limit": 250}
             if cursor:
                 params["cursor"] = cursor
-            async with session.get(COINBASE_BASE_URL + path, headers=_auth_headers("GET", path), params=params) as r:
+            # THE VENUE ASKS US TO WAIT; IT DOES NOT SAY WE HAVE NO MONEY.
+            #
+            # Before this retry, a 429 here returned (None, "HTTP 429"),
+            # and get_real_free_cash_usd passes None straight through,
+            # which every caller correctly reads as "do not deploy". So
+            # the most common refusal this endpoint gives looked exactly
+            # like an empty wallet and could stop the fleet buying.
+            # Live 2026-10-09 03:36Z: `HTTP 429 fetching USD`, twice,
+            # while the dashboard was being polled.
+            #
+            # account_census.fetch_balances already solved this for the
+            # census read, and the reasoning is written at the top of
+            # that module: a 429 is the venue asking us to wait, not
+            # telling us the account is empty. Same statuses, same
+            # backoff, same Retry-After handling, reused rather than
+            # re-invented.
+            #
+            # The retry is INSIDE the page loop and replaces the single
+            # request - it does not add one. The first draft of this put
+            # a retry loop ABOVE the original call and would have made
+            # two requests per page, doubling the load on the endpoint
+            # that is already refusing.
+            #
+            # IT STILL FAILS CLOSED. When every attempt is refused it
+            # returns (None, reason) exactly as before, and does NOT
+            # reach for the cached balance the way the 403 path does. A
+            # stale balance is a number the bot might SPEND against;
+            # refusing to deploy is the safe end of that trade.
+            _attempt = 0
+            while True:
+                r_ctx = session.get(COINBASE_BASE_URL + path,
+                                    headers=_auth_headers("GET", path),
+                                    params=params)
+                async with r_ctx as r:
+                    if (r.status in _ACCOUNTS_RETRY_STATUSES
+                            and _attempt < _ACCOUNTS_RETRY_ATTEMPTS - 1):
+                        _wait = _retry_after_seconds(
+                            r, _ACCOUNTS_RETRY_BACKOFF_SECONDS[
+                                min(_attempt,
+                                    len(_ACCOUNTS_RETRY_BACKOFF_SECONDS) - 1)])
+                        log.info(f"[CRYPTO] accounts HTTP {r.status} fetching "
+                                 f"USD - attempt {_attempt + 1}/"
+                                 f"{_ACCOUNTS_RETRY_ATTEMPTS}, retrying in "
+                                 f"{_wait:.1f}s")
+                    else:
+                        _status = r.status
+                        _text = None
+                        _json = None
+                        if r.status == 200:
+                            _json = await r.json()
+                        else:
+                            _text = (await r.text())[:300]
+                        break
+                _attempt += 1
+                await asyncio.sleep(_wait)
+
+            if True:
+                r = _FetchedPage(_status, _json, _text)
                 if r.status != 200:
-                    body = (await r.text())[:300]
+                    body = r.body_text
                     # Handle 403 Forbidden (network egress blocked)
                     if r.status == 403 and "not in allowlist" in body:
                         cached = get_cached_response(cache_key)
@@ -690,7 +798,7 @@ async def get_usd_balance(session):
                             return total, None
                         return None, f"HTTP 403: Egress blocked. No cache available. Fix: Add api.coinbase.com to Railway egress allowlist"
                     return None, f"HTTP {r.status}: {body}"
-                data = await r.json()
+                data = r.payload
                 accounts = data.get("accounts", [])
                 for account in accounts:
                     if account.get("currency") == "USD":
