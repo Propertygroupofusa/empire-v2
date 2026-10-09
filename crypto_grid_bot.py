@@ -188,6 +188,11 @@ def _attributed_caller(skip=2):
 # crypto_selection_backtest.py).
 GRID_DRAWDOWN_BREAKER_PCT = env_float("GRID_DRAWDOWN_BREAKER_PCT", 0.25)
 
+# OFF BY DEFAULT, and that default is the point: this changes what a
+# SAFETY CONTROL measures, so a deploy must not flip it. See
+# peak_ceiling_for_held_branch for what it does and what it gives up.
+GRID_PEAK_CLAMP_HELD = os.getenv("GRID_PEAK_CLAMP_HELD", "false").lower() == "true"
+
 # Real, opt-in fee-tier-aware dynamic grid spacing - OFF by default,
 # per the account owner's own explicit "backtest before going live"
 # instruction. Unlike the drawdown breaker above (pure downside
@@ -6479,6 +6484,61 @@ def peak_for_flat_branch(peak_equity, allocated_usd, slices):
     return round(float(allocated_usd), 2)
 
 
+def peak_ceiling_for_held_branch(peak_equity, allocated_usd, slices,
+                                 unrealized_usd, enabled=None):
+    """The flat-branch clamp, extended to a branch that still holds coin.
+
+    WHY THIS IS OPT-IN. peak_for_flat_branch above declines to touch a
+    held branch, on the stated grounds that the peak-to-equity gap
+    "mixes withdrawn claim with genuine market loss, and nothing stored
+    can separate them after the fact." That reasoning is correct for the
+    question it asks. This function asks a DIFFERENT question, and the
+    difference is the whole trade-off:
+
+      equity drawdown   how far has this BRANCH fallen from its best?
+                        needs history. Not derivable.
+      position drawdown how far is the coin it HOLDS below what it paid?
+                        allocated_usd and unrealized are both stored.
+
+    Clamping the peak to `allocated_usd + max(0, unrealized)` makes the
+    breaker read the second. When the position is underwater the ceiling
+    is just allocated_usd, so the reading becomes exactly
+    -unrealized / cost. When it is ahead, the ceiling is current equity
+    and rule 3 would have ratcheted there anyway, so nothing moves.
+
+    WHAT IT GIVES UP, stated plainly rather than buried: a branch that
+    lost money on CLOSED trades carries that loss in allocated_usd, and
+    this ceiling moves down with it. Such a branch reads 0% while flat
+    at a reduced size. The history is no longer visible to the breaker.
+    That is a real loss of information and it is why this is a flag and
+    not a change.
+
+    MEASURED ON THE LIVE FLEET 2026-10-09, which is what prompted it:
+    nine of twenty-one branches carried a stored peak above their entire
+    current claim. LTC read 32.2% against a position down 11.2% and was
+    breached - and a breached branch cannot buy, while the existing
+    repair only fires when a branch is FLAT, which LTC could not become
+    without a 14.09% rise. Frozen by a number, with no path out.
+    The error ran both ways: BCH read 6.2% against a position down
+    14.4%, so its protection was weaker than the dashboard showed.
+
+    Only ever clamps DOWN, and only to a value the branch can reach
+    today. Returns None when there is nothing to change.
+    """
+    if enabled is None:
+        enabled = GRID_PEAK_CLAMP_HELD
+    if not enabled:
+        return None
+    if not slices:
+        return None          # peak_for_flat_branch owns that case
+    if peak_equity is None or allocated_usd is None or unrealized_usd is None:
+        return None
+    ceiling = float(allocated_usd) + max(0.0, float(unrealized_usd))
+    if float(peak_equity) <= ceiling:
+        return None
+    return round(ceiling, 2)
+
+
 def effective_peak_equity(peak_equity, allocated_usd, slices, equity):
     """The high-water mark the drawdown breaker should measure against.
 
@@ -6517,6 +6577,15 @@ def effective_peak_equity(peak_equity, allocated_usd, slices, equity):
     flat = peak_for_flat_branch(peak, allocated_usd, slices)
     if flat is not None:
         clamped_from, peak = peak, flat
+    # Rule 2b, OFF unless GRID_PEAK_CLAMP_HELD is set. Sits here rather
+    # than inside peak_for_flat_branch so that function keeps its single
+    # stated meaning and stays testable on its own.
+    held = peak_ceiling_for_held_branch(peak, allocated_usd, slices,
+                                        (equity - allocated_usd)
+                                        if (equity is not None and allocated_usd is not None)
+                                        else None)
+    if held is not None:
+        clamped_from, peak = peak, held
     if equity > peak:
         peak = equity
     return peak, clamped_from
