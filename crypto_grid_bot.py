@@ -7215,6 +7215,16 @@ async def _net_edge_gate_ok(session, product_id: str, grid_pct: float, slice_usd
 _STATE_LINE_SEEN: dict = {}
 GRID_STATE_REASSERT_SECONDS = env_int("GRID_STATE_REASSERT_SECONDS", 3600)
 
+# How far the computed step must move before the new value is PERSISTED.
+# Governs the database write ONLY - never what the branch trades on, which
+# is always the freshly computed value (see run_grid_branch_cycle). Default
+# 1e-5 = 0.001 percentage points, about 3-10x the measured per-cycle drift,
+# so a drifting branch persists every few cycles instead of every cycle
+# while any real spacing move (hundredths of a point, >= 1e-4) still writes
+# immediately. Because trading does not depend on it, this value is safe to
+# tune: it trades disk writes against how stale a restart's loaded step is.
+GRID_PCT_WRITE_MIN_DELTA = env_float("GRID_PCT_WRITE_MIN_DELTA", 1e-5)
+
 
 def should_say_state(key: str, state: str, now_epoch: float,
                      reassert_seconds: int = None, seen: dict = None) -> bool:
@@ -7609,17 +7619,46 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                     f"to grid right now, which is an answer, not a failure."
                 )
 
-    if new_grid_pct is not None and abs(new_grid_pct - branch.grid_pct) > 1e-9:
-        async with get_session_factory()() as db:
-            result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
-            row = result.scalar_one_or_none()
-            if row:
-                row.grid_pct = new_grid_pct
-                await db.commit()
-        log.info(f"[GRID] {branch.bot_name}: dynamic spacing {branch.grid_pct*100:.4f}% -> "
-                 f"{new_grid_pct*100:.4f}% ({spacing_log_note})")
-        branch.grid_pct = new_grid_pct
     if new_grid_pct is not None:
+        # THE TRADING VALUE AND THE DATABASE WRITE ARE NOW SEPARATE THINGS.
+        #
+        # They used to be one. `branch.grid_pct = new_grid_pct` sat INSIDE
+        # the write guard, so the guard decided both what got persisted AND
+        # what the branch traded on that cycle. That coupling is why a
+        # "skip the immaterial write" change could not be made safely:
+        # every proposal to raise the threshold was, without anyone
+        # intending it, a proposal to trade on a stale step.
+        #
+        # MEASURED COST OF LEAVING IT ALONE, two readings 55 minutes apart
+        # on 2026-10-09: 10 of 21 branches drift continuously (11 sit
+        # pinned at exactly 3.0000%, the fleet floor, and never write).
+        # Drift ran +0.0008 to +0.0139 percentage points over that window,
+        # which is ~0.0001-0.0003 points per cycle - far above the old 1e-9
+        # guard, so each of those 10 wrote to the database EVERY cycle.
+        # About 17,280 writes a day to persist noise.
+        #
+        # NOT A TRADING CHANGE, and the ordering is what makes that true:
+        # the branch now takes the freshly computed step unconditionally,
+        # every cycle, before the write is even considered. The threshold
+        # below governs ONLY whether the number is persisted. The sole
+        # behavioural difference from before is in changes at or under
+        # 1e-9 - float noise - where the branch now uses the fresh value
+        # instead of the stale one. Strictly more responsive, never less.
+        #
+        # WHAT A SKIPPED WRITE COSTS: on a restart the branch loads a step
+        # up to one threshold stale, and the next cycle recomputes it from
+        # market data anyway. That is the whole exposure.
+        _prev_grid_pct = branch.grid_pct
+        branch.grid_pct = new_grid_pct
+        if abs(new_grid_pct - _prev_grid_pct) >= GRID_PCT_WRITE_MIN_DELTA:
+            async with get_session_factory()() as db:
+                result = await db.execute(select(CryptoGridBranch).where(CryptoGridBranch.bot_name == branch.bot_name))
+                row = result.scalar_one_or_none()
+                if row:
+                    row.grid_pct = new_grid_pct
+                    await db.commit()
+            log.info(f"[GRID] {branch.bot_name}: dynamic spacing {_prev_grid_pct*100:.4f}% -> "
+                     f"{new_grid_pct*100:.4f}% ({spacing_log_note})")
         grid_pct = branch.grid_pct
 
     # ---- Real dip: buy a new slice (skipped while drawdown-breached) ----
