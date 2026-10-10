@@ -219,5 +219,58 @@ class TestItIsWiredBeforeTheOrder(unittest.TestCase):
         self.assertIn('_feed_should_write("SELL_UNDELIVERABLE"', self.src)
 
 
+class TestStatusIsWhatTheCheckWillDo(unittest.TestCase):
+    def setUp(self):
+        self._prev = os.environ.get("GRID_SELL_DELIVERABILITY_CHECK")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("GRID_SELL_DELIVERABILITY_CHECK", None)
+        else:
+            os.environ["GRID_SELL_DELIVERABILITY_CHECK"] = self._prev
+
+    def _set(self, v):
+        if v is None:
+            os.environ.pop("GRID_SELL_DELIVERABILITY_CHECK", None)
+        else:
+            os.environ["GRID_SELL_DELIVERABILITY_CHECK"] = v
+
+    def test_enabled_agrees_with_is_enabled_for_every_value(self):
+        for v in (None, "", "0", "1", "false", "FALSE", " off ", "no", "true",
+                  "on", "disable", "disabled", "nope", "2"):
+            self._set(v)
+            self.assertEqual(sd.status()["enabled"], sd.is_enabled(), repr(v))
+
+    def test_enabled_agrees_with_what_verdict_actually_does(self):
+        for v in ("0", "false", "no", "off"):
+            self._set(v)
+            self.assertFalse(sd.status()["enabled"], v)
+            self.assertTrue(sd.verdict("ETH-USD", 1.0, {"ETH": 0.0}, 0)[0], v)
+        for v in (None, "1", "true", "disable", "disabled"):
+            self._set(v)
+            self.assertTrue(sd.status()["enabled"], repr(v))
+            self.assertFalse(sd.verdict("ETH-USD", 1.0, {"ETH": 0.0}, 0)[0], repr(v))
+
+    def test_a_failed_attempt_to_disable_is_reported_unrecognised(self):
+        """This default is ON, so the typo that matters is the opposite one:
+        meant to turn it OFF, and it silently stayed on."""
+        for v in ("disable", "disabled", "nope", "2"):
+            self._set(v)
+            st = sd.status()
+            self.assertTrue(st["enabled"], v)
+            self.assertFalse(st["value_recognised"], v)
+
+    def test_the_raw_value_is_never_echoed(self):
+        self._set("sk-live-DO-NOT-PRINT-THIS-1234567890")
+        blob = repr(sd.status())
+        self.assertNotIn("DO-NOT-PRINT", blob)
+
+    def test_status_never_raises(self):
+        import unittest.mock as m
+        with m.patch.object(sd.os, "getenv", side_effect=RuntimeError("boom")):
+            st = sd.status()
+        self.assertFalse(st["readable"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

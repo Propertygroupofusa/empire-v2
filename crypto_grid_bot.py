@@ -2926,6 +2926,27 @@ async def wallet_available_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
 _SELL_SKIPS = {}
 
 
+def _armed_flags_block() -> dict:
+    """The two switches that decide whether code shipped today is acting.
+
+    Published on /grid-status because "did that variable take" was otherwise
+    answerable only by watching an uptime counter - the reason stop_policy is
+    published too. Each module reports what the running process reads from its
+    own environment, through the SAME constant its gate consults, so the page
+    cannot say armed while the gate says no.
+
+    Isolated per module: one failing to import costs only its own key.
+    """
+    out = {}
+    for key, modname in (("inventory_depth_gate", "inventory_depth_gate"),
+                         ("sell_deliverability_check", "sell_deliverability")):
+        try:
+            out[key] = __import__(modname).status()
+        except Exception as exc:
+            out[key] = {"readable": False, "error": type(exc).__name__}
+    return out
+
+
 def _wallet_units_fallback(now, why):
     """The last good reading, if it is still young enough to be one.
 
@@ -10161,6 +10182,7 @@ async def get_grid_status() -> dict:
         # per branch. Exposed because "did that environment variable take"
         # was otherwise only answerable by watching an uptime counter.
         "stop_policy": _stop_policy_block(),
+        **_armed_flags_block(),
         "min_required_roi_pct": MIN_REQUIRED_ROI_PCT,
         # The REAL round-trip fee every P&L figure above is priced against,
         # plus whether it was genuinely observed from Coinbase or is still

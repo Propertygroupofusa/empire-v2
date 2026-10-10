@@ -72,10 +72,45 @@ COVER_TOLERANCE = max(0.0, env_float("GRID_SELL_COVER_TOLERANCE", 1e-9))
 SEND, SKIP, PROBE, UNKNOWN = "SEND", "SKIP", "PROBE", "UNKNOWN"
 
 
+ENV_NAME = "GRID_SELL_DELIVERABILITY_CHECK"
+_OFF = ("0", "false", "no", "off")
+_ON = ("", "1", "true", "yes", "on")
+
+
 def is_enabled() -> bool:
-    """On unless explicitly turned off. Read at call time, not at import."""
-    return os.getenv("GRID_SELL_DELIVERABILITY_CHECK", "1").strip().lower() not in (
-        "0", "false", "no", "off")
+    """On unless explicitly turned off. Read at call time, not at import.
+
+    ONE definition of "off" (_OFF), shared with status() below.
+    """
+    return os.getenv(ENV_NAME, "1").strip().lower() not in _OFF
+
+
+def status() -> dict:
+    """What the RUNNING PROCESS sees, for /grid-status. Pure, never raises.
+
+    The mirror image of inventory_depth_gate.status(): that one defaults OFF
+    and the typo that matters is "meant to arm, did not". This one defaults
+    ON, so the typo that matters is "meant to disable, did not" - "disable"
+    or "false " with the wrong word matches nothing in _OFF and the check
+    silently stays on. value_recognised catches it.
+
+    The raw value is not echoed, for the same reason.
+    """
+    try:
+        raw = os.getenv(ENV_NAME)
+        norm = (raw or "").strip().lower()
+        return {
+            "enabled": norm not in _OFF,
+            "env_name": ENV_NAME,
+            "env_is_set": raw is not None,
+            "value_recognised": norm in _OFF or norm in _ON,
+            "accepted_values_to_disable": list(_OFF),
+            "probe_every_skips": PROBE_EVERY,
+            "scope": ("skips only a sell the venue would reject; unknown "
+                      "balance always sends; never blocks a sellable order"),
+        }
+    except Exception as exc:
+        return {"readable": False, "error": type(exc).__name__}
 
 
 def asset_of(product_id) -> str:

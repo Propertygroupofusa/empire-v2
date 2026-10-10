@@ -116,15 +116,67 @@ NORMAL, WARN, ALERT = "NORMAL", "WARN", "ALERT"
 BUY_PAUSE_THRESHOLD = env_float("GRID_INVENTORY_ALERT_SHARE", 0.25)
 
 
+ENV_NAME = "GRID_INVENTORY_DEPTH_GATE"
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("", "0", "false", "no", "off")
+
+
+def _normalised() -> str:
+    return os.getenv(ENV_NAME, "").strip().lower()
+
+
 def is_armed() -> bool:
     """False unless the owner has armed it. Default OFF.
 
     Deliberately read at call time rather than captured at import, so the
     owner can arm it with a variable and a restart rather than a code
     change, and so a test can arm it without reloading the module.
+
+    The set of arming strings is ONE definition (_TRUTHY), shared with
+    status() below. They were two literals in two places for about an hour,
+    which is exactly how a status page ends up saying "armed" while the gate
+    does nothing.
     """
-    return os.getenv("GRID_INVENTORY_DEPTH_GATE", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    return _normalised() in _TRUTHY
+
+
+def status() -> dict:
+    """What the RUNNING PROCESS sees, for /grid-status. Pure, never raises.
+
+    This answers "did that environment variable take" without anyone having
+    to watch an uptime counter - the same reason stop_policy is published.
+    It reads os.environ in the process that is serving the request, so it
+    reports what the gate will actually do, not what the Railway UI says.
+
+    The raw value is deliberately NOT echoed. A variable that was pasted
+    into the wrong field could hold anything, and a status page is the last
+    place to print it. `value_recognised` carries the useful part: a value
+    like "tru" or "enabled" matches nothing in _TRUTHY, so the gate stays OFF
+    with no warning anywhere, and that is precisely the mistake worth
+    catching from outside.
+
+    `armed` does NOT mean it has refused anything. The gate runs only when a
+    branch is about to buy, so an armed gate with no branch at its dip
+    trigger shows no activity - which is why this flag exists at all.
+    """
+    try:
+        raw = os.getenv(ENV_NAME)
+        norm = (raw or "").strip().lower()
+        return {
+            "armed": norm in _TRUTHY,
+            "env_name": ENV_NAME,
+            "env_is_set": raw is not None,
+            "value_recognised": norm in _TRUTHY or norm in _FALSY,
+            "accepted_values_to_arm": list(_TRUTHY),
+            "alert_share_threshold": BUY_PAUSE_THRESHOLD,
+            "threshold_is": "judgement, not measurement",
+            "scope": "refuses NEW buys only - never sells, trims or resizes",
+            "runs_only_when": ("a branch is about to buy a dip, so armed with "
+                               "no refusal logged means nothing has reached "
+                               "its trigger, not that it is off"),
+        }
+    except Exception as exc:
+        return {"readable": False, "error": type(exc).__name__}
 
 
 def _field(row, name):

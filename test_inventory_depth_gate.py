@@ -218,5 +218,93 @@ class TestItIsWiredIntoTheBuyPath(unittest.TestCase):
         self.assertLess(inv, execg)
 
 
+class TestStatusIsWhatTheGateWillDo(unittest.TestCase):
+    """status() feeds /grid-status. Its whole value is that it cannot
+    disagree with the gate it describes, so these tie the two together
+    rather than testing the dict in isolation."""
+
+    def setUp(self):
+        self._prev = os.environ.get("GRID_INVENTORY_DEPTH_GATE")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("GRID_INVENTORY_DEPTH_GATE", None)
+        else:
+            os.environ["GRID_INVENTORY_DEPTH_GATE"] = self._prev
+
+    def _set(self, v):
+        if v is None:
+            os.environ.pop("GRID_INVENTORY_DEPTH_GATE", None)
+        else:
+            os.environ["GRID_INVENTORY_DEPTH_GATE"] = v
+
+    def test_armed_agrees_with_is_armed_for_every_value(self):
+        for v in (None, "", "0", "1", "true", "TRUE", " on ", "yes", "false",
+                  "off", "no", "tru", "enabled", "2", "armed", "y"):
+            self._set(v)
+            self.assertEqual(g.status()["armed"], g.is_armed(), repr(v))
+
+    def test_armed_agrees_with_what_verdict_actually_does(self):
+        """Not just the flag: the behaviour. An armed status must mean a
+        deep branch is really refused, an unarmed one that it is allowed."""
+        bad = [sl(100.0, mae=-0.99, hours=9999.0)]
+        for v in ("1", "true", "on", "yes"):
+            self._set(v)
+            self.assertTrue(g.status()["armed"], v)
+            self.assertFalse(g.verdict(bad, NOW, EPOCH)[0], v)
+        for v in (None, "0", "tru", "enabled", "armed"):
+            self._set(v)
+            self.assertFalse(g.status()["armed"], repr(v))
+            self.assertTrue(g.verdict(bad, NOW, EPOCH)[0], repr(v))
+
+    def test_a_typo_is_reported_as_unrecognised_not_as_armed(self):
+        """The mistake worth catching from outside: meant to arm, did not."""
+        for v in ("tru", "enabled", "armed", "y", "2"):
+            self._set(v)
+            st = g.status()
+            self.assertFalse(st["armed"], v)
+            self.assertTrue(st["env_is_set"], v)
+            self.assertFalse(st["value_recognised"], v)
+
+    def test_recognised_values_are_flagged_recognised(self):
+        for v in (None, "", "0", "false", "no", "off", "1", "true", "yes", "on"):
+            self._set(v)
+            self.assertTrue(g.status()["value_recognised"], repr(v))
+
+    def test_the_raw_value_is_never_echoed(self):
+        """A variable pasted into the wrong field could hold anything."""
+        self._set("sk-live-DO-NOT-PRINT-THIS-1234567890")
+        blob = repr(g.status())
+        self.assertNotIn("DO-NOT-PRINT", blob)
+        self.assertNotIn("sk-live", blob)
+
+    def test_it_says_armed_does_not_mean_it_has_refused(self):
+        self._set("1")
+        self.assertIn("about to buy", g.status()["runs_only_when"])
+
+    def test_status_never_raises(self):
+        import unittest.mock as m
+        with m.patch.object(g.os, "getenv", side_effect=RuntimeError("boom")):
+            st = g.status()
+        self.assertFalse(st["readable"])
+
+
+class TestStatusIsOnGridStatus(unittest.TestCase):
+    def setUp(self):
+        self.src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "crypto_grid_bot.py")).read()
+
+    def test_the_helper_is_spread_into_the_payload(self):
+        self.assertIn("**_armed_flags_block(),", self.src)
+
+    def test_the_helper_isolates_each_module(self):
+        seg = self.src[self.src.index("def _armed_flags_block"):
+                       self.src.index("def _wallet_units_fallback")]
+        self.assertIn("try:", seg)
+        self.assertIn('"readable": False', seg)
+        self.assertIn("inventory_depth_gate", seg)
+        self.assertIn("sell_deliverability", seg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
