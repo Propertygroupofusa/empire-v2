@@ -2861,6 +2861,52 @@ async def wallet_owned_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
     return units
 
 
+_WALLET_AVAIL_CACHE = {"units": None, "at": 0.0}
+
+
+async def wallet_available_units(max_age_seconds=WALLET_UNITS_TTL_SECONDS):
+    """{ASSET: units the venue will RELEASE}, or None when unreadable.
+
+    AVAILABLE, NOT OWNED - and deliberately the mirror of
+    wallet_owned_units() right above. That one reads OWNED because a BUY
+    must not be refused over coin merely sitting under a resting order.
+    This one reads AVAILABLE because a SELL is sized against what the
+    venue will actually hand over: staked coin is owned and not
+    available, and so is coin under a resting order.
+
+    Same cache terms and the same reason - this would otherwise sweep the
+    accounts endpoint once per branch per cycle, which is exactly what
+    got the owned read rate-limited before.
+
+    None is load-bearing and means UNKNOWN. sell_deliverability treats it
+    as "send the order unchanged", never as a shortfall.
+    """
+    import time as _t
+    now = _t.time()
+    cached = _WALLET_AVAIL_CACHE.get("units")
+    if cached is not None and (now - _WALLET_AVAIL_CACHE["at"]) < max_age_seconds:
+        return cached
+    try:
+        import account_census
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession() as _s:
+            _bal = await account_census.fetch_balances(_s)
+        units = account_census.available_units_map(_bal)
+    except Exception:
+        return _WALLET_AVAIL_CACHE.get("units")
+    if units is None:
+        return _WALLET_AVAIL_CACHE.get("units")
+    _WALLET_AVAIL_CACHE.update(units=units, at=now)
+    return units
+
+
+# Consecutive deliverability skips per (bot, product), so the probe in
+# sell_deliverability can let one order through and keep the venue as the
+# final authority. In memory only: a restart resets it to zero, which
+# means a restart always re-probes, which is the safe direction.
+_SELL_SKIPS = {}
+
+
 def _wallet_units_fallback(now, why):
     """The last good reading, if it is still young enough to be one.
 
@@ -8438,6 +8484,44 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                         f"profit at this price - holding every slice, waiting for a genuinely profitable one"
                     )
                 return
+        # ---- WILL THE VENUE ACTUALLY RELEASE THESE UNITS? ----
+        #
+        # Every gate above this line asked whether the sale SHOULD happen -
+        # the rise trigger on price, the picker on P&L. None asked whether
+        # it CAN. A branch whose coin is staked, or sitting under a resting
+        # order, passes all of them and then has its order rejected, and the
+        # cycle comes back 50 seconds later and does it again. BCH ran 200 of
+        # those; ZEC ran a retry loop that dominated a lifetime counter.
+        #
+        # THIS REFUSES NOTHING. An order the venue rejects sells nothing
+        # either way, so no sale is lost - only the doomed resend. UNKNOWN
+        # sends unchanged, a rounding crumb is not a shortfall, and after
+        # PROBE_EVERY skips it sends one anyway so the venue keeps the last
+        # word. Sells are never gated here and must never become gated.
+        _sd_key = (branch.bot_name, branch.product_id)
+        try:
+            import sell_deliverability as _sd
+            _send, _sd_state, _sd_why = _sd.verdict(
+                branch.product_id, oldest.qty,
+                await wallet_available_units(),
+                _SELL_SKIPS.get(_sd_key, 0))
+        except Exception as _sd_exc:
+            _send, _sd_state, _sd_why = True, "UNKNOWN", (
+                f"deliverability check unavailable ({type(_sd_exc).__name__}) - "
+                f"order sent unchanged")
+        if not _send:
+            _SELL_SKIPS[_sd_key] = _SELL_SKIPS.get(_sd_key, 0) + 1
+            if should_say_state(f"{branch.bot_name}:undeliverable",
+                                f"short:{len(slices)}", time.time()):
+                log.info(f"[GRID] {branch.bot_name}: 🪙 sell not sent - {_sd_why}")
+            if _feed_should_write("SELL_UNDELIVERABLE", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "SELL_UNDELIVERABLE", _sd_why)
+            return
+        if _sd_state == "PROBE":
+            log.info(f"[GRID] {branch.bot_name}: sell probe - {_sd_why}")
+        _SELL_SKIPS.pop(_sd_key, None)
+
         fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
             log.warning(f"[GRID] {branch.bot_name}: real grid sell of {branch.product_id} did not fill - will retry next cycle")

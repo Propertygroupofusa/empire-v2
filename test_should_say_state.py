@@ -294,7 +294,20 @@ def test_no_call_site_can_swallow_anything_but_a_log_line():
            not banned, f"found {sorted(set(banned))}")
         ok(f"{where}: has no else branch to diverge on",
            not node.orelse)
-    ok("every live call site was reached by this scan", sites == 7, f"{sites} sites")
+    # Not a pinned count. This read `sites == 7` and failed the moment an
+    # eighth guarded log line was added - the same magic-number failure
+    # test_newsroom had with `== 8`, and the same fix: compare against what
+    # the file actually contains. The scan's real claim is that it REACHED
+    # every call, i.e. that none sits outside an `if` test where the three
+    # checks above could not see it. So count every should_say_state call
+    # in the file and require the two numbers to agree.
+    every_call = sum(1 for n in ast.walk(tree)
+                     if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Name)
+                     and n.func.id == "should_say_state")
+    ok("every live call site was reached by this scan",
+       sites == every_call and sites > 0,
+       f"{sites} reached of {every_call} in the file")
 
 
 def test_zz_nothing_above_failed():
