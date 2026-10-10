@@ -644,6 +644,25 @@ def tradeable_slices(slices) -> list:
     return [s for s in (slices or []) if slice_is_tradeable(s)]
 
 
+def _slice_opened_epoch(opened_at):
+    """A slice's opened_at as a POSIX timestamp, or None when it has none.
+
+    Module level and named rather than a lambda at the call site, for two
+    reasons. test_slice_state_writes scans the cycle function for names
+    production would not have bound and does not descend into lambda
+    arguments, so an inline `lambda dt: ...` reads to it as an unbound `dt`
+    - a false positive, but the scanner is catching a real bug class and is
+    not worth weakening for one closure. And the buy path runs every cycle
+    on every branch, so it should not build a closure to do this.
+
+    Matches the conversion already used at the hold-time read further down
+    (`oldest.opened_at.timestamp()`) rather than introducing a second one.
+    opened_at is written naive by datetime.utcnow(), so this is correct on a
+    UTC container, which is what production runs.
+    """
+    return opened_at.timestamp() if opened_at else None
+
+
 def branch_is_parked(slices, num_levels) -> bool:
     """Is this branch on the parked-sell route rather than the rise trigger?
 
@@ -7914,6 +7933,43 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             log.warning(f"[GRID] {branch.bot_name}: 🧾 UNBACKED - no buy. {_back_reason}")
             await _record_gate_decision(branch.bot_name, branch.product_id,
                                         "UNBACKED", _back_reason)
+            return
+
+        # ---- DO NOT ADD TO INVENTORY THAT HAS ALREADY STOPPED WORKING ----
+        #
+        # Measured 2026-10-10 with no hindsight in it - only what was
+        # knowable at the moment of each purchase: 19 of 62 open slices,
+        # $1,583.70 and 38% of everything deployed, were bought into a
+        # branch that ALREADY held a slice past the 119.3h p95 recovery
+        # hold. XRP put $848.51 in across four such buys. That is how free
+        # cash becomes inventory that cannot sell, and on the same day 62
+        # of 63 open slices could not sell at a profit.
+        #
+        # REFUSE-ONLY, BUYS-ONLY, and OFF until armed. Unarmed it returns
+        # ALLOW on every input, so this block is byte-for-byte inert until
+        # GRID_INVENTORY_DEPTH_GATE is set - which is the owner's to set.
+        # It never sells, never trims, never touches a stop or a spacing,
+        # and it reads the stored mae_pct (a high-water mark) so a branch's
+        # verdict can only ratchet toward refusal, never flap.
+        #
+        # FAILS OPEN, like branch_backing_verdict above: unreadable
+        # inventory is UNKNOWN and UNKNOWN is never a refusal. Its own
+        # failure is likewise not a reason to refuse a buy - unlike the
+        # execution gate below, this one is an economic opinion, not an
+        # audit trail, so an exception here leaves the buy exactly where it
+        # was before this gate existed.
+        try:
+            import inventory_depth_gate as _idg
+            _inv_ok, _inv_reason = _idg.verdict(
+                slices, time.time(), _slice_opened_epoch)
+        except Exception as _inv_exc:
+            _inv_ok, _inv_reason = True, (
+                f"inventory-depth gate unavailable "
+                f"({type(_inv_exc).__name__}) - allowed through")
+        if not _inv_ok:
+            log.info(f"[GRID] {branch.bot_name}: 🧊 stuck inventory - no buy. {_inv_reason}")
+            await _record_gate_decision(branch.bot_name, branch.product_id,
+                                        "INVENTORY_DEPTH", _inv_reason)
             return
 
         # THE EXECUTION GATE. Called here so no buy path can reach the venue
