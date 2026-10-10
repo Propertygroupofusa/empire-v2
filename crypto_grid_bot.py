@@ -7967,9 +7967,19 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 f"inventory-depth gate unavailable "
                 f"({type(_inv_exc).__name__}) - allowed through")
         if not _inv_ok:
-            log.info(f"[GRID] {branch.bot_name}: 🧊 stuck inventory - no buy. {_inv_reason}")
-            await _record_gate_decision(branch.bot_name, branch.product_id,
-                                        "INVENTORY_DEPTH", _inv_reason)
+            # Throttled on BOTH sides. The log line fingerprints on the slice
+            # count so a standing refusal prints once, not every 50 seconds;
+            # the feed write goes through _feed_should_write for the same
+            # reason the sell-side one does. The first version wrote the feed
+            # unthrottled, copying EXITING's pattern - and EXITING is the
+            # pattern that filled 494 of the feed's 500 rows with one branch.
+            # Armed on today's book that would be three branches doing it.
+            if should_say_state(f"{branch.bot_name}:inventory",
+                                f"depth-refusal:{len(slices)}", time.time()):
+                log.info(f"[GRID] {branch.bot_name}: 🧊 stuck inventory - no buy. {_inv_reason}")
+            if _feed_should_write("INVENTORY_DEPTH", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "INVENTORY_DEPTH", _inv_reason)
             return
 
         # THE EXECUTION GATE. Called here so no buy path can reach the venue

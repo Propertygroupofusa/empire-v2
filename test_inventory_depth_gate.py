@@ -199,6 +199,15 @@ class TestItIsWiredIntoTheBuyPath(unittest.TestCase):
         self.assertIn("_idg.verdict(", src)
         self.assertIn('"INVENTORY_DEPTH"', src)
 
+    def test_its_feed_write_and_log_line_are_both_throttled(self):
+        """Unthrottled, three armed branches would each write the feed every
+        ~50s and push everything else off it - the ZEC EXITING failure."""
+        src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "crypto_grid_bot.py")).read()
+        seg = src[src.index("_idg.verdict("):src.index("fill = await grid_sell(")]
+        self.assertIn('_feed_should_write("INVENTORY_DEPTH"', seg)
+        self.assertIn('should_say_state(f"{branch.bot_name}:inventory"', seg)
+
     def test_it_sits_after_the_backing_gate_and_before_the_execution_gate(self):
         src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "crypto_grid_bot.py")).read()
