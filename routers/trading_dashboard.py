@@ -15748,6 +15748,7 @@ async def capital_kpis(fresh: int = 0, limit: int = 2000):
                 .order_by(CryptoGridTradeHistory.closed_at.desc())
                 .limit(max(int(limit or 0), 1)))).scalars().all()
         trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_reason": r.exit_reason,
                    "exit_price": r.exit_price, "opened_at": r.opened_at,
                    "closed_at": r.closed_at, "product_id": r.product_id}
                   for r in rows]
@@ -16130,6 +16131,7 @@ async def capital_placement(fresh: int = 0):
                 .order_by(CryptoGridTradeHistory.closed_at.desc())
                 .limit(2000))).scalars().all()
         trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_reason": r.exit_reason,
                    "exit_price": r.exit_price, "opened_at": r.opened_at,
                    "closed_at": r.closed_at, "product_id": r.product_id} for r in rows]
     except Exception as exc:
@@ -16820,6 +16822,7 @@ async def target_rate_view(target_usd_per_hour: float = 20.0, per_coin: int = 1)
                 .order_by(CryptoGridTradeHistory.closed_at.desc())
                 .limit(5000))).scalars().all()
         trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_reason": r.exit_reason,
                    "opened_at": r.opened_at, "closed_at": r.closed_at,
                    "product_id": r.product_id} for r in rows]
     except Exception as exc:
@@ -16935,6 +16938,7 @@ async def compound_path_view(target_usd_per_hour: float = 20.0):
                 .order_by(CryptoGridTradeHistory.closed_at.desc())
                 .limit(5000))).scalars().all()
         trades = [{"pnl": r.pnl, "qty": r.qty, "entry_price": r.entry_price,
+                   "exit_reason": r.exit_reason,
                    "opened_at": r.opened_at, "closed_at": r.closed_at,
                    "product_id": r.product_id} for r in rows]
     except Exception as exc:
