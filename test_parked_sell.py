@@ -220,10 +220,26 @@ _marginal = _S(1.0, 100.90)   # +0.099% at 101 - positive, under the floor
 _good = _S(1.0, 98.00)        # +3.06%   at 101 - clears the floor
 _book = [_marginal, _good]    # oldest first, exactly the blocking order
 
-_first = grid._pick_profitable_slice_to_sell(_book, 101.0, 0.0, 0.0)
+# min_net_pct=0.0 pins the LEGACY picker behaviour on purpose. This block
+# exists to demonstrate the FIFO-masking defect that justifies the parked
+# route having its own picker, and that demonstration needs the picker in the
+# state the defect was found in. Since 2026-10-10 the rise route carries
+# GRID_RISE_MIN_NET_PCT (default 0.15%), which skips a slice this marginal -
+# so left on the default this call now returns _good and the scenario below
+# would prove nothing. Passing the floor explicitly keeps the premise true
+# whatever the default becomes.
+_first = grid._pick_profitable_slice_to_sell(_book, 101.0, 0.0, 0.0, min_net_pct=0.0)
 ok("the FIFO picker really does return the marginal slice first",
    _first is _marginal,
    "if this fails the scenario below proves nothing about the defect")
+
+# And the half of that defect the rise floor now removes by itself: at the
+# shipped default the marginal slice no longer masks the good one HERE either.
+_first_floored = grid._pick_profitable_slice_to_sell(
+    _book, 101.0, 0.0, 0.0, min_net_pct=grid.GRID_RISE_MIN_NET_PCT)
+ok("the rise floor skips the marginal slice and takes the qualifying one",
+   _first_floored is _good,
+   f"got {_first_floored!r} - the floor is meant to look past a +0.099% slice")
 
 _pick, _pct = grid._pick_parked_slice_to_sell(_book, 101.0, 0.0, 0.0,
                                               grid.GRID_PARKED_MIN_NET_PCT)

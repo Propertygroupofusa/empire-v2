@@ -4328,6 +4328,43 @@ MIN_REQUIRED_ROI_PCT = env_float("GRID_MIN_REQUIRED_ROI_PCT", 20.0)
 # that can still buy is untouched, and keeps the full grid_pct gate.
 GRID_PARKED_MIN_NET_PCT = env_float("GRID_PARKED_MIN_NET_PCT", 0.010)
 
+# ── A FLOOR UNDER THE RISE ROUTE, FOR THE SAME REASON THE PARKED ONE HAS ONE ──
+#
+# Measured live 2026-10-10. APE-USD closed -$0.10 tagged profit_target - the
+# first negative that rule had ever booked in 226 closes. It was not a pricing
+# bug and the fee model was not wrong: the gate decided at 0.15332, where the
+# slice netted +$0.0495 on a $76.11 basis, and the order filled at 0.15302,
+# 0.1957% worse. +$0.0495 minus $0.1501 is the loss.
+#
+# _pick_profitable_slice_to_sell certified on `net > 0` with nothing under it,
+# so a slice clearing by 0.065% of its basis books a loss on any adverse fill
+# bigger than that. The parked route has carried GRID_PARKED_MIN_NET_PCT since
+# it was written; this route never had an equivalent, and the docstring of
+# _pick_parked_slice_to_sell says so outright: "any profit clears a gate with
+# no floor under it."
+#
+# THE DEFAULT IS MEASURED, NOT CHOSEN. Across the 174 closes under the two
+# never-negative rules, decision-time net as a share of basis ran:
+#     min +0.0651%   p5 +0.3279%   median +1.5418%   p75 +2.4473%
+# and a floor sweep against that real ledger gave:
+#     0.10% -> blocks 1 trade, which is the -$0.10
+#     0.15% -> blocks 3, total P&L forgone -$0.09 (you end up ahead)
+#     0.20% -> blocks 6, total P&L forgone +$0.10 (insurance starts costing)
+#     1.00% -> blocks 14, forgoes +$1.47
+# 0.15% is where it stops the loss and has not yet started paying for it.
+#
+# n=1 on the loss, so this is deliberately the smallest floor that does the
+# job rather than a tuned one - see the fitting-to-noise history in the grid
+# lessons. Set GRID_RISE_MIN_NET_PCT=0 to restore the previous behaviour
+# exactly, with no deploy.
+GRID_RISE_MIN_NET_PCT = env_float("GRID_RISE_MIN_NET_PCT", 0.0015)
+
+if GRID_RISE_MIN_NET_PCT < 0:
+    raise ValueError(
+        f"GRID_RISE_MIN_NET_PCT must be zero or positive, got {GRID_RISE_MIN_NET_PCT}. "
+        f"A negative floor would certify a slice that nets a LOSS, which is the one "
+        f"thing this gate exists to refuse.")
+
 # ---- WHAT YOU ACTUALLY PAID, FOR COIN THE GRID DID NOT BUY ----------------
 # An adopted slice's entry_price is the market price on the day
 # coin_adoption wrote it (see coin_adoption.slice_units - every slice at the
@@ -6312,7 +6349,7 @@ def _slice_rate(s, round_trip_fee_rate, exit_leg_rate):
 
 
 def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_rate: float = None,
-                                   exit_leg_rate: float = None):
+                                   exit_leg_rate: float = None, min_net_pct: float = None):
     """Real fix for a confirmed-live bug: the account owner spotted a
     branch's own real closed trades netting a real loss (-$1.57 over 4
     real trades on a DOGE-USD branch) while the branch's real live chart
@@ -6345,9 +6382,29 @@ def _pick_profitable_slice_to_sell(slices: list, price: float, round_trip_fee_ra
     price - the caller then skips selling entirely rather than forcing
     any real loss, same "never force a sale into a loss" principle
     already established elsewhere in this file (see the QUICK_PROFIT/
-    giveback-net-of-fees history)."""
+    giveback-net-of-fees history).
+
+    THE FLOOR, added 2026-10-10. A slice must now clear GRID_RISE_MIN_NET_PCT
+    of its own basis, not merely sit above zero. `net > 0` is still tested and
+    is never relaxed - the floor can only ever refuse MORE - so at a floor of
+    0.0 this behaves exactly as it did before. It exists because certifying on
+    bare `net > 0` let APE-USD go out at +$0.0495 on a $76.11 basis and book
+    -$0.10 once the fill arrived 0.1957% late: the first negative profit_target
+    in 226 closes. See GRID_RISE_MIN_NET_PCT for the measured sweep behind the
+    default. min_net_pct overrides it per call, which is what the tests use."""
+    floor = GRID_RISE_MIN_NET_PCT if min_net_pct is None else min_net_pct
     for s in slices:
-        if _grid_slice_net_pnl(s.qty, s.entry_price, price, _slice_rate(s, round_trip_fee_rate, exit_leg_rate)) > 0:
+        basis = (s.qty or 0) * (s.entry_price or 0)
+        if basis <= 0:
+            # No basis means no percentage to judge, and a zero-basis row has
+            # nothing to sell. Skipped rather than divided by.
+            continue
+        net = _grid_slice_net_pnl(s.qty, s.entry_price, price,
+                                  _slice_rate(s, round_trip_fee_rate, exit_leg_rate))
+        # BOTH conditions, not one. `net > 0` is the original promise and is
+        # never relaxed by the floor; the floor only ever refuses more. At
+        # floor 0.0 this is exactly the old test.
+        if net > 0 and net >= basis * floor:
             return s
     return None
 
