@@ -14626,3 +14626,46 @@ when quoting census/grid figures; "his Coinbase account" only for a figure
 that includes the staked and non-spot products, which this system cannot
 read at all. GRID_OUT_OF_REACH_USD exists precisely so that number can be
 declared; it is unset.
+
+## The Live Ops feed was full of one coin saying "no" (2026-10-11)
+
+Found by the daily code-health check. The feed keeps the newest 500 rows
+(ACTIVITY_FEED_MAX_ROWS). Between 10:14Z and 13:48Z, APE-USD wrote 204 of
+those 500 rows, all EXITING: the coin sits at its buy trigger, the exit
+list refuses the buy, and that refusal was recorded on EVERY cycle. Real
+BUY, SELL and ROTATION rows were being pushed out of the window by a
+condition that had not changed in three hours.
+
+This is the same failure 082bea8 fixed for INVENTORY_DEPTH, and that
+commit named EXITING as the pattern that once filled 494 of 500 rows.
+The EXITING write itself was never put behind the limiter. Neither were
+its two siblings in the same buy path, CONCENTRATION and UNBACKED, which
+repeat in exactly the same way whenever their condition holds.
+
+THE FIX. All three `_record_gate_decision` calls now sit inside
+`if _feed_should_write(VERDICT, branch.product_id):`, the same 15-minute
+per-(verdict, product) limiter the parked and inventory-depth writes use.
+The first refusal is still written immediately. One exiting coin does not
+silence another, because the key includes the product.
+
+WHAT IT DOES NOT TOUCH. The refusals themselves are unchanged: the
+`return` after each one is outside the new `if`, so the buy is refused
+exactly as before whether or not a row is written. The log lines are
+unchanged. No threshold, gate, order path or money path moves.
+CYCLE_ERROR stays unthrottled.
+
+TESTS. test_feed_rate_limit.py now pins all four buy-side verdicts behind
+the limiter and checks that no unguarded call for EXITING, CONCENTRATION
+or UNBACKED exists anywhere (22 pass; 6 fail against the old code).
+test_backing_gate.py selected "the If that contains the UNBACKED write"
+to find the real guard; the new throttle If also contains it, so the
+test now skips any If whose test is `_feed_should_write`. Its mutation
+check still fires: replacing `if not _back_ok:` with `if False:` still
+fails the test.
+
+Full suite: the same 9 modules fail on main and on this branch.
+test_write_attempts, listed earlier as failing, passed on both today, so
+it depends on the clock and not on this change.
+
+DEPLOY IS THE OWNER'S CALL. Pushing to main restarts the trading loop for
+about a minute. Branch: claude/exiting-feed-throttle.

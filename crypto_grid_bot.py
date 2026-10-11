@@ -7925,8 +7925,13 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             if should_say_state(f"{branch.bot_name}:exiting",
                                 f"exiting:{_exit_reason}", time.time()):
                 log.info(f"[GRID] {branch.bot_name}: 🚪 exiting - {_exit_reason}")
-            await _record_gate_decision(branch.bot_name, branch.product_id,
-                                        "EXITING", _exit_reason)
+            # Feed write throttled like INVENTORY_DEPTH (082bea8). Unthrottled,
+            # an exiting coin sitting at its trigger wrote a row every cycle:
+            # measured 2026-10-11, APE-USD 204 of the feed's 500 rows in 3.5h,
+            # pushing every BUY, SELL and ROTATION out of the window.
+            if _feed_should_write("EXITING", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "EXITING", _exit_reason)
             return
 
         import concentration_gate
@@ -7934,8 +7939,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             branch.product_id, await account_market_book(), spend)
         if not _conc_ok:
             log.info(f"[GRID] {branch.bot_name}: 🧱 concentration ceiling - {_conc_reason}")
-            await _record_gate_decision(branch.bot_name, branch.product_id,
-                                        "CONCENTRATION", _conc_reason)
+            # Same shape as EXITING above, throttled for the same reason.
+            if _feed_should_write("CONCENTRATION", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "CONCENTRATION", _conc_reason)
             return
 
         # DOES THIS BRANCH ACTUALLY HOLD WHAT ITS BOOKS CLAIM?
@@ -7954,8 +7961,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             branch.product_id, slices, price, await wallet_owned_units())
         if not _back_ok:
             log.warning(f"[GRID] {branch.bot_name}: 🧾 UNBACKED - no buy. {_back_reason}")
-            await _record_gate_decision(branch.bot_name, branch.product_id,
-                                        "UNBACKED", _back_reason)
+            # Same shape as EXITING above, throttled for the same reason.
+            if _feed_should_write("UNBACKED", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "UNBACKED", _back_reason)
             return
 
         # ---- DO NOT ADD TO INVENTORY THAT HAS ALREADY STOPPED WORKING ----

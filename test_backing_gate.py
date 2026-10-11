@@ -389,11 +389,17 @@ class TestItCannotBlockASell(unittest.TestCase):
         # fail for reasons unrelated to the guard. Matched on LINE SPANS,
         # not source segments: get_source_segment re-splits the whole
         # 9k-line file per node, which turned this one test into 39s.
+        # The feed write itself sits inside `if _feed_should_write(...)`
+        # (2026-10-11, throttled so a standing refusal stops evicting the
+        # activity feed). That If only rate-limits the telemetry row; it is
+        # not the guard, so it is skipped and the assertion lands on the
+        # `if not _back_ok:` that actually refuses the buy.
         marker = next(i for i, ln in enumerate(SRC.split('\n'), 1)
                       if '"UNBACKED", _back_reason' in ln)
         hits = [n for n in ast.walk(TREE)
                 if isinstance(n, ast.If)
-                and n.lineno <= marker <= (n.end_lineno or n.lineno)]
+                and n.lineno <= marker <= (n.end_lineno or n.lineno)
+                and '_feed_should_write' not in ast.dump(n.test)]
         self.assertTrue(hits, 'no UNBACKED guard found in the buy path at all')
         for node in [min(hits, key=lambda n: (n.end_lineno or n.lineno) - n.lineno)]:
             t = node.test

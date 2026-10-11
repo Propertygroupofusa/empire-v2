@@ -75,6 +75,41 @@ ok("PARKED_SELL is written behind the limiter", "PARKED_SELL" in guarded,
 ok("PARKED_SELL_NOFILL is written behind the limiter",
    "PARKED_SELL_NOFILL" in guarded, f"guarded: {sorted(guarded)}")
 
+# The three buy-side refusals that repeat every cycle while a coin sits at its
+# trigger. EXITING was the one that filled the window: measured 2026-10-11,
+# APE-USD wrote 204 of the feed's 500 rows in three and a half hours.
+for verdict in ("EXITING", "CONCENTRATION", "UNBACKED", "INVENTORY_DEPTH"):
+    ok(f"{verdict} is written behind the limiter", verdict in guarded,
+       f"guarded: {sorted(guarded)}")
+
+# And none of them is written anywhere WITHOUT it - a second, unguarded
+# call for the same verdict would refill the window just the same.
+_all_calls = [c.args[2].value for c in ast.walk(TREE)
+              if isinstance(c, ast.Call)
+              and getattr(c.func, "id", "") == "_record_gate_decision"
+              and len(c.args) >= 3 and isinstance(c.args[2], ast.Constant)]
+_guarded_calls = []
+for n in ast.walk(TREE):
+    if isinstance(n, ast.If) and "_feed_should_write" in ast.dump(n.test):
+        for c in n.body:
+            for cc in ast.walk(c):
+                if (isinstance(cc, ast.Call)
+                        and getattr(cc.func, "id", "") == "_record_gate_decision"
+                        and len(cc.args) >= 3 and isinstance(cc.args[2], ast.Constant)):
+                    _guarded_calls.append(cc.args[2].value)
+for verdict in ("EXITING", "CONCENTRATION", "UNBACKED"):
+    ok(f"every {verdict} write is guarded",
+       _all_calls.count(verdict) == _guarded_calls.count(verdict) >= 1,
+       f"{_all_calls.count(verdict)} calls, {_guarded_calls.count(verdict)} guarded")
+
+# The limiter keys on (verdict, product): APE exiting must not silence ZEC.
+g._FEED_LAST_WRITE.clear()
+ok("one exiting coin does not silence another",
+   g._feed_should_write("EXITING", "APE-USD", T)
+   and g._feed_should_write("EXITING", "ZEC-USD", T + 1)
+   and not g._feed_should_write("EXITING", "APE-USD", T + 60))
+g._FEED_LAST_WRITE.clear()
+
 # PARKED_NO_EXIT must stay gone entirely - it is a state, not an event.
 ok("PARKED_NO_EXIT is no longer recorded at all",
    '"PARKED_NO_EXIT"' not in SRC.split("def _feed_should_write")[0]
