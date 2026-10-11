@@ -1460,8 +1460,20 @@ async def lifespan(app: FastAPI):
                 except Exception:
                     return None
 
+            async def _reconcile_prices():
+                """Each branch's live mark, so a claim cut can lower that
+                branch's drawdown peak in step (reconcile_worker
+                _peak_after_cut). None when unreadable."""
+                try:
+                    st = await _rg.get_grid_status()
+                    return {b.get("product_id"): b.get("current_price")
+                            for b in (st.get("branches") or [])
+                            if b.get("product_id")}
+                except Exception:
+                    return None
+
             asyncio.create_task(reconcile_worker.loop(
-                _rg.get_session_factory, _reconcile_cash))
+                _rg.get_session_factory, _reconcile_cash, _reconcile_prices))
             log.info("🧾 Claim reconciliation running (writes only when armed)")
         except Exception as e:
             try:

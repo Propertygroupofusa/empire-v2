@@ -14677,3 +14677,68 @@ it depends on the clock and not on this change.
 
 DEPLOY IS THE OWNER'S CALL. Pushing to main restarts the trading loop for
 about a minute. Branch: claude/exiting-feed-throttle.
+
+## A claim cut froze BTC: the reconcile worker never moved the peak (2026-10-11)
+
+WHAT HAPPENED. At ~21:00Z the owner moved most of his USD into USDC, which
+the grid cannot spend. reconcile_worker did its job: unspent claims
+exceeded real USD, so it wrote $350.08 of claim off 15 branches. But it
+lowered allocated_usd and left peak_equity alone. The 25% drawdown breaker
+measures (peak - (allocated + unrealized)) / peak, so it read the cut as a
+loss.
+- BTC-USD claim went $52.84 -> $40.46 on $0.14 of market loss. The breaker
+  read 41.91% and BTC buys froze.
+- LINK (24.93%), TON (24.51%) and NEAR (23.79%) were left within a point of
+  the same freeze.
+
+WHY IT WAS MISSED. The 2026-10-05 fix (peak_after_withdrawal) went into
+every allocation-lowering path that existed then: the right-size, the
+concentration rotation and the fleet re-scale. reconcile_worker was not one
+of them. grep 'peak' in reconcile.py and reconcile_worker.py found nothing.
+
+THE FIX. run_once now calls crypto_grid_bot.peak_after_withdrawal on every
+claim it cuts. The helper is imported, never re-implemented.
+- main.py hands the loop a price reader built from the same grid status the
+  cash reader uses. With live unrealized, the peak scales so the drawdown
+  reading is unchanged by the cut.
+- With no price, the slices unreadable, or the helper unreadable, the cut
+  still lands. The peak takes the helper's subtraction path, or is left
+  exactly as before. Nothing in this path raises.
+- Slices are read in their own session before the write session opens.
+  Pricing must not share a transaction with the claim write.
+
+ONE-TIME REPAIR of the cuts written before the fix. By 21:35Z the episode
+had frozen BTC (43.3%), LINK (26.6%), NEAR (25.6%) and TON (26.5%), every
+one of them on claim cuts. repair_peaks_once replays this episode's cuts
+from claim_reduction_audit through the same helper, in order. It runs on
+the first armed pass, before run_once. It is bounded three ways:
+- only reconcile_worker rows written on or after REPAIR_SINCE (2026-10-11
+  20:50Z);
+- only rows written before this process started and before REPAIR_BEFORE
+  (23:00Z), because a fixed pass already moved its own peak;
+- once only: a TradingBotState marker (reconcile_peak_repair_20261011) is
+  written in the same transaction as the peaks.
+It only lowers peaks. It never raises: a broken database writes nothing.
+
+TESTS. test_reconcile_keeps_peak.py has 18 tests. The first 11 cover the
+forward fix:
+- the live BTC figures read the same drawdown before and after the cut;
+- the old behaviour reproduces 41.9%;
+- no price gives the subtraction;
+- a broken helper keeps the cut;
+- a NULL peak stays NULL;
+- a real 40% crash stays breached through a cut;
+- a dry run touches nothing;
+- main passes prices.
+10 of those 11 fail against the old code. The other 7 cover the repair:
+- it unfreezes BTC to its pre-episode reading;
+- it runs once;
+- it skips cuts written after the process started;
+- it skips older cuts and other writers;
+- a real crash stays breached;
+- a broken database writes nothing;
+- the loop repairs before its first pass.
+
+PRE-EXISTING FAILURE: test_reconcile_worker::test_it_never_touches_slices_or_places_orders
+fails on main as well. _audit_reduction's db.add( trips its forbidden-string
+list.

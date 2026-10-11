@@ -25,6 +25,7 @@ of having run it first.
 import asyncio
 import logging
 import os
+from datetime import datetime
 
 log = logging.getLogger(__name__)
 
@@ -218,14 +219,119 @@ async def _branch_rows(session_factory):
             for b in branches]
 
 
+# ── A CLAIM CUT IS NOT A CRASH. THE BREAKER MUST NOT READ IT AS ONE. ──
+#
+# WHAT WENT WRONG, measured 2026-10-11 21:16Z. The owner moved most of his
+# USD into USDC, which the grid cannot spend. This worker did its job and
+# wrote $350.08 of unspent claims down across 15 branches. But it wrote
+# allocated_usd and left peak_equity alone, and the 25% drawdown breaker
+# measures (peak - (allocated + unrealized)) / peak. BTC-USD went
+# $52.84 -> $40.46 of claim on $0.14 of market loss and froze at 41.91%.
+# LINK, TON and NEAR were left within a point of the same freeze.
+#
+# Every other path that lowers allocated_usd already calls
+# crypto_grid_bot.peak_after_withdrawal for exactly this reason - the
+# right-size, the concentration rotation and the fleet re-scale. This one
+# was missed. It is imported, never re-implemented: one function decides
+# what a peak may become after money leaves a branch.
+#
+# With the branch's live unrealized P&L the helper scales the peak so the
+# drawdown READING is unchanged by the cut. Without a price it falls back
+# to the plain subtraction, which keeps the dollar gap - the same
+# behaviour its other unpriced callers get. It only ever lowers a peak,
+# and a branch already past 25% on real market loss stays past it.
+def _unrealized(slices, price):
+    """This branch's unrealized P&L at `price`, or None if it cannot be
+    known. None is not zero: it sends the peak helper down its
+    subtraction path instead of inventing an equity."""
+    if price is None:
+        return None
+    try:
+        px = float(price)
+    except (TypeError, ValueError):
+        return None
+    if px != px or px in (float("inf"), float("-inf")) or px <= 0:
+        return None
+    try:
+        return round(sum(float(s.qty) * (px - float(s.entry_price))
+                         for s in slices
+                         if s.qty is not None and s.entry_price is not None), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def _peak_after_cut(peak_equity, before, after, unrealized, helper=None):
+    """The branch's new high-water mark after a claim cut, or None to leave
+    the column alone. NEVER raises: an unreadable helper leaves the peak
+    exactly as this worker always left it, and the cut itself still
+    stands."""
+    try:
+        if helper is None:
+            import crypto_grid_bot
+            helper = crypto_grid_bot.peak_after_withdrawal
+        return helper(peak_equity, before, after, unrealized=unrealized)
+    except Exception as e:
+        log.warning(f"[RECONCILE] peak not adjusted ({type(e).__name__}: {e}) "
+                    f"- the claim cut stands, the drawdown reading may overstate")
+        return None
+
+
+async def _slices_by_bot(session_factory):
+    """{bot_name: [slice, ...]} in its own read-only session, or None.
+    NEVER raises: no slices only means the peak takes the subtraction
+    path."""
+    try:
+        from models import CryptoGridSlice
+        from sqlalchemy import select
+        async with session_factory()() as db:
+            rows = (await db.execute(select(CryptoGridSlice))).scalars().all()
+        out = {}
+        for s in rows:
+            out.setdefault(s.bot_name, []).append(s)
+        return out
+    except Exception as e:
+        log.warning(f"[RECONCILE] slices unreadable ({type(e).__name__}) - "
+                    f"any peak adjustment this pass uses the subtraction path")
+        return None
+
+
+def _move_peak_with_claim(row, c, before, prices, slices_by_bot, helper=None):
+    """Lower this branch's drawdown peak in step with its claim cut.
+
+    NEVER raises. The claim cut is the correction; this keeps the breaker
+    from misreading it. If the slices or the price cannot be read the
+    helper takes its subtraction path, and if the helper itself cannot be
+    read the peak is left exactly as this worker always left it.
+    """
+    unreal = None
+    if slices_by_bot is not None:
+        unreal = _unrealized(slices_by_bot.get(c["bot_name"], []),
+                             (prices or {}).get(c["product_id"]))
+    peak = getattr(row, "peak_equity", None)
+    new_peak = _peak_after_cut(peak, before, c["new_allocated_usd"], unreal,
+                               helper=helper)
+    if new_peak is None:
+        return
+    log.warning(f"[RECONCILE] {c['bot_name']} ({c['product_id']}): drawdown "
+                f"peak {peak} -> {new_peak} with the claim cut (unrealized "
+                f"{unreal}) - a claim cut is not a market loss")
+    c["peak_before"] = peak
+    c["peak_after"] = new_peak
+    row.peak_equity = new_peak
+
+
 async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None,
-                   audit_sink=None):
+                   audit_sink=None, prices=None, peak_helper=None):
     """One pass. Returns the report plus what was applied.
 
     `sink` is the activity-feed writer and `audit_sink` the durable-row
     writer, both injectable so a test can read the exact rows the owner
     would see - one on his dashboard, one in the ledger - without a
     database.
+
+    `prices` maps product_id to its live mark. It is used for ONE thing:
+    pricing a branch's open slices so its drawdown peak can be lowered in
+    step with the claim. A missing price takes the subtraction path.
     """
     import reconcile as rec
     rows = await _branch_rows(session_factory)
@@ -235,6 +341,10 @@ async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None,
     if dry_run or not corrections:
         report["applied"] = 0
         return report
+
+    # Read before the write session opens, in a session of its own: pricing
+    # the positions must not share a transaction with the claim write.
+    slices_by_bot = await _slices_by_bot(session_factory) if prices else None
 
     from models import CryptoGridBranch
     from sqlalchemy import select
@@ -254,6 +364,8 @@ async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None,
                 continue
             before = float(row.allocated_usd)
             row.allocated_usd = c["new_allocated_usd"]
+            _move_peak_with_claim(row, c, before, prices, slices_by_bot,
+                                  helper=peak_helper)
             applied += 1
             # The LIVE before-figure, not the planned one, so the sentence
             # the owner reads is the money that actually moved.
@@ -278,15 +390,127 @@ async def run_once(session_factory, real_cash_usd, dry_run=True, sink=None,
     return report
 
 
-async def loop(session_factory, cash_reader):
-    """Forever. cash_reader() -> real spendable+held USD, or None."""
+# ── ONE-TIME REPAIR of the cuts this worker wrote before the fix above. ──
+#
+# Forward-only was not enough: by 21:35Z on 2026-10-11 the USDC episode had
+# frozen BTC (43.3%), LINK (26.6%), NEAR (25.6%) and TON (26.5%), every one
+# of them on claim cuts rather than market loss. Each cut is in
+# claim_reduction_audit with its before and after figures, so the peak move
+# that should have happened can be replayed through the same helper, in
+# the order the cuts were written.
+#
+# BOUNDED THREE WAYS so it cannot touch anything else:
+#   * only reconcile_worker rows written in this episode (REPAIR_SINCE);
+#   * only rows written BEFORE this process started and before
+#     REPAIR_BEFORE - a cut written by a fixed pass already moved its peak
+#     and must not be replayed;
+#   * once: a TradingBotState marker is written in the same transaction as
+#     the peaks, so a restart finds it and does nothing.
+# It only lowers peaks (the helper never raises one), and a branch whose
+# real market loss is past 25% stays past it.
+REPAIR_SINCE = datetime(2026, 10, 11, 20, 50)
+REPAIR_BEFORE = datetime(2026, 10, 11, 23, 0)
+REPAIR_MARKER = "reconcile_peak_repair_20261011"
+
+
+async def repair_peaks_once(session_factory, prices, started_at, helper=None,
+                            sink=None):
+    """Replay this episode's pre-fix claim cuts into the drawdown peaks.
+    NEVER raises. Returns a report."""
+    try:
+        from audit_models import ClaimReductionAudit
+        from models import CryptoGridBranch, TradingBotState
+        from sqlalchemy import select
+        upper = min(started_at, REPAIR_BEFORE)
+        slices_by_bot = await _slices_by_bot(session_factory) if prices else None
+        repaired = []
+        async with session_factory()() as db:
+            marker = (await db.execute(select(TradingBotState).where(
+                TradingBotState.bot_name == REPAIR_MARKER))).scalar_one_or_none()
+            if marker is not None:
+                return {"status": "ALREADY_DONE", "repaired": []}
+            cuts = (await db.execute(select(ClaimReductionAudit).where(
+                ClaimReductionAudit.source_component == "reconcile_worker",
+                ClaimReductionAudit.created_at >= REPAIR_SINCE,
+                ClaimReductionAudit.created_at < upper).order_by(
+                ClaimReductionAudit.created_at))).scalars().all()
+            by_bot = {}
+            for a in cuts:
+                by_bot.setdefault(a.bot_name, []).append(a)
+            for bot, rows in by_bot.items():
+                br = (await db.execute(select(CryptoGridBranch).where(
+                    CryptoGridBranch.bot_name == bot))).scalar_one_or_none()
+                if br is None or br.peak_equity is None:
+                    continue
+                unreal = None
+                if slices_by_bot is not None:
+                    unreal = _unrealized(slices_by_bot.get(bot, []),
+                                         (prices or {}).get(br.product_id))
+                peak = float(br.peak_equity)
+                for a in rows:
+                    nxt = _peak_after_cut(peak, a.previous_allocated_usd,
+                                          a.new_allocated_usd, unreal,
+                                          helper=helper)
+                    if nxt is not None:
+                        peak = nxt
+                if peak < float(br.peak_equity):
+                    repaired.append({"bot_name": bot, "product_id": br.product_id,
+                                     "peak_before": float(br.peak_equity),
+                                     "peak_after": peak, "cuts": len(rows),
+                                     "unrealized": unreal})
+                    br.peak_equity = peak
+            # Existence is the marker; 0.0 so no reader that sums
+            # base_capital across rows can ever count it as money.
+            db.add(TradingBotState(bot_name=REPAIR_MARKER, base_capital=0.0))
+            await db.commit()
+        for r in repaired:
+            msg = (f"[RECONCILE] {r['bot_name']} ({r['product_id']}): drawdown "
+                   f"peak {r['peak_before']:,.2f} -> {r['peak_after']:,.2f}, "
+                   f"replaying {r['cuts']} claim cut(s) from the USDC episode "
+                   f"that were written before the peak fix - a claim cut is "
+                   f"not a market loss")
+            log.warning(msg)
+            await _announce(r["bot_name"], r["product_id"], "PEAK_REPAIRED",
+                            msg, sink=sink)
+        return {"status": "REPAIRED", "repaired": repaired}
+    except Exception as e:
+        log.warning(f"[RECONCILE] peak repair skipped ({type(e).__name__}: {e}) "
+                    f"- nothing written")
+        return {"status": "FAILED", "repaired": []}
+
+
+async def _read_prices(price_reader):
+    """{product_id: price}, or None. NEVER raises - no prices only means
+    the peak takes the subtraction path, never that the pass is skipped."""
+    if price_reader is None:
+        return None
+    try:
+        return await price_reader()
+    except Exception as e:
+        log.warning(f"[RECONCILE] prices unreadable ({type(e).__name__}) - "
+                    f"any peak adjustment this pass uses the subtraction path")
+        return None
+
+
+async def loop(session_factory, cash_reader, price_reader=None):
+    """Forever. cash_reader() -> real spendable+held USD, or None.
+    price_reader() -> {product_id: live price}, or None."""
     log.warning(f"[RECONCILE] claim-reconciliation loop started "
                 f"(every {CHECK_SECONDS}s, writes only when armed)")
+    started_at = datetime.utcnow()
+    repair_tried = False
     while True:
         try:
             armed = await armed_now(session_factory)
             cash = await cash_reader()
-            report = await run_once(session_factory, cash, dry_run=not armed)
+            prices = await _read_prices(price_reader) if armed else None
+            if armed and not repair_tried:
+                # BEFORE this process's first pass, so no cut it writes can
+                # be replayed - see repair_peaks_once.
+                repair_tried = True
+                await repair_peaks_once(session_factory, prices, started_at)
+            report = await run_once(session_factory, cash, dry_run=not armed,
+                                    prices=prices)
             if report.get("status") in ("REFUSED", "UNKNOWN"):
                 # The protection DECLINING to act is a state he should see.
                 # A refused pass means the cash reading collapsed or the
