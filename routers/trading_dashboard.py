@@ -16337,13 +16337,17 @@ async def idle_capital_deploy_cash(dry_run: bool = True):
     status = await crypto_grid_bot_module.get_grid_status()
     history = await crypto_grid_bot_module.get_grid_trade_history()
     backing = status.get("allocation_backing") or {}
-    # unbacked is NEGATIVE when there is surplus cash - that surplus is
-    # exactly the cash no branch claims, which is the only deployable pot.
-    unclaimed = -float(backing.get("unbacked_usd") or 0.0)
+    # The pot is the cash no branch claims, capped by real free cash, and
+    # the reserve is the owner's cash floor - the same one the buy path
+    # holds back. Branches the backing gate refuses are skipped. See
+    # idle_cash.deploy_inputs for the 2026-10-11 measurement.
+    pot, reserve, unbacked = idle_cash.deploy_inputs(
+        status, getattr(crypto_grid_bot_module, "GRID_CASH_RESERVE_USD", 0.0))
 
     plan = idle_cash.plan(status.get("branches") or [],
                           history.get("recent_trades") or [],
-                          unclaimed_usd=unclaimed)
+                          unclaimed_usd=pot, reserve_usd=reserve,
+                          unbacked=unbacked)
     plan["backing_verdict"] = backing.get("verdict")
     if dry_run or not plan["ok"]:
         plan["dry_run"] = True

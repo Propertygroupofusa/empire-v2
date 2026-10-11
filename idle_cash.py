@@ -60,8 +60,38 @@ def _f(v, d=0.0):
         return d
 
 
+def deploy_inputs(status, cash_floor_usd):
+    """(pot, reserve, unbacked) for plan(), read from one grid status.
+
+    THE BUG THIS EXISTS FOR, 2026-10-11. The Deploy cash button held back
+    RESERVE_USD ($100) and nothing else, while the buy path holds back the
+    owner's cash floor (GRID_CASH_RESERVE_USD, $1,820 live). Measured that
+    evening: $3,181.28 unclaimed, $2,987.48 real free cash, and a plan of
+    $2,801.20 across ten branches - $1,633.72 more budget than exists above
+    the floor - including $280.12 for SOL-USD, whose coin is staked and
+    which the backing gate refuses to buy at all.
+
+    pot is the SMALLER of the unclaimed figure and the real free cash, so
+    a planner can never hand out money the free-cash reading does not see.
+    reserve is the larger of this module's working float and the owner's
+    floor. unbacked is every product the backing gate (OWNED units) would
+    refuse to buy - funding it is idle money with a branch's name on it.
+    An unreadable free-cash figure deploys nothing.
+    """
+    status = status or {}
+    backing = status.get("allocation_backing") or {}
+    unclaimed = -_f(backing.get("unbacked_usd"))
+    free = status.get("real_free_cash_usd")
+    pot = 0.0 if free is None else min(unclaimed, _f(free))
+    reserve = max(RESERVE_USD, _f(cash_floor_usd))
+    unbacked = {u.get("product_id")
+                for u in ((status.get("backing_owned") or {}).get("unbacked") or [])
+                if hasattr(u, "get") and u.get("product_id")}
+    return round(pot, 2), reserve, unbacked
+
+
 def plan(branches, trades, *, unclaimed_usd, min_add_usd=None,
-         reserve_usd=None, max_share_pct=None):
+         reserve_usd=None, max_share_pct=None, unbacked=None):
     """What to add, to which branches. Moves nothing."""
     min_add = MIN_ADD_USD if min_add_usd is None else min_add_usd
     reserve = RESERVE_USD if reserve_usd is None else reserve_usd
@@ -94,6 +124,9 @@ def plan(branches, trades, *, unclaimed_usd, min_add_usd=None,
             continue
         if b.get("locked"):
             refusals.append({"product_id": pid, "reason": "BRANCH_IS_LOCKED"})
+            continue
+        if unbacked and pid in unbacked:
+            refusals.append({"product_id": pid, "reason": "UNBACKED_CANNOT_BUY"})
             continue
         if lv and o >= lv:
             refusals.append({"product_id": pid, "reason": "PARKED_CANNOT_SPEND_IT",

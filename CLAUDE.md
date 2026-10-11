@@ -14742,3 +14742,32 @@ forward fix:
 PRE-EXISTING FAILURE: test_reconcile_worker::test_it_never_touches_slices_or_places_orders
 fails on main as well. _audit_reduction's db.add( trips its forbidden-string
 list.
+
+## Deploy cash held back $100, not the owner's $1,820 floor (2026-10-11)
+
+WHAT WAS WRONG. POST /idle-capital/deploy-cash planned against the cash no
+branch claims, minus idle_cash.RESERVE_USD ($100). The buy path holds back
+GRID_CASH_RESERVE_USD ($1,820 live). Measured at ~22:55Z:
+- $3,181.28 unclaimed and $2,987.48 of real free cash;
+- the plan was $2,801.20, $280.12 each to ten branches, which is $1,633.72
+  more budget than exists above the floor;
+- one of the ten was SOL-USD, whose coin is staked. The backing gate
+  refuses every SOL buy, so that $280.12 could never be spent.
+
+A CORRECTION TO WHAT I TOLD THE OWNER FIRST. I said pressing it would stop
+the bot buying. That was wrong: spendable_for_slice sizes each buy against
+the wallet minus GRID_CASH_RESERVE_USD, not against claims. The floor holds
+at buy time either way. The real harm was the oversubscribed budget,
+handed out to whichever coin dipped first, plus the dead SOL money.
+
+THE FIX. idle_cash.deploy_inputs(status, floor) returns three things:
+- the pot: min(unclaimed, real free cash);
+- the reserve: max(RESERVE_USD, GRID_CASH_RESERVE_USD);
+- the set of products backing_owned marks unbacked.
+plan() gets a refuse-only `unbacked` argument (reason UNBACKED_CANNOT_BUY).
+Unreadable free cash deploys nothing. On the live 22:55Z data the plan
+becomes $1,167.48 across ten branches at $116.75 each, with SOL and ETH
+refused. The endpoint is still dry-run by default and still write-guarded.
+
+TESTS. test_deploy_cash_keeps_floor.py, 9 tests; 7 fail on the old code.
+test_idle_cash.py is unchanged and passes (24).
