@@ -700,6 +700,73 @@ DAILY_SWEEP_KEY = "rotation_daily_sweep_at"
 DAILY_SWEEP_INTERVAL_SECONDS = 24 * 60 * 60
 DAILY_SWEEP_MIN_MOVABLE_USD = 50.0
 
+# ---------------------------------------------------------------------------
+# THE OWNER'S SWITCH. OFF unless GRID_DAILY_IDLE_SWEEP says on.
+#
+# 2026-10-11, in his words: "Yeah, turn off daily sweep."
+#
+# What it was doing, measured from saved /grid-status snapshots: every branch
+# that happened to be FLAT at the daily run was cut to the $15 keep-alive and
+# its claim split evenly over the six coins furthest below their own 30-day
+# high. TIA gave up $43.68 on 10-04, NEAR $163.51 on 10-08, ONDO $71.66 on
+# 10-10 and APE $221.77 on 10-11 - which is why four branches sat at $15 and
+# traded $5 slices. The money never left the fleet, but it left the branch
+# that earned it and went to the coins that had fallen furthest, against his
+# standing "grow inside the branch" and "no extra money into coins going
+# backwards". A 60-day fleet replay did not show the sweep paying for that:
+# ahead over eight short windows, behind over two 30-day ones, and in the
+# 30-day runs one coin grew to 30-37% of all claim.
+#
+# OFF BY DEFAULT, so deploying this IS the change he asked for. Turning it
+# back on is GRID_DAILY_IDLE_SWEEP=on and a restart; no code.
+#
+# ONLY THE SWEEP. The profit harvest shares the same hourly loop in main.py
+# and is deliberately untouched - he asked about the sweep.
+#
+# Checked FIRST, before the grid is read and before the 24h stamp is claimed,
+# so an off sweep reads nothing, writes nothing and burns no day. Turned back
+# on, it behaves exactly as before, clock included.
+# ---------------------------------------------------------------------------
+
+DAILY_SWEEP_ENV = "GRID_DAILY_IDLE_SWEEP"
+_SWEEP_ON = ("1", "true", "yes", "on", "arm", "armed")
+_SWEEP_OFF = ("", "0", "false", "no", "off")
+
+
+def daily_sweep_enabled() -> bool:
+    """True only for an explicit on value. Unset, empty, a typo: OFF.
+
+    Read at call time, not import, so a variable and a restart decide it.
+    One definition of "on" (_SWEEP_ON), shared with daily_sweep_status().
+    """
+    return (os.getenv(DAILY_SWEEP_ENV) or "").strip().lower() in _SWEEP_ON
+
+
+def daily_sweep_status() -> dict:
+    """What the RUNNING PROCESS sees, for /grid-status. Pure, never raises.
+
+    Same shape as inventory_depth_gate.status(): this one defaults OFF, so
+    the typo that matters is "meant to turn it back on, did not" - "enabled"
+    or "tru" matches nothing in _SWEEP_ON and it silently stays off.
+    value_recognised catches that. The raw value is never echoed.
+    """
+    try:
+        raw = os.getenv(DAILY_SWEEP_ENV)
+        norm = (raw or "").strip().lower()
+        return {
+            "enabled": norm in _SWEEP_ON,
+            "env_name": DAILY_SWEEP_ENV,
+            "env_is_set": raw is not None,
+            "value_recognised": norm in _SWEEP_ON or norm in _SWEEP_OFF,
+            "accepted_values_to_enable": list(_SWEEP_ON),
+            "default": "off",
+            "scope": ("the once-a-day move of idle claim out of FLAT branches; "
+                      "the profit harvest is a separate job and is not "
+                      "governed by this"),
+        }
+    except Exception as exc:
+        return {"readable": False, "error": type(exc).__name__}
+
 
 def movable_from_flat(branches):
     """What a rotation could actually take right now, in dollars.
@@ -753,6 +820,10 @@ async def run_daily_idle_sweep(grid, now_ts=None, ranker=None):
 
     if (os.getenv("STOP_TRADING", "false") or "").strip().lower() == "true":
         return {"ran": False, "reason": "STOP_TRADING"}
+
+    # The owner's switch. Before the grid read and before the 24h stamp.
+    if not daily_sweep_enabled():
+        return {"ran": False, "reason": "SWEEP_OFF", "env_name": DAILY_SWEEP_ENV}
 
     status = await grid.get_grid_status()
     branches = status.get("branches") or []

@@ -65,7 +65,15 @@ class MovableTests(unittest.TestCase):
 
 
 class SweepTests(unittest.IsolatedAsyncioTestCase):
+    """The sweep's own rules, with the owner's switch turned ON.
+
+    Since 2026-10-11 the sweep is OFF unless GRID_DAILY_IDLE_SWEEP says on
+    (test_daily_sweep_switch.py pins that). These tests turn it on so the
+    rules it follows when it does run stay pinned exactly as before.
+    """
     async def asyncSetUp(self):
+        self._prev_switch = os.environ.get(rotation_task.DAILY_SWEEP_ENV)
+        os.environ[rotation_task.DAILY_SWEEP_ENV] = "on"
         self.path = tempfile.mktemp(suffix=".sqlite")
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.path}")
         self.maker = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -86,6 +94,10 @@ class SweepTests(unittest.IsolatedAsyncioTestCase):
         rotation_task.build_plan = _plan
 
     async def asyncTearDown(self):
+        if self._prev_switch is None:
+            os.environ.pop(rotation_task.DAILY_SWEEP_ENV, None)
+        else:
+            os.environ[rotation_task.DAILY_SWEEP_ENV] = self._prev_switch
         rotation_task.apply = self._real_apply
         rotation_task.build_plan = self._real_plan
         await self.engine.dispose()

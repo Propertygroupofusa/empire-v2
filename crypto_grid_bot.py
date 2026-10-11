@@ -2927,7 +2927,7 @@ _SELL_SKIPS = {}
 
 
 def _armed_flags_block() -> dict:
-    """The two switches that decide whether code shipped today is acting.
+    """The switches that decide whether code shipped today is acting.
 
     Published on /grid-status because "did that variable take" was otherwise
     answerable only by watching an uptime counter - the reason stop_policy is
@@ -2938,10 +2938,11 @@ def _armed_flags_block() -> dict:
     Isolated per module: one failing to import costs only its own key.
     """
     out = {}
-    for key, modname in (("inventory_depth_gate", "inventory_depth_gate"),
-                         ("sell_deliverability_check", "sell_deliverability")):
+    for key, modname, fn in (("inventory_depth_gate", "inventory_depth_gate", "status"),
+                             ("sell_deliverability_check", "sell_deliverability", "status"),
+                             ("daily_idle_sweep", "rotation_task", "daily_sweep_status")):
         try:
-            out[key] = __import__(modname).status()
+            out[key] = getattr(__import__(modname), fn)()
         except Exception as exc:
             out[key] = {"readable": False, "error": type(exc).__name__}
     return out
