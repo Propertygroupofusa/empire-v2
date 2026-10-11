@@ -2940,7 +2940,8 @@ def _armed_flags_block() -> dict:
     out = {}
     for key, modname, fn in (("inventory_depth_gate", "inventory_depth_gate", "status"),
                              ("sell_deliverability_check", "sell_deliverability", "status"),
-                             ("daily_idle_sweep", "rotation_task", "daily_sweep_status")):
+                             ("daily_idle_sweep", "rotation_task", "daily_sweep_status"),
+                             ("profit_harvest", "profit_harvest", "harvest_status")):
         try:
             out[key] = getattr(__import__(modname), fn)()
         except Exception as exc:

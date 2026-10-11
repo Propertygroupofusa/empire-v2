@@ -26,6 +26,11 @@ import sys
 
 import harvest_redirect as hr
 
+# The live harvest is OFF unless GRID_PROFIT_HARVEST says on (2026-10-11, the
+# owner). Everything below is about where harvested money goes once the
+# harvest runs, so the harvest itself is switched on for this file.
+os.environ["GRID_PROFIT_HARVEST"] = "on"
+
 checks = []
 
 

@@ -83,6 +83,74 @@ KEEP_BRANCH_ALIVE_USD = 15.0
 # above, which is unchanged at $15.00.
 MIN_HARVEST_USD = 0.50
 
+# ---------------------------------------------------------------------------
+# THE OWNER'S SWITCH. OFF unless GRID_PROFIT_HARVEST says on.
+#
+# 2026-10-11, in his words: "turn off the harvest too, push it." Same day as
+# "Yeah, turn off daily sweep." and the standing "grow inside the branch" /
+# "the compound always come after the profit is made".
+#
+# With the harvest on, a branch that went flat had the profit it earned since
+# its baseline withdrawn into unallocated cash, where nothing put it back to
+# work (GRID_HARVEST_REDIRECT is off). Off, a branch keeps its winnings in
+# allocated_usd and its next rungs are sized from them - the profit compounds
+# in the branch that made it.
+#
+# OFF BY DEFAULT, so deploying this IS the change he asked for. Turning it
+# back on is GRID_PROFIT_HARVEST=on and a restart; no code.
+#
+# ONLY THE LIVE HARVEST. run(dry_run=True) and plan() - the read-only
+# preview - still compute what a harvest WOULD take, so the number stays
+# visible. The off check sits after STOP_TRADING and before plan(), so an
+# off harvest marks no baseline, withdraws nothing and advances nothing.
+#
+# TURNING IT BACK ON: baselines are not advanced while it is off, so the
+# first flat moment after re-enabling would take everything earned since the
+# old mark, capped as always at allocation minus the $15 keep-alive. That is
+# stated in status() rather than hidden.
+# ---------------------------------------------------------------------------
+
+HARVEST_ENV = "GRID_PROFIT_HARVEST"
+_HARVEST_ON = ("1", "true", "yes", "on", "arm", "armed")
+_HARVEST_OFF = ("", "0", "false", "no", "off")
+
+
+def harvest_enabled() -> bool:
+    """True only for an explicit on value. Unset, empty, a typo: OFF.
+
+    Read at call time, not import, so a variable and a restart decide it.
+    """
+    return (os.getenv(HARVEST_ENV) or "").strip().lower() in _HARVEST_ON
+
+
+def harvest_status() -> dict:
+    """What the RUNNING PROCESS sees, for /grid-status. Pure, never raises.
+
+    Same shape as rotation_task.daily_sweep_status(). A value that matches
+    neither list reports value_recognised false; the raw value is never
+    echoed.
+    """
+    try:
+        raw = os.getenv(HARVEST_ENV)
+        norm = (raw or "").strip().lower()
+        return {
+            "enabled": norm in _HARVEST_ON,
+            "env_name": HARVEST_ENV,
+            "env_is_set": raw is not None,
+            "value_recognised": norm in _HARVEST_ON or norm in _HARVEST_OFF,
+            "accepted_values_to_enable": list(_HARVEST_ON),
+            "default": "off",
+            "scope": ("the hourly withdrawal of realised profit out of FLAT "
+                      "branches into unallocated cash; the read-only preview "
+                      "still reports what it would take"),
+            "if_turned_back_on": ("baselines are not advanced while off, so "
+                                  "the first flat moment takes everything "
+                                  "earned since the old mark, capped at "
+                                  "allocation minus the $15 keep-alive"),
+        }
+    except Exception as exc:
+        return {"readable": False, "error": type(exc).__name__}
+
 
 async def realised_by_branch(session_factory):
     """{bot_name: cumulative realised P&L} straight from the trade ledger.
@@ -229,6 +297,7 @@ async def plan(grid, create=True):
             "ready": round(total, 2) >= MIN_HARVEST_USD,
             "unwatched_branches": unwatched,
             "loop_has_run": bool(rows) and unwatched < len(rows),
+            "harvest_active": harvest_enabled(),
             "redirect_active": _rd,
             "coin_quality_active": _cq,
             "max_coin_share_pct": round(coin_quality.MAX_COIN_SHARE * 100.0, 2),
@@ -250,6 +319,12 @@ async def run(grid, dry_run=True):
     """Harvest. dry_run=True (the default) computes and writes nothing."""
     if (os.getenv("STOP_TRADING", "false") or "").strip().lower() == "true":
         return {"ran": False, "reason": "STOP_TRADING"}
+
+    # The owner's switch. Live runs only, and before plan() - which marks
+    # baselines - so an off harvest writes nothing at all.
+    if not dry_run and not harvest_enabled():
+        return {"ran": False, "reason": "HARVEST_OFF", "env_name": HARVEST_ENV,
+                "harvested_usd": 0.0, "rows_written": 0}
 
     p = await plan(grid)
     if dry_run:

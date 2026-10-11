@@ -118,7 +118,15 @@ class PureTests(unittest.TestCase):
 
 
 class LedgerTests(unittest.IsolatedAsyncioTestCase):
+    """The harvest's own rules, with the owner's switch turned ON.
+
+    Since 2026-10-11 the live harvest is OFF unless GRID_PROFIT_HARVEST says
+    on (test_profit_harvest_switch.py pins that). These tests turn it on so
+    the rules it follows when it does run stay pinned exactly as before.
+    """
     async def asyncSetUp(self):
+        self._prev_switch = os.environ.get(H.HARVEST_ENV)
+        os.environ[H.HARVEST_ENV] = "on"
         self.path = tempfile.mktemp(suffix=".sqlite")
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.path}")
         self.maker = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -126,6 +134,10 @@ class LedgerTests(unittest.IsolatedAsyncioTestCase):
             await c.run_sync(Base.metadata.create_all)
 
     async def asyncTearDown(self):
+        if self._prev_switch is None:
+            os.environ.pop(H.HARVEST_ENV, None)
+        else:
+            os.environ[H.HARVEST_ENV] = self._prev_switch
         await self.engine.dispose()
         try:
             os.unlink(self.path)
