@@ -14639,10 +14639,18 @@ condition that had not changed in three hours.
 This is the same failure 082bea8 fixed for INVENTORY_DEPTH, and that
 commit named EXITING as the pattern that once filled 494 of 500 rows.
 The EXITING write itself was never put behind the limiter. Neither were
-its two siblings in the same buy path, CONCENTRATION and UNBACKED, which
-repeat in exactly the same way whenever their condition holds.
+its siblings in the same buy path, which repeat in exactly the same way
+whenever their condition holds: CONCENTRATION, UNBACKED, CASH_RESERVE and
+ADOPTED_RUNG. CASH_RESERVE had already done it once: the same 500-row
+window still held 128 ZEC-USD CASH_RESERVE rows from 19:11Z to 21:05Z on
+2026-10-10.
 
-THE FIX. All three `_record_gate_decision` calls now sit inside
+LEFT ALONE ON PURPOSE. The net-edge gate rows (GATE_PASS, GATE_BLOCK and
+the rest) are the events the limiter exists to protect. The order-outcome
+row is written once per real order attempt. EXECUTION_GATE has the same
+per-cycle shape but no measured flood, so it was not touched.
+
+THE FIX. All five `_record_gate_decision` calls now sit inside
 `if _feed_should_write(VERDICT, branch.product_id):`, the same 15-minute
 per-(verdict, product) limiter the parked and inventory-depth writes use.
 The first refusal is still written immediately. One exiting coin does not
@@ -14654,9 +14662,9 @@ exactly as before whether or not a row is written. The log lines are
 unchanged. No threshold, gate, order path or money path moves.
 CYCLE_ERROR stays unthrottled.
 
-TESTS. test_feed_rate_limit.py now pins all four buy-side verdicts behind
-the limiter and checks that no unguarded call for EXITING, CONCENTRATION
-or UNBACKED exists anywhere (22 pass; 6 fail against the old code).
+TESTS. test_feed_rate_limit.py now pins all six buy-side verdicts behind
+the limiter and checks that no unguarded call for any of the five exists
+anywhere (26 pass; 10 fail against the old code).
 test_backing_gate.py selected "the If that contains the UNBACKED write"
 to find the real guard; the new throttle If also contains it, so the
 test now skips any If whose test is `_feed_should_write`. Its mutation

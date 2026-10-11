@@ -78,7 +78,9 @@ ok("PARKED_SELL_NOFILL is written behind the limiter",
 # The three buy-side refusals that repeat every cycle while a coin sits at its
 # trigger. EXITING was the one that filled the window: measured 2026-10-11,
 # APE-USD wrote 204 of the feed's 500 rows in three and a half hours.
-for verdict in ("EXITING", "CONCENTRATION", "UNBACKED", "INVENTORY_DEPTH"):
+# CASH_RESERVE did the same on 2026-10-10: ZEC-USD, 128 rows in two hours.
+for verdict in ("EXITING", "CONCENTRATION", "UNBACKED", "INVENTORY_DEPTH",
+                "CASH_RESERVE", "ADOPTED_RUNG"):
     ok(f"{verdict} is written behind the limiter", verdict in guarded,
        f"guarded: {sorted(guarded)}")
 
@@ -97,7 +99,8 @@ for n in ast.walk(TREE):
                         and getattr(cc.func, "id", "") == "_record_gate_decision"
                         and len(cc.args) >= 3 and isinstance(cc.args[2], ast.Constant)):
                     _guarded_calls.append(cc.args[2].value)
-for verdict in ("EXITING", "CONCENTRATION", "UNBACKED"):
+for verdict in ("EXITING", "CONCENTRATION", "UNBACKED", "CASH_RESERVE",
+                "ADOPTED_RUNG"):
     ok(f"every {verdict} write is guarded",
        _all_calls.count(verdict) == _guarded_calls.count(verdict) >= 1,
        f"{_all_calls.count(verdict)} calls, {_guarded_calls.count(verdict)} guarded")

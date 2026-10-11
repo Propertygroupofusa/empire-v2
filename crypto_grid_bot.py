@@ -7891,8 +7891,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 await _adopted_branch_count())
             if slice_usd <= 0:
                 log.info(f"[GRID] {branch.bot_name}: no adopted rung - {rung_reason}")
-                await _record_gate_decision(branch.bot_name, branch.product_id,
-                                            "ADOPTED_RUNG", rung_reason)
+                # Throttled like EXITING below: a state, not an event.
+                if _feed_should_write("ADOPTED_RUNG", branch.product_id):
+                    await _record_gate_decision(branch.bot_name, branch.product_id,
+                                                "ADOPTED_RUNG", rung_reason)
                 return
         else:
             slice_usd = branch.allocated_usd / branch.num_levels
@@ -7901,8 +7903,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                                   deployment_reserve=_dep_reserve)
         if spend <= 0:
             log.info(f"[GRID] {branch.bot_name}: no buy - {spend_reason}")
-            await _record_gate_decision(branch.bot_name, branch.product_id, "CASH_RESERVE",
-                                        spend_reason)
+            # Throttled like EXITING below. Unthrottled, measured 2026-10-10:
+            # ZEC-USD wrote 128 CASH_RESERVE rows between 19:11Z and 21:05Z.
+            if _feed_should_write("CASH_RESERVE", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "CASH_RESERVE", spend_reason)
             return
 
         # The owner's own standing ceiling: no coin over 20% of the fleet.
