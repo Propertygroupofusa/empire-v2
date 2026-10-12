@@ -65,12 +65,17 @@ ok("the builder attaches x-dashboard-token", "'x-dashboard-token'" in HTML)
 ok("and omits it rather than sending an empty one",
    "if (t) h['x-dashboard-token'] = t;" in HTML)
 
-print("\nTHE CREDENTIAL DOES NOT OUTLIVE THE TAB")
+print("\nTHE CREDENTIAL IS REMEMBERED ON THE DEVICE, FOR A BOUNDED TIME (2026-10-12)")
 
-ok("it is held in sessionStorage", "sessionStorage.getItem(TOKEN_KEY)" in HTML)
-ok("and NOT in localStorage",
-   "localStorage.setItem(TOKEN_KEY" not in HTML and "localStorage.getItem(TOKEN_KEY" not in HTML,
-   "a key that moves money should not survive on a phone that is lost")
+# Until 2026-10-12 this section asserted sessionStorage only - "a key that
+# moves money should not survive on a phone that is lost". The owner asked
+# for the per-tab paste to stop ("time consuming"), so the key is remembered
+# on the device; the lost-phone concern is kept as a BOUND, not dropped.
+ok("it is remembered on the device", "localStorage.getItem(TOKEN_KEY)" in HTML)
+ok("but only for a bounded time", "TOKEN_TTL_MS" in HTML and "localStorage.removeItem(TOKEN_KEY)" in HTML,
+   "a key that moves money should not survive indefinitely on a phone that is lost")
+ok("the bound is stamped when the key is saved", "TOKEN_KEY + '_at', String(Date.now())" in HTML)
+ok("and the old per-tab slot is still read", "sessionStorage.getItem(TOKEN_KEY)" in HTML)
 ok("a blocked storage accessor does not break the page",
    HTML.count("catch (e) { return ''; }") >= 1 and "private mode" in HTML)
 ok("there is a way to lock it again", "setWriteToken('')" in HTML)

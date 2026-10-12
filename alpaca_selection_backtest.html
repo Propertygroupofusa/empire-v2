@@ -218,7 +218,8 @@ const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashbo
 // the screen changed nothing here.
 //
 // It also parked a secret in localStorage, which survives browser restarts
-// indefinitely. The lock bar deliberately uses sessionStorage so the token
+// indefinitely. Since 2026-10-12 the lock bar remembers the token on the device
+// (localStorage) at the owner's request; before that it deliberately used sessionStorage so the token
 // dies with the tab. Any value left behind by the old prompt is cleared.
 const KEY_STORAGE = 'bmb_admin_key';
 try { localStorage.removeItem(KEY_STORAGE); } catch (e) { /* private mode */ }
@@ -229,7 +230,7 @@ try { localStorage.removeItem(KEY_STORAGE); } catch (e) { /* private mode */ }
 const TOKEN_KEY = 'empire_write_token';
 
 function getAdminKey() {
-    try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+    try { var at = Number(localStorage.getItem(TOKEN_KEY + '_at') || 0); if (at && (Date.now() - at) > 7 * 24 * 60 * 60 * 1000) { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(TOKEN_KEY + '_at'); } return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
 }
 
 function fmtUsd(n) {

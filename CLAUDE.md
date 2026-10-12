@@ -14817,3 +14817,31 @@ still sell above it; the peak keeps tracking while held; the function
 default is off; the env switch is on unless explicitly negative; both live
 call sites pass it. test_held_position_exit_fallback.py unchanged, 28 pass.
 Script-mode suite: 10 failing modules before and after, the same ten.
+
+## The dashboard key is remembered on the device for a week (2026-10-12)
+
+THE OWNER'S WORDS. "Take the administration key lock off ... can't nobody
+do nothing by seeing my dashboard ... that's making it time consuming."
+
+WHAT THE LOCK IS. DASHBOARD_WRITE_TOKEN (added 2026-10-04, 4783bb7) gates
+WRITES only - every button that moves money or changes a branch. Viewing
+has never needed it. The pages are on a public URL, so the gate stays:
+without it anyone who found the address could press Deploy cash, Close
+or Set levels.
+
+WHAT CHANGED. The key was held in sessionStorage - one tab, gone when the
+phone discarded the tab, which it does every time the owner switches apps
+- so he was pasting it several times a day. It is now kept in
+localStorage on all four pages that share the key (family tree, Alpaca,
+both backtests), with a one-week bound stamped at save time: after seven
+days it is forgotten and asked for again. "Lock again" forgets it now.
+The per-tab slot is still read so a tab unlocked the old way keeps
+working. The key is still never sent anywhere but the same-origin API and
+never stored on the server.
+
+WHY A BOUND AND NOT FOREVER. test_write_token used to assert "NOT in
+localStorage - a key that moves money should not survive on a phone that
+is lost". That concern is real and is kept as a limit rather than dropped:
+the test now asserts the bound exists, is stamped on save, and that the
+old slot is still read. 38/38; test_adopted_stop_card 42/42; every page's
+inline script parses.

@@ -89,15 +89,17 @@
 // server's raw "Missing x-dashboard-token header" text. This wraps fetch
 // once, so no call site can forget the header, and refuses a write BEFORE
 // sending it when the tab is locked, with a message that says what to do.
-// The token is kept in sessionStorage (this tab only) under the same key the
+// The token is remembered on this device (localStorage, since 2026-10-12 at the
+// owner's request; the per-tab sessionStorage slot is still read) under the same key the
 // Coinbase page uses, so unlocking one page unlocks the others in the tab.
 (function () {
     if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;
     var KEY = 'empire_write_token';
     var WRITES = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
-    function tok() { try { return sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } }
+    var TTL_MS = 7 * 24 * 60 * 60 * 1000;   // remembered on the device for a week since 2026-10-12 (owner: per-tab was "time consuming"); the gate itself stays
+    function tok() { try { var at = Number(localStorage.getItem(KEY + '_at') || 0); if (at && (Date.now() - at) > TTL_MS) { localStorage.removeItem(KEY); localStorage.removeItem(KEY + '_at'); } return localStorage.getItem(KEY) || sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } }
     window.empireSetWriteToken = function (v) {
-        try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch (e) {}
+        try { if (v) { localStorage.setItem(KEY, v); localStorage.setItem(KEY + '_at', String(Date.now())); sessionStorage.setItem(KEY, v); } else { localStorage.removeItem(KEY); localStorage.removeItem(KEY + '_at'); sessionStorage.removeItem(KEY); } } catch (e) {}
         drawBar();
     };
     var orig = window.fetch.bind(window);
@@ -426,7 +428,8 @@ const API_BASE = 'https://empire-v2-production.up.railway.app/api/trading-dashbo
 // the screen changed nothing here.
 //
 // It also parked a secret in localStorage, which survives browser restarts
-// indefinitely. The lock bar deliberately uses sessionStorage so the token
+// indefinitely. Since 2026-10-12 the lock bar remembers the token on the device
+// (localStorage) at the owner's request; before that it deliberately used sessionStorage so the token
 // dies with the tab. Any value left behind by the old prompt is cleared.
 const KEY_STORAGE = 'bmb_admin_key';
 try { localStorage.removeItem(KEY_STORAGE); } catch (e) { /* private mode */ }
@@ -437,7 +440,7 @@ try { localStorage.removeItem(KEY_STORAGE); } catch (e) { /* private mode */ }
 const TOKEN_KEY = 'empire_write_token';
 
 function getAdminKey() {
-    try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+    try { var at = Number(localStorage.getItem(TOKEN_KEY + '_at') || 0); if (at && (Date.now() - at) > 7 * 24 * 60 * 60 * 1000) { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(TOKEN_KEY + '_at'); } return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
 }
 
 function fmtUsd(n) {

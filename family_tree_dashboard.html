@@ -2156,13 +2156,26 @@
 // server's raw "Missing x-dashboard-token header" text. This wraps fetch
 // once, so no call site can forget the header, and refuses a write BEFORE
 // sending it when the tab is locked, with a message that says what to do.
-// The token is kept in sessionStorage (this tab only) under the same key the
-// Coinbase page uses, so unlocking one page unlocks the others in the tab.
+// The token is kept in this browser's localStorage (this device, every tab,
+// survives closing the tab and the app) under the same key the Coinbase page
+// uses. Until 2026-10-12 it was sessionStorage, per tab, and the owner had
+// to paste it again every time his phone dropped the tab: "That's making
+// it time consuming ... take it off." The GATE STAYS - the page is on a
+// public URL and these buttons move real money - but the key is now
+// remembered on the device. "Lock again" removes it. sessionStorage is
+// still read so a tab unlocked under the old scheme keeps working.
 (function () {
     if (typeof window === 'undefined' || typeof window.fetch !== 'function') return;
     var KEY = 'empire_write_token';
     var WRITES = { POST: 1, PUT: 1, PATCH: 1, DELETE: 1 };
-    function tok() { try { return sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } }
+    var TTL_MS = 7 * 24 * 60 * 60 * 1000;   // remembered for a week, then asked for again
+    function tok() {
+        try {
+            var at = Number(localStorage.getItem(KEY + '_at') || 0);
+            if (at && (Date.now() - at) > TTL_MS) { localStorage.removeItem(KEY); localStorage.removeItem(KEY + '_at'); }
+            return localStorage.getItem(KEY) || sessionStorage.getItem(KEY) || '';
+        } catch (e) { return ''; }
+    }
     window.empireSetWriteToken = function (v) {
         try { v ? sessionStorage.setItem(KEY, v) : sessionStorage.removeItem(KEY); } catch (e) {}
         drawBar();
@@ -7227,14 +7240,33 @@ async function runLeague() {
 // ---------------------------------------------------------------------------
 const TOKEN_KEY = 'empire_write_token';
 
+// Remembered on the device for a week, then asked for again. A key that
+// moves money should not survive indefinitely on a phone that is lost; a
+// week is the owner's "stop making me paste it every time" balanced
+// against that. test_write_token asserts the bound exists.
+const TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 function getWriteToken() {
-    try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; }
+    // Device storage first (remembered since 2026-10-12, for TOKEN_TTL_MS),
+    // then the old per-tab slot so a tab unlocked before that keeps working.
+    try {
+        const at = Number(localStorage.getItem(TOKEN_KEY + '_at') || 0);
+        if (at && (Date.now() - at) > TOKEN_TTL_MS) {
+            localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(TOKEN_KEY + '_at');
+        }
+        return localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || '';
+    } catch (e) { return ''; }
 }
 
 function setWriteToken(v) {
     try {
-        if (v) { sessionStorage.setItem(TOKEN_KEY, v); }
-        else { sessionStorage.removeItem(TOKEN_KEY); }
+        if (v) {
+            localStorage.setItem(TOKEN_KEY, v); localStorage.setItem(TOKEN_KEY + '_at', String(Date.now()));
+            sessionStorage.setItem(TOKEN_KEY, v);
+        } else {
+            localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(TOKEN_KEY + '_at');
+            sessionStorage.removeItem(TOKEN_KEY);
+        }
     } catch (e) { /* private mode - the header still works for this page load */ }
     renderTokenBar();
     // Clearing or pasting the token changes what every button can do, so the
@@ -7265,11 +7297,13 @@ async function postGuarded(url, body) {
     // quoted here: test_status_strip asserts it is gone from the page
     // and cannot tell a comment from a template.
     //
-    // The token lives in sessionStorage, so it is gone after a browser
-    // restart or in a new tab. That is deliberate (it moves real money and
-    // should not outlive the tab) and it means THIS case - unlocked
-    // deployment, locked tab - is the common one. Answer it here, before
-    // anything is sent, so no call site can report it as something else.
+    // The token lived in sessionStorage until 2026-10-12 - gone after a
+    // browser restart or in a new tab, deliberately, because it moves real
+    // money. The owner asked for that to stop ("time consuming"), so it is
+    // now remembered on the device and this case - unlocked deployment,
+    // locked browser - is the FIRST visit on a device, or after "Lock
+    // again". Answer it here, before anything is sent, so no call site can
+    // report it as something else.
     if (!tok) {
         throw new Error('This browser tab is locked. Nothing was sent and nothing '
             + 'changed. Open the \u{1F512} lock bar at the top of this page and paste '
@@ -7324,8 +7358,9 @@ function renderTokenBar() {
         ? `<div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
              <span style="color:var(--green); font-weight:700; font-size:0.82em;">\u{1F513} UNLOCKED</span>
              <span style="font-size:0.74em; color:var(--text-dim);">
-               Write actions on this page will send your token. It is held for this
-               browser tab only and is never stored on the server.</span>
+               Write actions on this page will send your token. It is remembered on
+               this device for a week (every tab, survives closing the app) and is
+               never stored on the server. Lock again forgets it now.</span>
              <button class="unlock-btn" style="margin:0; padding:4px 10px; font-size:0.78em;"
                      onclick="setWriteToken('')">Lock again</button></div>`
         : `<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
@@ -7340,7 +7375,9 @@ function renderTokenBar() {
              <div style="font-size:0.72em; color:var(--text-dim); width:100%; line-height:1.5;">
                This is not a link and not something to copy from the code - it is a
                password you invent, set as <code>DASHBOARD_WRITE_TOKEN</code> in Railway
-               on this service, then redeploy. Every write button on this page needs it.</div></div>`;
+               on this service, then redeploy. Every write button on this page needs it.
+               Paste it once per phone or computer - it is remembered on the device
+               for a week.</div></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -9620,9 +9657,9 @@ function renderGridLevels(branches) {
     }
     // THE LOCK STATE, SHOWN BEFORE THE TAP RATHER THAN AFTER.
     //
-    // The token lives in sessionStorage, which is per-tab and is cleared
-    // when the tab is closed OR discarded - which phones do routinely when
-    // you switch apps. postGuarded then refuses before sending, so the
+    // The token is remembered on the device (localStorage) since
+    // 2026-10-12; before that it was per-tab and phones discarded it every
+    // time the owner switched apps. postGuarded then refuses before sending, so the
     // request never reaches the server and the server log stays empty,
     // which is indistinguishable from a broken button. Saying so up front
     // costs one line and removes a whole class of wasted round trip.
