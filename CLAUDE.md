@@ -1467,6 +1467,23 @@ fix. Both fixed: `commodities` now holds `["MGC", "MCL", "SIL"]`, and
 `validate_entry` now includes both `commodities` and the new
 `inverse_etfs` category in its approved-symbols check.
 
+**Retired from new entries 2026-10-12** (`prop_bot.py`,
+`_retired_symbols_from_env`, `ALPACA_RETIRED_SYMBOLS`): the owner said
+"fix whatever that needs to be fixed for it to change to it being a
+positive result." Measured first with the bot's own `should_exit_position()`
+under the live rule set (`sell_only_at_profit=True`) on 60 days of real
+15-minute bars: with the four, 29 sells / 29 wins / +$24.25 banked;
+without them, 39 / 39 / +$41.77 - better in both halves of the window on
+both banked and banked-plus-paper. Under the no-loss rule a drifting
+inverse ETF costs a slot for weeks (SH held 72.8 days in the replay), and
+four slots are the whole account. The retirement is a third layer unioned
+into `get_effective_excluded_symbols()` - entry-only, consulted by
+`try_open` and the manual "Trade this" endpoint, never by an exit.
+`FUTURES` keeps the four (exits resolve `FUTURES[contract]`) and the
+mandate keeps `inverse_etfs` (compliance history unchanged). Unset means
+the four; an empty string brings them all back; a comma list retires
+exactly those. `test_alpaca_retired_symbols.py` covers it.
+
 ---
 
 ## Common Tasks

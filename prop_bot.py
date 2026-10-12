@@ -1608,6 +1608,49 @@ TOP_N_ELIGIBLE_SYMBOLS = _safe_int_env("PROP_TOP_N_SYMBOLS", "5")
 # restored deliberately by naming symbols here again.
 INDEX_HEDGE_SYMBOLS = set()  # was {"SH", "DOG", "RWM"}; PSQ removed Sept 10
 
+# RETIRED SYMBOLS - a third exclusion layer, entry-only, env-overridable.
+#
+# 2026-10-12, the owner: "fix whatever that needs to be fixed for it to
+# change to it being a positive result." Measured first, read-only, with
+# the bot's own should_exit_position() under the LIVE rule set
+# (sell_only_at_profit=True) on 60 days of real 15-minute bars, all 17
+# symbols, $128 a slot, 4 slots, 0.12% round trip:
+#
+#   with SH/PSQ/DOG/RWM     29 sells, 29 wins, banked +$24.25, paper -$18.51
+#   without them            39 sells, 39 wins, banked +$41.77, paper -$19.44
+#   first half  (07-20..08-28)   +$6.08  ->  +$20.15
+#   second half (08-28..10-12)  +$27.84  ->  +$34.95
+#
+# Better in every window on both measures. Under the no-loss rule an
+# inverse ETF that drifts down is a slot held for weeks (SH 72.8 days in
+# the replay) while the four stock slots are the whole account, so the
+# cost is not the loss - it is the slot. The same four were already the
+# biggest drag in the 10-05 replay (+$5.00 with, +$55.85 without), and
+# the INDEX_HEDGE_SYMBOLS exemption that kept them in rotation was
+# removed 2026-10-09 for the same reason. This finishes that.
+#
+# ENTRY ONLY. It is unioned into get_effective_excluded_symbols(), which
+# try_open and the manual "Trade this" endpoint consult before OPENING a
+# position, and nothing else reads it - every exit path is untouched, so
+# a position already held in one of these still closes exactly as before.
+# FUTURES keeps their entries (exits resolve FUTURES[contract]) and the
+# mandate keeps its inverse_etfs list (compliance history is unchanged).
+#
+# ALPACA_RETIRED_SYMBOLS unset -> the four below. Set it to an empty
+# string to bring them all back, or to a comma list to retire exactly
+# those. The variable is the owner's to set.
+ALPACA_RETIRED_SYMBOLS_ENV = "ALPACA_RETIRED_SYMBOLS"
+_DEFAULT_RETIRED_SYMBOLS = "SH,PSQ,DOG,RWM"
+
+
+def _retired_symbols_from_env() -> set:
+    """Tickers retired from NEW entries. Unset -> the measured default;
+    an explicit empty string -> none; a comma list -> exactly those."""
+    raw = os.environ.get(ALPACA_RETIRED_SYMBOLS_ENV)
+    if raw is None:
+        raw = _DEFAULT_RETIRED_SYMBOLS
+    return {part.strip().upper() for part in raw.replace(";", ",").split(",") if part.strip()}
+
 
 async def _compute_top_ranked_symbols():
     """Real, live ranking by latest AlpacaBacktestRun.roi_pct_of_spend per
@@ -1647,16 +1690,18 @@ async def get_effective_excluded_symbols() -> set:
     record is never excluded by the auto-exclusion layer - there isn't
     enough evidence yet.
 
-    Unions two real layers: the existing auto-exclusion (a symbol whose
-    last AUTO_EXCLUDE_RUN_WINDOW runs were ALL negative-ROI) and the
+    Unions three real layers: the existing auto-exclusion (a symbol whose
+    last AUTO_EXCLUDE_RUN_WINDOW runs were ALL negative-ROI), the
     top-N concentration filter (see _compute_top_ranked_symbols) - a
     symbol outside the current top TOP_N_ELIGIBLE_SYMBOLS by real ROI is
     excluded here too, once enough real evidence exists to rank the whole
-    universe. Neither layer force-closes an existing position - both only
-    ever stop NEW entries, same "never one-way, never touches what's
-    already open" philosophy as every exclusion layer on the crypto side."""
+    universe - and the owner's retired list (_retired_symbols_from_env,
+    ALPACA_RETIRED_SYMBOLS). No layer force-closes an existing position -
+    all three only ever stop NEW entries, same "never one-way, never
+    touches what's already open" philosophy as every exclusion layer on
+    the crypto side."""
     negative, outside_top = await _exclusion_layers()
-    return negative | outside_top
+    return negative | outside_top | _retired_symbols_from_env()
 
 
 async def _recent_daily_rois(db, symbol):
@@ -1719,6 +1764,9 @@ async def describe_symbol_exclusion_reason(symbol: str) -> str:
     instead of always assuming it's the auto-exclusion layer. Only
     meaningful to call on a symbol already confirmed excluded; returns a
     generic fallback otherwise."""
+    if symbol in _retired_symbols_from_env():
+        return (f"retired from new entries by the owner on 2026-10-12 "
+                f"({ALPACA_RETIRED_SYMBOLS_ENV}); exits are unaffected")
     async with AsyncSessionLocal() as db:
         recent = await _recent_daily_rois(db, symbol)
     if len(recent) >= AUTO_EXCLUDE_RUN_WINDOW and all(roi is not None and roi < 0 for roi in recent):
