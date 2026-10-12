@@ -14771,3 +14771,46 @@ refused. The endpoint is still dry-run by default and still write-guarded.
 
 TESTS. test_deploy_cash_keeps_floor.py, 9 tests; 7 fail on the old code.
 test_idle_cash.py is unchanged and passes (24).
+
+## Alpaca: an OFF-by-default switch so the stock bot sells only at a win (2026-10-12)
+
+THE OWNER'S WORDS. "Is it going to stop selling at a loss? ... Make sure
+that this doesn't continue to happen. We need to sell at a win."
+
+WHAT SELLS AT A LOSS TODAY. Four mean-reversion rules in
+alpaca_mean_reversion.should_exit_position() can close below cost: the
+-1.5% hard stop, the breakeven stop (once the +1% ratchet has armed), the
+peak giveback (as low as peak minus 1.5%) and the 7,200-second max hold,
+which sells at whatever the price is. Measured on the live book the same
+day: 129 of 225 real sell orders were losers. A 60-day replay of this
+function on real 15-minute bars for all 17 symbols: 566 of 906 sells at a
+loss, 714 of them max-hold timeouts, -$116.86 in total.
+
+THE CHANGE. should_exit_position() takes sell_only_at_profit (default
+False). When True, nothing may sell below the fee floor (a round trip plus
+the house margin, 0.32% today); every rule still fires above it, so a stop,
+a giveback or a timeout that does fire does so at a net win. Below the
+floor the position is held and the reason names the rule that wanted out.
+prop_bot reads ALPACA_SELL_ONLY_AT_PROFIT with the same shape as the
+force-close switch: True only for an explicit affirmative, everything else
+OFF. OFF is byte-for-byte today's behaviour, so a deploy carrying this
+changes nothing until the owner sets the variable. Both live call sites
+pass it; describe_live_rules() says when it is armed.
+
+THE COST, SO IT IS NOT A SURPRISE. The same replay with no loss-taking
+exit banked +$21.97 on 23 sells but left all four slots under water for
+weeks (one for 73 days). Armed, a losing position keeps its slot until the
+price comes back and the bot trades less in a falling market. The owner
+chose that over realising losses. The risk governor's floors are untouched.
+
+WHAT THE GUARD MUST KNOW. Once armed, the Alpaca guard's condition 5 ("a
+position is past its live stop and still open") describes the intended
+state, not a bug, and condition 6 (past the max hold) likewise below the
+floor. Re-base those two when the variable is set.
+
+TESTS. test_alpaca_sell_only_at_profit.py, 17 tests: the four loss-taking
+rules hold below the floor; profit target, timeout, RSI exit and giveback
+still sell above it; the peak keeps tracking while held; the default is
+off; the env switch arms only on an explicit affirmative; both live call
+sites pass it. test_held_position_exit_fallback.py unchanged, 28 pass.
+Script-mode suite: 10 failing modules before and after, the same ten.

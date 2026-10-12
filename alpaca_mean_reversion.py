@@ -48,6 +48,7 @@ def should_exit_position(
     max_giveback_pct: float = 0.005,  # once a REAL profit has been reached, cap how much of the peak can be given back before forcing an exit
     min_peak_to_arm_pct: float = None,  # the giveback rule stays disarmed until the peak clears a round trip; None = compute from the fee floor
     log_prefix: str = "",
+    sell_only_at_profit: bool = False,  # OFF by default; see RULE 0a. prop_bot passes True only when the owner has set ALPACA_SELL_ONLY_AT_PROFIT
 ) -> Tuple[bool, str, str, float]:
     """
     Decide whether to exit a position (long or short) based on mean reversion rules.
@@ -87,6 +88,61 @@ def should_exit_position(
         return False, f"Unknown direction: {direction}", "error", peak_pnl_pct
 
     new_peak_pnl_pct = max(peak_pnl_pct, unrealized_pnl_pct)
+
+    # The smallest exit that is a real win after both legs' fees. Computed
+    # here, once, because two things below need it: the giveback rule's
+    # arming threshold (unchanged) and the optional sell_only_at_profit gate.
+    min_peak_to_arm = min_peak_to_arm_pct
+    if min_peak_to_arm is None:
+        try:
+            import fee_floor
+            min_peak_to_arm = fee_floor.fee_floor_pct(ALPACA_ROUND_TRIP_PCT)
+        except Exception:
+            min_peak_to_arm = ALPACA_ROUND_TRIP_PCT + 0.002
+
+    # ========== RULE 0a: Sell only at a win (OPTIONAL, OFF BY DEFAULT) ==========
+    # Added 2026-10-12 at the account owner's request, in his words: "Is it
+    # going to stop selling at a loss? ... Make sure that this doesn't
+    # continue to happen. We need to sell at a win." Four rules below can
+    # close a position below cost: the hard stop (RULE 1), the breakeven
+    # stop (RULE 1 once the ratchet is armed), the peak-giveback (RULE 1b)
+    # and the max hold (RULE 4, which sells at whatever the price is).
+    #
+    # With sell_only_at_profit True, nothing here may sell below
+    # min_peak_to_arm (the fee floor: a round trip plus the house margin).
+    # Every rule still runs exactly as written once the position is above
+    # that line, so a stop, a giveback or a timeout that fires does so at a
+    # net win. Below the line the position is HELD and the reason names the
+    # rule that wanted out, so the log shows what the gate is holding.
+    #
+    # THE COST, STATED. A 60-day replay of this function on real 15-minute
+    # bars with no loss-taking exit banked +$21.97 on 23 sells but left all
+    # four slots under water for weeks (one for 73 days): a losing position
+    # keeps its slot until the price comes back, and the bot trades less in
+    # a falling market. The risk governor's equity floor and buying-power
+    # floor are untouched and still block new entries as before.
+    #
+    # DEFAULT False EVERYWHERE. Every existing caller - the backtests above
+    # all - is byte-for-byte unchanged, and prop_bot passes True only when
+    # ALPACA_SELL_ONLY_AT_PROFIT is an explicit affirmative. A deploy that
+    # carries this code changes no live behaviour on its own.
+    if sell_only_at_profit and unrealized_pnl_pct < min_peak_to_arm:
+        wanted = []
+        _stop_now = 0.0 if new_peak_pnl_pct >= breakeven_trigger_pct else stop_loss_pct
+        if unrealized_pnl_pct <= -_stop_now:
+            wanted.append("stop" if _stop_now > 0 else "breakeven stop")
+        if (new_peak_pnl_pct >= min_peak_to_arm
+                and (new_peak_pnl_pct - unrealized_pnl_pct) >= max_giveback_pct):
+            wanted.append("peak giveback")
+        if position_age_seconds >= max_hold_seconds:
+            wanted.append("max hold")
+        reason = (f"Hold at {unrealized_pnl_pct*100:+.2f}%: "
+                  + (", ".join(wanted) + " would sell at a loss after fees; "
+                     if wanted else "")
+                  + f"sell_only_at_profit holds until it clears +{min_peak_to_arm*100:.2f}%")
+        if wanted:
+            log.info(f"  ⏸️ {log_prefix}{symbol} ({direction.upper()}): {reason}")
+        return False, reason, "hold", new_peak_pnl_pct
 
     # ========== RULE 0: Breakeven ratchet ==========
     # Once this position has ever been up by breakeven_trigger_pct or more,
@@ -131,14 +187,6 @@ def should_exit_position(
     # A giveback exit only makes sense once there is something to give
     # back. The peak must clear what a round trip costs; below that there
     # was never a real gain, and the stop loss owns the exit.
-    min_peak_to_arm = min_peak_to_arm_pct
-    if min_peak_to_arm is None:
-        try:
-            import fee_floor
-            min_peak_to_arm = fee_floor.fee_floor_pct(ALPACA_ROUND_TRIP_PCT)
-        except Exception:
-            min_peak_to_arm = ALPACA_ROUND_TRIP_PCT + 0.002
-
     peak_giveback = new_peak_pnl_pct - unrealized_pnl_pct
     if new_peak_pnl_pct >= min_peak_to_arm and peak_giveback >= max_giveback_pct:
         reason = f"Peak profit giveback: gave back {peak_giveback*100:.2f}% from a {new_peak_pnl_pct*100:.2f}% peak (limit: {max_giveback_pct*100:.2f}%)"
