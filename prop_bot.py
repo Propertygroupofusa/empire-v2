@@ -1064,29 +1064,32 @@ MEAN_REVERSION_GIVEBACK_PCT = 0.015
 MEAN_REVERSION_BREAKEVEN_TRIGGER_PCT = 0.01
 MEAN_REVERSION_MAX_HOLD_SECONDS = 7200  # matches should_exit_position()'s own default, the same one every backtest run tonight implicitly used
 
-# ── SELL ONLY AT A WIN - OFF unless the owner arms it (2026-10-12) ──────
+# ── SELL ONLY AT A WIN - ON unless the owner switches it off (2026-10-12) ──
 #
 # The owner's words: "Is it going to stop selling at a loss? ... Make sure
 # that this doesn't continue to happen. We need to sell at a win." Four
 # mean-reversion rules can close below cost (the -1.5% stop, the breakeven
-# stop, the peak giveback and the 7,200s max hold). With this armed,
+# stop, the peak giveback and the 7,200s max hold). With this on,
 # should_exit_position() holds a position below the fee floor instead of
 # selling it, and every rule still works above the floor - see RULE 0a
 # there for the measured cost (slots stay occupied in a falling market).
 #
-# Same switch shape as ALPACA_FORCE_CLOSE below: True only for an explicit
-# affirmative. Unset, empty, "0", "false", a typo, a quoted value - all
-# OFF, and OFF is byte-for-byte today's behaviour. A deploy carrying this
-# code changes nothing on its own; the owner arms it by setting the
-# variable to true.
+# ON BY DEFAULT at the owner's explicit instruction the same afternoon,
+# when told it would otherwise wait on a variable: "I give you permission
+# to do it, not me, as long as it's going to help make profit." So the
+# deploy that carries this arms it. ALPACA_SELL_ONLY_AT_PROFIT is the OFF
+# switch, no deploy needed: only an explicit negative ("0", "false", "no",
+# "off", case and quotes ignored) turns it off. Unset, empty or a typo
+# leave it on, because a switch that silently disarms on an invisible
+# character would put the loss-taking exits back without anyone meaning to.
 ALPACA_SELL_ONLY_AT_PROFIT_ENV = "ALPACA_SELL_ONLY_AT_PROFIT"
 
 
 def _sell_only_at_profit_from_env() -> bool:
     raw = os.environ.get(ALPACA_SELL_ONLY_AT_PROFIT_ENV)
     if raw is None:
-        return False
-    return raw.strip().strip('"').strip("'").lower() in ("1", "true", "yes", "on")
+        return True
+    return raw.strip().strip('"').strip("'").lower() not in ("0", "false", "no", "off")
 
 
 MEAN_REVERSION_SELL_ONLY_AT_PROFIT = _sell_only_at_profit_from_env()

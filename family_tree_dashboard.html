@@ -11829,16 +11829,43 @@ async function loadHeaderTotals() {
             coinbaseEl.title = 'Coinbase API credentials need JWT format. Check Railway variables.';
         }
 
-        // Alpaca: display real equity (actual account value)
-        if (data.alpaca_equity !== null && data.alpaca_equity !== undefined) {
-            renderHeaderTotal('header-total-alpaca', data.alpaca_equity, 'balance');
-        } else {
-            document.getElementById('header-total-alpaca').textContent = '—';
-        }
     } catch (e) {
         console.error('Error loading header totals:', e);
         document.getElementById('header-total-coinbase').textContent = '⚠️ API';
-        document.getElementById('header-total-alpaca').textContent = '—';
+    }
+
+    // Alpaca: from the stock account's OWN endpoint, never from the crypto
+    // payload above. /family-tree-status stopped carrying alpaca_equity on
+    // 2026-10-05 (the two accounts are separate, everything is separate)
+    // and this header kept reading it, so it showed "—" for a week. The
+    // owner, 2026-10-12: "I can't see the amount that's going on. I need
+    // that done now." This is the stock account's equity shown beside the
+    // Coinbase cash - two balances from two endpoints, never added or
+    // compared. Read at most once a minute: /alpaca-overview scans the
+    // order history on every call and this header polls far more often.
+    await loadAlpacaHeaderTotal();
+}
+
+let _alpacaHeaderAt = 0;
+let _alpacaHeaderEquity = null;
+async function loadAlpacaHeaderTotal() {
+    const el = document.getElementById('header-total-alpaca');
+    if (Date.now() - _alpacaHeaderAt < 60000) {
+        if (_alpacaHeaderEquity !== null) renderHeaderTotal('header-total-alpaca', _alpacaHeaderEquity, 'balance');
+        return;
+    }
+    _alpacaHeaderAt = Date.now();
+    try {
+        const alp = await apiGet('/alpaca-overview');
+        if (alp && alp.equity !== null && alp.equity !== undefined) {
+            _alpacaHeaderEquity = Number(alp.equity);
+            renderHeaderTotal('header-total-alpaca', _alpacaHeaderEquity, 'balance');
+        } else {
+            el.textContent = '—';
+        }
+    } catch (e) {
+        console.error('Error loading Alpaca equity for the header:', e);
+        if (_alpacaHeaderEquity === null) el.textContent = '—';
     }
 }
 

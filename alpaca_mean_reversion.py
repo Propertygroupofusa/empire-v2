@@ -48,7 +48,7 @@ def should_exit_position(
     max_giveback_pct: float = 0.005,  # once a REAL profit has been reached, cap how much of the peak can be given back before forcing an exit
     min_peak_to_arm_pct: float = None,  # the giveback rule stays disarmed until the peak clears a round trip; None = compute from the fee floor
     log_prefix: str = "",
-    sell_only_at_profit: bool = False,  # OFF by default; see RULE 0a. prop_bot passes True only when the owner has set ALPACA_SELL_ONLY_AT_PROFIT
+    sell_only_at_profit: bool = False,  # function default False so the backtests are unchanged; prop_bot passes True unless ALPACA_SELL_ONLY_AT_PROFIT is set to false - see RULE 0a
 ) -> Tuple[bool, str, str, float]:
     """
     Decide whether to exit a position (long or short) based on mean reversion rules.
@@ -100,7 +100,7 @@ def should_exit_position(
         except Exception:
             min_peak_to_arm = ALPACA_ROUND_TRIP_PCT + 0.002
 
-    # ========== RULE 0a: Sell only at a win (OPTIONAL, OFF BY DEFAULT) ==========
+    # ========== RULE 0a: Sell only at a win (live via prop_bot; off = ALPACA_SELL_ONLY_AT_PROFIT=false) ==========
     # Added 2026-10-12 at the account owner's request, in his words: "Is it
     # going to stop selling at a loss? ... Make sure that this doesn't
     # continue to happen. We need to sell at a win." Four rules below can
@@ -122,10 +122,11 @@ def should_exit_position(
     # a falling market. The risk governor's equity floor and buying-power
     # floor are untouched and still block new entries as before.
     #
-    # DEFAULT False EVERYWHERE. Every existing caller - the backtests above
-    # all - is byte-for-byte unchanged, and prop_bot passes True only when
-    # ALPACA_SELL_ONLY_AT_PROFIT is an explicit affirmative. A deploy that
-    # carries this code changes no live behaviour on its own.
+    # THE FUNCTION DEFAULT IS False, so every existing caller - the backtests
+    # above all - is byte-for-byte unchanged. prop_bot passes True unless
+    # ALPACA_SELL_ONLY_AT_PROFIT is an explicit negative: the owner's
+    # instruction on 2026-10-12, "I give you permission to do it, not me" -
+    # so the deploy carrying this code arms it on the live account.
     if sell_only_at_profit and unrealized_pnl_pct < min_peak_to_arm:
         wanted = []
         _stop_now = 0.0 if new_peak_pnl_pct >= breakeven_trigger_pct else stop_loss_pct

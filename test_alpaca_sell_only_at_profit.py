@@ -137,21 +137,21 @@ def test_the_parameter_defaults_to_off():
 
 # ── the live wiring in prop_bot ────────────────────────────────────────
 
-def test_prop_bot_switch_is_off_unless_explicitly_armed():
-    """Unset, empty, "0", "false", a typo, a quoted value - all OFF. Only
-    an explicit affirmative arms it, so a deploy carrying the code changes
-    nothing until the owner sets the variable."""
+def test_prop_bot_switch_is_on_unless_explicitly_off():
+    """ON when unset - the owner's instruction, so the deploy arms it. Only
+    an explicit negative turns it off; empty or a typo leaves it on, so an
+    invisible character can never put the loss-taking exits back."""
     import prop_bot
     f = prop_bot._sell_only_at_profit_from_env
     saved = os.environ.pop("ALPACA_SELL_ONLY_AT_PROFIT", None)
     try:
-        assert f() is False
-        for v in ("", "0", "false", "no", "off", "tru", "armed?"):
-            os.environ["ALPACA_SELL_ONLY_AT_PROFIT"] = v
-            assert f() is False, v
-        for v in ("true", " True ", '"yes"', "1", "on"):
+        assert f() is True
+        for v in ("", "tru", "armed?", "true", " True ", '"yes"', "1", "on"):
             os.environ["ALPACA_SELL_ONLY_AT_PROFIT"] = v
             assert f() is True, v
+        for v in ("0", "false", " False ", '"no"', "off"):
+            os.environ["ALPACA_SELL_ONLY_AT_PROFIT"] = v
+            assert f() is False, v
     finally:
         os.environ.pop("ALPACA_SELL_ONLY_AT_PROFIT", None)
         if saved is not None:

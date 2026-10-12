@@ -6119,6 +6119,12 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         ),
         "entry_variant": entry_variant,
         "strategy_family": strategy_family,
+        # Whether the mean-reversion exit may sell below the fee floor. On
+        # by the owner's instruction (2026-10-12); ALPACA_SELL_ONLY_AT_PROFIT
+        # =false turns it off. Shown here so the page and the hourly guard
+        # can read the live state instead of assuming it.
+        "sell_only_at_profit": (bool(getattr(prop_bot_module, "MEAN_REVERSION_SELL_ONLY_AT_PROFIT", False))
+                                if prop_bot_module else None),
         "cash": round(cash, 2),
         "session_pl": round(session_pl, 2),
         "session_pl_pct": round(session_pl_pct, 2),

@@ -14772,7 +14772,7 @@ refused. The endpoint is still dry-run by default and still write-guarded.
 TESTS. test_deploy_cash_keeps_floor.py, 9 tests; 7 fail on the old code.
 test_idle_cash.py is unchanged and passes (24).
 
-## Alpaca: an OFF-by-default switch so the stock bot sells only at a win (2026-10-12)
+## Alpaca: the stock bot sells only at a win, with an off switch (2026-10-12)
 
 THE OWNER'S WORDS. "Is it going to stop selling at a loss? ... Make sure
 that this doesn't continue to happen. We need to sell at a win."
@@ -14791,11 +14791,14 @@ False). When True, nothing may sell below the fee floor (a round trip plus
 the house margin, 0.32% today); every rule still fires above it, so a stop,
 a giveback or a timeout that does fire does so at a net win. Below the
 floor the position is held and the reason names the rule that wanted out.
-prop_bot reads ALPACA_SELL_ONLY_AT_PROFIT with the same shape as the
-force-close switch: True only for an explicit affirmative, everything else
-OFF. OFF is byte-for-byte today's behaviour, so a deploy carrying this
-changes nothing until the owner sets the variable. Both live call sites
-pass it; describe_live_rules() says when it is armed.
+prop_bot passes it ON unless ALPACA_SELL_ONLY_AT_PROFIT is an explicit
+negative ("0", "false", "no", "off"). The first cut was off-by-default and
+waited on the owner to set the variable; he answered the same afternoon:
+"I give you permission to do it, not me, as long as it's going to help
+make profit." So the deploy arms it and the variable is the off switch, no
+deploy needed. Unset, empty or a typo stay ON - a switch that disarmed on
+an invisible character would restore the loss-taking exits by accident.
+Both live call sites pass it; describe_live_rules() says when it is on.
 
 THE COST, SO IT IS NOT A SURPRISE. The same replay with no loss-taking
 exit banked +$21.97 on 23 sells but left all four slots under water for
@@ -14810,7 +14813,7 @@ floor. Re-base those two when the variable is set.
 
 TESTS. test_alpaca_sell_only_at_profit.py, 17 tests: the four loss-taking
 rules hold below the floor; profit target, timeout, RSI exit and giveback
-still sell above it; the peak keeps tracking while held; the default is
-off; the env switch arms only on an explicit affirmative; both live call
-sites pass it. test_held_position_exit_fallback.py unchanged, 28 pass.
+still sell above it; the peak keeps tracking while held; the function
+default is off; the env switch is on unless explicitly negative; both live
+call sites pass it. test_held_position_exit_fallback.py unchanged, 28 pass.
 Script-mode suite: 10 failing modules before and after, the same ten.
