@@ -47,6 +47,10 @@ MIN_ADD_USD = float(_os.getenv("GRID_IDLE_CASH_MIN_ADD_USD", "25"))
 # Keep a working float back rather than deploying to the last dollar: a
 # branch that sells needs somewhere for the proceeds to land, and a wallet
 # at zero turns an ordinary rebuy into a failed order.
+# crypto_grid_bot.ADOPTED_EXIT_REASON, spelled out here so this module stays
+# importable on its own (the tests import it without the bot).
+_ADOPTED_EXIT_REASON = "adopted_exit"
+
 RESERVE_USD = float(_os.getenv("GRID_IDLE_CASH_RESERVE_USD", "100"))
 # The owner's standing rule, measured on allocation - what this moves.
 MAX_SHARE_PCT = float(_os.getenv("GRID_IDLE_CASH_MAX_SHARE_PCT", "20"))
@@ -107,6 +111,17 @@ def plan(branches, trades, *, unclaimed_usd, min_add_usd=None,
     net = {}
     for t in (trades or ()):
         if hasattr(t, "get") and t.get("product_id"):
+            # INHERITED EXITS DO NOT COUNT, as a trip or as money. An
+            # adopted_exit row is coin the owner bought before the bot,
+            # booked at the adoption mark rather than at what he paid: ZEC's
+            # four read -$311.24 that way and +$297.78 against his real cost
+            # (crypto_grid_bot restates them on read). Summed raw, that
+            # bookkeeping kept ZEC refused here as NET_NEGATIVE_SO_FAR long
+            # after the branch's own trips had turned positive. The owner,
+            # 2026-10-12: "clear this out ... that way the bot won't see it."
+            # Only the grid's OWN completed trips judge a branch here.
+            if t.get("exit_reason") == _ADOPTED_EXIT_REASON:
+                continue
             pid = t["product_id"]
             trips[pid] = trips.get(pid, 0) + 1
             net[pid] = net.get(pid, 0.0) + _f(t.get("pnl"))
