@@ -94,6 +94,27 @@ def deploy_inputs(status, cash_floor_usd):
     return round(pot, 2), reserve, unbacked
 
 
+def partial_record(history):
+    """Why the trade rows are NOT the whole record, or None when they are.
+
+    plan() refuses a branch whose own trips net negative, and it can only
+    judge that from every one of those trips. get_grid_trade_history()
+    returns the newest closes first, at most GRID_TRADE_HISTORY_MAX_ROWS of
+    them; past that the oldest losses fall out of view and a losing coin
+    reads as clean. A 50-row window did exactly that on 2026-10-13: the
+    first auto-deploy funded APE, TON and ONDO. A partial record funds
+    nobody.
+    """
+    h = history if hasattr(history, "get") else {}
+    if not h.get("recent_trades_truncated"):
+        return None
+    return (f"only the latest {h.get('recent_trades_returned')} of "
+            f"{h.get('total_trade_count')} closed trades could be read, so a "
+            f"coin's older losses could be out of view - nothing deployed. "
+            f"GRID_TRADE_HISTORY_MAX_ROWS needs to be above "
+            f"{h.get('total_trade_count')}.")
+
+
 def plan(branches, trades, *, unclaimed_usd, min_add_usd=None,
          reserve_usd=None, max_share_pct=None, unbacked=None):
     """What to add, to which branches. Moves nothing."""

@@ -97,7 +97,17 @@ async def run_once(grid):
     try:
         import idle_cash
         status = await grid.get_grid_status()
-        history = await grid.get_grid_trade_history()
+        # THE WHOLE RECORD, NOT THE LAST 50. The plan refuses a branch whose
+        # own trips net NEGATIVE, and get_grid_trade_history() returns only
+        # the 50 latest closes by default - so on 2026-10-13 APE, TON and
+        # ONDO, whose losses were older than that, read as clean and were
+        # funded. A book bigger than one read is refused, not guessed at.
+        history = await grid.get_grid_trade_history(
+            limit_recent=getattr(grid, "GRID_TRADE_HISTORY_MAX_ROWS", 1000))
+        partial = idle_cash.partial_record(history)
+        if partial:
+            return _keep({"ran": False, "reason": "PARTIAL_TRADE_RECORD",
+                          "detail": partial})
         pot, reserve, unbacked = idle_cash.deploy_inputs(
             status, getattr(grid, "GRID_CASH_RESERVE_USD", 0.0))
         deployable = round(max(0.0, pot - reserve), 2)

@@ -16357,7 +16357,15 @@ async def idle_capital_deploy_cash(dry_run: bool = True):
     import idle_cash
 
     status = await crypto_grid_bot_module.get_grid_status()
-    history = await crypto_grid_bot_module.get_grid_trade_history()
+    # The whole trade record, not the default latest 50: the plan refuses a
+    # branch whose own trips net negative, and a 50-row window let older
+    # losses (APE, TON, ONDO on 2026-10-13) drop out of view.
+    history = await crypto_grid_bot_module.get_grid_trade_history(
+        limit_recent=getattr(crypto_grid_bot_module, "GRID_TRADE_HISTORY_MAX_ROWS", 1000))
+    partial = idle_cash.partial_record(history)
+    if partial:
+        return {"ok": False, "dry_run": True, "adds": [],
+                "reason": "PARTIAL_TRADE_RECORD", "detail": partial}
     backing = status.get("allocation_backing") or {}
     # The pot is the cash no branch claims, capped by real free cash, and
     # the reserve is the owner's cash floor - the same one the buy path
