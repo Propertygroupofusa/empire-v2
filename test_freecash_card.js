@@ -61,6 +61,13 @@ function env(opts = {}) {
                 const live = url.includes('dry_run=false');
                 if (opts.nothingIdle) return {ok: false, adds: [], total_usd: 0,
                         detail: 'Nothing above the reserve is unclaimed.'};
+                if (live && opts.liveEmpty) return {ok: false, adds: [], dry_run: true,
+                        detail: 'Nothing to add.'};
+                if (live && opts.liveFailed) return {ok: true, dry_run: false,
+                        adds: [{product_id: 'NEAR-USD', usd: 120.5}, {product_id: 'TIA-USD', usd: 120.5}],
+                        added: [{product_id: 'NEAR-USD', usd: 120.5}],
+                        failed: [{product_id: 'TIA-USD', usd: 120.5, error: 'ValueError: no grid branch named x'}],
+                        added_usd: 120.5};
                 return {ok: true, adds: [{product_id: 'NEAR-USD', usd: 120.5}],
                         added: live ? [{product_id: 'NEAR-USD', usd: 120.5}] : [],
                         added_usd: live ? 120.5 : 0, detail: 'ok'};
@@ -218,6 +225,25 @@ function env(opts = {}) {
     const d11 = e11.posts.filter(p => p.url.includes('deploy-cash'));
     ok(d11.every(p => p.url.includes('dry_run=true')), 'only dry runs were sent');
     ok(/Nothing above the reserve/.test(e11.els['rs-status'].innerHTML), 'shows why');
+
+    console.log('--- the plan empties between the presses: no false success ---');
+    let e12 = env({preview: EMPTY, liveEmpty: true});
+    await e12.api.renderGridFreeCash();
+    await e12.api.runDeployFreed();
+    await e12.api.runDeployFreed();
+    const st12 = e12.els['rs-status'].innerHTML;
+    ok(/Nothing was put to work, and no money moved/.test(st12), 'says nothing moved: ' + st12.slice(0, 80));
+    ok(!/NaN/.test(st12) && !/\u2705 Put/.test(st12), 'no "Put $NaN" success line');
+    ok(e12.els['rs-deploy-btn'].disabled === false, 'button re-enabled to try again');
+
+    console.log('--- a branch the server could not add to is shown, not hidden ---');
+    let e13 = env({preview: EMPTY, liveFailed: true});
+    await e13.api.renderGridFreeCash();
+    await e13.api.runDeployFreed();
+    await e13.api.runDeployFreed();
+    ok(/Put <strong>\$120\.50<\/strong>/.test(e13.els['rs-status'].innerHTML), 'reports the real added total');
+    ok(/NEAR-USD: \+\$120\.50/.test(e13.els['rs-detail'].innerHTML), 'lists what was added');
+    ok(/TIA-USD: not added/.test(e13.els['rs-detail'].innerHTML), 'lists the failure');
 
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);

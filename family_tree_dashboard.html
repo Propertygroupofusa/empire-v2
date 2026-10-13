@@ -9303,13 +9303,28 @@ uiTrace('dep_apply_sending');
         const live = await postGuarded(
             API_BASE + '/idle-capital/deploy-cash?dry_run=false', {});
         const done = (live && live.added) || [];
+        const failed = (live && live.failed) || [];
         _depPreviewed = null;   // spent - the next deploy previews again
 uiTrace(done.length ? 'dep_apply_ok' : 'dep_apply_empty', done.length);
-        _rsSay(`\u2705 Put <strong>${fmtUsd(live && live.added_usd)}</strong> to
-                work across ${done.length} branch(es). No order was placed \u2014
-                each branch now buys its own dips at its own unchanged step.`);
-        document.getElementById('rs-detail').innerHTML = done.map(a =>
-            `<div>\u2705 ${escText(a.product_id)}: +${fmtUsd(a.usd)}</div>`).join('');
+        // NEVER CLAIM A MOVE THAT DID NOT HAPPEN. The plan is rebuilt on the
+        // live press, and anything that changed since the preview (cash spent,
+        // a branch filled its rungs) can leave it empty. The server then
+        // returns the plan with no "added", and this used to print
+        // "Put $NaN to work across 0 branch(es)" under a green tick.
+        if (!done.length) {
+            _rsSay('\u2139\ufe0f Nothing was put to work, and no money moved: ' +
+                   escText(String((live && live.detail) ||
+                                  'the plan came back empty on the live press.')));
+            _rsEnable('rs-deploy-btn', true);
+        } else {
+            _rsSay(`\u2705 Put <strong>${fmtUsd(live.added_usd)}</strong> to
+                    work across ${done.length} branch(es). No order was placed \u2014
+                    each branch now buys its own dips at its own unchanged step.`);
+        }
+        document.getElementById('rs-detail').innerHTML =
+            done.map(a => `<div>\u2705 ${escText(a.product_id)}: +${fmtUsd(a.usd)}</div>`).join('') +
+            failed.map(a => `<div>\u26a0\ufe0f ${escText(a.product_id)}: not added -
+                ${escText(String(a.error || 'refused'))}</div>`).join('');
     } catch (e) {
         uiTrace('dep_apply_threw');
         _rsSay('\u26A0\uFE0F ' + escText(String(e.message || e)));
