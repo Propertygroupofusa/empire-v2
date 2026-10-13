@@ -9335,7 +9335,10 @@ async def get_grid_status_endpoint(fresh: int = 0):
                 _hrs = None
         data["silence"] = trading_silence.assess(
             hours_since_last_fill=_hrs, refusals_by_product=_ref,
-            cycle_errors=_errs, branches=data.get("branches") or [])
+            cycle_errors=_errs, branches=data.get("branches") or [],
+            # Read exactly as run_grid_branch_cycle reads it, so the two
+            # can never disagree about whether the grid is switched off.
+            halted=os.getenv("STOP_TRADING", "false").lower() == "true")
     except Exception as _exc:
         data["silence"] = {"verdict": "UNKNOWN", "alarm": False,
                            "reason": f"{type(_exc).__name__}: {_exc}",

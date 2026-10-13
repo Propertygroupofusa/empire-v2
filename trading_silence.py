@@ -49,8 +49,35 @@ def _f(v, default=None):
     return out if out == out else default
 
 
+def _below_buy(branches):
+    """Branches whose price is at or under their own buy trigger and that
+    still have a free rung: the dips the grid exists to buy.
+
+    Counted only where the rung count is readable, and never for a branch
+    whose buys are paused or whose drawdown breaker is set - those are
+    refusing on purpose."""
+    out = []
+    for b in (branches or ()):
+        if not hasattr(b, "get") or b.get("buys_paused") or b.get("drawdown_breached"):
+            continue
+        px, ref = _f(b.get("current_price")), _f(b.get("reference_price"))
+        step, levels = _f(b.get("grid_pct")), _f(b.get("num_levels"))
+        if not (px and ref and step and levels):
+            continue
+        held = _f(b.get("open_slices"))
+        if held is None:
+            held = len(b.get("slices") or [])
+        trigger = ref * (1 - step)
+        if px <= trigger and held < levels:
+            out.append({"product_id": b.get("product_id"),
+                        "pct_below_buy_price": round((1 - px / trigger) * 100, 2)})
+    out.sort(key=lambda r: -r["pct_below_buy_price"])
+    return out
+
+
 def assess(*, hours_since_last_fill, refusals_by_product=None,
-           cycle_errors=None, branches=None, readable=True, reason=None):
+           cycle_errors=None, branches=None, readable=True, reason=None,
+           halted=False):
     """Verdict on a quiet fleet. Never guesses from missing inputs.
 
     hours_since_last_fill - None when it could not be read.
@@ -58,12 +85,34 @@ def assess(*, hours_since_last_fill, refusals_by_product=None,
                             refused, e.g. /grid-status/orders-not-placed.
     cycle_errors          - count of branch cycles that died mid-pass.
     branches              - grid-status branch dicts, to find any branch
-                            sitting PAST its own sell trigger.
+                            sitting PAST its own sell trigger, or under its
+                            own buy trigger with a rung free.
+    halted                - STOP_TRADING as the grid itself reads it.
+
+    HALTED, 2026-10-13. STOP_TRADING=true makes run_grid_branch_cycle
+    return before it reads a price, so nothing buys or sells - and this
+    read "QUIET ... no branch has reached a trigger" for eleven hours
+    while ten branches sat 1-11% under their buy price. Quiet and
+    switched off are different facts; the owner was told the market was
+    quiet.
     """
     if not readable:
         return {"verdict": "UNKNOWN", "alarm": False,
                 "reason": reason or "inputs unreadable",
                 "this_is_unknown_not_healthy": True}
+
+    below_buy = _below_buy(branches)
+    if halted:
+        hrs_h = _f(hours_since_last_fill)
+        return {"verdict": "HALTED", "alarm": True,
+                "hours_since_last_fill": None if hrs_h is None else round(hrs_h, 2),
+                "below_buy_price": below_buy[:10],
+                "reason": ("STOP_TRADING is true: every grid branch stops before it "
+                           "reads a price, so nothing buys and nothing sells"
+                           + (f" - {len(below_buy)} branch(es) are under their buy "
+                              f"price with a rung free" if below_buy else "")
+                           + ". Set STOP_TRADING to false to resume."),
+                "this_is_switched_off_not_quiet": True}
 
     hrs = _f(hours_since_last_fill)
     if hrs is None:
@@ -156,12 +205,22 @@ def assess(*, hours_since_last_fill, refusals_by_product=None,
                     "order was ever placed and nobody knew for eleven days.")}
 
     if quiet:
+        if below_buy:
+            # Not an alarm on its own: the buy gates refuse dips on purpose.
+            # But "nothing reached a trigger" would be false, so it is not said.
+            why = (f"no fill for {hrs:.1f}h and nothing was refused. No branch is past "
+                   f"a sell trigger with a slice it could sell at a profit, but "
+                   f"{len(below_buy)} branch(es) are under their buy price with a rung "
+                   f"free and have not bought ({', '.join(r['product_id'] for r in below_buy[:3])}"
+                   f"{', ...' if len(below_buy) > 3 else ''}) - read the buy gate's decisions.")
+        else:
+            why = (f"no fill for {hrs:.1f}h, and nothing was refused - no "
+                   f"branch has reached a trigger. A grid waiting for a move "
+                   f"is not a grid that is broken.")
         return {"verdict": "QUIET", "alarm": False,
                 "hours_since_last_fill": round(hrs, 2),
-                "past_trigger": [], "cycle_errors": errs,
-                "reason": (f"no fill for {hrs:.1f}h, and nothing was refused - no "
-                           f"branch has reached a trigger. A grid waiting for a move "
-                           f"is not a grid that is broken."),
+                "past_trigger": [], "below_buy_price": below_buy[:10],
+                "cycle_errors": errs, "reason": why,
                 "quiet_is_not_broken": True}
 
     return {"verdict": "TRADING", "alarm": False,
