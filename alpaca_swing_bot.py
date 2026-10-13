@@ -153,6 +153,52 @@ INTRADAY_PROFIT_TARGET = 0.01   # +1% profit target (intraday)
 INTRADAY_STOP_LOSS = 0.005      # -0.5% stop loss (tighter for day trades)
 DAILY_PROFIT_TARGET = 225.0     # $225/day target
 
+# ========== SELL ONLY AT A WIN ==========
+# The owner, 2026-10-12: "Make sure that this doesn't continue to happen. We
+# need to sell at a win." prop_bot got that rule the same day (RULE 0a in
+# alpaca_mean_reversion.py) and this file never got the message - the same
+# gap PSQ fell through on 2026-09-25 - so on the SAME Alpaca account one bot
+# held its losers while this one still sold at its -0.5% intraday and -2%
+# swing stops, and on an RSI exit taken below cost.
+#
+# Same switch, same floor: ALPACA_SELL_ONLY_AT_PROFIT (only an explicit
+# negative turns it off, read every cycle), and nothing sells below a round
+# trip plus the house margin. Above the floor every exit runs exactly as
+# written. Below it the position is HELD and the log names the exit that
+# wanted out.
+#
+# THE COST, STATED. A position under water keeps its slot until the price
+# comes back, so this bot trades less in a falling market. The equity floor
+# and buying-power floor still block new entries exactly as before.
+SELL_ONLY_AT_PROFIT_ENV = "ALPACA_SELL_ONLY_AT_PROFIT"
+
+
+def sell_only_at_profit() -> bool:
+    raw = os.environ.get(SELL_ONLY_AT_PROFIT_ENV)
+    if raw is None:
+        return True
+    return raw.strip().strip('"').strip("'").lower() not in ("0", "false", "no", "off")
+
+
+def min_exit_pnl_pct() -> float:
+    """The win floor, in percent: prop_bot's round trip plus its margin."""
+    try:
+        from alpaca_mean_reversion import ALPACA_ROUND_TRIP_PCT
+    except Exception:
+        ALPACA_ROUND_TRIP_PCT = 0.0012
+    return (ALPACA_ROUND_TRIP_PCT + 0.002) * 100
+
+
+def gate_exit_at_win(should_exit, reason, pnl_pct):
+    """(should_exit, reason) after the win floor. Pure apart from the env read."""
+    if not should_exit or not sell_only_at_profit():
+        return should_exit, reason
+    floor = min_exit_pnl_pct()
+    if pnl_pct >= floor:
+        return should_exit, reason
+    return False, (f"Hold at {pnl_pct:+.2f}%: '{reason}' wanted out below the "
+                   f"+{floor:.2f}% win floor ({SELL_ONLY_AT_PROFIT_ENV})")
+
 # ========== POSITION MANAGEMENT ==========
 # Identity in the closed_trades ledger. Distinct from prop_bot's
 # "prop_apex" because the governor judges THIS strategy on its own record;
@@ -878,6 +924,11 @@ async def run_intraday_check():
                 should_exit = True
                 reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation)"
 
+            wanted = should_exit
+            should_exit, reason = gate_exit_at_win(should_exit, reason, pnl_pct)
+            if wanted and not should_exit:
+                log.info(f"  ✋ INTRADAY HOLD {key} ({proxy}): {reason}")
+
             if should_exit:
                 log.info(f"\n  🛑 INTRADAY EXIT {key} ({proxy}): {reason} | P&L {pnl_pct:+.2f}%")
                 order = await place_order(session, proxy, qty, "sell")
@@ -1123,6 +1174,11 @@ async def run_swing_check():
                 should_exit = True
                 reason = f"HARD STOP-LOSS -{abs(pnl_pct):.2f}% hit (capital preservation for micro account)"
 
+            wanted = should_exit
+            should_exit, reason = gate_exit_at_win(should_exit, reason, pnl_pct)
+            if wanted and not should_exit:
+                log.info(f"  ✋ SWING HOLD {key} ({proxy}): {reason}")
+
             if should_exit:
                 log.info(f"\n  🛑 EXIT {key} ({proxy}): {reason} | P&L {pnl_pct:+.2f}%")
 
@@ -1208,7 +1264,9 @@ def run():
              f"(${RISK_PER_TRADE:.0f}) - not the live balance; live equity is in the pre-flight check")
     log.info(f"API Key: {'✓ Configured' if os.getenv('ALPACA_API_KEY') else '✗ NOT SET'}")
     log.info(f"Base URL: {get_base_url()}")
-    log.info(f"Stops: HARD STOP-LOSS ENABLED ({STOP_LOSS_PCT*100:.1f}%)")
+    log.info(f"Stops: HARD STOP-LOSS ENABLED ({STOP_LOSS_PCT*100:.1f}%)"
+             + (f" - but nothing sells below the +{min_exit_pnl_pct():.2f}% win floor "
+                f"({SELL_ONLY_AT_PROFIT_ENV} armed)" if sell_only_at_profit() else ""))
     log.info(f"")
     log.info(f"SWING: RSI < {WEEKLY_RSI_BUY} entry, max {MAX_CONCURRENT_SWING} positions, {STOP_LOSS_PCT*100:.1f}% hard stop")
     log.info(f"DAY: RSI < {INTRADAY_RSI_BUY} intraday entry, max {INTRADAY_SLOT_CEILING} positions (governor may lower), {INTRADAY_STOP_LOSS*100:.1f}% hard stop")
