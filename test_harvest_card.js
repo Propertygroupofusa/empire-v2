@@ -110,6 +110,43 @@ function run(payload, {fetchThrows = false, httpStatus = 200} = {}) {
     ok(!/A-USD/.test(el.innerHTML),
        'a branch with no baseline must not be listed as harvestable');
 
+    console.log('--- harvest switched OFF: the card must not say it takes anything ---');
+    // Live 2026-10-13: harvest_active false since the owner's 10-11 switch,
+    // and the card still said "every hour this takes..." and "it is running".
+    const OFF = {
+        branches: [
+            {bot_name: 'crypto_grid_4', product_id: 'ONDO-USD', allocated_usd: 28.75,
+             realised_total: -0.39, baseline: -1.24, earned_since_baseline: 0.85,
+             harvest_usd: 0.85, why_not: null},
+            {bot_name: 'crypto_grid_23', product_id: 'APE-USD', allocated_usd: 8.27,
+             realised_total: -6.82, baseline: 11.16, earned_since_baseline: -17.98,
+             harvest_usd: 0.0,
+             why_not: '$-17.98 earned since baseline, under the $0.50 minimum'},
+        ],
+        total_harvest_usd: 0.85, ready: true, unwatched_branches: 0,
+        loop_has_run: true, harvest_active: false
+    };
+    el = await run(OFF);
+    ok(/OFF - takes nothing/.test(el.innerHTML), 'header says OFF');
+    ok(/OFF - nothing comes off the table/.test(el.innerHTML), 'headline says nothing comes off');
+    ok(!/ready to come off the table/.test(el.innerHTML),
+       'must NOT announce money ready to leave when off');
+    ok(!/Every hour this takes/.test(el.innerHTML), 'must NOT claim it takes hourly');
+    ok(!/so it is running/.test(el.innerHTML), 'must NOT claim it is running');
+    ok(!/TOTAL ALLOCATED \(GRID\) goes DOWN/.test(el.innerHTML),
+       'no "goes DOWN" warning for a harvest that cannot fire');
+    ok(/GRID_PROFIT_HARVEST=on/.test(el.innerHTML), 'names how to turn it back on');
+    ok(/would take \$0\.85/.test(el.innerHTML), 'per-branch figure is conditional');
+    ok(!/→ take/.test(el.innerHTML), 'no unconditional take arrow when off');
+    ok(/-\$17\.98 realised loss since baseline/.test(el.innerHTML),
+       'a loss reads as a loss, not "$-17.98 earned"');
+    ok(!/\$-17\.98 earned/.test(el.innerHTML), 'the old loss-as-earned wording is gone');
+
+    el = await run({...OFF, harvest_active: true});
+    ok(/\$0\.85 ready to come off the table/.test(el.innerHTML), 'ON keeps the live wording');
+    ok(/take \$0\.85/.test(el.innerHTML) && !/would take/.test(el.innerHTML),
+       'ON keeps the unconditional take');
+
     console.log('--- a dead endpoint says so instead of looking empty ---');
     el = await run(LIVE, {fetchThrows: true});
     ok(el.style.display === 'block', 'still visible on error');
