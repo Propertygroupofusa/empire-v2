@@ -18,6 +18,7 @@ function grab(sig) {
 const src = [
     grab('function fmtUsd('), grab('function escText('),
     'let _rsPreviewed = null; let _rsRan = false; let _depPreviewed = null; let _rsNothingToFree = false;',
+    grab('async function _autoDeployLine('),
     grab('async function renderGridFreeCash('),
     grab('function _rsSay('), grab('function _rsEnable('),
     grab('async function previewFreeCash('),
@@ -53,7 +54,8 @@ function env(opts = {}) {
     const ctx = {
         API_BASE: 'https://x/api',
         document: {getElementById: (id) => els[id] || null},
-        fetch: async () => ({ok: true, status: 200, json: async () => (opts.preview || PREVIEW)}),
+        fetch: async (url) => ({ok: true, status: 200, json: async () =>
+            (String(url).includes('auto-deploy') ? (opts.auto || {}) : (opts.preview || PREVIEW))}),
         postGuarded: async (url, body) => {
             posts.push({url, body});
             if (opts.postThrows) throw new Error('the tab is locked');
@@ -244,6 +246,26 @@ function env(opts = {}) {
     ok(/Put <strong>\$120\.50<\/strong>/.test(e13.els['rs-status'].innerHTML), 'reports the real added total');
     ok(/NEAR-USD: \+\$120\.50/.test(e13.els['rs-detail'].innerHTML), 'lists what was added');
     ok(/TIA-USD: not added/.test(e13.els['rs-detail'].innerHTML), 'lists the failure');
+
+    console.log('--- auto-deploy state is shown on the card ---');
+    let e14 = env({preview: EMPTY, auto: {env_name: 'GRID_AUTO_DEPLOY', enabled: false,
+                                          min_deploy_usd: 1000}});
+    await e14.api.renderGridFreeCash();
+    ok(/Auto-deploy is off/.test(e14.els['grid-freecash-wrap'].innerHTML), 'OFF is shown');
+    ok(/set GRID_AUTO_DEPLOY to on in Railway/.test(e14.els['grid-freecash-wrap'].innerHTML),
+       'says how to turn it on');
+    let e15 = env({auto: {env_name: 'GRID_AUTO_DEPLOY', enabled: true, min_deploy_usd: 1000,
+        last: {reason: 'DEPLOYED', detail: 'put $1,062.52 to work across 9 branch(es).',
+               checked_at: '2026-10-13T19:05:00Z'}}});
+    await e15.api.renderGridFreeCash();
+    const h15 = e15.els['grid-freecash-wrap'].innerHTML;
+    ok(/Auto-deploy is ON/.test(h15), 'ON is shown (stranded layout too)');
+    ok(/\$1,000\.00 sits idle above your floor/.test(h15), 'states the $1,000 rule');
+    ok(/put \$1,062\.52 to work across 9/.test(h15), 'shows the last check');
+    let e16 = env({preview: EMPTY});
+    await e16.api.renderGridFreeCash();
+    ok(!/Auto-deploy/.test(e16.els['grid-freecash-wrap'].innerHTML),
+       'an unreadable status adds nothing and breaks nothing');
 
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);

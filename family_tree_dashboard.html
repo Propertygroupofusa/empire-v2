@@ -9025,6 +9025,39 @@ let _depPreviewed = null;  // total the deploy preview last reported
 // there is anything: an empty plan says so and moves nothing.
 let _rsNothingToFree = false;
 
+// AUTO-DEPLOY, SHOWN WHERE THE BUTTON IS. The hourly job (auto_deploy.py)
+// is the Deploy button pressed on a timer, so its state belongs on this
+// card: on or off, and what its last check did, in the owner's own time.
+// A read of the process's memory - no venue call, no token. Empty on any
+// failure: this line is information, never the thing that breaks the card.
+async function _autoDeployLine() {
+    try {
+        const r = await fetch(API_BASE + '/idle-capital/auto-deploy', {cache: 'no-store'});
+        if (!r || !r.ok) return '';
+        const a = await r.json();
+        if (!a || !a.env_name) return '';
+        const last = a.last || null;
+        let when = '';
+        if (last && last.checked_at) {
+            const t = new Date(last.checked_at);
+            if (!isNaN(t)) when = ' (' + t.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'}) + ')';
+        }
+        const lastTxt = last ? escText(String(last.detail || last.reason || '')) + when
+                             : 'no check yet since the last restart - the first is about five minutes after it.';
+        return a.enabled
+            ? `<div style="margin-top:8px; padding:8px 10px; border-radius:6px;
+                           background:rgba(46,139,87,0.10); font-size:0.82em; line-height:1.45;">
+                 \u{1F916} <strong>Auto-deploy is ON.</strong> Every hour, once at least
+                 ${fmtUsd(a.min_deploy_usd)} sits idle above your floor, it is put to
+                 work the same way as this button. Last check: ${lastTxt}</div>`
+            : `<div style="margin-top:8px; font-size:0.8em; color:var(--text-dim); line-height:1.45;">
+                 \u{1F916} Auto-deploy is off. To have this happen by itself every
+                 hour, set ${escText(a.env_name)} to on in Railway.</div>`;
+    } catch (e) {
+        return '';
+    }
+}
+
 async function renderGridFreeCash() {
     const wrap = document.getElementById('grid-freecash-wrap');
     if (!wrap) return;
@@ -9058,6 +9091,7 @@ async function renderGridFreeCash() {
     const rows = (d.branches || []).filter(r => Number(r.freeable_usd) > 0);
     const total = Number(d.total_freeable_usd || 0);
     _rsNothingToFree = !rows.length || total <= 0;
+    const autoLine = await _autoDeployLine();
     if (_rsNothingToFree) {
         wrap.style.display = 'block';
         wrap.innerHTML = `
@@ -9086,6 +9120,7 @@ async function renderGridFreeCash() {
             <div id="rs-status" style="margin-top:8px; font-size:0.82em;
                  color:var(--text-dim);"></div>
             <div id="rs-detail" style="margin-top:6px; font-size:0.8em;"></div>
+            ${autoLine}
           </div>`;
         return;
     }
@@ -9145,6 +9180,7 @@ async function renderGridFreeCash() {
         <div id="rs-status" style="margin-top:8px; font-size:0.82em;
              color:var(--text-dim);"></div>
         <div id="rs-detail" style="margin-top:6px; font-size:0.8em;"></div>
+        ${autoLine}
       </div>`;
 }
 

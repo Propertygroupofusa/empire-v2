@@ -1331,6 +1331,25 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # Auto-deploy: the Deploy cash button, pressed once an hour by the
+        # owner's instruction (2026-10-13, "why do I have to push it every
+        # time?"). OFF unless GRID_AUTO_DEPLOY is on. Same plan as the button
+        # - reserve kept, 20% share rule, only branches that can buy - and at
+        # least $1,000 idle above the floor before it acts. Places no order
+        # and sells no coin. See auto_deploy.py.
+        try:
+            import auto_deploy
+            import crypto_grid_bot as _adg
+            asyncio.create_task(auto_deploy.run_periodically(_adg))
+            log.info(f"🤖 Auto-deploy running, enabled={auto_deploy.enabled()}, "
+                     f"min ${auto_deploy.MIN_DEPLOY_USD:,.0f}, "
+                     f"max ${auto_deploy.MAX_PER_PASS_USD:,.0f}/check, hourly")
+        except Exception as e:
+            try:
+                log.warning(f"auto-deploy not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # One-shot boot task: two bookkeeping writes that have never
         # reached the database through the dashboard. SHIPPED INERT - it
         # does nothing at all unless STARTUP_FIX_TICKET is set in the

@@ -16320,6 +16320,19 @@ async def idle_capital_set_armed(payload: SetIdleRotationArmedRequest):
     return result
 
 
+@router.get("/idle-capital/auto-deploy")
+async def idle_capital_auto_deploy_status():
+    """Whether the hourly auto-deploy is on, and what its last check did.
+
+    STRICTLY READ-ONLY - reads this process's own memory, calls no venue and
+    writes nothing. A money-moving loop that cannot be watched read-only is
+    indistinguishable from one that is not running. See auto_deploy.py.
+    """
+    import auto_deploy
+    return JSONResponse(content=auto_deploy.status(), headers={
+        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0"})
+
+
 @router.post("/idle-capital/deploy-cash")
 async def idle_capital_deploy_cash(dry_run: bool = True):
     """Put cash that no branch claims into branches that can spend it.
