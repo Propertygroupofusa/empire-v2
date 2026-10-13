@@ -8942,6 +8942,9 @@ _UI_TRACE_OK = {
     "rs_apply_ok", "rs_apply_threw",
     "dep_apply_enter", "dep_apply_no_free", "dep_apply_sending",
     "dep_apply_empty", "dep_apply_ok", "dep_apply_threw",
+    # Deploy's preview half (two presses since 2026-10-08). The page already
+    # sends these; without them here the server dropped every one.
+    "dep_preview_sending", "dep_preview_ok", "dep_preview_empty",
     "rot_apply_enter", "rot_apply_no_ticket", "rot_apply_cancelled",
     "rot_apply_sending", "rot_apply_ok", "rot_apply_nothing", "rot_apply_threw",
     "ast_apply_enter", "ast_apply_cancelled", "ast_apply_sending",

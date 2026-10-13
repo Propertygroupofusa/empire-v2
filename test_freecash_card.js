@@ -17,7 +17,7 @@ function grab(sig) {
 
 const src = [
     grab('function fmtUsd('), grab('function escText('),
-    'let _rsPreviewed = null; let _rsRan = false;',
+    'let _rsPreviewed = null; let _rsRan = false; let _depPreviewed = null; let _rsNothingToFree = false;',
     grab('async function renderGridFreeCash('),
     grab('function _rsSay('), grab('function _rsEnable('),
     grab('async function previewFreeCash('),
@@ -53,12 +53,14 @@ function env(opts = {}) {
     const ctx = {
         API_BASE: 'https://x/api',
         document: {getElementById: (id) => els[id] || null},
-        fetch: async () => ({ok: true, status: 200, json: async () => PREVIEW}),
+        fetch: async () => ({ok: true, status: 200, json: async () => (opts.preview || PREVIEW)}),
         postGuarded: async (url, body) => {
             posts.push({url, body});
             if (opts.postThrows) throw new Error('the tab is locked');
             if (url.includes('deploy-cash')) {
                 const live = url.includes('dry_run=false');
+                if (opts.nothingIdle) return {ok: false, adds: [], total_usd: 0,
+                        detail: 'Nothing above the reserve is unclaimed.'};
                 return {ok: true, adds: [{product_id: 'NEAR-USD', usd: 120.5}],
                         added: live ? [{product_id: 'NEAR-USD', usd: 120.5}] : [],
                         added_usd: live ? 120.5 : 0, detail: 'ok'};
@@ -153,7 +155,8 @@ function env(opts = {}) {
     await e7.api.renderGridFreeCash();
     await e7.api.previewFreeCash();
     await e7.api.runFreeCash();
-    await e7.api.runDeployFreed();
+    await e7.api.runDeployFreed();   // first press: preview only
+    await e7.api.runDeployFreed();   // second press: live
     const dep = e7.posts.filter(p => p.url.includes('deploy-cash'));
     ok(dep.length === 2, 'deploy previewed then ran, got ' + dep.length);
     ok(dep[0].url.includes('dry_run=true'), 'first deploy call is a dry run');
@@ -175,6 +178,46 @@ function env(opts = {}) {
     await e9.api.previewFreeCash();
     ok(/locked/.test(e9.els['rs-status'].innerHTML), 'surfaces the lock message');
     ok(!/Freed/.test(e9.els['rs-status'].innerHTML), 'must NOT claim it freed anything');
+
+    console.log('--- nothing stranded: the deploy button is still on the page ---');
+    const EMPTY = {read_only: true, total_freeable_usd: 0.0,
+        branches: [{...PREVIEW.branches[2]}]};
+    let e10 = env({preview: EMPTY});
+    await e10.api.renderGridFreeCash();
+    const h10 = e10.els['grid-freecash-wrap'].innerHTML;
+    ok(/Nothing is stranded right now/.test(h10), 'still says nothing is stranded');
+    ok(/id="rs-deploy-btn"/.test(h10), 'the deploy button is rendered');
+    ok(!/id="rs-deploy-btn"[^>]*disabled/.test(h10), 'and it is NOT disabled');
+    ok(/Put idle cash to work/.test(h10), 'labelled for idle cash');
+    ok(/reserve is never\s+touched/.test(h10), 'says the reserve is untouched');
+    ok(/id="rs-status"/.test(h10) && /id="rs-detail"/.test(h10), 'has its status lines');
+
+    console.log('--- nothing stranded: first press previews, second press runs ---');
+    await e10.api.runDeployFreed();
+    let d10 = e10.posts.filter(p => p.url.includes('deploy-cash'));
+    ok(d10.length === 1 && d10[0].url.includes('dry_run=true'), 'first press is a dry run only');
+    ok(/nothing moved/.test(e10.els['rs-status'].innerHTML), 'says nothing moved');
+    ok(!/Free the money first/.test(e10.els['rs-status'].innerHTML), 'no longer refuses');
+    e10.els['grid-freecash-wrap'].innerHTML = 'MARK';
+    await e10.api.renderGridFreeCash();
+    ok(e10.els['grid-freecash-wrap'].innerHTML === 'MARK',
+       'a pending preview is NOT wiped by the next poll');
+    await e10.api.runDeployFreed();
+    d10 = e10.posts.filter(p => p.url.includes('deploy-cash'));
+    ok(d10.length === 2 && d10[1].url.includes('dry_run=false'), 'second press is live');
+    ok(/Put <strong>\$120\.50<\/strong> to\s+work/.test(e10.els['rs-status'].innerHTML),
+       'reports what was deployed');
+    await e10.api.renderGridFreeCash();
+    ok(e10.els['grid-freecash-wrap'].innerHTML !== 'MARK', 'after the run the card refreshes again');
+
+    console.log('--- nothing idle: the preview says so and nothing goes live ---');
+    let e11 = env({preview: EMPTY, nothingIdle: true});
+    await e11.api.renderGridFreeCash();
+    await e11.api.runDeployFreed();
+    await e11.api.runDeployFreed();
+    const d11 = e11.posts.filter(p => p.url.includes('deploy-cash'));
+    ok(d11.every(p => p.url.includes('dry_run=true')), 'only dry runs were sent');
+    ok(/Nothing above the reserve/.test(e11.els['rs-status'].innerHTML), 'shows why');
 
     console.log(`\n${pass} passed, ${fail} failed`);
     process.exit(fail ? 1 : 0);

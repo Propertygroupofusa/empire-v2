@@ -9017,10 +9017,21 @@ let _rsRan = false;        // a live right-size completed this session
 // and therefore the plan: a preview taken before it must not authorise a
 // run after it.
 let _depPreviewed = null;  // total the deploy preview last reported
+// Nothing is stranded, so there is nothing to free first. Deploy still has a
+// job then: cash ABOVE the reserve that no branch claims (a deposit, money
+// left over after a sale). Until 2026-10-13 the button lived only in the
+// stranded layout and waited on a free, so on 2026-10-13 $1,062.52 sat idle
+// with no button on the page to put it to work. The preview decides whether
+// there is anything: an empty plan says so and moves nothing.
+let _rsNothingToFree = false;
 
 async function renderGridFreeCash() {
     const wrap = document.getElementById('grid-freecash-wrap');
     if (!wrap) return;
+    // A deploy preview is waiting for its second press. This card is redrawn
+    // on every grid-status poll, and redrawing it now would wipe the figures
+    // the owner is about to confirm - same rule as the levels panel.
+    if (_depPreviewed !== null && document.getElementById('rs-deploy-btn')) return;
     let d;
     try {
         const r = await fetch(API_BASE + '/grid-status/rightsize-preview',
@@ -9046,7 +9057,8 @@ async function renderGridFreeCash() {
 
     const rows = (d.branches || []).filter(r => Number(r.freeable_usd) > 0);
     const total = Number(d.total_freeable_usd || 0);
-    if (!rows.length || total <= 0) {
+    _rsNothingToFree = !rows.length || total <= 0;
+    if (_rsNothingToFree) {
         wrap.style.display = 'block';
         wrap.innerHTML = `
           <div style="margin-top:10px; padding:12px 14px; border-radius:8px;
@@ -9059,6 +9071,21 @@ async function renderGridFreeCash() {
               Nothing is stranded right now. Every branch either holds a free
               rung it can spend, or is already down to the coin it owns.
             </div>
+            <div style="margin-top:8px; font-size:0.82em; line-height:1.45;">
+              Cash above your reserve that no branch claims can still be put
+              to work. The first press only previews and moves nothing; press
+              again to do it. No order is placed and no coin is sold - the
+              branches buy their own dips with it, and the reserve is never
+              touched.
+            </div>
+            <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="unlock-btn" id="rs-deploy-btn"
+                      onclick="runDeployFreed()">
+                \u{1F4B0} Put idle cash to work</button>
+            </div>
+            <div id="rs-status" style="margin-top:8px; font-size:0.82em;
+                 color:var(--text-dim);"></div>
+            <div id="rs-detail" style="margin-top:6px; font-size:0.8em;"></div>
           </div>`;
         return;
     }
@@ -9228,7 +9255,7 @@ uiTrace('rs_apply_ok', Math.round(freed));
 
 async function runDeployFreed() {
 uiTrace('dep_apply_enter');
-    if (!_rsRan) {
+    if (!_rsRan && !_rsNothingToFree) {
 uiTrace('dep_apply_no_free');
         _rsSay('\u26A0\uFE0F Free the money first \u2014 deploy only spends cash no branch claims.');
         return;
@@ -9277,7 +9304,7 @@ uiTrace('dep_apply_sending');
             API_BASE + '/idle-capital/deploy-cash?dry_run=false', {});
         const done = (live && live.added) || [];
         _depPreviewed = null;   // spent - the next deploy previews again
-uiTrace('dep_apply_ok', done.length);
+uiTrace(done.length ? 'dep_apply_ok' : 'dep_apply_empty', done.length);
         _rsSay(`\u2705 Put <strong>${fmtUsd(live && live.added_usd)}</strong> to
                 work across ${done.length} branch(es). No order was placed \u2014
                 each branch now buys its own dips at its own unchanged step.`);
