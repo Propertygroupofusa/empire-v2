@@ -211,3 +211,57 @@ def test_six_underwater_parked_branches_do_not_pin_the_alarm_on():
                   branches=under)
     assert r["past_trigger"] == []
     assert r["verdict"] != "BROKEN", r
+
+
+# --- switched off is not quiet (2026-10-13) --------------------------------
+
+def L(pid, price, ref, step=0.03, held=1, levels=3, **kw):
+    return {"product_id": pid, "current_price": price, "reference_price": ref,
+            "grid_pct": step, "open_slices": held, "num_levels": levels,
+            "slices": [{"qty": 1, "entry_price": ref}] * held, **kw}
+
+
+# Live 2026-10-13 ~20:42Z: ALGO 0.1207 against a 0.13126 reference at a 3%
+# step, 2 of 3 rungs held - 5.2% under its buy price, eleven hours unfilled.
+ALGO = L("ALGO-USD", 0.1207, 0.13126, held=2, levels=3)
+
+
+def test_stop_trading_reads_halted_not_quiet():
+    r = ts.assess(hours_since_last_fill=11.4, refusals_by_product={},
+                  branches=[ALGO], halted=True)
+    assert r["verdict"] == "HALTED" and r["alarm"] is True, r
+    assert "STOP_TRADING" in r["reason"] and "nothing buys" in r["reason"]
+    assert r["below_buy_price"][0]["product_id"] == "ALGO-USD"
+    assert "no branch has reached a trigger" not in r["reason"]
+
+
+def test_halted_wins_even_right_after_a_fill():
+    r = ts.assess(hours_since_last_fill=0.2, halted=True)
+    assert r["verdict"] == "HALTED" and r["alarm"] is True
+
+
+def test_quiet_never_claims_no_trigger_while_a_dip_sits_unbought():
+    r = ts.assess(hours_since_last_fill=11.4, refusals_by_product={}, branches=[ALGO])
+    assert r["verdict"] == "QUIET" and r["alarm"] is False, r
+    assert "no branch has reached a trigger" not in r["reason"]
+    assert "ALGO-USD" in r["reason"] and r["below_buy_price"][0]["pct_below_buy_price"] > 5
+
+
+def test_a_full_paused_or_breached_branch_is_not_an_unbought_dip():
+    full = L("SHIB-USD", 0.9, 1.0, held=3, levels=3)
+    paused = L("ETH-USD", 0.9, 1.0, buys_paused=True)
+    breached = L("LTC-USD", 0.9, 1.0, drawdown_breached=True)
+    r = ts.assess(hours_since_last_fill=11.4, branches=[full, paused, breached])
+    assert r["below_buy_price"] == [] and "no branch has reached a trigger" in r["reason"]
+
+
+def test_the_grid_status_route_reads_stop_trading_the_way_the_grid_does():
+    import os, re
+    here = os.path.dirname(os.path.abspath(__file__))
+    grid = open(os.path.join(here, "crypto_grid_bot.py"), encoding="utf-8").read()
+    route = open(os.path.join(here, "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    expr = 'os.getenv("STOP_TRADING", "false").lower() == "true"'
+    cycle = grid[grid.index("async def run_grid_branch_cycle("):]
+    assert expr in cycle[:3000]                       # the grid's own halt
+    call = route[route.index("trading_silence.assess("):]
+    assert re.search(r"halted=" + re.escape(expr), call[:600])
