@@ -218,7 +218,8 @@ async def plan_now(*, cheap: bool = True):
         history.get("recent_trades") or [],
         total_trade_count=history.get("total_trade_count"),
     )
-    return report, idle_capital.rotation_plan(report)
+    return report, idle_capital.rotation_plan(
+        report, keep_alive_usd=getattr(grid, "GRID_KEEP_BRANCH_ALIVE_USD", None))
 
 
 async def rotate_once(*, dry_run: bool = True, require_arm: bool = True,

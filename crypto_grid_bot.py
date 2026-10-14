@@ -4027,6 +4027,24 @@ async def move_cash_between_grid_branches(from_bot_name: str, amount: float, to_
             raise ValueError(f"{from_bot_name} has real open slices - can only move cash from a FLAT branch")
         if amount > source.allocated_usd + 0.01:
             raise ValueError(f"{from_bot_name} only has ${source.allocated_usd:.2f} real allocated - can't move ${amount:.2f}")
+        # THE DEBIT MUST BE ABLE TO HAPPEN BEFORE ANYTHING IS CREDITED.
+        #
+        # withdraw_from_grid_branch() below refuses to take a branch under
+        # GRID_KEEP_BRANCH_ALIVE_USD. That refusal used to arrive AFTER the
+        # destination had been funded, so the destination kept the money
+        # and the source kept it too. Live 2026-10-13 22:12Z -> 10-14: the
+        # idle rotation asked to move APE-USD's whole $96.81 every 15
+        # minutes; every pass credited TIA or ONDO and every debit was
+        # refused, and $2,226.63 of allocation was created from nothing in
+        # five hours. The same check, made here first, refuses the move
+        # before either side changes.
+        _left = round(source.allocated_usd - amount, 2)
+        if _left < GRID_KEEP_BRANCH_ALIVE_USD:
+            raise ValueError(
+                f"moving ${amount:,.2f} would leave {from_bot_name} with ${_left:,.2f}, "
+                f"under the ${GRID_KEEP_BRANCH_ALIVE_USD:,.2f} keep-alive floor - nothing "
+                f"moved. Move ${max(0.0, source.allocated_usd - GRID_KEEP_BRANCH_ALIVE_USD):,.2f} "
+                f"or less.")
         source_product_id = source.product_id
 
     if to_bot_name:

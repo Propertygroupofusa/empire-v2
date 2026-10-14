@@ -270,7 +270,9 @@ def test_it_moves_the_stale_branch_into_the_one_trading_most_recently():
     assert p["ok"] and len(p["moves"]) == 1
     m = p["moves"][0]
     assert m["from_product_id"] == "BONK" and m["to_product_id"] == "XLM"
-    assert m["usd"] == 69.23
+    # $69.23 less the $15 keep-alive. Asking for all of it is a move the
+    # debit refuses - see test_a_move_never_asks_for_the_keep_alive_floor.
+    assert m["usd"] == 54.23
 
 
 def test_it_never_sends_idle_money_to_another_idle_branch():
@@ -392,7 +394,7 @@ def test_the_live_case_plans_the_move_the_fleet_actually_needs():
     p = ic.rotation_plan(_rep(bs, ts))
     assert len(p["moves"]) == 1
     assert p["moves"][0]["from_product_id"] == "BONK"
-    assert p["total_usd"] == 69.23
+    assert p["total_usd"] == 54.23     # $69.23 less the $15 keep-alive
 
 
 def test_a_fleet_too_small_for_the_share_rule_refuses_rather_than_concentrating():
@@ -491,3 +493,36 @@ def test_a_recycled_slot_does_not_inherit_the_previous_coins_record():
     # contract, which test_a_trade_row_carries_the_coin_not_just_the_slot
     # is the test for. Recorded rather than dressed up as coverage this
     # file does not have.
+
+
+
+# --- the move that was refused every 15 minutes (2026-10-13/14) ------------
+
+def test_a_move_never_asks_for_the_keep_alive_floor():
+    """Live: APE-USD $96.81, flat and stale. The plan asked for all $96.81;
+    the debit refused (it would leave $0, under the $15 floor) after TIA or
+    ONDO had already been credited - 23 times, $2,226.63 created."""
+    bs, bt = _fleet(branch("APE", 96.81, bot="g8"),
+                    branch("TIA", 100.47, bot="g7"))
+    ts = bt + [trade("g8", ago(days=4)), trade("g7", ago(hours=1))]
+    p = ic.rotation_plan(_rep(bs, ts))
+    assert p["ok"] and p["moves"][0]["usd"] == 81.81, p
+    # and once APE is down to its floor there is nothing left to move
+    bs2, bt2 = _fleet(branch("APE", 15.0, bot="g8"), branch("TIA", 182.28, bot="g7"))
+    p2 = ic.rotation_plan(_rep(bs2, bt2 + [trade("g8", ago(days=4)), trade("g7", ago(hours=1))]))
+    assert not p2["moves"], p2
+
+
+def test_move_cash_checks_the_debit_before_it_credits_anyone():
+    """Structural: the call needs a live database. The keep-alive check must
+    sit before the destination is funded, or a refused debit leaves the
+    money counted twice."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    src = open(os.path.join(here, "crypto_grid_bot.py"), encoding="utf-8").read()
+    fn = src[src.index("async def move_cash_between_grid_branches("):]
+    fn = fn[:fn.index("\nasync def ", 10)]
+    i_check = fn.index("GRID_KEEP_BRANCH_ALIVE_USD")
+    i_credit = min(fn.index("await add_cash_to_grid_branch("), fn.index("await create_grid_branch("))
+    i_debit = fn.index("await withdraw_from_grid_branch(")
+    assert i_check < i_credit < i_debit

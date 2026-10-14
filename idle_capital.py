@@ -246,9 +246,18 @@ MIN_MOVE_USD = float(_os.getenv("GRID_IDLE_MIN_MOVE_USD", "25"))
 MAX_DEST_SHARE_PCT = float(_os.getenv("GRID_IDLE_MAX_DEST_SHARE_PCT", "20"))
 
 
-def rotation_plan(report_out, *, min_move_usd=None, max_dest_share_pct=None):
+# What a source branch keeps. Mirrors crypto_grid_bot's
+# GRID_KEEP_BRANCH_ALIVE_USD (MIN_TRADE_USD * 3): the debit refuses to take a
+# branch under it, so a plan that asks for more than allocated minus this can
+# never be carried out. Passed in by the worker; this default is the same $15.
+KEEP_ALIVE_USD = 15.0
+
+
+def rotation_plan(report_out, *, min_move_usd=None, max_dest_share_pct=None,
+                  keep_alive_usd=None):
     """What to move, out of where, into what. Moves nothing itself."""
     min_move = MIN_MOVE_USD if min_move_usd is None else min_move_usd
+    keep = KEEP_ALIVE_USD if keep_alive_usd is None else float(keep_alive_usd)
     max_share = MAX_DEST_SHARE_PCT if max_dest_share_pct is None else max_dest_share_pct
 
     rows = report_out.get("branches") or []
@@ -281,7 +290,10 @@ def rotation_plan(report_out, *, min_move_usd=None, max_dest_share_pct=None):
     projected = {r.get("bot_name"): float(r.get("allocated_usd") or 0.0) for r in rows}
 
     for s in stale:
-        amount = round(float(s.get("allocated_usd") or 0.0), 2)
+        # What can actually leave: the branch keeps its keep-alive floor.
+        # Asking for all of it was a move the debit always refused - see
+        # crypto_grid_bot.move_cash_between_grid_branches, 2026-10-14.
+        amount = round(max(0.0, float(s.get("allocated_usd") or 0.0) - keep), 2)
         if amount < min_move:
             refusals.append({"bot_name": s.get("bot_name"), "product_id": s.get("product_id"),
                              "usd": amount, "reason": "BELOW_MIN_MOVE"})
