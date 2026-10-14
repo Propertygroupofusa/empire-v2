@@ -155,8 +155,39 @@ print("\nthe token bar is on the page and renders at load")
 
 ok("the bar has a home", 'id="token-bar"' in HTML)
 ok("and is rendered on load", re.search(r"^renderTokenBar\(\);", HTML, re.M) is not None)
+# 2026-10-14: the check above was satisfied by a call at column 0 that sat
+# INSIDE executeSale(), so the box was never drawn on load and the owner had
+# nowhere to put the code. The load-time call must follow the definition
+# directly, at top level, and no other call may be flush left inside a function.
+_def = HTML.index("function renderTokenBar()")
+_after = HTML[_def:_def + 4200]
+_end_of_fn = _after.index("\n}\n")
+ok("the load-time call sits right after the function, at top level",
+   re.search(r"^renderTokenBar\(\);", _after[_end_of_fn:_end_of_fn + 1200], re.M) is not None)
+ok("it is the ONLY flush-left call (a second one hid inside executeSale)",
+   len(re.findall(r"^renderTokenBar\(\);", HTML, re.M)) == 1)
 ok("everything it prints is escaped",
    "escText(e.message)" in HTML and "escText(p.note" in HTML)
+
+# The owner, 2026-10-14: "There is nowhere for me to put in a code at the top
+# of this page to unlock it ... It needs to be on this page so I can scroll
+# down and do what I need to do." The box lived in the middle of a very long
+# page and he could not find it. It is now the first thing under the header.
+print("\nthe unlock box is at the TOP of the page, and there is exactly one")
+
+ok("exactly one unlock box (a second id would leave one of them dead)",
+   HTML.count('id="token-bar"') == 1)
+_bar = HTML.index('id="token-bar"')
+ok("it sits below the page header", _bar > HTML.index('<div class="header">'))
+ok("it sits above the status strip, so it is the first thing under the header",
+   _bar < HTML.index('id="status-strip"'))
+ok("it sits above the very first money panel and every section title",
+   _bar < HTML.index('class="section-title"'))
+_body = HTML.index("<body>")
+ok("it is within the first few KB of the page body (it was ~70 KB down), not buried",
+   _bar - _body < 6000)
+ok("the old mid-page copy is gone",
+   HTML.count('<div id="token-bar"></div>') == 1)
 
 print(f"\n{_passed}/{_passed + _failed} checks passed")
 raise SystemExit(1 if _failed else 0)

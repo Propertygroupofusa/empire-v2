@@ -1082,6 +1082,19 @@
         </div>
     </div>
 
+    <!-- THE UNLOCK BAR, AT THE TOP.
+         Moved here 2026-10-14. It used to sit in the middle of the page, under
+         the money panels and above "The tape", and the owner could not find
+         it: "There is nowhere for me to put in a code at the top of this page
+         to unlock it ... It needs to be on this page so I can scroll down and
+         do what I need to do." Every write button on this page needs the token
+         in this box, so the box is the first thing under the header. The id is
+         still token-bar, so renderTokenBar() and the tab-lock banner find it
+         exactly as before, and there is exactly one of it on the page. -->
+    <div class="panel" id="token-bar-panel" style="margin-bottom:14px;">
+        <div id="token-bar"></div>
+    </div>
+
     <!-- THE STATUS STRIP.
          Added 2026-09-25. Before this, the three questions that actually
          matter - is it running, what is it worth, did it trade today -
@@ -1598,10 +1611,6 @@
             <button id="money-check-btn" class="unlock-btn" style="margin-top:0;" onclick="runMoneyCheck()">🔎 Check for idle money</button>
         </div>
         <div id="money-check-wrap"><div class="coin-history-empty">Not run yet - tap the button above.</div></div>
-    </div>
-
-    <div class="panel" style="margin-bottom:14px;">
-        <div id="token-bar"></div>
     </div>
 
     <div class="section-title">📟 The tape <span style="font-weight:400;font-size:0.7em;opacity:0.75">&middot; other people&rsquo;s trades, not yours</span></div>
@@ -7380,6 +7389,21 @@ function renderTokenBar() {
                for a week.</div></div>`;
 }
 
+// DRAW THE UNLOCK BOX WHEN THE PAGE LOADS.
+//
+// Found 2026-10-14, when the owner said there was "nowhere to put in a code".
+// The box (#token-bar) was never drawn on load: the only top-level-looking
+// call to renderTokenBar() sat at column 0 but INSIDE executeSale(), so it ran
+// only after a sale was placed, and setWriteToken() ran it only after a token
+// had already been pasted - which needs the box. The page therefore opened
+// with an empty panel where the box should be, and there was no way to unlock
+// it. test_write_token.py matched the stray line with a regex and called it
+// "rendered on load".
+//
+// This is the top-level call. The script runs after the markup, so
+// #token-bar exists.
+renderTokenBar();
+
 // ---------------------------------------------------------------------------
 // SELL A DOLLAR AMOUNT OF A HOLDING NO BRANCH OWNS
 //
@@ -7455,7 +7479,7 @@ async function executeSale() {
                <strong>Order placed.</strong><br>${escText(JSON.stringify(d).slice(0, 500))}</div>`;
         refresh();
         loadTradingProfile();
-renderTokenBar();
+        renderTokenBar();
     } catch (e) {
         uiTrace('sale_apply_threw');
         wrap.innerHTML = `<div class="coin-history-empty" style="color:var(--red);">
