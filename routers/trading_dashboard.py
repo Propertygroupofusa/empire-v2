@@ -9314,9 +9314,19 @@ async def get_grid_status_endpoint(fresh: int = 0):
         _ref, _last, _errs = {}, None, 0
         try:
             _blocked = await orders_not_placed()
-            _ref = {g.get("product_id"): g.get("count")
-                    for g in (_blocked.get("by_product_and_side") or [])
-                    if g.get("side") == "sell"}
+            # Counted row by row, so a DUST COOLDOWN is left out. That row
+            # is a leftover under Coinbase's minimum order - the engine
+            # waiting between asks, not the venue refusing a real order.
+            # Live 2026-10-14: 200 such rows for a 3.56 PRIME (~$0.80)
+            # leftover read the whole fleet as BROKEN.
+            _ref = {}
+            for _r in (_blocked.get("blocked") or []):
+                if _r.get("side") != "sell":
+                    continue
+                if str(_r.get("reason") or "").startswith("dust cooldown"):
+                    continue
+                _p = _r.get("product_id")
+                _ref[_p] = _ref.get(_p, 0) + 1
         except Exception:
             _ref = {}
         for _b in (data.get("branches") or []):

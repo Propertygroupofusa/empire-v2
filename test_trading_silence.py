@@ -265,3 +265,31 @@ def test_the_grid_status_route_reads_stop_trading_the_way_the_grid_does():
     assert expr in cycle[:3000]                       # the grid's own halt
     call = route[route.index("trading_silence.assess("):]
     assert re.search(r"halted=" + re.escape(expr), call[:600])
+
+
+# --- a leftover too small to sell is not a broken fleet (2026-10-14) -------
+
+def test_a_dust_slice_past_its_trigger_is_not_broken():
+    # PRIME live: 3.56 units at ~$0.2245, under Coinbase's $1 minimum order.
+    prime = {"product_id": "PRIME-USD", "current_price": 0.2245, "reference_price": 0.2185,
+             "grid_pct": 0.0151, "open_slices": 1, "num_levels": 3,
+             "slices": [{"qty": 3.56, "entry_price": 0.2100, "unrealized_net_usd": 0.04}]}
+    r = ts.assess(hours_since_last_fill=18.3, refusals_by_product={}, branches=[prime])
+    assert r["verdict"] == "QUIET" and r["alarm"] is False, r
+
+
+def test_a_real_slice_past_its_trigger_still_alarms():
+    real = {"product_id": "PRIME-USD", "current_price": 0.2245, "reference_price": 0.2185,
+            "grid_pct": 0.0151, "open_slices": 1, "num_levels": 3,
+            "slices": [{"qty": 80.0, "entry_price": 0.2100, "unrealized_net_usd": 1.02}]}
+    r = ts.assess(hours_since_last_fill=18.3, refusals_by_product={}, branches=[real])
+    assert r["verdict"] == "BROKEN" and r["past_trigger"][0]["product_id"] == "PRIME-USD", r
+
+
+def test_the_route_leaves_dust_cooldowns_out_of_the_refusal_count():
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    route = open(os.path.join(here, "routers", "trading_dashboard.py"), encoding="utf-8").read()
+    i = route.index("_blocked = await orders_not_placed()")
+    seg = route[i:i + 900]
+    assert 'startswith("dust cooldown")' in seg and '_blocked.get("blocked")' in seg
