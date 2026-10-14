@@ -18,7 +18,7 @@ def test_aged_and_losing_is_held():
 
 
 def test_aged_at_breakeven_or_better_closes():
-    assert D(0.0, 10, profit_pct=0.08, max_hold_days=10, aged_require_breakeven=True) == (True, "max hold")
+    assert D(0.0032, 10, profit_pct=0.08, max_hold_days=10, aged_require_breakeven=True) == (True, "max hold")
     assert D(0.02, 15, profit_pct=0.08, max_hold_days=10, aged_require_breakeven=True) == (True, "max hold")
 
 
@@ -128,3 +128,16 @@ def test_a_close_is_written_to_the_closed_trade_ledger():
     r = rows[0]
     assert (r.bot, r.symbol, r.exit_reason) == ("alpaca_auto_close", "NVDA", "PROFIT TARGET")
     assert abs(r.pnl - 18.0) < 1e-9 and abs(r.hold_hours - 72) < 0.1
+
+
+
+def test_aged_just_above_cost_but_under_the_win_floor_is_held():
+    """2026-10-14, "No losses. Only gains.": +0.05% is a loss after the round
+    trip, so 'breakeven' means the +0.32% win floor, not 0.00%."""
+    for pl in (0.0, 0.0005, 0.0031):
+        assert D(pl, 10, profit_pct=0.08, max_hold_days=10, aged_require_breakeven=True) == \
+            (False, "aged, waiting for breakeven"), pl
+
+
+def test_the_explicit_off_switch_still_closes_at_any_pl():
+    assert D(0.0005, 12, profit_pct=0.08, max_hold_days=10, aged_require_breakeven=False) == (True, "max hold")

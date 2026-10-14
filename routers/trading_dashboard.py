@@ -234,6 +234,17 @@ ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN = (
     os.getenv("ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN", "true").strip().lower() != "false")
 
 
+def _auto_close_win_floor():
+    """The smallest gain that is a real win after costs: the same floor the
+    stock bot's own exits use (a round trip plus the house margin, +0.32%)."""
+    try:
+        import fee_floor
+        from alpaca_mean_reversion import ALPACA_ROUND_TRIP_PCT
+        return fee_floor.fee_floor_pct(ALPACA_ROUND_TRIP_PCT)
+    except Exception:
+        return 0.0032
+
+
 def auto_close_decision(unrealized_plpc, age_days, *,
                         profit_pct=None, max_hold_days=None, aged_require_breakeven=None):
     """(close?, reason) for one position. Pure, so the rule can be tested.
@@ -248,7 +259,12 @@ def auto_close_decision(unrealized_plpc, age_days, *,
     if unrealized_plpc >= profit_pct:
         return True, "profit target"
     if age_days is not None and age_days >= max_hold_days:
-        if req and unrealized_plpc < 0:
+        # BREAKEVEN MEANS COVERING COSTS, NOT 0.00%. A position closed at
+        # +0.05% is a small loss once the round trip is paid, which the
+        # owner has ruled out ("No losses. Only gains.", 2026-10-14). So an
+        # aged position waits until it clears the same win floor as every
+        # other stock sale.
+        if req and unrealized_plpc < _auto_close_win_floor():
             return False, "aged, waiting for breakeven"
         return True, "max hold"
     return False, None
@@ -258,7 +274,8 @@ def auto_close_summary():
     """One accurate description of the rules, for the startup log."""
     return (f"profit target {ALPACA_AUTO_CLOSE_PROFIT_PCT*100:.0f}%, "
             f"max hold {ALPACA_AUTO_CLOSE_MAX_HOLD_DAYS:.0f}d"
-            + (" (only at or above breakeven)" if ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN else "")
+            + (f" (only above breakeven plus costs, +{_auto_close_win_floor()*100:.2f}%)"
+               if ALPACA_AUTO_CLOSE_AGED_REQUIRE_BREAKEVEN else "")
             + (f", {ALPACA_PROFIT_SKIM_PCT*100:.0f}% of profit locked" if ALPACA_PROFIT_SKIM_PCT > 0
                else ", no profit skim")
             + f", checking every {ALPACA_AUTO_CLOSE_CHECK_INTERVAL_SECONDS}s while the market is open")
@@ -7542,8 +7559,8 @@ async def check_and_auto_close_positions():
             if not should_close:
                 if reason:
                     log.info(f"[AUTO-CLOSE] {symbol} is {age_days:.1f}d old but "
-                             f"{unrealized_plpc*100:+.1f}% - held until it is back to breakeven "
-                             f"(its own stop still applies)")
+                             f"{unrealized_plpc*100:+.2f}% - held until it clears breakeven plus "
+                             f"costs (+{_auto_close_win_floor()*100:.2f}%)")
                 continue
 
             # cancel_orders=true - see close_alpaca_position's comment above;
