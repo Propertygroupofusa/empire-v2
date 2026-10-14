@@ -36,6 +36,7 @@ strategies are meant to be swapped, not blended.
 import base64
 import hashlib
 import hmac
+import json
 import math
 import os
 import asyncio
@@ -734,6 +735,103 @@ async def get_usdc_balance(session) -> tuple:
     real number in front of them (surfaced on the dashboard) instead of
     a confusing "why does it say I have no money" moment."""
     return await get_asset_balance(session, "USDC")
+
+
+# The most a USDC -> USD conversion may cost before it is refused. Coinbase
+# converts USDC-USD one for one; a quote that charges anything is not the
+# conversion the owner asked for, so it is never committed.
+CONVERT_MAX_FEE_USD = 0.01
+
+
+def _amount_value(obj):
+    """Amount objects arrive as {"value": "12.34", "currency": "USD"}."""
+    try:
+        return float((obj or {}).get("value"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+async def convert_usdc_to_usd(session, amount_usd: float) -> tuple:
+    """Convert exactly `amount_usd` of USDC into USD through Coinbase's own
+    convert endpoints. Returns (converted, None) or (None, reason).
+
+    THE OWNER, 2026-10-13, after his cash moved from USD to USDC twice in
+    one day with nobody pressing anything: "make it buy with USDC too...
+    so it won't break." The docstring of get_usdc_balance above records
+    why this was held back before: whether a USD order can be FUNDED from
+    USDC is unconfirmed. This does not rely on that. It converts first,
+    with the documented convert API (quote, then commit; currency codes
+    for the accounts; scope `trade`; USDC-USD is a listed pair), so the
+    order that follows is the same USD order the bot always places.
+
+    A QUOTE MOVES NOTHING. Every check happens between the quote and the
+    commit, and any doubt stops there:
+      * no trade id               -> nothing committed
+      * a fee over CONVERT_MAX_FEE_USD
+      * a total that is not the amount asked for (one for one, to a cent)
+    Only the commit moves money, and it moves USDC into USD in the same
+    account - the owner's cash either way.
+    """
+    try:
+        amt = math.ceil(float(amount_usd) * 100 - 1e-9) / 100.0
+    except (TypeError, ValueError):
+        return None, "amount unreadable"
+    if amt <= 0:
+        return None, "nothing to convert"
+    accounts = {"from_account": "USDC", "to_account": "USD"}
+    qpath = "/api/v3/brokerage/convert/quote"
+    qbody = json.dumps({**accounts, "amount": f"{amt:.2f}"})
+    try:
+        async with session.post(COINBASE_BASE_URL + qpath,
+                                headers=_auth_headers("POST", qpath, qbody),
+                                data=qbody, timeout=15) as r:
+            if r.status != 200:
+                return None, f"convert quote HTTP {r.status}: {(await r.text())[:200]}"
+            quote = await r.json()
+        trade = (quote or {}).get("trade") or {}
+        trade_id = trade.get("id")
+        if not trade_id:
+            return None, f"convert quote carried no trade id: {str(quote)[:200]}"
+
+        fee = _amount_value((trade.get("total_fee") or {}).get("amount"))
+        if fee is None:
+            _fees = [_amount_value((f or {}).get("amount")) for f in (trade.get("fees") or [])]
+            fee = sum(f for f in _fees if f is not None) if _fees else None
+        if fee is not None and fee > CONVERT_MAX_FEE_USD:
+            return None, (f"convert quote charges ${fee:,.2f} on ${amt:,.2f} - "
+                          f"not committed; USDC-USD should be one for one")
+        total = _amount_value(trade.get("total"))
+        if total is not None and abs(total - amt) > 0.01:
+            return None, (f"convert quote totals ${total:,.2f} for ${amt:,.2f} - "
+                          f"not one for one, not committed")
+        if fee is None and total is None:
+            return None, "convert quote showed neither fee nor total - not committed"
+
+        cpath = f"/api/v3/brokerage/convert/trade/{trade_id}"
+        cbody = json.dumps(accounts)
+        async with session.post(COINBASE_BASE_URL + cpath,
+                                headers=_auth_headers("POST", cpath, cbody),
+                                data=cbody, timeout=15) as r:
+            if r.status != 200:
+                return None, f"convert commit HTTP {r.status}: {(await r.text())[:200]}"
+            done = await r.json()
+        status = ((done or {}).get("trade") or {}).get("status")
+        if status == "TRADE_STATUS_CANCELED":
+            return None, "the venue canceled the conversion"
+    except asyncio.TimeoutError:
+        return None, "Coinbase API timeout during conversion"
+    except aiohttp.ClientError as e:
+        return None, f"Coinbase connection failed during conversion: {type(e).__name__}"
+    except ValueError as e:
+        return None, f"auth unavailable: {e}"
+    finally:
+        # Whatever happened, the next balance read goes to the venue. A
+        # cached pre-conversion USD figure would size the buy that follows.
+        _BALANCES_CACHE["by_currency"] = None
+        _BALANCES_CACHE["at"] = 0.0
+    log.warning(f"💱 Converted ${amt:,.2f} USDC -> USD for a grid buy "
+                f"(trade {trade_id}, status {status})")
+    return amt, None
 
 
 async def get_real_fee_tier(session) -> tuple:

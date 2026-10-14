@@ -1344,6 +1344,18 @@ async def get_account_census(db: AsyncSession = Depends(get_db)):
         # No USD row at all means a zero USD wallet, which is a real
         # reading on this account right now - not a missing one.
         _usd = 0.0
+    # Cash held as USDC counts once the grid can spend it (GRID_SPEND_USDC,
+    # on by default since 2026-10-14): the buy path converts the shortfall
+    # from USDC itself, so that cash is no longer out of the bot's reach.
+    # Available units only, for the reason given above.
+    try:
+        if crypto_grid_bot_module is not None and crypto_grid_bot_module.spend_usdc_enabled():
+            for _row in (out.get("holdings") or []):
+                if _row.get("asset") == "USDC":
+                    _usd = float(_usd) + float(_row.get("available_units") or 0.0)
+                    break
+    except Exception:
+        pass
 
     tracked = None
     try:

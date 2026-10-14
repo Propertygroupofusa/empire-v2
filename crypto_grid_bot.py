@@ -519,6 +519,97 @@ async def unfunded_deployment_reserve() -> tuple:
         return 0.0, "reserve could not be computed - nothing held back"
 
 
+# ---- CASH HELD AS USDC IS STILL CASH ---------------------------------------
+#
+# THE OWNER, 2026-10-13: "make it buy with USDC too... I don't know how I
+# keep getting switched over. So, do that so it won't break." Twice that day
+# the account's cash moved from USD to USDC with nobody pressing anything in
+# this bot (00:00-08:56Z, then 20:43-20:54Z, no fill in either window), and
+# both times every grid buy was refused: the buy path read the USD account
+# only, so $3,407.80 of the owner's cash read as $0.00.
+#
+# WHAT CHANGES: the buy path counts USD + USDC as cash, and just before an
+# order that has already passed every gate, it converts ONLY the USD that
+# order is short from USDC (engine.convert_usdc_to_usd - quote, check one
+# for one and fee-free, then commit). The order itself is the same USD
+# order as before. The $1,820 floor applies to USD and USDC together.
+#
+# WHAT DOES NOT: sells, stops, spacing, sizing rules, every gate. A failed
+# conversion is a skipped buy - exactly what happened before this existed.
+#
+# ON unless GRID_SPEND_USDC is an explicit off value, because the owner
+# asked for it to work without anyone pressing anything.
+SPEND_USDC_ENV = "GRID_SPEND_USDC"
+_SPEND_USDC_OFF = ("0", "false", "no", "off")
+# Coinbase takes its fee out of USD on top of the order. A conversion that
+# lands exactly the order size would leave the fee short, so it tops up by
+# this much more - cash either way, never spent by itself.
+USDC_TOP_UP_PCT = 0.01
+USDC_TOP_UP_MIN_USD = 1.00
+
+
+def spend_usdc_enabled() -> bool:
+    """True unless the owner has switched it off. Read every call."""
+    v = (os.getenv(SPEND_USDC_ENV) or "").strip().strip('"').strip("'").lower()
+    return v not in _SPEND_USDC_OFF
+
+
+async def wallet_cash(session):
+    """(usd, usdc, usd_err). usdc is 0.0 when the switch is off or USDC
+    cannot be read: an unreadable USDC balance is never counted, so it can
+    only ever leave the old USD-only figure in place, never inflate it."""
+    usd, err = await engine.get_usd_balance(session)
+    usdc = 0.0
+    if spend_usdc_enabled():
+        getter = getattr(engine, "get_usdc_balance", None)
+        if getter is not None:
+            try:
+                v, _e = await getter(session)
+                usdc = max(0.0, float(v)) if v is not None else 0.0
+            except Exception:
+                usdc = 0.0
+    return usd, usdc, err
+
+
+def usd_short_for(spend, usd_available):
+    """USD an order of `spend` is short, including the fee top-up. Pure."""
+    need = float(spend) + max(USDC_TOP_UP_MIN_USD, float(spend) * USDC_TOP_UP_PCT)
+    import math
+    short = need - float(usd_available or 0.0)
+    return 0.0 if short <= 0 else math.ceil(short * 100 - 1e-9) / 100.0
+
+
+async def ensure_usd_for_buy(session, spend):
+    """(ok, note). Called after every gate has passed and before the order.
+
+    Switch off, or USD already covers the order: (True, None) and nothing
+    happens - the buy goes exactly as it always did. Otherwise converts the
+    shortfall from USDC and confirms the USD is there before saying yes."""
+    if not spend_usdc_enabled():
+        return True, None
+    usd, usdc, err = await wallet_cash(session)
+    if usd is None:
+        return False, f"USD balance unreadable ({err}) - no buy"
+    short = usd_short_for(spend, usd)
+    if short <= 0:
+        return True, None
+    if usdc < short:
+        return False, (f"order needs ${short:,.2f} more USD and only ${usdc:,.2f} "
+                       f"USDC is available - no buy")
+    convert = getattr(engine, "convert_usdc_to_usd", None)
+    if convert is None:
+        return False, "no USDC converter available - no buy"
+    got, cerr = await convert(session, short)
+    if got is None:
+        return False, f"USDC -> USD conversion not done: {cerr} - no buy"
+    usd_after, _e = await engine.get_usd_balance(session)
+    if usd_after is None or usd_after < float(spend):
+        return False, (f"converted ${got:,.2f} USDC -> USD but USD reads "
+                       f"{'unreadable' if usd_after is None else f'${usd_after:,.2f}'} "
+                       f"- buy waits for next cycle")
+    return True, f"converted ${got:,.2f} USDC -> USD for this buy"
+
+
 def spendable_for_slice(slice_usd, real_balance, reserve=None, min_trade=None,
                         deployment_reserve=0.0):
     """How much of the wallet a single grid slice may actually spend.
@@ -3502,7 +3593,10 @@ async def get_real_free_cash_usd(usd_balance=None):
     # and must not be mistaken for an absent argument.
     if usd_balance is None:
         async with engine.aiohttp.ClientSession() as session:
-            real_balance, _err = await engine.get_usd_balance(session)
+            # USD + USDC when GRID_SPEND_USDC is on (see wallet_cash): the
+            # buy path spends either, so the free-cash figure counts both.
+            _usd, _usdc, _err = await wallet_cash(session)
+            real_balance = None if _usd is None else _usd + _usdc
     else:
         real_balance = usd_balance
     if real_balance is None:
@@ -7897,7 +7991,10 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 log.info(_dd_msg)
     elif (price <= branch.reference_price * (1 - grid_pct)
           and len(tradeable_slices(slices)) < branch.num_levels):
-        real_balance, real_balance_err = await engine.get_usd_balance(session)
+        # USD + USDC (see wallet_cash): cash the owner holds as USDC is
+        # sized against like any other cash, and the floor covers both.
+        _usd_now, _usdc_now, real_balance_err = await wallet_cash(session)
+        real_balance = None if _usd_now is None else _usd_now + _usdc_now
         if real_balance is None:
             log.warning(f"[GRID] {branch.bot_name}: real balance unavailable ({real_balance_err}) - skipping this cycle")
             return
@@ -8104,6 +8201,21 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                 return
         except Exception as e:
             log.warning(f"[LEARN] {branch.bot_name}: memory unavailable ({e}) - trading anyway")
+
+        # Every gate has said yes. If the USD for this order is sitting in
+        # USDC, convert just the shortfall now - never earlier, so a buy a
+        # gate refuses never converts anything.
+        _usd_ok, _usd_note = await ensure_usd_for_buy(session, spend)
+        if not _usd_ok:
+            log.info(f"[GRID] {branch.bot_name}: 💱 {_usd_note}")
+            if _feed_should_write("USDC_TOP_UP", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "USDC_TOP_UP", _usd_note)
+            return
+        if _usd_note:
+            log.info(f"[GRID] {branch.bot_name}: 💱 {_usd_note}")
+            await _record_gate_decision(branch.bot_name, branch.product_id,
+                                        "USDC_TO_USD", _usd_note)
 
         _outcome = {}
         fill = await grid_buy(session, spend, branch.product_id, branch.bot_name,
@@ -9915,7 +10027,8 @@ async def get_grid_status() -> dict:
             log.info(f"[GRID] USD-on-hold unavailable ({type(_e).__name__}) - "
                      f"backing will count available cash only")
         try:
-            wallet_cash_usd, _wallet_err = await engine.get_usd_balance(session)
+            _w_usd, _w_usdc, _wallet_err = await wallet_cash(session)
+            wallet_cash_usd = None if _w_usd is None else _w_usd + _w_usdc
         except Exception as exc:
             log.warning(f"[GRID] status: wallet balance unreadable ({exc})")
         stop_by_product = {}
