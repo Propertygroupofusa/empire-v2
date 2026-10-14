@@ -71,7 +71,35 @@ def test_rotation_never_sells_a_losing_position_under_profit_only():
     assert "elif weakest_contract is not None" in before[k:]
 
 
-def test_the_equity_floor_breach_is_unchanged():
+# --- "No losses. Only gains." (the owner, 2026-10-14, the same afternoon) -----
+# Every other forced or rule-driven sale path gets the same floor.
+
+def test_the_equity_floor_breach_asks_before_it_sells():
     i = CYCLE.index("if equity_floor_breached:")
-    block = CYCLE[i:i + 2200]
-    assert "forced_exit_allowed(" not in block
+    block = CYCLE[i:i + 3500]
+    assert block.index("forced_exit_allowed(") < block.index('"EQUITY FLOOR BREACH")')
+
+
+def test_momentum_exits_are_held_below_the_win_floor_on_both_paths():
+    n = SRC.count("should_exit_position_momentum(")
+    calls = [k for k in range(len(SRC)) if SRC.startswith("should_exit_position_momentum(", k)]
+    guarded = 0
+    for k in calls:
+        after = SRC[k:k + 900]
+        if "if should_exit and not forced_exit_allowed(" in after:
+            guarded += 1
+    assert guarded == 2, (guarded, n)
+
+
+def test_the_opening_bar_exit_asks_before_it_sells():
+    fn = SRC[SRC.index("async def run_opening_bar_symbol_cycle("):]
+    fn = fn[:fn.index("\nasync def ", 10)]
+    assert fn.index("forced_exit_allowed(") < fn.index('"OPENING_BAR_EXIT"')
+
+
+def test_every_sell_order_in_the_stock_bot_is_a_known_path():
+    """A new SELL call site must be looked at against the floor, not
+    discovered after it has sold something at a loss."""
+    sites = SRC.count('execute_futures_trade(session, contract, "SELL"') + \
+        SRC.count("execute_futures_trade(session, contract, close_action")
+    assert sites == 3, sites   # close_position, branch_exit, opening_bar_exit

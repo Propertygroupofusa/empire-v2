@@ -3702,6 +3702,14 @@ async def run_prop_cycle():
                 # one path that exists to get the account OUT.
                 data = scans.get(contract) or broker_fallback_scan(contract)
                 if data:
+                    _ok, _why = forced_exit_allowed(open_prop_positions[contract], data["price"])
+                    if not _ok:
+                        # New entries stay halted while the floor is breached;
+                        # the owner's rule is no sale below cost (2026-10-14:
+                        # "No losses. Only gains.").
+                        log.warning(f"[APEX_589296] 🛑 EQUITY FLOOR: {contract} {_why} "
+                                    f"(ALPACA_SELL_ONLY_AT_PROFIT) - not sold")
+                        continue
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "EQUITY FLOOR BREACH")
                 else:
@@ -3856,6 +3864,11 @@ async def run_prop_cycle():
                     max_hold_seconds=MOMENTUM_MAX_HOLD_SECONDS,
                     trail_pct=MOMENTUM_TRAIL_PCT,
                 )
+                # The momentum rules take no sell_only_at_profit argument;
+                # its trail and timeout can close below cost. Same floor.
+                if should_exit and not forced_exit_allowed(
+                        {"entry": entry, "side": position.get("side", "long")}, price)[0]:
+                    should_exit = False
             if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
                 position["peak_pnl_pct"] = new_peak_pnl_pct
                 await _db_update_peak_pct(contract, new_peak_pnl_pct)
@@ -4587,6 +4600,9 @@ async def run_alpaca_branch_cycle(session, branch, equity, buying_power, strateg
                 position_age_seconds=position_age_seconds, peak_pnl_pct=position.get("peak_pnl_pct", 0.0),
                 max_hold_seconds=MOMENTUM_MAX_HOLD_SECONDS, trail_pct=MOMENTUM_TRAIL_PCT,
             )
+            if should_exit and not forced_exit_allowed(
+                    {"entry": position["entry"], "side": "long"}, price)[0]:
+                should_exit = False
         if new_peak_pnl_pct > position.get("peak_pnl_pct", 0.0):
             position["peak_pnl_pct"] = new_peak_pnl_pct
             await _db_update_branch_peak_pct(branch.bot_name, contract, new_peak_pnl_pct)
@@ -5249,6 +5265,13 @@ async def run_opening_bar_symbol_cycle(session, contract: str, config: dict, equ
         entry = position["entry_price"]
         qty = position["qty"]
         pnl = (current_price - entry) * qty
+        # The opening-bar replay exits on its stop or at the session end at
+        # whatever the price is. Under sell-only-at-profit it waits instead.
+        _ok, _why = forced_exit_allowed({"entry": entry, "side": "long"}, current_price)
+        if not _ok:
+            log.info(f"[OPENING-BAR] {contract} ({symbol}): exit signal {_why} "
+                     f"(ALPACA_SELL_ONLY_AT_PROFIT) - holding")
+            return
         filled = await execute_futures_trade(session, contract, "SELL", qty, current_price, 0.0, "OPENING_BAR_EXIT", target=current_price, source="opening_bar_exit")
         if filled:
             open_opening_bar_positions.pop(contract, None)
