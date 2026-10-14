@@ -1093,6 +1093,43 @@ def _sell_only_at_profit_from_env() -> bool:
 
 
 MEAN_REVERSION_SELL_ONLY_AT_PROFIT = _sell_only_at_profit_from_env()
+
+
+def forced_exit_allowed(position, price, sell_only_at_profit=None):
+    """(allowed, reason) for an exit the strategy did not choose - the daily
+    loss circuit breaker and the make-room rotation.
+
+    THE OWNER, 2026-10-14, after the breaker sold SLV (-$6.41, -$1.74), AMZN
+    (-$1.84) and META (-$1.41) within two seconds at 14:06Z: "make sure it
+    sells as a profit and not a loss... Let only profit happen."
+    sell_only_at_profit reached should_exit_position only; these two paths
+    never asked it. Under it they now sell only at or above the same fee
+    floor the strategy's own exits use, and hold everything below it.
+    Unreadable entry or price holds - a forced sale on a guess is the one
+    this exists to stop.
+    """
+    if sell_only_at_profit is None:
+        sell_only_at_profit = MEAN_REVERSION_SELL_ONLY_AT_PROFIT
+    if not sell_only_at_profit:
+        return True, "ALPACA_SELL_ONLY_AT_PROFIT is off"
+    try:
+        entry = float((position or {}).get("entry") or 0.0)
+        px = float(price)
+    except (TypeError, ValueError):
+        return False, "entry or price unreadable - held"
+    if entry <= 0 or px <= 0:
+        return False, "entry or price unreadable - held"
+    side = (position or {}).get("side", "long")
+    pct = (px - entry) / entry if side == "long" else (entry - px) / entry
+    try:
+        import fee_floor
+        from alpaca_mean_reversion import ALPACA_ROUND_TRIP_PCT
+        floor = fee_floor.fee_floor_pct(ALPACA_ROUND_TRIP_PCT)
+    except Exception:
+        floor = 0.0032
+    if pct >= floor:
+        return True, f"at {pct*100:+.2f}%, above the +{floor*100:.2f}% win floor"
+    return False, f"held at {pct*100:+.2f}% - under the +{floor*100:.2f}% win floor"
 STRATEGY_FAMILIES = ["momentum", "mean_reversion"]
 ALPACA_STRATEGY_FAMILY_KEY = "alpaca_strategy_family"
 
@@ -3628,6 +3665,13 @@ async def run_prop_cycle():
                 # one path that exists to get the account OUT.
                 data = scans.get(contract) or broker_fallback_scan(contract)
                 if data:
+                    _ok, _why = forced_exit_allowed(open_prop_positions[contract], data["price"])
+                    if not _ok:
+                        # New entries stay halted below; a held position keeps
+                        # every one of its own exits, all of which sell at a win.
+                        log.warning(f"[APEX_589296] 🛑 CIRCUIT BREAKER: {contract} {_why} "
+                                    f"(ALPACA_SELL_ONLY_AT_PROFIT) - not sold")
+                        continue
                     await close_position(session, contract, config, open_prop_positions[contract],
                                        data["price"], data["rsi"], data["trend"], "CIRCUIT BREAKER - DAILY LOSS LIMIT")
                 else:
@@ -3934,6 +3978,14 @@ async def run_prop_cycle():
             if is_hitting_daily_loss_limit:
                 log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily 2% loss limit reached, no new entries")
                 continue
+            # The $ breaker halts new entries too. It used to close every
+            # position and let the next signal buy straight back in -
+            # 2026-10-14 14:07-14:26Z: SLV bought and closed again five
+            # times inside twenty minutes.
+            if daily_circuit_breaker_tripped:
+                log.info(f"[APEX_589296] 🛑 {side.upper()} {contract} blocked — daily loss "
+                         f"${daily_loss_dollars:.2f} >= ${dynamic_daily_max_loss:.2f} breaker, no new entries")
+                continue
 
             # Equity floor ratchet: no new entries while equity is below the
             # locked floor — only resumes once equity recovers above it.
@@ -3983,7 +4035,15 @@ async def run_prop_cycle():
                     if weakest_pct is None or held_pct < weakest_pct:
                         weakest_pct, weakest_contract = held_pct, held_contract
 
-                if weakest_contract is not None and weakest_pct is not None and weakest_pct < 0:
+                if (weakest_contract is not None and weakest_pct is not None and weakest_pct < 0
+                        and MEAN_REVERSION_SELL_ONLY_AT_PROFIT):
+                    # Rotation only ever picks a LOSING position, so under
+                    # sell-only-at-profit it never sells: the signal waits.
+                    log.info(
+                        f"[APEX_589296] At max positions ({dynamic_max_positions}) - {contract} {side} "
+                        f"signal held; weakest ({weakest_contract} {weakest_pct:+.2f}%) is below cost "
+                        f"and ALPACA_SELL_ONLY_AT_PROFIT keeps it")
+                elif weakest_contract is not None and weakest_pct is not None and weakest_pct < 0:
                     held_data = scans[weakest_contract]
                     # Capture the dollar value being freed up before closing
                     # (close_position pops it from open_prop_positions), so
