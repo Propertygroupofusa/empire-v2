@@ -1455,6 +1455,28 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # One-time budget correction (budget_correction.py): take back the
+        # $3,097.92 of budget the 2026-10-13/14 rotation bug duplicated onto
+        # ONDO-USD and TIA-USD. Bookkeeping only - it lowers allocated_usd on
+        # two flat branches through the same call the dashboard's Withdraw
+        # button uses, and never places an order or moves a coin. It runs HERE,
+        # awaited, BEFORE claim reconciliation starts, so the reconciliation
+        # never sees the duplicated claims and never cuts every other branch to
+        # make room for money that was never there. Expires 2026-10-21; never
+        # raises; touches a branch only if it still holds the exact inflated
+        # figure the bug left.
+        try:
+            import budget_correction
+            import crypto_grid_bot as _bc_grid
+            _bc_report = await budget_correction.run_once(_bc_grid)
+            log.warning(f"[budget-correction] {_bc_report.get('reason')}: "
+                        f"{_bc_report.get('detail') or _bc_report.get('left_alone') or ''}")
+        except Exception as e:
+            try:
+                log.warning(f"budget correction not run: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # Claim reconciliation: when the fleet's UNSPENT claims exceed the
         # cash that really exists, lower the claims until they fit. Writes
         # one number - allocated_usd - and never an order, a slice or a coin.
