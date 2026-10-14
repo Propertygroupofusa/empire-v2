@@ -686,6 +686,11 @@ async def place_order(session, symbol, qty, side):
         # buy (the counter does that itself); only a failure to reach the
         # counter at all falls through, loudly, like the pause check above.
         try:
+            import alpaca_entry_cap
+            _closed = alpaca_entry_cap.entry_window_reason()
+            if _closed:
+                log.info(f"\U0001f6d1 ENTRY WINDOW {symbol}: {_closed} - no buy placed.")
+                return None
             from prop_bot import _ENTRY_COUNTER
             _ok, _used, _limit, _why = await _ENTRY_COUNTER.reserve()
             if not _ok:

@@ -1,20 +1,32 @@
-"""A ceiling on how many positions the stock bot may OPEN in one trading day.
+"""When the stock bot may open a position, and how many per trading day.
 
-THE OWNER, 2026-10-14: "It was making money then ... go back to this date."
-The numbers behind that hunch (Alpaca realised P&L, by week, from the orders
-the broker still holds):
+THE OWNER, 2026-10-14: "It was making money then... go back to this date."
 
-    week of 7 Sep    8 sales   +$6.44
-    week of 14 Sep   4 sales   +$1.84
-    week of 28 Sep   128 sales -$27.37
-    week of 5 Oct    88 sales  -$7.28
+What the real trades say (Alpaca round trips from 8 Sep; 256 of them, -$44.17):
 
-The account made money while it traded a handful of times a week and lost it
-once it traded a hundred. Each round trip on a ~$125 position pays the spread
-and slippage twice, and the average loser was more than twice the average
-winner, so more trades is more of the loss. Rolling the code back would also
-roll back the no-loss protections, so the fix is narrower: a daily ceiling on
-ENTRIES. Exits are never counted and never refused.
+  * 85% of the loss is two incidents, both already fixed: six META buys at once
+    on 28 Sep (-$26.12) and the 14 Oct breaker sell-off (-$11.41). The other 246
+    trades lost -$6.64, about -$0.03 each: break-even, 41% winners, the average
+    winner (+$0.37) about the size of the average loser (-$0.38).
+  * "It trades too much" is NOT what the data shows. Replayed on those trades, a
+    plain first-come ceiling of three entries a day does no better than no
+    ceiling (-$8.82 against -$6.64): it spends its slots on the morning.
+  * What held up in both halves of the history is the time of day. Entries at or
+    after 2 PM Eastern on the symbols the bot trades now made +$6.01 over 20
+    trades; entries before 2 PM lost -$7.63 over 94. Start times from 1:00 to
+    2:30 PM all give +$6 to +$7, so the exact minute is not the lucky part. A
+    random draw of 20 trades from the same pool nets as much about 11% of the
+    time: a test worth running for several weeks, not a proof.
+
+So two guards, both on ENTRIES only (exits are never counted or refused):
+
+  1. THE AFTERNOON WINDOW: no new position before ALPACA_ENTRY_EARLIEST_ET
+     (default 14:00 Eastern). This switches the opening-bar entries off in
+     practice, since they only fire in the first minutes of the session.
+  2. THE DAILY CEILING: at most ALPACA_MAX_ENTRIES_PER_DAY (default 3), a
+     backstop against a burst, not the thing expected to earn. In the replay,
+     a ceiling of 3 inside the window gave +$5.77 against +$6.01 for no
+     ceiling; a ceiling of 1 or 2 lost money, so it is not set lower.
 
 What it counts: orders that open a position (entry_pass, branch_entry,
 idle_cash_sweep, opening_bar_entry), submitted, filled or not, because the
@@ -73,6 +85,54 @@ def trading_day(now=None):
 
 def day_key(now=None):
     return f"{KEY_PREFIX}{trading_day(now)}"
+
+
+# ---------------------------------------------------------------- the window
+EARLIEST_ENV = "ALPACA_ENTRY_EARLIEST_ET"
+DEFAULT_EARLIEST = "14:00"
+WINDOW_PREFIX = "entry window closed"
+
+
+def earliest_entry_minutes():
+    """Minutes after midnight Eastern before which no position may be opened,
+    or None when the window is switched off.
+
+    "HH:MM" sets it. "off"/"none"/"any" switch it off. Unset, empty or a typo
+    fall back to the default, never to "no window" - a typo must not remove a
+    guard.
+    """
+    raw = os.getenv(EARLIEST_ENV)
+    if raw is None:
+        raw = DEFAULT_EARLIEST
+    v = raw.strip().strip("\"'").strip().lower()
+    if v in ("off", "none", "any", "no", "false"):
+        return None
+    try:
+        hh, mm = v.split(":")
+        h, m = int(hh), int(mm)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h * 60 + m
+    except (ValueError, AttributeError):
+        pass
+    hh, mm = DEFAULT_EARLIEST.split(":")
+    return int(hh) * 60 + int(mm)
+
+
+def entry_window_reason(now=None):
+    """None when a new position may be opened right now; otherwise why not.
+
+    Eastern clock, so daylight saving moves with the market. Only the start of
+    the window lives here: the market-closed check already knows when the
+    session ends, including early closes.
+    """
+    start = earliest_entry_minutes()
+    if start is None:
+        return None
+    now = (now or datetime.now(ET)).astimezone(ET)
+    if now.hour * 60 + now.minute >= start:
+        return None
+    return (f"{WINDOW_PREFIX}: new positions only from {start // 60:02d}:{start % 60:02d} "
+            f"Eastern ({now:%H:%M} Eastern now) - the afternoon test; exits are unaffected")
 
 
 class EntryCounter:

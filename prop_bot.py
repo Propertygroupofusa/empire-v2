@@ -2604,11 +2604,11 @@ def concentration_refusals():
 
 # ── DAILY ENTRY CEILING ───────────────────────────────────────────────
 #
-# How many positions the stock bot may open per US/Eastern trading day. See
-# alpaca_entry_cap for the numbers: the account made money trading a handful
-# of times a week and lost it trading a hundred. Counted in the database so a
-# deploy mid-day does not hand the bot a fresh allowance. Entries only; the
-# three exits are never counted or refused.
+# When the stock bot may open a position (afternoon window) and how many per
+# US/Eastern trading day (ceiling). See alpaca_entry_cap for what the real
+# trades showed and why. Counted in the database so a deploy mid-day does not
+# hand the bot a fresh allowance. Entries only; the three exits are never
+# counted or refused.
 async def _entry_count_load(key):
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
@@ -2651,6 +2651,17 @@ async def daily_entry_ceiling_reason():
         return None
     return (f"{ENTRY_CEILING_PREFIX} reached: {used} of {limit} new positions "
             f"opened today - no more until the next trading day; exits are unaffected")
+
+
+# Both are expected, standing states for hours at a time, so both are reported
+# once per cycle and quietly, like "market closed".
+ENTRY_QUIET_PREFIXES = (ENTRY_CEILING_PREFIX, alpaca_entry_cap.WINDOW_PREFIX)
+
+
+async def entries_closed_reason():
+    """Why no new position may open right now - the afternoon window first,
+    then today's ceiling - or None when both are open."""
+    return alpaca_entry_cap.entry_window_reason() or await daily_entry_ceiling_reason()
 
 
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend,
@@ -2897,6 +2908,16 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
     # read refuses the entry, never waves it through.
     _slot_taken = False
     if source in alpaca_entry_cap.ENTRY_SOURCES:
+        # The afternoon window first, so a morning order never uses up a slot.
+        _closed = alpaca_entry_cap.entry_window_reason()
+        if _closed:
+            _log_key = (alpaca_entry_cap.trading_day(), symbol, "window")
+            if _log_key not in _entry_refusal_logged:
+                _entry_refusal_logged.add(_log_key)
+                log.warning(f"🛑 ENTRY WINDOW refused {action} {qty} {contract} "
+                            f"({symbol}) [{source}] - {_closed}")
+            await _record_cap_refusal(symbol, source, _closed, _notional)
+            return False
         _ok, _used, _limit, _why = await _ENTRY_COUNTER.reserve()
         if not _ok:
             _log_key = (alpaca_entry_cap.trading_day(), symbol)
@@ -3139,7 +3160,7 @@ async def run_prop_cycle():
 
         # Last, so "market closed" and the owner's pause still win the label.
         if not entries_halted:
-            entries_halted = await daily_entry_ceiling_reason()
+            entries_halted = await entries_closed_reason()
 
         global _last_auto_backtest_at
         now_ts = time.time()
@@ -3375,9 +3396,9 @@ async def run_prop_cycle():
             # across every symbol scanned. Every genuine MANDATE refusal
             # below does record one - test_every_refusing_return_in_
             # try_open_logs_a_decision holds that line.
-            if entries_halted.startswith(ENTRY_CEILING_PREFIX):
-                # Every symbol, every cycle, rest of the day: expected.
-                log.debug(f"[ENTRY CEILING] {contract} entry deferred to the next trading day")
+            if entries_halted.startswith(ENTRY_QUIET_PREFIXES):
+                # Every symbol, every cycle, for hours: expected.
+                log.debug(f"[ENTRY GATE] {contract} entry deferred - {entries_halted[:60]}")
             elif entries_halted.startswith(MARKET_CLOSED_PREFIX):
                 # Every symbol, every cycle, all night: a known, expected state.
                 log.debug(f"[MARKET CLOSED] {contract} entry deferred to the open")
@@ -4065,6 +4086,7 @@ async def run_prop_cycle():
         # through it; this guard is an addition, never a replacement.
         if entries_halted and candidates:
             _halt_kind = ("market closed" if entries_halted.startswith(MARKET_CLOSED_PREFIX)
+                          else "entry window" if entries_halted.startswith(alpaca_entry_cap.WINDOW_PREFIX)
                           else "entry ceiling" if entries_halted.startswith(ENTRY_CEILING_PREFIX)
                           else "KILL CONDITION")
             log.info(
@@ -5317,6 +5339,8 @@ async def run_opening_bar_symbol_cycle(session, contract: str, config: dict, equ
             return  # the whole-account scan already holds this real contract
         if contract in await get_alpaca_branch_claimed_contracts():
             return  # a real Alpaca branch already claims this contract
+        if await entries_closed_reason():
+            return  # outside the afternoon window or the day's ceiling is used; exits are handled below
         is_safe, reason = check_margin_safety(
             buying_power, equity, len(open_prop_positions),
             extra_open_notional=_total_alpaca_branch_notional() + _total_opening_bar_notional(),

@@ -1,13 +1,16 @@
-"""The stock bot may open only so many positions per trading day.
+"""When the stock bot may open a position, and how many per trading day.
 
 The owner, 2026-10-14: "It was making money then... go back to this date."
-Alpaca realised P&L by week: +$6.44 and +$1.84 while it traded a handful of
-times, then -$27.37 on 128 sales the week of 28 Sep. The fix that keeps the
-no-loss protections is a ceiling on ENTRIES, not a rollback.
+Replayed on the real trades, a first-come daily ceiling alone does nothing
+(-$8.82 against -$6.64 without it, once the two fixed incidents are set aside).
+What held up in both halves of the history is the time of day: entries at or
+after 2 PM Eastern made +$6.01 over 20 trades. So the guards are an afternoon
+window plus a ceiling of three, on ENTRIES only.
 
 Pinned here: the counting rules (behavioural, against a dict standing in for
-the database) and the wiring (structural - execute_futures_trade needs the
-broker to run). Exits are never counted and never refused.
+the database), the window rules (behavioural, against explicit clocks) and the
+wiring (structural - execute_futures_trade needs the broker to run). Exits are
+never counted and never refused.
 """
 import asyncio
 from datetime import datetime
@@ -53,6 +56,8 @@ MON = datetime(2026, 10, 14, 10, 0, tzinfo=ET)
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.delenv(cap.MAX_ENTRIES_ENV, raising=False)
+    # The counting tests must not depend on what time of day they run.
+    monkeypatch.setenv(cap.EARLIEST_ENV, "off")
 
 
 # ------------------------------------------------------------ the setting
@@ -201,9 +206,8 @@ def test_the_ceiling_is_taken_after_the_venue_minimum_and_before_the_send():
 
 
 def test_only_entry_sources_reach_the_counter():
-    i = FN.index("_ENTRY_COUNTER.reserve()")
-    guard = FN[max(0, i - 200):i]
-    assert "source in alpaca_entry_cap.ENTRY_SOURCES" in guard
+    i_if = FN.index("if source in alpaca_entry_cap.ENTRY_SOURCES:")
+    assert i_if < FN.index("alpaca_entry_cap.entry_window_reason()") < FN.index("_ENTRY_COUNTER.reserve()")
 
 
 def test_only_an_explicit_venue_rejection_gives_the_slot_back():
@@ -249,12 +253,12 @@ def test_switched_off_the_cycle_is_never_halted_by_it(monkeypatch):
 
 def test_the_cycle_checks_the_ceiling_last_so_pause_and_market_closed_keep_their_label():
     i = SRC.index("entries_halted = await market_entry_block_reason(session)")
-    j = SRC.index("entries_halted = await daily_entry_ceiling_reason()")
+    j = SRC.index("entries_halted = await entries_closed_reason()")
     assert i < j < i + 600
 
 
 def test_the_ceiling_is_reported_quietly_like_market_closed():
-    assert "[ENTRY CEILING]" in SRC and '"entry ceiling"' in SRC
+    assert "[ENTRY GATE]" in SRC and '"entry ceiling"' in SRC
 
 
 # ------------------------------------------------------------- the swing bot
@@ -367,3 +371,125 @@ def test_a_refused_entry_returns_false_like_any_other_refusal():
     i = FN.index("_ENTRY_COUNTER.reserve()")
     block = FN[i:i + 900]
     assert "return False" in block and block.index("return False") < block.index("_slot_taken =")
+
+
+# ============================================================ the afternoon window
+def at(h, m=0, y=2026, mo=10, d=14):
+    return datetime(y, mo, d, h, m, tzinfo=ET)
+
+
+def test_the_window_defaults_to_two_pm_eastern(monkeypatch):
+    monkeypatch.delenv(cap.EARLIEST_ENV, raising=False)
+    assert cap.earliest_entry_minutes() == 14 * 60
+
+
+@pytest.mark.parametrize("raw,want", [("13:30", 810), (' "15:00" ', 900), ("9:30", 570), ("00:00", 0)])
+def test_a_time_sets_the_window(monkeypatch, raw, want):
+    monkeypatch.setenv(cap.EARLIEST_ENV, raw)
+    assert cap.earliest_entry_minutes() == want
+
+
+@pytest.mark.parametrize("raw", ["off", "OFF", "any", "none", "false"])
+def test_only_an_explicit_word_switches_the_window_off(monkeypatch, raw):
+    monkeypatch.setenv(cap.EARLIEST_ENV, raw)
+    assert cap.earliest_entry_minutes() is None
+    assert cap.entry_window_reason(at(9, 31)) is None
+
+
+@pytest.mark.parametrize("raw", ["", "2pm", "14", "25:00", "14:61", "noon", "14:00:00", "-1:30"])
+def test_a_typo_never_removes_the_window(monkeypatch, raw):
+    monkeypatch.setenv(cap.EARLIEST_ENV, raw)
+    assert cap.earliest_entry_minutes() == 14 * 60
+
+
+def test_the_morning_is_refused_and_the_afternoon_is_allowed(monkeypatch):
+    monkeypatch.delenv(cap.EARLIEST_ENV, raising=False)
+    assert "09:31" in cap.entry_window_reason(at(9, 31))
+    assert cap.entry_window_reason(at(13, 59)).startswith(cap.WINDOW_PREFIX)
+    assert cap.entry_window_reason(at(14, 0)) is None
+    assert cap.entry_window_reason(at(15, 59)) is None
+
+
+def test_the_reason_says_exits_are_unaffected(monkeypatch):
+    monkeypatch.delenv(cap.EARLIEST_ENV, raising=False)
+    assert "exits are unaffected" in cap.entry_window_reason(at(10, 0))
+
+
+def test_the_window_follows_eastern_time_through_daylight_saving(monkeypatch):
+    from datetime import timezone
+    monkeypatch.delenv(cap.EARLIEST_ENV, raising=False)
+    # October is EDT (UTC-4): 14:00 Eastern is 18:00 UTC.
+    assert cap.entry_window_reason(datetime(2026, 10, 14, 17, 59, tzinfo=timezone.utc)) is not None
+    assert cap.entry_window_reason(datetime(2026, 10, 14, 18, 0, tzinfo=timezone.utc)) is None
+    # January is EST (UTC-5): 14:00 Eastern is 19:00 UTC.
+    assert cap.entry_window_reason(datetime(2027, 1, 12, 18, 59, tzinfo=timezone.utc)) is not None
+    assert cap.entry_window_reason(datetime(2027, 1, 12, 19, 0, tzinfo=timezone.utc)) is None
+
+
+def test_a_cycle_before_the_window_halts_entries_with_the_window_reason(monkeypatch):
+    import prop_bot
+    c, _ = counter()
+    monkeypatch.setattr(prop_bot, "_ENTRY_COUNTER", c)
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")           # always closed during the test
+    why = run(prop_bot.entries_closed_reason())
+    assert why.startswith(cap.WINDOW_PREFIX)
+
+
+def test_inside_the_window_the_ceiling_still_applies(monkeypatch):
+    import prop_bot
+    c, _ = counter()
+    monkeypatch.setattr(prop_bot, "_ENTRY_COUNTER", c)
+    monkeypatch.setenv(cap.EARLIEST_ENV, "00:00")           # always open during the test
+    assert run(prop_bot.entries_closed_reason()) is None
+    for _ in range(3):
+        run(c.reserve())
+    assert run(prop_bot.entries_closed_reason()).startswith(prop_bot.ENTRY_CEILING_PREFIX)
+
+
+def test_the_window_is_checked_before_a_slot_is_taken_and_refuses_like_any_other_gate():
+    i_win = FN.index("alpaca_entry_cap.entry_window_reason()")
+    i_res = FN.index("_ENTRY_COUNTER.reserve()")
+    i_send = FN.index("session.post(")
+    assert i_win < i_res < i_send
+    block = FN[i_win:i_res]
+    assert "return False" in block and "_record_cap_refusal" in block
+
+
+def test_only_entry_sources_reach_the_window_check():
+    i = FN.index("alpaca_entry_cap.entry_window_reason()")
+    assert "source in alpaca_entry_cap.ENTRY_SOURCES" in FN[max(0, i - 300):i]
+
+
+def test_both_quiet_prefixes_are_reported_quietly():
+    assert "ENTRY_QUIET_PREFIXES" in SRC
+    assert "entries_halted.startswith(ENTRY_QUIET_PREFIXES)" in SRC
+    assert '"entry window"' in SRC
+
+
+def test_the_opening_bar_entry_branch_stops_quietly_outside_the_window_but_exits_are_untouched():
+    fn = SRC[SRC.index("async def run_opening_bar_symbol_cycle("):]
+    fn = fn[:fn.index("\nasync def ", 10)]
+    i = fn.index("await entries_closed_reason()")
+    assert fn.index("get_alpaca_branch_claimed_contracts()") < i < fn.index("check_margin_safety(")
+    # the exit branch (STOP / PUSH) comes after, with its own sell call and no gate in front of it
+    assert fn.index('source="opening_bar_exit"') > i
+    assert "entries_closed_reason" not in fn[fn.index("# STOP or a real PUSH"):]
+
+
+def test_the_swing_bot_checks_the_window_before_a_slot_and_before_the_post():
+    assert PLACE.index("entry_window_reason()") < PLACE.index("_ENTRY_COUNTER.reserve()") < PLACE.index("session.post(")
+
+
+def test_the_swing_bot_cannot_buy_in_the_morning_and_does_not_burn_a_slot(swing, monkeypatch):
+    sw, c, s = swing
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    sess = _S(_R(200, {"id": "x"}))
+    assert run(sw.place_order(sess, "NVDA", 1, "buy")) is None
+    assert sess.posts == 0 and s.d == {}
+
+
+def test_the_swing_bot_still_sells_in_the_morning(swing, monkeypatch):
+    sw, c, s = swing
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    sess = _S(_R(200, {"id": "s1"}))
+    assert run(sw.place_order(sess, "NVDA", 1, "sell"))["id"] == "s1"
