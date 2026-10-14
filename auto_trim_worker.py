@@ -199,6 +199,11 @@ async def _available_map(session):
 
 async def check_once(session_factory, *, place=True) -> dict:
     """One pass: read the account, size the trims, place them if armed."""
+    # STOP MEANS STOP (owner, 2026-10-14: "stop everything ... leave everything
+    # like it is"). This can place orders when armed and never read STOP_TRADING.
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return {"mode": current_mode(), "stopped": True, "placed": 0,
+                "detail": "STOP_TRADING is set - nothing is placed"}
     import account_census
     import sell_amount
 

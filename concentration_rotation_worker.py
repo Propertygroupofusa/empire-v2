@@ -105,6 +105,13 @@ def _slice_net_pct(slice_row, price, default_cost_pct):
 
 async def check_once():
     """One pass. Returns a dict describing what it did and why."""
+    # STOP MEANS STOP. The owner, 2026-10-14: "stop everything. Don't sell
+    # anything. Don't buy anything anymore. Just leave everything like it is."
+    # This sells through close_all_grid_slices, which has no STOP_TRADING gate
+    # of its own, so the switch is honoured here, before anything is read.
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return {"mode": current_mode(), "armed": is_armed(), "settled": 0,
+                "stopped": True, "detail": "STOP_TRADING is set - nothing is sold"}
     if not is_armed():
         return {"mode": MODE_OBSERVE, "armed": False, "settled": 0,
                 "detail": f"observing - set {MODE_ENV}=arm to let it act"}

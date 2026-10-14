@@ -664,6 +664,14 @@ async def place_order(session, symbol, qty, side):
     same way passive mode does. Only `buy` is refused: while the owner's
     pause is set, and once today's entry ceiling is used up.
     """
+    # STOP MEANS STOP, BOTH SIDES. The owner, 2026-10-14: "stop everything.
+    # Don't sell anything. Don't buy anything anymore. Just leave everything
+    # like it is." This bot never read STOP_TRADING, so the one switch that
+    # stops every other bot left this one trading. This is its only order
+    # function, so one check here covers every buy and every sell it makes.
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        log.info(f"STOP_TRADING is set - no {side} of {symbol} placed. Everything is left as it is.")
+        return None
     _counter = None
     if side == "buy":
         try:

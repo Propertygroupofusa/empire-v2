@@ -154,6 +154,11 @@ async def place(session, product_id, plan):
 
 async def check_once(session_factory, *, place_orders=True) -> dict:
     """One pass. Reads the levels, then makes the venue match them."""
+    # STOP MEANS STOP (owner, 2026-10-14: "stop everything ... leave everything
+    # like it is"). This can place orders when armed and never read STOP_TRADING.
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return {"armed": is_armed(), "stopped": True, "placed": 0, "replaced": 0,
+                "detail": "STOP_TRADING is set - the venue was not contacted"}
     if not is_armed():
         return {"armed": False, "placed": 0, "replaced": 0,
                 "detail": "observing - the venue was not contacted"}

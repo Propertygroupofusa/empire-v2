@@ -7523,6 +7523,12 @@ async def check_and_auto_close_positions():
     the whole attempt while closed is the only way to guarantee that
     never happens; the position just waits, still protected by whatever
     order it already had, until the next check after market open."""
+    # STOP MEANS STOP. The owner, 2026-10-14: "stop everything. Don't sell
+    # anything ... Just leave everything like it is." This loop closes Alpaca
+    # positions (at +8%, or aged at the win floor) and never read STOP_TRADING,
+    # so the switch left it selling. It is honoured here, before any read.
+    if os.getenv("STOP_TRADING", "false").lower() == "true":
+        return
     if not (ALPACA_KEY and ALPACA_SECRET):
         return
 
