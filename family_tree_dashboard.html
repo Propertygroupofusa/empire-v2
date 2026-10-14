@@ -1356,6 +1356,24 @@
                 <canvas id="adv-price" height="300"></canvas>
             </div>
 
+            <!-- WHAT THE BOT IS DOING ON THIS COIN. Added 2026-10-14. The owner:
+                 "I don't have a grid like this that's showing me what the bots are
+                 doing ... how the bots are literally deciding what they're going to
+                 do with my money." The dashed lines on the price chart above and the
+                 sentences here are the same numbers the bot decides with. -->
+            <div class="adv-card adv-card-price" id="adv-bot-card">
+                <div class="adv-card-head">
+                    <span class="adv-card-title">What the bot is doing on this coin</span>
+                    <span class="adv-legend">
+                        <i class="sw" style="background:var(--green)"></i>buy level
+                        <i class="sw" style="background:#f0b429"></i>sell level
+                        <i class="sw" style="background:var(--text-dim)"></i>rungs it holds
+                    </span>
+                </div>
+                <div id="adv-bot">—</div>
+                <div class="adv-note"><strong>Read-only.</strong> These are the bot&rsquo;s own numbers (its reference price, step, rungs and the rungs it holds), drawn over the price. This card describes what it is waiting for; it places, sizes and cancels nothing.</div>
+            </div>
+
             <div class="adv-card adv-card-price">
                 <div class="adv-card-head">
                     <span class="adv-card-title">Volume</span>
@@ -8074,12 +8092,38 @@ async function advDrawFacts(product) {
     }
 }
 
+// What the grid bot on this coin is waiting for, read from the same
+// /grid-status the rest of the page uses. Its own try: a failed read costs
+// the overlay and the card, never the chart under it.
+async function advBotLevels(product) {
+    const el = document.getElementById('adv-bot');
+    const say = html => { if (el) el.innerHTML = html; };
+    try {
+        const d = await apiGet('/grid-status');
+        const brs = (d.branches || []).filter(b => b.product_id === product);
+        if (!brs.length) {
+            say(`<div class="fact-why">No grid bot trades ${escText(product)}, so there are no buy or sell levels to draw.</div>`);
+            return null;
+        }
+        // One branch per coin is the norm. If there are several, show the one holding the most.
+        brs.sort((a, b) => (b.open_slices || 0) - (a.open_slices || 0));
+        const lv = ADV.botLevels(brs[0]);
+        say(lv.story.map(t => `<p style="margin:7px 0; font-size:0.84em; line-height:1.55;">${escText(t)}</p>`).join('')
+            + (brs.length > 1 ? `<p style="margin:7px 0; font-size:0.78em; color:var(--text-dim);">${brs.length} bots trade this coin; this is the one holding the most.</p>` : ''));
+        return lv;
+    } catch (e) {
+        say(`<div class="fact-why warn">Could not read the bots&rsquo; levels (${escText(e.message)}). The chart shows price only. This says nothing about what the bot will do.</div>`);
+        return null;
+    }
+}
+
 async function advDraw() {
     if (!advProduct) return;
     try {
         const candles = await advFetchCandles(advProduct, advGran);
         advSetError(null);
-        ADV.drawPrice(document.getElementById('adv-price'), candles);
+        const bot = await advBotLevels(advProduct);
+        ADV.drawPrice(document.getElementById('adv-price'), candles, bot ? bot.lines : null);
         ADV.drawVolume(document.getElementById('adv-volume'), candles);
         const r = ADV.drawRsi(document.getElementById('adv-rsi'), candles);
         ADV.drawMacd(document.getElementById('adv-macd'), candles);

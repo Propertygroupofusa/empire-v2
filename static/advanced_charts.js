@@ -226,12 +226,131 @@ const ADV = (function () {
         return '$' + v.toFixed(a >= 0.01 ? 4 : 6);
     }
 
-    function drawPrice(cv, candles) {
+    // ---- WHAT THE GRID BOT IS WAITING FOR (pure) ----
+    //
+    // Added 2026-10-14, when the owner said he could not see "how the bots are
+    // literally deciding what they're going to do with my money".
+    //
+    // Computed from the numbers the bot itself decides with, as /grid-status
+    // returns them, using the rules read from crypto_grid_bot.py:
+    //   BUY   when the price <= reference * (1 - step) and a rung is free; the
+    //         reference then becomes that fill.
+    //   SELL  one rung when the price >= reference * (1 + step), and only the
+    //         OLDEST rung that nets >= 0.15% after both fee legs. If none does,
+    //         it waits.
+    //   PARKED when every rung is used, any rung that would net >= 1% sells.
+    //   It never sells below cost.
+    // Describes. Places, sizes and cancels nothing.
+    var FEE_RT = 0.007, RISE_FLOOR = 0.0015, PARKED_FLOOR = 0.01;
+
+    function pctTxt(x) {
+        return (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(2) + '%';
+    }
+
+    function botLevels(b) {
+        if (!b) return null;
+        var px = Number(b.current_price), ref = Number(b.reference_price), step = Number(b.grid_pct);
+        var levels = Number(b.num_levels) || 0;
+        if (!isFinite(px) || px <= 0 || !isFinite(ref) || ref <= 0 || !isFinite(step) || step <= 0) {
+            return { ok: false, lines: [], story: [
+                'The bot’s levels for this coin could not be read, so none are drawn. ' +
+                'That says nothing about what it will do.'] };
+        }
+        var sl = (b.slices || []).map(function (s) {
+            return { entry: Number(s.entry_price), net: Number(s.unrealized_net_pct),
+                     at: s.opened_at ? Date.parse(s.opened_at) : 0 };
+        }).filter(function (s) { return isFinite(s.entry) && s.entry > 0; })
+          .sort(function (a, z) { return (a.at || 0) - (z.at || 0); });          // oldest first, like the bot
+        var open = sl.length, full = levels > 0 && open >= levels;
+        var buyAt = (!full && levels > 0) ? ref * (1 - step) : null;
+        var sellAt = open > 0 ? ref * (1 + step) : null;
+
+        var riseSlice = null, riseNet = null;
+        if (sellAt !== null) {
+            for (var i = 0; i < sl.length; i++) {
+                var n = sellAt / sl[i].entry - 1 - FEE_RT;
+                if (n >= RISE_FLOOR) { riseSlice = sl[i]; riseNet = n; break; }
+            }
+        }
+        var parkedAt = null, parkedSlice = null;
+        if (full) {
+            parkedSlice = sl.reduce(function (m, s) { return (m === null || s.entry < m.entry) ? s : m; }, null);
+            parkedAt = parkedSlice.entry * (1 + PARKED_FLOOR + FEE_RT);
+        }
+
+        var lines = [];
+        if (buyAt !== null) lines.push({ v: buyAt, kind: 'buy', label: 'BUY ≤ ' + money(buyAt) });
+        if (sellAt !== null) lines.push({ v: sellAt, kind: 'sell', label: 'SELL ≥ ' + money(sellAt) });
+        if (parkedAt !== null) lines.push({ v: parkedAt, kind: 'sell', label: 'SELL (full) ≥ ' + money(parkedAt) });
+        // Rungs bought within 0.5% of each other are one line, "held x3 @ $1.54":
+        // ten rungs on one coin would otherwise stack ten labels over the candles.
+        var groups = [];
+        sl.forEach(function (s) {
+            var g = groups.filter(function (x) { return Math.abs(s.entry / x.v - 1) <= 0.005; })[0];
+            if (g) { g.n += 1; } else { groups.push({ v: s.entry, n: 1 }); }
+        });
+        groups.slice(0, 4).forEach(function (g) {
+            lines.push({ v: g.v, kind: 'held',
+                         label: 'held ' + (g.n > 1 ? '×' + g.n + ' ' : '') + '@ ' + money(g.v) });
+        });
+
+        var story = [];
+        story.push('Using ' + open + ' of ' + levels + ' rungs' +
+                   (b.allocated_usd ? ' of a ' + money(Number(b.allocated_usd)) + ' budget' : '') +
+                   ' · step ' + (step * 100).toFixed(2) + '%.');
+        if (open === 0) {
+            story.push('Holding nothing here. It buys when the price falls ' + (step * 100).toFixed(2) +
+                       '% below ' + money(ref) + ', the recent high it tracks: that is ' + money(buyAt) +
+                       ', ' + pctTxt(buyAt / px - 1) + ' from now.');
+        } else if (buyAt !== null) {
+            story.push('It buys another rung if the price falls to ' + money(buyAt) +
+                       ' (' + pctTxt(buyAt / px - 1) + ' from now).');
+        } else {
+            story.push('Every rung is used, so it will not buy more until one sells.');
+        }
+        if (sellAt !== null) {
+            story.push('It sells one rung once the price reaches ' + money(sellAt) +
+                       ' (' + pctTxt(sellAt / px - 1) + ' from now)' +
+                       (riseSlice
+                           ? '. The first rung that clears fees there is the one bought at ' + money(riseSlice.entry) +
+                             ', which would bank ' + pctTxt(riseNet) + ' profit.'
+                           : ', but at that price no rung would clear fees yet, so it keeps waiting.'));
+        }
+        if (parkedAt !== null) {
+            story.push('Because every rung is used it also sells the rung bought at ' + money(parkedSlice.entry) +
+                       ' at ' + money(parkedAt) + ' (' + pctTxt(parkedAt / px - 1) +
+                       ' from now), where it banks +' + (PARKED_FLOOR * 100).toFixed(2) + '% profit.');
+        }
+        if (open > 0) {
+            var shown = sl.slice(0, 4).map(function (s) {
+                return money(s.entry) + (isFinite(s.net) ? ' (' + pctTxt(s.net) + ' now)' : '');
+            });
+            story.push('Rungs held, oldest first: ' + shown.join(', ') +
+                       (open > 4 ? ', and ' + (open - 4) + ' more.' : '.'));
+        }
+        story.push('It never sells below cost: a rung in the red waits for the price to come back.');
+        return { ok: true, price: px, ref: ref, step: step, levels: levels, open: open, full: full,
+                 buyAt: buyAt, sellAt: sellAt, parkedAt: parkedAt, lines: lines, story: story };
+    }
+
+    // Lines that sit far from the price would squash the candles into a
+    // sliver, so only those within 20% of the last price are drawn; every one
+    // is still in the written story.
+    function visibleLines(lines, price) {
+        return (lines || []).filter(function (l) {
+            return isFinite(l.v) && price > 0 && Math.abs(l.v / price - 1) <= 0.20;
+        });
+    }
+
+    function drawPrice(cv, candles, overlay) {
         const f = fit(cv); if (!f) return;
         const c = f.c, w = f.w, h = f.h;
         const closes = candles.map(d => d.close);
         const s = sma(closes, 50), e = ema(closes, 50);
-        const ex = extent([candles.map(d => d.high), candles.map(d => d.low), s, e]);
+        const lastPx = closes[closes.length - 1];
+        const ovl = visibleLines(overlay, lastPx);
+        const ex = extent([candles.map(d => d.high), candles.map(d => d.low), s, e,
+                           ovl.map(l => l.v)]);
         if (!ex) return;
         const pad = (ex.hi - ex.lo) * 0.06;
         const lo = ex.lo - pad, hi = ex.hi + pad;
@@ -257,6 +376,48 @@ const ADV = (function () {
         });
         line(c, s, lo, hi, w, h, CSS('--blue'), 1.6);
         line(c, e, lo, hi, w, h, CSS('--gold'), 1.6);
+        drawBotLines(c, ovl, lo, hi, w, h);
+    }
+
+    // The bot's levels over the price: dashed green BUY, dashed amber SELL,
+    // dotted grey for each rung it holds. Labels sit inside the plot at the
+    // right edge and are nudged apart when two levels are close.
+    function drawBotLines(c, ovl, lo, hi, w, h) {
+        if (!ovl || !ovl.length) return;
+        const colour = { buy: CSS('--green'), sell: '#f0b429', held: CSS('--text-dim') };
+        c.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        c.textBaseline = 'middle';
+        const placed = [];
+        ovl.map(l => ({ l: l, y: yOf(l.v, lo, hi, h) }))
+           .sort((a, z) => a.y - z.y)
+           .forEach(o => {
+               const col = colour[o.l.kind] || CSS('--text-dim');
+               c.save();
+               c.strokeStyle = col;
+               c.lineWidth = o.l.kind === 'held' ? 1 : 1.6;
+               c.setLineDash(o.l.kind === 'held' ? [2, 4] : [7, 4]);
+               c.beginPath();
+               c.moveTo(PAD.l, Math.round(o.y) + 0.5);
+               c.lineTo(w - PAD.r, Math.round(o.y) + 0.5);
+               c.stroke();
+               c.restore();
+               let ly = o.y;
+               placed.forEach(p => { if (Math.abs(ly - p) < 14) ly = p + 14; });
+               placed.push(ly);
+               const tw = c.measureText(o.l.label).width + 10;
+               // The LEFT edge: the newest candles are on the right and are the
+               // ones being read against these levels, so the labels stay off them.
+               const x = PAD.l + 4;
+               c.fillStyle = CSS('--bg') || '#0b0e14';
+               c.globalAlpha = 0.85;
+               c.fillRect(x, ly - 8, tw, 16);
+               c.globalAlpha = 1;
+               c.strokeStyle = col;
+               c.lineWidth = 1;
+               c.strokeRect(x + 0.5, ly - 7.5, tw - 1, 15);
+               c.fillStyle = col;
+               c.fillText(o.l.label, x + 5, ly);
+           });
     }
 
     function drawRsi(cv, candles) {
@@ -425,7 +586,8 @@ const ADV = (function () {
              liquidityBand: liquidityBand, marketFacts: marketFacts,
              THIN_USD: THIN_USD, DEEP_USD: DEEP_USD,
              drawPrice: drawPrice, drawRsi: drawRsi, drawMacd: drawMacd,
-             drawVolume: drawVolume };
+             drawVolume: drawVolume,
+             botLevels: botLevels, visibleLines: visibleLines };
 })();
 if (typeof window !== 'undefined') window.ADV = ADV;
 if (typeof module !== 'undefined' && module.exports) module.exports = ADV;
