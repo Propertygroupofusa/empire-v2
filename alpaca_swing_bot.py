@@ -661,9 +661,10 @@ async def place_order(session, symbol, qty, side):
 
     SELLS ARE NEVER BLOCKED. This bot shares an account with prop_bot.py
     and an exit is a protection; refusing one would trap a position the
-    same way passive mode does. Only `buy` is refused, and only while the
-    owner's flag is set.
+    same way passive mode does. Only `buy` is refused: while the owner's
+    pause is set, and once today's entry ceiling is used up.
     """
+    _counter = None
     if side == "buy":
         try:
             from prop_bot import are_alpaca_entries_paused
@@ -679,6 +680,24 @@ async def place_order(session, symbol, qty, side):
             # silently become a second, invisible kill switch. It is logged
             # loudly so a persistent failure is visible.
             log.error(f"Entry-pause check failed for {symbol} - proceeding as unpaused: {e}")
+        # THE DAILY ENTRY CEILING, shared with prop_bot's order function: the
+        # two bots share one account and one allowance, so a buy here counts
+        # against the same number. A count that cannot be read refuses the
+        # buy (the counter does that itself); only a failure to reach the
+        # counter at all falls through, loudly, like the pause check above.
+        try:
+            from prop_bot import _ENTRY_COUNTER
+            _ok, _used, _limit, _why = await _ENTRY_COUNTER.reserve()
+            if not _ok:
+                log.info(
+                    f"\U0001f6d1 DAILY ENTRY CEILING {symbol}: {_why} - no buy placed. "
+                    f"Exits are unaffected."
+                )
+                return None
+            if _used is not None:
+                _counter = _ENTRY_COUNTER
+        except Exception as e:
+            log.error(f"Entry-ceiling check failed for {symbol} - proceeding without it: {e}")
     try:
         url = f"{get_base_url()}/v2/orders"
         payload = {
@@ -692,6 +711,11 @@ async def place_order(session, symbol, qty, side):
             if r.status not in (200, 201):
                 error_body = await r.text()
                 log.error(f"Order failed: {r.status} | {error_body[:200]}")
+                # An explicit rejection: nothing opened, so the slot goes
+                # back. Any other doubt (no id, an exception mid-reply) keeps
+                # it - a ceiling errs towards fewer entries, never more.
+                if _counter is not None:
+                    await _counter.release()
                 return None
             result = await r.json()
             # CRITICAL: Verify order received valid ID from Alpaca

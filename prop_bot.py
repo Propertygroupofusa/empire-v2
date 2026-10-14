@@ -24,6 +24,7 @@ from database import get_session_factory
 import decision_log as _dlog
 from models import BotPosition, Payment, AlpacaBacktestRun, TradingBotState, AlpacaBranch, AlpacaBranchTradeHistory
 import bot_mandates
+import alpaca_entry_cap
 from bot_mandates import (APEX_MANDATE, validate_entry, validate_entry_verbose,
                           MOMENTUM_ENTRY, MEAN_REVERSION_ENTRY)
 from alpaca_mean_reversion import should_exit_position_momentum, should_exit_position
@@ -2601,6 +2602,57 @@ def concentration_refusals():
     return list(_CAP_REFUSALS)
 
 
+# ── DAILY ENTRY CEILING ───────────────────────────────────────────────
+#
+# How many positions the stock bot may open per US/Eastern trading day. See
+# alpaca_entry_cap for the numbers: the account made money trading a handful
+# of times a week and lost it trading a hundred. Counted in the database so a
+# deploy mid-day does not hand the bot a fresh allowance. Entries only; the
+# three exits are never counted or refused.
+async def _entry_count_load(key):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        row = result.scalar_one_or_none()
+        return row.base_capital if row is not None else None
+
+
+async def _entry_count_save(key, value):
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(TradingBotState).where(TradingBotState.bot_name == key))
+        row = result.scalar_one_or_none()
+        if row is None:
+            db.add(TradingBotState(bot_name=key, base_capital=float(value)))
+        else:
+            row.base_capital = float(value)
+        await db.commit()
+
+
+_ENTRY_COUNTER = alpaca_entry_cap.EntryCounter(_entry_count_load, _entry_count_save)
+# One log line per (day, symbol) so a refused entry that is retried every
+# cycle does not write the same sentence 1,400 times.
+_entry_refusal_logged = set()
+
+# Once the ceiling is reached the rest of the day is an expected, standing
+# state, like "market closed": reported once per cycle, not once per symbol.
+ENTRY_CEILING_PREFIX = "daily entry ceiling"
+
+
+async def daily_entry_ceiling_reason():
+    """The halt reason once today's ceiling is used up, else None.
+
+    Only an actual "used up" halts the cycle early. An unreadable count
+    returns None here and is left to the per-order gate, which refuses.
+    """
+    limit = alpaca_entry_cap.max_entries_per_day()
+    if limit is None:
+        return None
+    used = await _ENTRY_COUNTER.used_today()
+    if used is None or used < limit:
+        return None
+    return (f"{ENTRY_CEILING_PREFIX} reached: {used} of {limit} new positions "
+            f"opened today - no more until the next trading day; exits are unaffected")
+
+
 async def execute_futures_trade(session, contract, action, qty, price, rsi, trend,
                                 stop_loss=None, target=None, source="unlabelled"):
     """Place a real order via Alpaca. `action` is the literal order side
@@ -2835,14 +2887,40 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
 
     mode = "LIVE" if LIVE_TRADE else "PAPER"
 
+    # ── THE DAILY ENTRY CEILING, TAKEN RIGHT BEFORE SENDING ───────────
+    #
+    # After every other refusal above, so a size the venue would never accept
+    # does not use up a slot, and before the order goes out. ENTRIES ONLY:
+    # the three exits are never consulted, because a gate that can refuse a
+    # sale can trap the account in a position it needs to leave. The slot is
+    # given back below if the venue rejects the order. A count that cannot be
+    # read refuses the entry, never waves it through.
+    _slot_taken = False
+    if source in alpaca_entry_cap.ENTRY_SOURCES:
+        _ok, _used, _limit, _why = await _ENTRY_COUNTER.reserve()
+        if not _ok:
+            _log_key = (alpaca_entry_cap.trading_day(), symbol)
+            if _log_key not in _entry_refusal_logged:
+                _entry_refusal_logged.add(_log_key)
+                log.warning(f"🛑 DAILY ENTRY CEILING refused {action} {qty} {contract} "
+                            f"({symbol}) [{source}] - {_why}")
+            await _record_cap_refusal(symbol, source, f"daily entry ceiling: {_why}", _notional)
+            return False
+        _slot_taken = _used is not None
+
     try:
         async with session.post(f"{get_base_url()}/v2/orders", headers=get_headers(), json=order) as r:
             result = await r.json()
             if r.status in (200, 201):
+                # The venue took the order: the slot is spent, and nothing
+                # after this line (the broadcast, the log) may give it back.
+                _slot_taken = False
                 log.info(f"✅ FUTURES TRADE | {mode} | {action} {qty} {contract} ({symbol}) @ ${price:.2f} | APEX_589296")
                 await broadcast_signal_to_subscribers(session, contract, action, price, rsi, trend, stop_loss, target)
                 return True
             else:
+                if _slot_taken:
+                    await _ENTRY_COUNTER.release()
                 # Name the order alongside the rejection. The bare message
                 # on its own ("fractional orders must be DAY orders") gave
                 # no way to tell WHICH order, which side, or what quantity
@@ -2856,6 +2934,9 @@ async def execute_futures_trade(session, contract, action, qty, price, rsi, tren
                 )
                 return False
     except Exception as e:
+        # No release here: an exception can land after the venue took the
+        # order, and a ceiling errs towards fewer entries, never more. Only
+        # an explicit rejection (above) gives the slot back.
         log.error(f"Futures trade error: {e}")
         return False
 
@@ -3055,6 +3136,10 @@ async def run_prop_cycle():
 
         if not entries_halted:
             entries_halted = await market_entry_block_reason(session)
+
+        # Last, so "market closed" and the owner's pause still win the label.
+        if not entries_halted:
+            entries_halted = await daily_entry_ceiling_reason()
 
         global _last_auto_backtest_at
         now_ts = time.time()
@@ -3290,7 +3375,10 @@ async def run_prop_cycle():
             # across every symbol scanned. Every genuine MANDATE refusal
             # below does record one - test_every_refusing_return_in_
             # try_open_logs_a_decision holds that line.
-            if entries_halted.startswith(MARKET_CLOSED_PREFIX):
+            if entries_halted.startswith(ENTRY_CEILING_PREFIX):
+                # Every symbol, every cycle, rest of the day: expected.
+                log.debug(f"[ENTRY CEILING] {contract} entry deferred to the next trading day")
+            elif entries_halted.startswith(MARKET_CLOSED_PREFIX):
                 # Every symbol, every cycle, all night: a known, expected state.
                 log.debug(f"[MARKET CLOSED] {contract} entry deferred to the open")
             else:
@@ -3977,6 +4065,7 @@ async def run_prop_cycle():
         # through it; this guard is an addition, never a replacement.
         if entries_halted and candidates:
             _halt_kind = ("market closed" if entries_halted.startswith(MARKET_CLOSED_PREFIX)
+                          else "entry ceiling" if entries_halted.startswith(ENTRY_CEILING_PREFIX)
                           else "KILL CONDITION")
             log.info(
                 f"[APEX_589296] ⏸️  {len(candidates)} signal(s) deferred - {_halt_kind}: "
