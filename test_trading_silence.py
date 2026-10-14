@@ -291,5 +291,12 @@ def test_the_route_leaves_dust_cooldowns_out_of_the_refusal_count():
     here = os.path.dirname(os.path.abspath(__file__))
     route = open(os.path.join(here, "routers", "trading_dashboard.py"), encoding="utf-8").read()
     i = route.index("_blocked = await orders_not_placed()")
-    seg = route[i:i + 900]
-    assert 'startswith("dust cooldown")' in seg and '_blocked.get("blocked")' in seg
+    seg = route[i:i + 1600]
+    assert "startswith(_DUST_REASONS)" in seg and '_blocked.get("blocked")' in seg
+    head = route[route.index("_DUST_REASONS = ("):][:200]
+    # Live 2026-10-14 after the restart: 11 PRIME rows reading
+    # "BELOW_QUOTE_MIN_SIZE: 3.56 at 0.22912 is 0.8156672, under the
+    # product's 1 minimum order value." kept the fleet BROKEN.
+    for code in ("dust cooldown", "BELOW_QUOTE_MIN_SIZE", "REQUEST_BELOW_BASE_INCREMENT"):
+        assert f'"{code}"' in head, code
+    assert '"BELOW_BASE_INCREMENT"' not in head      # coin missing still counts

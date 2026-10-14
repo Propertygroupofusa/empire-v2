@@ -9311,6 +9311,8 @@ async def get_grid_status_endpoint(fresh: int = 0):
     # trigger, is.
     try:
         import trading_silence
+        _DUST_REASONS = ("dust cooldown", "BELOW_QUOTE_MIN_SIZE",
+                         "REQUEST_BELOW_BASE_INCREMENT")
         _ref, _last, _errs = {}, None, 0
         try:
             _blocked = await orders_not_placed()
@@ -9323,7 +9325,12 @@ async def get_grid_status_endpoint(fresh: int = 0):
             for _r in (_blocked.get("blocked") or []):
                 if _r.get("side") != "sell":
                     continue
-                if str(_r.get("reason") or "").startswith("dust cooldown"):
+                # Too small to ever be an order: the dust cooldown, and the
+                # first attempts it throttles (an order under the product's
+                # minimum value, or a requested size under one unit). A
+                # sell with NOTHING available (BELOW_BASE_INCREMENT on 0.0)
+                # still counts - that is coin missing, which is news.
+                if str(_r.get("reason") or "").startswith(_DUST_REASONS):
                     continue
                 _p = _r.get("product_id")
                 _ref[_p] = _ref.get(_p, 0) + 1
