@@ -40,6 +40,12 @@ QUIET_HOURS = 6.0
 # order retried into the same wall.
 REFUSALS_THAT_MEAN_BROKEN = 10
 
+# Coinbase's usual minimum order on a USD pair. A slice worth less than this
+# cannot be sold on its own however far past its trigger the price goes, so
+# it is not a sale the fleet failed to make. Live 2026-10-14: a 3.56 PRIME
+# leftover (~$0.80) kept the fleet reading BROKEN.
+DUST_NOTIONAL_USD = 1.00
+
 
 def _f(v, default=None):
     try:
@@ -158,7 +164,9 @@ def assess(*, hours_since_last_fill, refusals_by_product=None,
     for b in (branches or ()):
         px, ref = _f(b.get("current_price")), _f(b.get("reference_price"))
         step = _f(b.get("grid_pct"))
-        slices = b.get("slices") or []
+        slices = [s for s in (b.get("slices") or [])
+                  if not (hasattr(s, "get") and _f(s.get("qty")) is not None
+                          and _f(s.get("qty")) * (px or 0) < DUST_NOTIONAL_USD)]
         if not (px and ref and step) or not slices:
             continue
         over = (px / (ref * (1 + step)) - 1) * 100
