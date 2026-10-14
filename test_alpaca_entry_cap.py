@@ -493,3 +493,108 @@ def test_the_swing_bot_still_sells_in_the_morning(swing, monkeypatch):
     monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
     sess = _S(_R(200, {"id": "s1"}))
     assert run(sw.place_order(sess, "NVDA", 1, "sell"))["id"] == "s1"
+
+
+# ================================ execute_futures_trade itself, against fakes
+# The structural tests above pin where the gates sit; these run the function.
+@pytest.fixture
+def venue(monkeypatch):
+    import prop_bot
+    c, s = counter()
+    monkeypatch.setattr(prop_bot, "_ENTRY_COUNTER", c)
+    prop_bot._entry_refusal_logged.clear()
+    prop_bot._CAP_REFUSALS.clear()
+
+    async def allow(session, symbol, qty, price):
+        return "ALLOW", "ok", float(qty) * float(price)
+
+    async def unreadable(session, symbol):
+        return None, None                                    # fails open, as it does live
+
+    async def nothing(*a, **k):
+        return None
+    monkeypatch.setattr(prop_bot, "_check_concentration", allow)
+    monkeypatch.setattr(prop_bot, "_sellable_qty", unreadable)
+    monkeypatch.setattr(prop_bot, "broadcast_signal_to_subscribers", nothing)
+    monkeypatch.setattr(prop_bot, "get_base_url", lambda: "https://x")
+    monkeypatch.setattr(prop_bot, "get_headers", lambda: {})
+    contract = next(iter(prop_bot.FUTURES))
+    return prop_bot, contract, c, s
+
+
+def _buy(pb, contract, sess, source="entry_pass", action="BUY"):
+    return run(pb.execute_futures_trade(sess, contract, action, 1.0, 120.0, 30.0, "up", source=source))
+
+
+def test_a_morning_entry_is_refused_without_sending_or_using_a_slot(venue, monkeypatch):
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    sess = _S(_R(200, {"id": "o"}))
+    assert _buy(pb, contract, sess) is False
+    assert sess.posts == 0 and s.d == {}
+    assert "entry window" in pb.concentration_refusals()[-1]["reason"].lower() or \
+        "window" in pb.concentration_refusals()[-1]["reason"].lower()
+
+
+def test_in_the_afternoon_three_entries_go_out_and_the_fourth_does_not(venue, monkeypatch):
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "00:00")
+    ok = _R(200, {"id": "o"})
+    sess = _S(ok, ok, ok, ok)
+    got = [_buy(pb, contract, sess) for _ in range(4)]
+    assert got == [True, True, True, False] and sess.posts == 3
+    assert s.d[cap.day_key()] == 3.0
+
+
+def test_every_entry_source_is_gated(venue, monkeypatch):
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    for src in sorted(cap.ENTRY_SOURCES):
+        sess = _S(_R(200, {"id": "o"}))
+        assert _buy(pb, contract, sess, source=src) is False and sess.posts == 0, src
+
+
+def test_a_rejected_entry_does_not_use_up_a_slot(venue, monkeypatch):
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "00:00")
+    sess = _S(_R(403, {"message": "no"}), _R(200, {"id": "o"}))
+    assert _buy(pb, contract, sess) is False
+    assert s.d[cap.day_key()] == 0.0
+    assert _buy(pb, contract, sess) is True
+    assert s.d[cap.day_key()] == 1.0
+
+
+def test_an_exit_is_never_gated_even_in_the_morning_with_the_ceiling_used_up(venue, monkeypatch):
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    for _ in range(3):
+        run(c.reserve())
+    for src in sorted(pb._EXIT_SOURCES):
+        sess = _S(_R(200, {"id": "x"}))
+        assert _buy(pb, contract, sess, source=src, action="SELL") is True and sess.posts == 1, src
+    assert s.d[cap.day_key()] == 3.0                         # exits are not counted
+
+
+def test_a_cover_order_from_the_exit_path_is_never_gated(venue, monkeypatch):
+    """A BUY from exit_pass closes a short: it is an exit even though it is a buy."""
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    sess = _S(_R(200, {"id": "x"}))
+    assert _buy(pb, contract, sess, source="exit_pass", action="BUY") is True and sess.posts == 1
+
+
+def test_an_unlabelled_caller_is_not_gated(venue, monkeypatch):
+    """Not an entry source: the gate acts only on callers it knows by name."""
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "23:59")
+    sess = _S(_R(200, {"id": "x"}))
+    assert _buy(pb, contract, sess, source="unlabelled") is True and sess.posts == 1
+
+
+def test_an_unreadable_count_refuses_the_entry_and_sends_nothing(venue, monkeypatch):
+    pb, contract, c, s = venue
+    monkeypatch.setenv(cap.EARLIEST_ENV, "00:00")
+    bad, _ = counter(fail_load=True)
+    monkeypatch.setattr(pb, "_ENTRY_COUNTER", bad)
+    sess = _S(_R(200, {"id": "x"}))
+    assert _buy(pb, contract, sess) is False and sess.posts == 0
