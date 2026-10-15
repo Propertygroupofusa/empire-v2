@@ -50,8 +50,13 @@ ok("that call is the board's read-only address", "fetch(base + '/api/board'" in 
 ok("it sends nothing: no method, no body",
    all(w not in code for w in ("method:", "body:", "POST", "PUT", "DELETE")))
 ok("it uses no dashboard write path", "writeHeaders" not in code and "apiFetch(" not in code)
+# "Kalshi / Coinbase" is a price LABEL (Coinbase's prediction markets trade
+# Kalshi's contracts); what must never appear is a path to either account.
 ok("it reaches neither trading account",
-   all(w not in code.lower() for w in ("/api/trading-dashboard", "alpaca", "coinbase", "/api/crypto")))
+   all(w not in code.lower() for w in ("/api/trading-dashboard", "alpaca", "/api/crypto",
+                                        "/api/coinbase", "coinbase.com", "api.exchange")))
+ok("Coinbase appears only as the Kalshi price label",
+   all("Kalshi / Coinbase" in ln or "Coinbase's" in ln for ln in code.splitlines() if "coinbase" in ln.lower()))
 url = re.search(r"const SPORTS_BOARD_URL = '([^']*)';", code)
 ok("the board address is empty or https", url is not None and (url.group(1) == "" or url.group(1).startswith("https://")),
    url.group(1) if url else "missing")
@@ -62,7 +67,8 @@ for field in ("team", "g.price", "g.book", "g.favorite", "g.better_price.site", 
               "a.event", "b.side", "b.site", "b.price", "code"):
     ok(f"{field} is escaped before it is drawn", f"sportsEsc({field})" in code)
 ok("numbers are formatted, not pasted",
-   "Number(g.wins_on_100).toFixed(2)" in code and "Number(b.stake).toFixed(2)" in code)
+   "Number(g.wins_on_100).toFixed(2)" in code and "Number(b.stake).toFixed(2)" in code
+   and "Number(g.kalshi.price_cents).toFixed(0)" in code and "Number(g.kalshi.wins_on_100_after_fee).toFixed(2)" in code)
 ok("a sport name is escaped too", "sportsEsc(SPORT_NAMES[g.sport] || g.sport)" in code)
 
 print("\nIT SAYS WHAT IS MISSING INSTEAD OF DRAWING NOTHING")

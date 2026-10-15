@@ -713,7 +713,9 @@
                 else. It reads public odds and scores only and places no bets; nothing in this panel touches
                 the Alpaca or Coinbase accounts. Chance = the bookmaker's odds with its cut taken out
                 (DraftKings for team sports, Pinnacle for tennis, MMA and boxing). "$100 wins" is the profit
-                if they win; the $100 is lost if they don't. Tap a sport to see only that sport.
+                if they win; the $100 is lost if they don't. "Kalshi / Coinbase" is the same bet on Kalshi,
+                which Coinbase's prediction markets also trade (Coinbase may add its own fee); it is a
+                price shown here, not a link to either account. Tap a sport to see only that sport.
             </p>
             <div id="sportsScorecard" style="margin-bottom: 12px;"></div>
             <div id="sportsChips"></div>
@@ -1841,6 +1843,13 @@
                     if (g.better_price) {
                         line += ' Better price: ' + sportsEsc(g.better_price.site) + ', $100 wins $'
                             + Number(g.better_price.wins_on_100).toFixed(2) + '.';
+                    }
+                    // Kalshi's price is also Coinbase's: Coinbase's prediction markets trade Kalshi's contracts.
+                    if (g.kalshi && g.kalshi.usable) {
+                        line += '<br>Kalshi / Coinbase: ' + Number(g.kalshi.price_cents).toFixed(0) + '¢, $100 wins $'
+                            + Number(g.kalshi.wins_on_100_after_fee).toFixed(2) + ' after Kalshi\'s fee.';
+                    } else if (g.kalshi) {
+                        line += '<br>Kalshi / Coinbase: listed, but no real market on it yet.';
                     }
                     return '<div style="border-top: 1px solid var(--border); padding: 8px 0;">'
                         + '<div style="font-size: 0.8em; color: var(--text-dim);">' + sportsEsc(SPORT_NAMES[g.sport] || g.sport) + ' · '
