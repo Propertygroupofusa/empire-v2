@@ -264,7 +264,9 @@ def test_the_grid_status_route_reads_stop_trading_the_way_the_grid_does():
     cycle = grid[grid.index("async def run_grid_branch_cycle("):]
     assert expr in cycle[:3000]                       # the grid's own halt
     call = route[route.index("trading_silence.assess("):]
-    assert re.search(r"halted=" + re.escape(expr), call[:600])
+    # Under GRID_SELL_ONLY (2026-10-15) the halt is that same read AND the
+    # switch being off - still the grid's own expression, never a copy.
+    assert re.search(r"halted=\(?" + re.escape(expr), call[:900])
 
 
 # --- a leftover too small to sell is not a broken fleet (2026-10-14) -------

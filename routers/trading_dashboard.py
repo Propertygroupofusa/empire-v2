@@ -903,6 +903,9 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         # of the two flags README calls jointly required. This can.
         "venue": alpaca_venue(),
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
+        # The crypto grid's sell-only switch: no buys, profit sales only. The
+        # one thing that runs under STOP_TRADING (crypto_grid_bot.grid_sell_only).
+        "grid_sell_only": (os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true",
         **order_block,
     }
 
@@ -9390,7 +9393,14 @@ async def get_grid_status_endpoint(fresh: int = 0):
             cycle_errors=_errs, branches=data.get("branches") or [],
             # Read exactly as run_grid_branch_cycle reads it, so the two
             # can never disagree about whether the grid is switched off.
-            halted=os.getenv("STOP_TRADING", "false").lower() == "true")
+            # Under GRID_SELL_ONLY the cycle runs (sell-only) even with
+            # STOP_TRADING set, so it is not HALTED and must not say so.
+            # Parsed as crypto_grid_bot.grid_sell_only parses it; read from
+            # the environment directly so a failed module import cannot turn
+            # the verdict into an error.
+            halted=(os.getenv("STOP_TRADING", "false").lower() == "true"
+                    and (os.getenv("GRID_SELL_ONLY") or "").strip().lower() != "true"),
+            sell_only=(os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true")
     except Exception as _exc:
         data["silence"] = {"verdict": "UNKNOWN", "alarm": False,
                            "reason": f"{type(_exc).__name__}: {_exc}",

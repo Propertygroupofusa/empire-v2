@@ -1615,6 +1615,28 @@ async def get_fill_mix() -> dict:
     return out
 
 
+# ---- The owner's sell-only switch ------------------------------------------
+#
+# GRID_SELL_ONLY=true: no grid branch buys, and a slice sells ONLY when it
+# clears its own profit line - the rise trigger's fee-adjusted profitable pick
+# (GRID_RISE_MIN_NET_PCT) or the parked-branch exit (GRID_PARKED_MIN_NET_PCT).
+# The stop-loss sale is off while it is on, so nothing is sold below cost.
+#
+# It is the ONE thing allowed past STOP_TRADING. The owner, 2026-10-15, after
+# "Don't buy anything anymore" and "we're not selling nothing at no loss",
+# asked for this mode so profit is banked as prices recover. Turning
+# STOP_TRADING off would restart every other job as well - the Alpaca bots,
+# auto-deploy, rotation, trim - so it stays on, and this lets the grid's
+# profitable sales, and nothing else, run underneath it.
+GRID_SELL_ONLY_ENV = "GRID_SELL_ONLY"
+
+
+def grid_sell_only() -> bool:
+    """True only for an explicit "true" (any case, surrounding spaces ignored).
+    Unset, empty or anything else leaves the grid exactly as before."""
+    return (os.getenv(GRID_SELL_ONLY_ENV) or "").strip().lower() == "true"
+
+
 async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = None,
                    outcome_out: dict = None):
     """Real grid BUY: maker first (cheap, may not fill), market fallback
@@ -1633,6 +1655,16 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
     guessed "rejected" for all of them; then this function guessed
     "expired" for all of them, which hid the non-orders in the one cause
     that counts as routine. Same detail_out pattern as _net_edge_gate_ok."""
+    if grid_sell_only():
+        # Refused HERE, in the one function every grid buy goes through - the
+        # dip trigger, an adopted rung, a forced buy - so no path gets past it,
+        # including one added later. Nothing is sent to the venue.
+        log.info(f"[GRID] {bot_name or product_id}: GRID_SELL_ONLY is on - no buy placed")
+        if outcome_out is not None:
+            import order_outcome as _oo   # this function imports it locally below
+            outcome_out["cause"] = _oo.NO_ORDER_CREATED
+            outcome_out["detail"] = "GRID_SELL_ONLY is on - buys are refused"
+        return None
     if await is_maker_orders_active():
         fill = await engine.place_maker_buy(session, usd_amount, product_id,
                                             await maker_wait_seconds())
@@ -7657,7 +7689,11 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     only - an existing open slice keeps selling normally, which is
     itself this branch's own real recovery path) and, when the account
     owner has opted into it, real fee-tier-aware dynamic spacing."""
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
+    # STOP_TRADING stops the cycle before it reads anything - unless the
+    # owner's sell-only switch is on, which lets this cycle run with every
+    # buy refused and the stop-loss sale off (see grid_sell_only).
+    _owner_sell_only = grid_sell_only()
+    if os.getenv("STOP_TRADING", "false").lower() == "true" and not _owner_sell_only:
         return
     price, _atr = await engine.get_price_and_volatility(session, branch.product_id)
     if price is None:
@@ -8000,10 +8036,13 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     # the same fact: the breaker fires on its own drawdown, while
     # buys_paused is set deliberately at adoption so an overweight
     # position walks DOWN through strength instead of being bought back.
-    _sell_only = bool(getattr(branch, "buys_paused", False))
+    _sell_only = bool(getattr(branch, "buys_paused", False)) or _owner_sell_only
     if _sell_only and not drawdown_breached:
         if should_say_state(f"{branch.bot_name}:sellonly", "sell-only", time.time()):
             log.info(
+                f"[GRID] {branch.bot_name}: SELL-ONLY (GRID_SELL_ONLY) - no buys; a slice "
+                f"sells only when it clears its profit line, never at a loss."
+                if _owner_sell_only else
                 f"[GRID] {branch.bot_name}: SELL-ONLY - this branch may sell its slices but "
                 f"never buy more. Set at adoption because the position was over the 20% rule, "
                 f"so every sale banks profit AND reduces the concentration."
@@ -8659,6 +8698,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             if _entry and price <= _entry * (1 - _stop_pct):
                 _stop_slice = _stop_candidate
                 break
+    # Under GRID_SELL_ONLY the stop-loss sale is off: that mode exists so a
+    # slice is only ever sold at a profit. The two remaining exits both
+    # require one (_pick_profitable_slice_to_sell, _pick_parked_slice_to_sell),
+    # and clearing it here, before the parked check, keeps that exit open.
+    if _owner_sell_only:
+        _stop_slice = None
 
     # A branch as full as its levels cannot buy, so the spacing gate is
     # protecting a rebuy that cannot happen - see GRID_PARKED_MIN_NET_PCT.

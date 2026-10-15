@@ -83,7 +83,7 @@ def _below_buy(branches):
 
 def assess(*, hours_since_last_fill, refusals_by_product=None,
            cycle_errors=None, branches=None, readable=True, reason=None,
-           halted=False):
+           halted=False, sell_only=False):
     """Verdict on a quiet fleet. Never guesses from missing inputs.
 
     hours_since_last_fill - None when it could not be read.
@@ -108,6 +108,20 @@ def assess(*, hours_since_last_fill, refusals_by_product=None,
                 "this_is_unknown_not_healthy": True}
 
     below_buy = _below_buy(branches)
+    if sell_only and not halted:
+        # GRID_SELL_ONLY, 2026-10-15: the grid runs but cannot buy, and sells a
+        # slice only at a profit. A branch under its buy price is therefore
+        # expected to sit, and saying "QUIET" or "HALTED" would both be wrong.
+        hrs_s = _f(hours_since_last_fill)
+        return {"verdict": "SELL_ONLY", "alarm": False,
+                "hours_since_last_fill": None if hrs_s is None else round(hrs_s, 2),
+                "below_buy_price": below_buy[:10],
+                "reason": ("GRID_SELL_ONLY is on: no branch buys, and a slice sells only "
+                           "when it clears its own profit line - never at a loss"
+                           + (f". {len(below_buy)} branch(es) are under their buy price "
+                              f"and will not buy" if below_buy else "")
+                           + ". Set GRID_SELL_ONLY to false to let the grid buy again."),
+                "this_is_sell_only_not_quiet": True}
     if halted:
         hrs_h = _f(hours_since_last_fill)
         return {"verdict": "HALTED", "alarm": True,
