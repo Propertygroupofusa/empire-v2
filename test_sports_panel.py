@@ -58,9 +58,12 @@ ok("the board address is empty or https", url is not None and (url.group(1) == "
 
 print("\nIT ESCAPES WHAT ANOTHER SERVICE SENDS")
 ok("there is an escape helper", "function sportsEsc(" in code)
-for field in ("team", "g.sport", "g.price", "g.favorite", "g.better_price.site", "sportsWhen(g.start)"):
+for field in ("team", "g.price", "g.book", "g.favorite", "g.better_price.site", "sportsWhen(g.start)",
+              "a.event", "b.side", "b.site", "b.price", "code"):
     ok(f"{field} is escaped before it is drawn", f"sportsEsc({field})" in code)
-ok("numbers are formatted, not pasted", "Number(g.wins_on_100).toFixed(2)" in code)
+ok("numbers are formatted, not pasted",
+   "Number(g.wins_on_100).toFixed(2)" in code and "Number(b.stake).toFixed(2)" in code)
+ok("a sport name is escaped too", "sportsEsc(SPORT_NAMES[g.sport] || g.sport)" in code)
 
 print("\nIT SAYS WHAT IS MISSING INSTEAD OF DRAWING NOTHING")
 ok("no address yet -> it says how to get one", "Not connected yet" in code and "Generate Domain" in code)
@@ -68,6 +71,11 @@ ok("an unreachable board says so", "Sports board unreachable" in code)
 ok("no finished games -> the scorecard says why", "no finished games scored yet" in code)
 ok("a loss and a profit carry a sign and a word",
    "' profit'" in code and "' loss'" in code and "'+$'" in code)
+
+print("\nPICKING A SPORT ONLY REDRAWS")
+pick = code[code.index("function sportsPick("):code.index("function drawSports(")]
+ok("tapping a sport fetches nothing", "fetch(" not in pick and "drawSports()" in pick)
+ok("the arbitrage list is the after-fees one", "arbs_after_fees" in code)
 
 print("\nIT DOES NOT HAMMER THE BOARD")
 ok("refreshes every 5 minutes", "setInterval(refreshSports, 300000)" in HTML)
