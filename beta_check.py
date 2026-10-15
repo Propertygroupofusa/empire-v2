@@ -196,19 +196,33 @@ def scan(configs, window_returns, **kw):
             "TOO_FEW_INSTRUMENTS": 6}
     out.sort(key=lambda o: (rank.get(o["verdict"], 9), o["config"]))
     actionable = [o for o in out if o["can_act_on_it"]]
+    n_in = len([o for o in out if o["verdict"] == "EDGE_SURVIVES_A_FALL"])
+    n_out = len([o for o in out if o["verdict"] in ("ROBUST_NEGATIVE", "FAILED_THE_FALL")])
+    # Say what the WINDOW was, not a fixed sentence. "None has been shown a
+    # falling market" was printed under a window where all three coins fell
+    # (FLOKI -3.70%, TIA -3.73%, BONK -4.31%, 2026-10-15) - false on its face,
+    # right above the numbers that contradict it.
+    moves = [w for w in (_num(v) for v in (window_returns or {}).values()) if w is not None]
+    any_fell = any(w < 0 for w in moves)
+    any_rose = any(w > 0 for w in moves)
+    if n_in:
+        said_in = f"{n_in} survived a falling instrument. "
+    elif not any_fell:
+        said_in = "None has been shown a falling market, so none can be ruled IN. "
+    else:
+        said_in = "None passed the falling-market test, so none can be ruled IN. "
+    if n_out or any_rose:
+        said_out = (f"{n_out} can be ruled OUT now, because a long-only result that loses "
+                    f"in a rising market loses for real.")
+    else:
+        said_out = ("None can be ruled OUT either: a loss only counts against a setting "
+                    "when its coin rose, and no coin rose in this window.")
     return {
         "configs": out,
         "actionable": [o["config"] for o in actionable],
         "rule_out": [o["config"] for o in out if o["verdict"] in
                      ("ROBUST_NEGATIVE", "FAILED_THE_FALL")],
         "rule_in": [o["config"] for o in out if o["verdict"] == "EDGE_SURVIVES_A_FALL"],
-        "detail": (
-            f"{len(out)} configuration(s) judged. "
-            + (f"{len([o for o in out if o['verdict'] == 'EDGE_SURVIVES_A_FALL'])} survived a "
-               f"falling instrument. " if any(o["verdict"] == "EDGE_SURVIVES_A_FALL" for o in out)
-               else "None has been shown a falling market, so none can be ruled IN. ")
-            + f"{len([o for o in out if o['verdict'] in ('ROBUST_NEGATIVE', 'FAILED_THE_FALL')])} "
-              f"can be ruled OUT now, because a long-only result that loses in a rising "
-              f"market loses for real."),
+        "detail": f"{len(out)} configuration(s) judged. " + said_in + said_out,
         "is_a_measurement_not_a_change": True,
     }

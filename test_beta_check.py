@@ -124,6 +124,24 @@ def test_the_scan_separates_what_can_be_ruled_out_from_what_cannot():
     out = bc.scan({"1.0%@6h": RUNG_1_0_AT_6H, "3.0%@72h": RUNG_3_0_AT_72H}, WINDOW)
     assert "1.0%@6h" in out["rule_out"]
     assert out["rule_in"] == []
+    # BTC fell in this window, so the detail must not say no fall was seen.
+    assert "None has been shown a falling market" not in out["detail"]
+    assert "None passed the falling-market test" in out["detail"]
+
+
+def test_the_detail_never_denies_a_fall_that_is_on_the_screen():
+    """2026-10-15: all three coins fell and the panel said 'None has been
+    shown a falling market' directly above those three red numbers."""
+    window = {"FLOKI-USD": -3.70, "TIA-USD": -3.73, "BONK-USD": -4.31}
+    out = bc.scan({"1.0%@6h": {"FLOKI-USD": -1.805, "TIA-USD": -1.343, "BONK-USD": -1.567}},
+                  window)
+    assert "None has been shown a falling market" not in out["detail"]
+    assert "a long-only result that loses in a rising market" not in out["detail"]
+    assert "no coin rose in this window" in out["detail"]
+
+
+def test_a_window_with_no_fall_still_says_so():
+    out = bc.scan({"x": {"A": 1.0, "B": 0.5, "C": 0.2}}, {"A": 19.0, "B": 16.0, "C": 8.0})
     assert "None has been shown a falling market" in out["detail"]
 
 

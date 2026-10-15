@@ -1687,7 +1687,10 @@
 
     <div class="section-title">🧪 Did it earn that, or did the coin go up?</div>
     <div class="panel">
-        <div class="panel-sub">The resting-rung study measured three coins over the same 21 days.
+        <div class="panel-sub"><strong>Where this started - the FIRST study, not today's.</strong>
+            The button below re-runs it on the latest 21 days, so its coins and numbers will
+            differ from these.
+            <br><br>The first resting-rung study measured three coins over the same 21 days.
             <strong>BONK rose 19.27%</strong> and its best rung made money. <strong>ONDO rose
             16.52%</strong> and did the same. <strong>BTC fell 2.61%</strong> and every rung lost -
             every target, every horizon. Its widest setting filled <strong>0%</strong> of the time
@@ -2401,7 +2404,11 @@ function fmtUsd(n) {
     const num = Number(n);
     const rounded = Math.round(num * 100) / 100;
     const display = rounded === 0 ? 0 : num;
-    return '$' + display.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    // The sign goes in front of the dollar sign. toLocaleString on a
+    // negative printed "$-575.38", which the owner sent back as "fix this":
+    // it reads as a typo, and next to a "+" figure it is easy to miss.
+    const body = Math.abs(display).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (display < 0 ? '-$' : '$') + body;
 }
 
 // A COIN PRICE, not a dollar balance: keep enough significant digits
@@ -4004,8 +4011,6 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
     const realizedColor = realized > 0 ? 'var(--green)' : (realized < 0 ? 'var(--red)' : 'var(--text-dim)');
     const unrealized = statusData ? statusData.total_unrealized_net_usd : null;
     const unrealizedKnown = unrealized !== null && unrealized !== undefined;
-    const combined = unrealizedKnown ? realized + unrealized : null;
-    const combinedColor = combined !== null ? (combined > 0 ? 'var(--green)' : (combined < 0 ? 'var(--red)' : 'var(--text-dim)')) : 'var(--text-dim)';
     // BANKED LEADS. The combined total led this card until 2026-10-03, on the
     // reasoning that realized cannot go negative so only the sum can warn.
     // That reasoning is sound and the sum is still here - but headlining it
@@ -4018,19 +4023,15 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
     // the only figure that is actually money. The open mark keeps its own
     // line, in red, named as the one that can move against you - demoting it
     // would make the day it matters invisible, which is worse than alarming.
-    // The sum stays too, labelled as a sum of two unlike things rather than
-    // as a total. An unknown unrealized leg shows as unknown and is never
-    // backfilled with realized.
-    const gapWarning = (combined !== null && realized > 0 && combined < 0)
-        ? `<div style="margin-top:10px; padding:9px 11px; border:1px solid #5a4420; background:#241b0d;
-                   border-radius:6px; font-size:0.8em; color:#f0c97a;">
-               ⚠️ Banked is +${fmtUsd(realized)} while open slices are marked -${fmtUsd(Math.abs(combined - realized))}
-               below their entries. A NORMAL grid exit only sells above its own entry, so most of that
-               gap is sitting in coin still held rather than in the trade log — but a FORCED close
-               (emergency exit, retirement, branch liquidation) ignores that rule and books a
-               real loss, so check the trade log too rather than assuming it is all unrealized.
-           </div>`
-        : '';
+    // An unknown unrealized leg shows as unknown and is never backfilled
+    // with realized.
+    //
+    // THE SUM IS GONE (2026-10-15). It stayed on as "the two added
+    // together", labelled as a sum of unlike things - and the owner still
+    // read "-$127.36" as the account's result and sent it back as "fix
+    // this". Banked is cash; the open mark is coin priced at this minute.
+    // Adding them answers no question the owner asks, so it is not shown.
+    // The amber gap warning went with it: it was the same sum in words.
     return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
         <div style="font-size:1.25em; font-weight:700; color:${realizedColor};">
             🏆 Banked — real money, all-time: ${realized >= 0 ? '+' : ''}${fmtUsd(realized)}
@@ -4050,18 +4051,18 @@ function renderGridRealizedTotalBanner(historyTotals, statusData) {
             The difference is a measurement correction, <strong>not money the grid earned</strong>.
         </div>` : ''}
         <div style="font-size:0.92em; font-weight:700; margin-top:12px; color:${unrealizedKnown ? (unrealized < 0 ? 'var(--red)' : 'var(--green)') : 'var(--text-dim)'};">
-            📉 Still open, marked at today's price: ${unrealizedKnown ? `${unrealized >= 0 ? '+' : ''}${fmtUsd(unrealized)}` : 'unknown right now (a live price fetch failed)'}
+            ${!unrealizedKnown
+                ? '📉 Coins still held: price unknown right now (a live price fetch failed)'
+                : unrealized < 0
+                    ? `📉 Coins still held are priced ${fmtUsd(Math.abs(unrealized))} under what was paid for them`
+                    : `📈 Coins still held are priced ${fmtUsd(unrealized)} over what was paid for them`}
         </div>
         <div style="font-size:0.8em; color:var(--text-dim); margin-top:2px;">
-            Coin you still hold, priced as of now — not money lost, and the only one of these two that
-            can move against you. It becomes real only if a slice is sold below its own entry, which a
-            normal grid exit never does. A forced close (emergency exit, retirement, liquidation) can.
+            Not money lost, and not taken off the banked figure above: nothing has been sold.
+            It is the price of the coin you hold at this minute, it moves with the market, and it
+            only becomes real if a slice is sold below what it cost - which a normal grid exit
+            never does (a forced close, such as retiring a coin, can).
         </div>
-        <div style="font-size:0.8em; color:var(--text-dim); margin-top:10px; padding-top:8px; border-top:1px solid var(--border);">
-            The two added together: <strong style="color:${combinedColor};">${combined === null ? 'unknown' : `${combined >= 0 ? '+' : ''}${fmtUsd(combined)}`}</strong>
-            — one is cash and one is a price mark, so this is a sum of two unlike things rather than a profit figure.
-        </div>
-        ${gapWarning}
     </div>`;
 }
 
@@ -4091,15 +4092,22 @@ function renderGridCloseAllBanner(data) {
     }
     const isProfit = total > 0;
     const color = isProfit ? 'var(--green)' : (total < 0 ? 'var(--red)' : 'var(--text-dim)');
+    // Worded as what the coin is priced at against what it cost, because
+    // "Total right now ... $-575.38" was read as money gone. Nothing in this
+    // figure has been sold; it is the same mark as the line in the card above.
+    const n = `${withSlices} branch${withSlices === 1 ? '' : 'es'}`;
     return `<div style="margin-top:14px; padding:14px; background:var(--bg); border-radius:8px;">
         <div style="font-size:1.05em; font-weight:700; color:${color};">
-            💰 Total right now across all ${withSlices} branch${withSlices === 1 ? '' : 'es'} holding a real open slice:
-            ${isProfit ? '+' : ''}${fmtUsd(total)}
+            ${isProfit
+                ? `💰 Coins held in ${n}: priced ${fmtUsd(total)} over what was paid, after selling fees`
+                : total < 0
+                    ? `💰 Coins held in ${n}: priced ${fmtUsd(Math.abs(total))} under what was paid, after selling fees`
+                    : `💰 Coins held in ${n}: priced right at what was paid`}
         </div>
         <div style="font-size:0.8em; color:var(--text-dim); margin-top:4px;">
             ${isProfit
-                ? 'Real, fee-adjusted - this is genuinely up right now. You can close every open slice, in every branch, at once below.'
-                : 'Real, fee-adjusted - not currently profitable as a whole, so the close-everything button stays off. Individual branches can still be handled one at a time above.'}
+                ? 'This is up right now. The button below sells every open slice in every branch at once and books it.'
+                : 'Nothing is sold and nothing is lost while the coin is held - this shrinks as prices come back. The button below only turns on when this is above what was paid, so it can never sell everything at a loss.'}
         </div>
         <button id="grid-close-all-btn" onclick="closeAllGridSlices(this)" ${isProfit ? '' : 'disabled'}
             style="margin-top:10px; padding:10px 16px; border-radius:8px; border:none; font-weight:600; cursor:${isProfit ? 'pointer' : 'not-allowed'};
@@ -6708,9 +6716,75 @@ async function runMoneyCheck() {
 let lastProx = {};
 let proxTickAt = 0;
 
+// WHY a branch under its buy line is not buying, in the bot's own words.
+// Every refusal in the dip-buy path writes one row to the activity feed
+// (CASH_RESERVE, EXITING, CONCENTRATION, UNBACKED, INVENTORY_DEPTH,
+// ADOPTED_RUNG), repeated at most every 15 minutes while it holds. Before
+// this the row printed "↓ 0.00% buy at ..." - true arithmetic, since the
+// price was already past the line, but it read as "about to buy" on 15
+// branches that the bot was refusing on purpose. The owner sent it back
+// as "fix this". A reason is shown only when the bot logged it; nothing
+// here guesses one.
+const PROX_REFUSALS = {
+    INVENTORY_DEPTH: 'its open slices are deeper than any that has recovered before, so the bot adds no new dollars here',
+    EXITING: 'this coin is marked to be exited, so it takes no new dollars (nothing is sold)',
+    UNBACKED: 'the books show more coin than the wallet holds, so the bot will not add to it',
+    CASH_RESERVE: 'spendable cash is at the reserve floor',
+    CONCENTRATION: 'this coin is at the 20% ceiling',
+    ADOPTED_RUNG: 'no rung size is left for coin the account already owned',
+};
+const PROX_REASON_FRESH_MS = 2 * 3600 * 1000;
+let proxReasons = {};
+let proxReasonsAt = 0;
+let proxReasonsOk = false;
+let proxLastData = null;
+
+async function refreshProxReasons() {
+    if (Date.now() - proxReasonsAt < 120000) return;
+    proxReasonsAt = Date.now();
+    try {
+        const feed = await apiGet('/family-tree-status/activity-feed?limit=200', 20000);
+        const out = {};
+        (feed && feed.events || []).forEach(ev => {
+            if (!ev || !PROX_REFUSALS[ev.event_type] || out[ev.product_id]) return;
+            const at = Date.parse((ev.created_at || '') + (/[zZ]|[+-]\d\d:?\d\d$/.test(ev.created_at || '') ? '' : 'Z'));
+            if (!isFinite(at) || Date.now() - at > PROX_REASON_FRESH_MS) return;
+            out[ev.product_id] = { type: ev.event_type, at };
+        });
+        proxReasons = out;
+        proxReasonsOk = true;
+    } catch (e) {
+        proxReasonsOk = false;
+    }
+    if (proxLastData) renderGridProximity(proxLastData);
+}
+
+// The line under a row whose price is already below its buy line.
+function proxUnderLine(r) {
+    if (!r.under) return '';
+    const rungs = r.openSlices > r.levels
+        ? `${r.openSlices} slices held on ${r.levels} rung${r.levels === 1 ? '' : 's'}`
+        : `${r.openSlices} of ${r.levels} rung${r.levels === 1 ? '' : 's'}`;
+    let why;
+    if (r.full) {
+        why = `not buying - all rungs are full (${rungs}); a full branch buys again only after a sell`;
+    } else if (r.refusal) {
+        why = `not buying - ${PROX_REFUSALS[r.refusal]}`;
+    } else if (!proxReasonsOk) {
+        why = `the reason it has not bought could not be read just now`;
+    } else {
+        why = `a buy is due - the bot has logged no reason to refuse it (${rungs} held)`;
+    }
+    return `<div class="prox-ends" style="color:${r.blocked ? 'var(--text-dim)' : 'var(--navy)'}; font-weight:600;">
+                <span>${why}</span>
+            </div>`;
+}
+
 function renderGridProximity(d) {
     const wrap = document.getElementById('grid-proximity-wrap');
     if (!wrap) return;
+    proxLastData = d;
+    refreshProxReasons();
     try {
         const branches = (d.branches || []).filter(b => b.current_price != null && b.reference_price);
         if (branches.length === 0) {
@@ -6747,14 +6821,33 @@ function renderGridProximity(d) {
             }
 
             const pos = Math.max(0, Math.min(1, (cur - buyAt) / (bandTop - buyAt)));
+            // Already past the buy line: say how far, and whether the bot
+            // is refusing it, instead of "needs 0.00%".
+            const under = cur < buyAt;
+            const underPct = under ? (buyAt - cur) / buyAt * 100 : 0;
+            const levels = Number(b.num_levels) || 0;
+            const openSlices = b.open_slices != null ? Number(b.open_slices) : slices.length;
+            const full = levels > 0 && openSlices >= levels;
+            const refusal = (proxReasons[b.product_id] || {}).type || null;
+            const blocked = under && (full || !!refusal) && nextAction === 'buy';
             return { b, g, ref, cur, buyAt, bandTop, sellAt, pos,
                      nextAction, nextDist, nextColor, nextAt,
-                     openSlices: slices.length };
+                     openSlices, levels, under, underPct, full, refusal, blocked };
         });
 
+        // One note for the whole fleet when no branch has a stop, instead
+        // of the same red warning repeated on every row.
+        const withOpen = rows.filter(r => r.b.open_slices);
+        const noStopAll = withOpen.length > 0 && withOpen.every(r =>
+            r.b.stop_pct != null && Number(r.b.stop_pct) <= 0);
+        rows.forEach(r => { r.noStopNoted = noStopAll; });
+
         // Closest to acting, first. This is the running order of what is
-        // about to happen, which is the whole point of the panel.
-        rows.sort((a, z) => a.nextDist - z.nextDist);
+        // about to happen, which is the whole point of the panel. A branch
+        // the bot is refusing is not about to act, so those go last, deepest
+        // under the line first.
+        rows.sort((a, z) => (a.blocked - z.blocked)
+            || (a.blocked ? z.underPct - a.underPct : a.nextDist - z.nextDist));
 
         const bar = r => {
             const coin = r.b.product_id.replace('-USD', '');
@@ -6798,22 +6891,39 @@ function renderGridProximity(d) {
                         <span>buy ${fmtCoinPrice(r.buyAt)}</span>
                         <span>now ${fmtCoinPrice(r.cur)}</span>
                     </div>
+                    ${proxUnderLine(r)}
                     ${stopLine(r)}
                 </div>
                 <div class="prox-next">${bothLegs(r, moveCls, arrow)}</div>
             </div>`;
         };
 
-        const closest = rows[0];
+        const acting = rows.filter(r => !r.blocked);
+        const closest = acting[0] || null;
+        const blockedN = rows.length - acting.length;
+        const coinOf = r => r.b.product_id.replace('-USD', '');
+        const nearestText = !closest
+            ? `No branch can act right now - ${blockedN} under the buy line are being held back (reasons on each row)`
+            : closest.under
+                ? `Nearest: ${coinOf(closest)} is ${closest.underPct.toFixed(2)}% under its buy line - a buy is due`
+                : closest.nextDist <= 0
+                    ? `Nearest: ${coinOf(closest)} is at its ${closest.nextAction} line`
+                    : `Nearest: ${coinOf(closest)} needs ${closest.nextDist.toFixed(2)}% to ${closest.nextAction}`;
+        const blockedNote = blockedN && closest
+            ? `<div style="font-size:0.72em; color:var(--text-dim); margin:-2px 0 8px;">${blockedN} branch${blockedN === 1 ? ' is' : 'es are'} already under the buy line and held back on purpose - listed last, with the bot's reason on each.</div>`
+            : '';
+        const stopNote = noStopAll
+            ? `<div style="font-size:0.72em; color:var(--text-dim); margin:-2px 0 8px;">No branch has a stop: a slice is never sold at a loss, so it waits for the price to come back however far it falls.</div>`
+            : '';
         proxTickAt = Date.now();
         const legend = `
             <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:0.72em; color:var(--text-dim); margin-bottom:8px;">
                 <span><span style="display:inline-block; width:10px; height:3px; background:var(--navy); vertical-align:middle;"></span> buy trigger</span>
                 <span><span style="display:inline-block; width:10px; height:3px; background:var(--green); vertical-align:middle;"></span> sell trigger (open slice)</span>
                 <span><span style="display:inline-block; width:10px; height:3px; background:var(--text-dim); opacity:0.55; vertical-align:middle;"></span> reference</span>
-                <span style="font-weight:600; color:var(--text);"><span class="tick-dot"></span>Nearest: ${closest.b.product_id.replace('-USD', '')} needs ${closest.nextDist.toFixed(2)}% to ${closest.nextAction}</span>
+                <span style="font-weight:600; color:var(--text);"><span class="tick-dot"></span>${nearestText}</span>
                 <span id="prox-age" style="color:var(--text-dim);">live</span>
-            </div>`;
+            </div>${blockedNote}${stopNote}`;
         wrap.innerHTML = legend + rows.map(bar).join('');
     } catch (e) {
         wrap.innerHTML = `<div class="coin-history-empty">Could not draw branch proximity (${e.message}).</div>`;
@@ -6831,6 +6941,7 @@ function stopLine(r) {
     const pct = Number(b.stop_pct) * 100;
 
     if (pct <= 0) {
+        if (r.noStopNoted) return '';
         return `<div class="prox-ends" style="color:var(--red); font-weight:600;">
                     <span>\u26a0\ufe0f no stop on this branch</span>
                     <span>a slice here can fall without limit</span>
@@ -8621,12 +8732,14 @@ async function runFleetReview() {
 // the panel failing at the one job it has.
 function bothLegs(r, moveCls, arrow) {
     const buy = `
-        <div class="prox-dist ${r.nextAction === 'buy' ? moveCls : ''}"
-             style="${r.nextAction === 'buy' && moveCls ? '' : `color:${r.nextAction === 'buy' ? 'var(--navy)' : 'var(--text-dim)'};`}
+        <div class="prox-dist ${r.nextAction === 'buy' && !r.blocked ? moveCls : ''}"
+             style="${r.nextAction === 'buy' && moveCls && !r.blocked ? '' : `color:${r.nextAction === 'buy' && !r.blocked ? 'var(--navy)' : 'var(--text-dim)'};`}
                     ${r.nextAction === 'buy' ? '' : 'font-size:0.82em; font-weight:600;'}">
-            \u2193 ${Math.max(0, (r.cur - r.buyAt) / r.cur * 100).toFixed(2)}%
+            ${r.under
+                ? `${r.underPct.toFixed(2)}% under`
+                : `\u2193 ${Math.max(0, (r.cur - r.buyAt) / r.cur * 100).toFixed(2)}%`}
         </div>
-        <div class="prox-at">buy at ${fmtCoinPrice(r.buyAt)}</div>`;
+        <div class="prox-at">${r.under ? 'buy line' : 'buy at'} ${fmtCoinPrice(r.buyAt)}</div>`;
 
     if (r.sellAt == null) {
         // Nothing open means nothing to sell - said out loud, because a
@@ -8638,7 +8751,7 @@ function bothLegs(r, moveCls, arrow) {
         <div class="prox-dist ${r.nextAction === 'sell' ? moveCls : ''}"
              style="${r.nextAction === 'sell' && moveCls ? '' : `color:${r.nextAction === 'sell' ? 'var(--green)' : 'var(--text-dim)'};`}
                     ${r.nextAction === 'sell' ? '' : 'font-size:0.82em; font-weight:600;'}">
-            \u2191 ${Math.max(0, (r.sellAt - r.cur) / r.cur * 100).toFixed(2)}%
+            ${r.sellAt <= r.cur ? 'at sell line' : `\u2191 ${((r.sellAt - r.cur) / r.cur * 100).toFixed(2)}%`}
         </div>
         <div class="prox-at">sell at ${fmtCoinPrice(r.sellAt)}</div>`;
 
@@ -13090,6 +13203,27 @@ async function loadLeague() {
         const crownTone = d.crown_status === 'CONFIRMED' ? good
                         : d.crown_status === 'PROVISIONAL' ? warn : dim;
 
+        // "4 closed round trip(s); a coin ranks at 5. A perfect record over
+        // two trades would take the crown off a coin with eighty." was
+        // printed in full on every still-qualifying row - five copies of
+        // one rule. The rule now sits once under the header; each row says
+        // only how many trades it still needs.
+        const rankAt = c => {
+            const m = /ranks at (\d+)/.exec(c.why_not_ranked || '');
+            return m ? Number(m[1]) : null;
+        };
+        const shortWhy = c => {
+            const at = rankAt(c);
+            if (at == null || c.trades == null) return c.why_not_ranked;
+            const left = Math.max(1, at - c.trades);
+            return `needs ${left} more closed trade${left === 1 ? '' : 's'} to be ranked`;
+        };
+        const sq = d.still_qualifying || [];
+        const sqAt = sq.map(rankAt).find(v => v != null);
+        const sqRule = sqAt != null
+            ? `<div style="font-size:0.8em;color:${dim};padding:0 12px 6px;line-height:1.5">A coin is ranked once it has ${sqAt} closed round trips, so a short lucky streak cannot take the crown.</div>`
+            : '';
+
         const row = (c, i) => `
           <div style="display:flex;gap:12px;align-items:baseline;padding:9px 12px;
                border-left:3px solid ${c.coin === d.crown ? crownTone : 'transparent'};
@@ -13104,7 +13238,7 @@ async function loadLeague() {
               ${c.deployed_usd != null ? ' · ' + money(c.deployed_usd) + ' at work' : ''}
               ${c.window_return_pct != null ? ` · coin ${c.window_return_pct > 0 ? '+' : ''}${c.window_return_pct.toFixed(1)}%` : ''}
               ${c.config_status && c.config_status !== 'CURRENT' ? ` · <span style="color:${bad}">${esc2(c.config_status.replace(/_/g, ' ').toLowerCase())}</span>` : ''}
-              ${c.why_not_ranked ? '<br><span style="color:' + warn + '">' + esc2(c.why_not_ranked) + '</span>' : ''}
+              ${c.why_not_ranked ? '<br><span style="color:' + warn + '">' + esc2(shortWhy(c)) + '</span>' : ''}
             </div>
           </div>`;
 
@@ -13136,7 +13270,7 @@ async function loadLeague() {
           ${(d.ranked || []).map(row).join('')}
           ${(d.still_qualifying || []).length ? `<div style="font-size:0.72em;letter-spacing:.1em;
              text-transform:uppercase;color:${dim};margin:14px 0 4px;padding:0 12px">Still qualifying</div>
-             ${d.still_qualifying.map(row).join('')}` : ''}
+             ${sqRule}${d.still_qualifying.map(row).join('')}` : ''}
 
           <div style="font-size:0.82em;color:${dim};line-height:1.6;margin-top:14px;padding:10px 12px;
                border-left:3px solid var(--border,#8884)">
