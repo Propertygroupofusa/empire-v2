@@ -706,6 +706,19 @@
             <div id="cryptoCoinbaseList">Loading...</div>
         </div>
 
+        <div class="panel" id="sportsPanel">
+            <h3>🏈 Sports: Who's Likely to Win</h3>
+            <p style="color: var(--text-dim); font-size: 0.85em; margin-bottom: 10px;">
+                From the Delfina sports board - a separate service with its own code, read here and nowhere
+                else. It reads public odds and scores only and places no bets; nothing in this panel touches
+                the Alpaca or Coinbase accounts. Chance = DraftKings' odds with its cut taken out. "$100 wins"
+                is the profit if that team wins; the $100 is lost if they don't.
+            </p>
+            <div id="sportsScorecard" style="margin-bottom: 12px;"></div>
+            <div id="sportsGames">Loading...</div>
+            <p id="sportsMeta" style="color: var(--text-dim); font-size: 0.8em; margin-top: 10px;"></p>
+        </div>
+
         <div class="panel">
             <h3>🔍 YouTube SEO Backfill</h3>
             <p style="color: var(--text-dim); font-size: 0.85em; margin-bottom: 10px;">
@@ -1756,6 +1769,99 @@
         refreshDividends();
         refreshMeasurements();
         refreshChart();
+        // ---- Sports board (Delfina) -------------------------------------
+        // Delfina's public Railway address. Empty until that service has one
+        // (Railway -> Delfina -> Settings -> Networking -> Generate Domain).
+        // The board is public odds and scores served read-only with an open
+        // CORS header; this page only GETs it and never sends anything back.
+        const SPORTS_BOARD_URL = '';
+
+        function sportsEsc(v) {
+            return String(v == null ? '' : v).replace(/[&<>"']/g,
+                c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+        }
+
+        function sportsMoney(v) {
+            if (v == null) return '';
+            if (Math.abs(v) < 0.005) return '$0.00';
+            return (v > 0 ? '+$' : '\u2212$') + Math.abs(v).toFixed(2) + (v > 0 ? ' profit' : ' loss');
+        }
+
+        function sportsWhen(iso) {
+            const d = new Date(iso);
+            if (isNaN(d)) return '';
+            return d.toLocaleString([], {weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'});
+        }
+
+        async function refreshSports() {
+            const gamesEl = document.getElementById('sportsGames');
+            const cardEl = document.getElementById('sportsScorecard');
+            const metaEl = document.getElementById('sportsMeta');
+            if (!gamesEl) return;
+            if (!SPORTS_BOARD_URL) {
+                gamesEl.textContent = 'Not connected yet: the Delfina service needs a public address '
+                    + '(Railway \u2192 Delfina \u2192 Settings \u2192 Networking \u2192 Generate Domain).';
+                return;
+            }
+            const base = SPORTS_BOARD_URL.replace(/\/$/, '');
+            try {
+                const r = await fetch(base + '/api/board', {cache: 'no-store'});
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const d = await r.json();
+                const a = (d.scorecard && d.scorecard.all) || {games: 0};
+                if (!a.games) {
+                    cardEl.innerHTML = '<span style="color: var(--text-dim); font-size: 0.85em;">'
+                        + 'Scorecard: no finished games scored yet. Each game\'s odds are saved before it starts '
+                        + 'and scored when the final comes in.</span>';
+                } else {
+                    const won = Math.round(a.fav_won / a.games * 100);
+                    const exp = Math.round(a.expected / a.games * 100);
+                    const col = a.pnl > 0 ? 'var(--green)' : (a.pnl < 0 ? 'var(--red)' : 'var(--text-dim)');
+                    cardEl.innerHTML = '<div style="font-weight: 700; color: var(--navy);">Favorites won '
+                        + a.fav_won + ' of ' + a.games + ' (' + won + '%) \u00b7 the odds expected ' + exp + '%</div>'
+                        + '<div style="font-size: 0.85em;">$100 on every favorite at DraftKings: '
+                        + '<span style="color: ' + col + '; font-weight: 700;">' + sportsEsc(sportsMoney(a.pnl)) + '</span></div>';
+                }
+                const games = d.games || [];
+                if (!games.length) {
+                    gamesEl.textContent = 'No upcoming games with odds yet.';
+                } else {
+                    gamesEl.innerHTML = games.slice(0, 12).map(g => {
+                        const ch = g.chances || {};
+                        const pct = side => Math.round((ch[side] || 0) * 100);
+                        const name = (side, team) => {
+                            const t = sportsEsc(team) + ' ' + pct(side) + '%';
+                            return g.favorite === team ? '<b>' + t + '</b>' : t;
+                        };
+                        const favSide = g.favorite === g.home ? 'home' : (g.favorite === g.away ? 'away' : 'draw');
+                        const seg = side => '<span style="display:block;height:100%;width:' + pct(side) + '%;background:'
+                            + (side === favSide ? 'var(--navy)' : 'var(--border)') + '"></span>';
+                        const bar = seg('away') + ('draw' in ch ? seg('draw') : '') + seg('home');
+                        let line = 'Bet ' + sportsEsc(g.favorite) + ': DraftKings ' + sportsEsc(g.price)
+                            + ', $100 wins $' + Number(g.wins_on_100).toFixed(2) + '.';
+                        if (g.better_price) {
+                            line += ' Better price: ' + sportsEsc(g.better_price.site) + ', $100 wins $'
+                                + Number(g.better_price.wins_on_100).toFixed(2) + '.';
+                        }
+                        return '<div style="border-top: 1px solid var(--border); padding: 8px 0;">'
+                            + '<div style="font-size: 0.8em; color: var(--text-dim);">' + sportsEsc(g.sport) + ' \u00b7 '
+                            + sportsEsc(sportsWhen(g.start)) + ('draw' in ch ? ' \u00b7 Draw ' + pct('draw') + '%' : '') + '</div>'
+                            + '<div style="display: flex; justify-content: space-between; gap: 10px;"><span>'
+                            + name('away', g.away) + '</span><span style="text-align: right;">' + name('home', g.home) + '</span></div>'
+                            + '<div style="display: flex; gap: 2px; height: 8px; border-radius: 4px; overflow: hidden; margin: 4px 0;">' + bar + '</div>'
+                            + '<div style="font-size: 0.8em; color: var(--text-dim);">' + line + '</div></div>';
+                    }).join('');
+                }
+                metaEl.innerHTML = 'Showing ' + Math.min(12, games.length) + ' of ' + games.length
+                    + ' games in the next 4 days \u00b7 <a href="' + sportsEsc(base) + '/" target="_blank" rel="noopener">Full sports board</a>';
+            } catch (e) {
+                gamesEl.textContent = 'Sports board unreachable: ' + e.message;
+            }
+        }
+
+        refreshSports();
+        setInterval(refreshSports, 300000); // the board reads ESPN hourly; every 5 min is plenty
+
         setInterval(refreshStatus, 30000);
         setInterval(refreshWithdrawals, 30000);
         setInterval(refreshSignals, 30000);
