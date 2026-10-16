@@ -83,7 +83,7 @@ def _below_buy(branches):
 
 def assess(*, hours_since_last_fill, refusals_by_product=None,
            cycle_errors=None, branches=None, readable=True, reason=None,
-           halted=False, sell_only=False):
+           halted=False, sell_only=False, bounce=False):
     """Verdict on a quiet fleet. Never guesses from missing inputs.
 
     hours_since_last_fill - None when it could not be read.
@@ -108,6 +108,21 @@ def assess(*, hours_since_last_fill, refusals_by_product=None,
                 "this_is_unknown_not_healthy": True}
 
     below_buy = _below_buy(branches)
+    if bounce and not halted:
+        # GRID_BOUNCE_BUYING, 2026-10-16: the grid buys only after a coin is
+        # 2% off its 24h low, and sells a slice only at a profit. A branch
+        # under its buy price may be waiting for that bounce on purpose.
+        hrs_b = _f(hours_since_last_fill)
+        return {"verdict": "BOUNCE_BUYING", "alarm": False,
+                "hours_since_last_fill": None if hrs_b is None else round(hrs_b, 2),
+                "below_buy_price": below_buy[:10],
+                "reason": ("GRID_BOUNCE_BUYING is on: a coin buys only once its price is 2% "
+                           "above its 24-hour low, and a slice sells only when it clears its "
+                           "own profit line - never at a loss"
+                           + (f". {len(below_buy)} branch(es) are under their buy price and "
+                              f"buy only after that bounce" if below_buy else "")
+                           + ". Set GRID_BOUNCE_BUYING to false to go back to sell-only."),
+                "this_is_bounce_buying_not_quiet": True}
     if sell_only and not halted:
         # GRID_SELL_ONLY, 2026-10-15: the grid runs but cannot buy, and sells a
         # slice only at a profit. A branch under its buy price is therefore

@@ -906,6 +906,10 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         # The crypto grid's sell-only switch: no buys, profit sales only. The
         # one thing that runs under STOP_TRADING (crypto_grid_bot.grid_sell_only).
         "grid_sell_only": (os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true",
+        # The grid's bounce-buying switch: buys only after a 2% bounce off the
+        # 24h low, profit sales only. Wins over sell-only when both are on
+        # (crypto_grid_bot.grid_bounce_buying).
+        "grid_bounce_buying": (os.getenv("GRID_BOUNCE_BUYING") or "").strip().lower() == "true",
         **order_block,
     }
 
@@ -9398,9 +9402,12 @@ async def get_grid_status_endpoint(fresh: int = 0):
             # Parsed as crypto_grid_bot.grid_sell_only parses it; read from
             # the environment directly so a failed module import cannot turn
             # the verdict into an error.
+            # GRID_BOUNCE_BUYING runs under STOP_TRADING the same way.
             halted=(os.getenv("STOP_TRADING", "false").lower() == "true"
-                    and (os.getenv("GRID_SELL_ONLY") or "").strip().lower() != "true"),
-            sell_only=(os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true")
+                    and (os.getenv("GRID_SELL_ONLY") or "").strip().lower() != "true"
+                    and (os.getenv("GRID_BOUNCE_BUYING") or "").strip().lower() != "true"),
+            sell_only=(os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true",
+            bounce=(os.getenv("GRID_BOUNCE_BUYING") or "").strip().lower() == "true")
     except Exception as _exc:
         data["silence"] = {"verdict": "UNKNOWN", "alarm": False,
                            "reason": f"{type(_exc).__name__}: {_exc}",

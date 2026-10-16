@@ -146,7 +146,7 @@ def test_the_buy_branch_is_unreachable_in_sell_only():
 
 def test_the_stop_loss_sale_is_off_in_sell_only():
     src, tree = _cycle_tree()
-    override = "    if _owner_sell_only:\n        _stop_slice = None\n"
+    override = "    if _owner_sell_only or _owner_bounce:\n        _stop_slice = None\n"
     assert src.count(override) == 1, "the sell-only override of the stop sale is gone"
     pick = src.index("_stop_slice = _stop_candidate")
     at = src.index(override)
@@ -164,8 +164,9 @@ def test_the_cycle_has_one_sale_and_it_is_profit_or_stop():
 
 def test_the_switch_is_read_once_per_cycle_before_anything_else():
     src, _ = _cycle_tree()
-    gate = src.index('if os.getenv("STOP_TRADING", "false").lower() == "true" and not _owner_sell_only:')
-    assert src.index("_owner_sell_only = grid_sell_only()") < gate < src.index("engine.get_price_and_volatility(")
+    gate = src.index('if os.getenv("STOP_TRADING", "false").lower() == "true" and not _owner_mode:')
+    assert src.index("_owner_mode = grid_owner_mode()") < gate < src.index("engine.get_price_and_volatility(")
+    assert src.index('_owner_sell_only = _owner_mode == "sell_only"') < gate
 
 
 # ---------------------------------------------------------------- reporting
@@ -181,4 +182,4 @@ def test_status_and_grid_status_read_the_switch():
     import pathlib
     src = pathlib.Path(grid.__file__).with_name("routers").joinpath("trading_dashboard.py").read_text()
     assert '"grid_sell_only": (os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true"' in src
-    assert 'sell_only=(os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true")' in src
+    assert 'sell_only=(os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true",' in src

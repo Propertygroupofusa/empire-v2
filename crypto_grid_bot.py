@@ -1637,6 +1637,88 @@ def grid_sell_only() -> bool:
     return (os.getenv(GRID_SELL_ONLY_ENV) or "").strip().lower() == "true"
 
 
+# ---- The owner's bounce-buying switch --------------------------------------
+#
+# GRID_BOUNCE_BUYING=true: the grid buys again, but a coin buys only once its
+# price is GRID_BOUNCE_PCT above its lowest price of the last 24 hours - after
+# a drop, once it has started back up. Selling is unchanged and the stop-loss
+# sale stays off, so a slice still sells only when it clears its profit line.
+#
+# The owner, 2026-10-16: "when you see the market is not bullish and is going
+# down, that's when I want you to start buying. And when you can tell that the
+# market is bullish, that's when I want you to start selling." Measured before
+# it was built, on 180 days of 15-minute prices for the fleet's 21 coins with
+# today's allocations and spacing: buying on every dip banked +$462 and ended
+# holding $4,629 of coin priced $258 under cost; waiting for a 2% bounce off
+# the 24h low banked +$295 and ended holding $3,391 priced $109 OVER cost, and
+# through the Oct 2-15 slide held about $1,700 less coin. Two other gates
+# (above the 3-day average; skip after a 5% 3-day drop) did worse.
+#
+# Like GRID_SELL_ONLY it runs under STOP_TRADING - the Alpaca bots and every
+# other job stay stopped - and it wins when both are on, so switching it off
+# falls straight back to sell-only. Every other buy gate (cash floor,
+# concentration, inventory depth, maker-only) still applies.
+GRID_BOUNCE_BUYING_ENV = "GRID_BOUNCE_BUYING"
+GRID_BOUNCE_PCT = 0.02
+GRID_BOUNCE_CACHE_SECONDS = 60.0
+_bounce_cache = {}
+
+
+def grid_bounce_buying() -> bool:
+    """True only for an explicit "true", parsed exactly as grid_sell_only()."""
+    return (os.getenv(GRID_BOUNCE_BUYING_ENV) or "").strip().lower() == "true"
+
+
+def grid_owner_mode() -> str:
+    """"bounce", "sell_only", or "" when neither owner switch is on.
+    Bounce wins, so turning it off leaves sell-only in force."""
+    if grid_bounce_buying():
+        return "bounce"
+    if grid_sell_only():
+        return "sell_only"
+    return ""
+
+
+def bounce_verdict(last, low_24h, pct: float = GRID_BOUNCE_PCT):
+    """(ok, detail) for one coin. Pure. Anything unreadable is a no."""
+    try:
+        last, low_24h = float(last), float(low_24h)
+    except (TypeError, ValueError):
+        return False, "24h low or price unreadable - no buy"
+    if not (last > 0 and low_24h > 0):
+        return False, "24h low or price unreadable - no buy"
+    up = (last / low_24h - 1) * 100
+    need = low_24h * (1 + pct)
+    if last >= need:
+        return True, f"${last:,.6g} is {up:.2f}% above its 24h low ${low_24h:,.6g}"
+    return False, (f"waiting for a bounce - ${last:,.6g} is {up:.2f}% above its 24h low "
+                   f"${low_24h:,.6g}, needs {pct * 100:.0f}% (${need:,.6g})")
+
+
+async def bounce_signal(session, product_id: str, now: float = None):
+    """(ok, detail) from Coinbase's public 24h stats - a GET, no key. Fails
+    CLOSED: a read that does not answer means no buy, never a guessed yes.
+    Cached a minute per coin so 21 branches cycling do not hammer it."""
+    now = time.time() if now is None else now
+    hit = _bounce_cache.get(product_id)
+    if hit and now - hit[0] < GRID_BOUNCE_CACHE_SECONDS:
+        return hit[1]
+    url = f"https://api.exchange.coinbase.com/products/{product_id}/stats"
+    try:
+        import aiohttp
+        async with session.get(url, headers={"User-Agent": "empire-v2-grid"},
+                               timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                out = (False, f"24h stats HTTP {r.status} - no buy")
+            else:
+                d = await r.json(content_type=None)
+                out = bounce_verdict(d.get("last"), d.get("low"))
+    except Exception as e:
+        out = (False, f"24h stats unreadable ({type(e).__name__}) - no buy")
+    _bounce_cache[product_id] = (now, out)
+    return out
+
+
 async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = None,
                    outcome_out: dict = None):
     """Real grid BUY: maker first (cheap, may not fill), market fallback
@@ -1655,7 +1737,8 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
     guessed "rejected" for all of them; then this function guessed
     "expired" for all of them, which hid the non-orders in the one cause
     that counts as routine. Same detail_out pattern as _net_edge_gate_ok."""
-    if grid_sell_only():
+    _owner_mode = grid_owner_mode()
+    if _owner_mode == "sell_only":
         # Refused HERE, in the one function every grid buy goes through - the
         # dip trigger, an adopted rung, a forced buy - so no path gets past it,
         # including one added later. Nothing is sent to the venue.
@@ -1665,6 +1748,17 @@ async def grid_buy(session, usd_amount: float, product_id: str, bot_name: str = 
             outcome_out["cause"] = _oo.NO_ORDER_CREATED
             outcome_out["detail"] = "GRID_SELL_ONLY is on - buys are refused"
         return None
+    if _owner_mode == "bounce":
+        # Checked here as well as in the cycle, for the same reason as above:
+        # every path that buys passes through this function.
+        _b_ok, _b_why = await bounce_signal(session, product_id)
+        if not _b_ok:
+            log.info(f"[GRID] {bot_name or product_id}: GRID_BOUNCE_BUYING - {_b_why}")
+            if outcome_out is not None:
+                import order_outcome as _oo
+                outcome_out["cause"] = _oo.NO_ORDER_CREATED
+                outcome_out["detail"] = f"GRID_BOUNCE_BUYING: {_b_why}"
+            return None
     if await is_maker_orders_active():
         fill = await engine.place_maker_buy(session, usd_amount, product_id,
                                             await maker_wait_seconds())
@@ -7689,11 +7783,14 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     only - an existing open slice keeps selling normally, which is
     itself this branch's own real recovery path) and, when the account
     owner has opted into it, real fee-tier-aware dynamic spacing."""
-    # STOP_TRADING stops the cycle before it reads anything - unless the
-    # owner's sell-only switch is on, which lets this cycle run with every
-    # buy refused and the stop-loss sale off (see grid_sell_only).
-    _owner_sell_only = grid_sell_only()
-    if os.getenv("STOP_TRADING", "false").lower() == "true" and not _owner_sell_only:
+    # STOP_TRADING stops the cycle before it reads anything - unless one of
+    # the owner's switches is on: sell-only (every buy refused) or bounce
+    # buying (buys only after a 2% bounce off the 24h low). Both turn the
+    # stop-loss sale off. See grid_sell_only and grid_bounce_buying.
+    _owner_mode = grid_owner_mode()
+    _owner_sell_only = _owner_mode == "sell_only"
+    _owner_bounce = _owner_mode == "bounce"
+    if os.getenv("STOP_TRADING", "false").lower() == "true" and not _owner_mode:
         return
     price, _atr = await engine.get_price_and_volatility(session, branch.product_id)
     if price is None:
@@ -8286,6 +8383,18 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
                                             "INFLATED_BUDGET", _hold_why)
             return
 
+        # GRID_BOUNCE_BUYING: the last gate, so a buy it refuses never
+        # converts USDC and never reaches the venue. grid_buy checks again.
+        if _owner_bounce:
+            _b_ok, _b_why = await bounce_signal(session, branch.product_id)
+            if not _b_ok:
+                if should_say_state(f"{branch.bot_name}:bounce", "waiting", time.time()):
+                    log.info(f"[GRID] {branch.bot_name}: ⏳ {_b_why}")
+                if _feed_should_write("WAITING_FOR_BOUNCE", branch.product_id):
+                    await _record_gate_decision(branch.bot_name, branch.product_id,
+                                                "WAITING_FOR_BOUNCE", _b_why)
+                return
+
         # Every gate has said yes. If the USD for this order is sitting in
         # USDC, convert just the shortfall now - never earlier, so a buy a
         # gate refuses never converts anything.
@@ -8698,11 +8807,12 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             if _entry and price <= _entry * (1 - _stop_pct):
                 _stop_slice = _stop_candidate
                 break
-    # Under GRID_SELL_ONLY the stop-loss sale is off: that mode exists so a
-    # slice is only ever sold at a profit. The two remaining exits both
-    # require one (_pick_profitable_slice_to_sell, _pick_parked_slice_to_sell),
-    # and clearing it here, before the parked check, keeps that exit open.
-    if _owner_sell_only:
+    # Under GRID_SELL_ONLY and GRID_BOUNCE_BUYING the stop-loss sale is off:
+    # both exist so a slice is only ever sold at a profit. The two remaining
+    # exits both require one (_pick_profitable_slice_to_sell,
+    # _pick_parked_slice_to_sell), and clearing it here, before the parked
+    # check, keeps that exit open.
+    if _owner_sell_only or _owner_bounce:
         _stop_slice = None
 
     # A branch as full as its levels cannot buy, so the spacing gate is
