@@ -9869,6 +9869,15 @@ async def run_grid_branches_cycle():
                                             "CYCLE_ERROR", _detail)
             await asyncio.sleep(0.5)
 
+        # The owner's BTC dip buy (btc_dip_buy.py): its own switch, read once
+        # a minute, after every branch has decided. Off unless
+        # GRID_BTC_DIP_BUY=true; it buys BTC only and never sells.
+        try:
+            import btc_dip_buy
+            await btc_dip_buy.maybe_buy(session)
+        except Exception as e:
+            log.warning(f"[GRID] BTC dip buy pass failed (non-fatal): {type(e).__name__}: {e}")
+
         # Fill in any post-expiry horizons that have come due. Inside the
         # session so it reuses the connection, after the branches so it can
         # never delay a trading decision, and capped per cycle.

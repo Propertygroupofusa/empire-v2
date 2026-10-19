@@ -914,6 +914,9 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         # The owner's no-sell list: coins nothing in this service sells
         # (no_sell.py). BTC unless NO_SELL_COINS says otherwise.
         "no_sell_coins": list(no_sell.coins()),
+        # The owner's BTC dip buy: $15 at or under $81,000, each paid for by
+        # $15 of banked sale profit (btc_dip_buy.py). Parsed as grid_sell_only is.
+        "grid_btc_dip_buy": (os.getenv("GRID_BTC_DIP_BUY") or "").strip().lower() == "true",
         **order_block,
     }
 
