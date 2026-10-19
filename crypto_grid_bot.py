@@ -9898,6 +9898,15 @@ async def run_grid_branches_cycle():
         except Exception as e:
             log.warning(f"[GRID] BTC dip buy pass failed (non-fatal): {type(e).__name__}: {e}")
 
+        # The owner's coin picker (coin_picker.py): its own switch, its own
+        # coins - never one a branch or the tree claims - read once a minute
+        # after every branch has decided. Off unless GRID_COIN_PICKER=true.
+        try:
+            import coin_picker
+            await coin_picker.maybe_trade(session)
+        except Exception as e:
+            log.warning(f"[GRID] coin picker pass failed (non-fatal): {type(e).__name__}: {e}")
+
         # Fill in any post-expiry horizons that have come due. Inside the
         # session so it reuses the connection, after the branches so it can
         # never delay a trading decision, and capped per cycle.

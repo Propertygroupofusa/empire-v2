@@ -9,9 +9,9 @@ a "dip" at that level is most of the time - and 24 under $81,000.
 
 THE RULE
   * BTC buys when its price is at or under GRID_BTC_DIP_BUY_PRICE ($81,000).
-  * Each $15 buy needs $15 of profit the grid's sales have banked since the
-    rule was switched on, less what earlier dip buys already used. Sales,
-    not the prediction bets placed outside the bot.
+  * Each $15 buy needs $15 of profit the grid's and the coin picker's sales
+    have banked since the rule was switched on, less what earlier dip buys
+    already used. Sales, not the prediction bets placed outside the bot.
   * The price is Coinbase's public ticker - a GET, no key.
 
 WHAT STILL APPLIES
@@ -130,18 +130,20 @@ async def read_state(now):
 
 
 async def profit_since(start):
-    """Sum of the grid's booked profit on sales closed after `start`.
-    Raises when it cannot be read."""
+    """The profit every sale booked after `start`: the grid's, and the coin
+    picker's (coin_picker.py) - "all our sales". Raises when either cannot be
+    read, so an unreadable book is a no-buy, never a guess."""
     from sqlalchemy import func, select
     from database import get_session_factory
     from models import CryptoGridTradeHistory
+    import coin_picker
+    since = datetime.fromtimestamp(start, timezone.utc).replace(tzinfo=None)
     async with get_session_factory()() as db:
         total = (await db.execute(
             select(func.coalesce(func.sum(CryptoGridTradeHistory.pnl), 0.0))
-            .where(CryptoGridTradeHistory.closed_at >
-                   datetime.fromtimestamp(start, timezone.utc).replace(tzinfo=None))
+            .where(CryptoGridTradeHistory.closed_at > since)
         )).scalar()
-    return float(total or 0.0)
+    return float(total or 0.0) + await coin_picker.banked_since(since)
 
 
 async def add_spent(usd):

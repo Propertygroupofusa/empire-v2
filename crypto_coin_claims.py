@@ -47,6 +47,7 @@ log = logging.getLogger("crypto_coin_claims")
 
 GRID = "grid"
 TREE = "tree"
+PICKER = "picker"
 
 
 def normalize_product(symbol):
@@ -146,6 +147,30 @@ async def tree_claimed_products():
     return {c for c in claimed if c}
 
 
+async def picker_claimed_products():
+    """Coins the coin picker (coin_picker.py) holds an open piece in.
+
+    Held coin only: a pick it has not bought yet is an intention, and the
+    picker itself skips any coin the grid or the tree claims before it buys.
+    Read on its own, so an unreadable picker table can never cost the grid
+    or the tree their claims on each other.
+    """
+    from models import CoinPickerPiece
+    async with get_session_factory()() as db:
+        result = await db.execute(select(CoinPickerPiece.product_id)
+                                  .where(CoinPickerPiece.status == "open"))
+        return {normalize_product(r[0]) for r in result.all() if r[0]}
+
+
+async def _picker_claims_or_empty():
+    try:
+        return await picker_claimed_products()
+    except Exception as e:
+        log.warning("coin picker claims unreadable (%s: %s) - withholding none of its coins "
+                    "this cycle", type(e).__name__, e)
+        return set()
+
+
 async def claimed_by_other(system: str):
     """Coins `system` must NOT take, because the other system owns them.
 
@@ -158,9 +183,11 @@ async def claimed_by_other(system: str):
     """
     try:
         if system == GRID:
-            return await tree_claimed_products()
+            return await tree_claimed_products() | await _picker_claims_or_empty()
         if system == TREE:
-            return await grid_claimed_products()
+            return await grid_claimed_products() | await _picker_claims_or_empty()
+        if system == PICKER:
+            return await grid_claimed_products() | await tree_claimed_products()
         log.warning("unknown system %r - no coins withheld", system)
         return set()
     except Exception as e:
@@ -175,10 +202,9 @@ async def claim_map():
     therefore the one worth seeing immediately if it ever occurs."""
     grid = await grid_claimed_products()
     tree = await tree_claimed_products()
+    picker = await _picker_claims_or_empty()
     out = {}
-    for p in grid | tree:
-        if p in grid and p in tree:
-            out[p] = "grid+tree"
-        else:
-            out[p] = GRID if p in grid else TREE
+    for p in grid | tree | picker:
+        owners = [n for n, c in ((GRID, grid), (TREE, tree), (PICKER, picker)) if p in c]
+        out[p] = "+".join(owners)
     return out

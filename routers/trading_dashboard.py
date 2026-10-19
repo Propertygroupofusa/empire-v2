@@ -17103,3 +17103,38 @@ async def compound_path_view(target_usd_per_hour: float = 20.0):
         "after it worth reading.")
     out["is_a_measurement_not_a_change"] = True
     return out
+
+
+@router.get("/coin-picker")
+async def coin_picker_status():
+    """The owner's coin picker (coin_picker.py): the latest picks, the pieces it
+    holds, and what its sales banked. Read-only - places and changes nothing.
+
+    `switch_on_here` reads this web service's own GRID_COIN_PICKER. The picker
+    runs in the trading service, which reads its own copy of the variable."""
+    from models import CoinPickerPick, CoinPickerPiece
+    try:
+        async with get_session_factory()() as db:
+            pieces = (await db.execute(select(CoinPickerPiece))).scalars().all()
+            at = (await db.execute(select(func.max(CoinPickerPick.picked_at)))).scalar()
+            picks = [] if at is None else (await db.execute(
+                select(CoinPickerPick).where(CoinPickerPick.picked_at == at)
+                .order_by(CoinPickerPick.rank))).scalars().all()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"coin picker record unreadable: {exc}")
+    closed = [p for p in pieces if p.status == "closed"]
+    held = [p for p in pieces if p.status == "open"]
+    return {
+        "switch_on_here": (os.getenv("GRID_COIN_PICKER") or "").strip().lower() == "true",
+        "picked_at": (at.isoformat() + "Z") if at else None,
+        "picks": [{"rank": p.rank, "product_id": p.product_id, "round_trips": p.round_trips,
+                   "banked_per_piece": p.banked_per_piece, "within_24h": p.within_24h}
+                  for p in picks],
+        "banked_usd": round(sum(p.pnl or 0.0 for p in closed), 2),
+        "sales": len(closed),
+        "open": [{"product_id": p.product_id, "qty": p.qty, "entry_price": p.entry_price,
+                  "cost_usd": round(p.cost_usd or 0.0, 2), "target_price": p.target_price,
+                  "opened_at": (p.opened_at.isoformat() + "Z") if p.opened_at else None}
+                 for p in held],
+        "open_cost_usd": round(sum(p.cost_usd or 0.0 for p in held), 2),
+    }

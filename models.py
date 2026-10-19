@@ -3226,3 +3226,49 @@ class AlpacaWheelState(Base):
             "last_note": self.last_note,
             "updated_at": (self.updated_at.isoformat() + "Z") if self.updated_at else None,
         }
+
+
+class CoinPickerPiece(Base):
+    """One $15 piece the coin picker bought (coin_picker.py), open or sold.
+
+    The picker is its own small pot beside the grid: it trades only coins no
+    grid branch or tree branch claims, and crypto_coin_claims registers what
+    it holds so neither of them, nor coin adoption, takes these coins over.
+
+    target_price is fixed at the buy: the price at which selling the whole
+    piece nets 1% of its cost after both fee legs. A piece is never sold
+    under it (profit_only.py). status is "open" or "closed"; exit_price, pnl
+    and closed_at are set only by a real fill.
+    """
+    __tablename__ = "coin_picker_pieces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    status = Column(String, index=True, default="open")
+    qty = Column(Float)
+    entry_price = Column(Float)
+    cost_usd = Column(Float)
+    target_price = Column(Float)
+    round_trip_fee_rate = Column(Float)          # the rate the target was priced with
+    opened_at = Column(DateTime, default=datetime.utcnow, index=True)
+    closed_at = Column(DateTime, nullable=True, index=True)
+    exit_price = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+
+
+class CoinPickerPick(Base):
+    """One coin in one set of coin picker picks (coin_picker.py).
+
+    A set is every row sharing a picked_at. Kept so the 14-day cadence
+    survives a restart - a deploy reads the latest set back instead of
+    re-ranking - and so the dashboard can show what was picked and why.
+    """
+    __tablename__ = "coin_picker_picks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    picked_at = Column(DateTime, index=True)
+    rank = Column(Integer)
+    product_id = Column(String, index=True)
+    round_trips = Column(Integer)           # in the 60 days it was ranked on
+    banked_per_piece = Column(Float)        # what the rule banked per $15 piece there
+    within_24h = Column(Float)              # share of those round trips closed inside 24h
