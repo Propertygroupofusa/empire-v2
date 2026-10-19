@@ -209,8 +209,12 @@ def world(monkeypatch):
     monkeypatch.setattr(engine, "place_maker_sell", maker_sell)
     monkeypatch.setattr(engine, "place_market_buy", forbidden)
     monkeypatch.setattr(engine, "place_market_sell", forbidden)
-    if hasattr(grid, "ensure_usd_for_buy"):
-        monkeypatch.setattr(grid, "ensure_usd_for_buy", forbidden)
+    w["converted"], w["convert_ok"] = [], (True, "converted for this buy")
+
+    async def ensure_usd(session, spend):
+        w["converted"].append(spend)
+        return w["convert_ok"]
+    monkeypatch.setattr(grid, "ensure_usd_for_buy", ensure_usd)
     return w
 
 
@@ -283,12 +287,39 @@ def test_the_cash_floor_refuses(world, monkeypatch):
     assert world["buys"] == [] and world["feed"][-1][0] == "CASH_RESERVE"
 
 
-def test_usd_short_refuses_and_never_converts(world, monkeypatch):
+def test_cash_in_usdc_converts_only_this_buy_then_buys(world, monkeypatch):
+    """The owner: "Convert just $15" - the grid's own shortfall converter, after
+    every gate, right before the order."""
     monkeypatch.setattr(cp, "_picks", ["BBB-USD"])
     world["prices"]["BBB-USD"], world["highs"]["BBB-USD"] = 9.0, 10.0
-    world["usd"], world["usdc"] = 10.0, 5000.0
+    world["usd"], world["usdc"] = 0.0, 5000.0
     _pass()
-    assert world["buys"] == []
+    assert world["converted"] == [15.0] and world["buys"] == [("BBB-USD", 15.0)]
+
+
+def test_a_conversion_that_fails_buys_nothing(world, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["BBB-USD"])
+    world["prices"]["BBB-USD"], world["highs"]["BBB-USD"] = 9.0, 10.0
+    world["usd"], world["usdc"] = 0.0, 5000.0
+    world["convert_ok"] = (False, "USDC -> USD conversion not done")
+    _pass()
+    assert world["buys"] == [] and world["feed"][-1][0] == "CASH_RESERVE"
+
+
+def test_usd_on_hand_converts_nothing(world, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["BBB-USD"])
+    world["prices"]["BBB-USD"], world["highs"]["BBB-USD"] = 9.0, 10.0
+    _pass()
+    assert world["converted"] == [] and world["buys"] == [("BBB-USD", 15.0)]
+
+
+def test_the_ceiling_is_checked_before_any_conversion(world, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["BBB-USD"])
+    world["prices"]["BBB-USD"], world["highs"]["BBB-USD"] = 9.0, 10.0
+    world["usd"], world["usdc"] = 0.0, 5000.0
+    world["conc"] = (False, "over 20%")
+    _pass()
+    assert world["converted"] == [] and world["buys"] == []
 
 
 def test_the_twenty_percent_ceiling_refuses(world, monkeypatch):
@@ -324,10 +355,19 @@ def practice(world, monkeypatch):
     monkeypatch.setenv("GRID_COIN_PICKER", "paper")
 
     async def no_order(*a, **k):
-        raise AssertionError("practice mode placed a real order")
+        raise AssertionError("practice mode placed a real order or converted USDC")
     monkeypatch.setattr(engine, "place_maker_buy", no_order)
     monkeypatch.setattr(engine, "place_maker_sell", no_order)
+    monkeypatch.setattr(grid, "ensure_usd_for_buy", no_order)
     return world
+
+
+def test_practice_with_cash_in_usdc_converts_nothing(practice, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["BBB-USD"])
+    practice["prices"]["BBB-USD"], practice["highs"]["BBB-USD"] = 9.0, 10.0
+    practice["usd"], practice["usdc"] = 0.0, 5000.0
+    _pass()
+    assert practice["recorded"][0][0] == "BBB-USD" and practice["recorded"][0][4] is True
 
 
 def test_practice_buys_without_an_order_and_marks_it_paper(practice, monkeypatch):
@@ -416,10 +456,11 @@ def test_status_and_the_picker_page_show_the_mode_and_both_books():
     assert '"failed_passes"' in page
 
 
-def test_the_module_cannot_market_trade_or_convert():
+def test_the_module_cannot_market_trade_and_converts_only_through_the_grid():
     code = inspect.getsource(cp).split('"""', 2)[2]
-    for word in ("place_market_sell", "place_market_buy", "ensure_usd_for_buy", "convert_usdc"):
+    for word in ("place_market_sell", "place_market_buy", "convert_usdc"):
         assert word not in code, word
+    assert code.count("ensure_usd_for_buy(") == 1 and "if usd < spend and not paper:" in code
 
 
 def test_the_records_round_trip_through_a_database():

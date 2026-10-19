@@ -20,7 +20,9 @@ WHAT STILL APPLIES
   * The owner's 20% single-coin ceiling (concentration_gate), judged on the
     whole account after the buy - the same book auto_trim uses.
   * Maker-only: a post-only order at the bid. No market fallback.
-  * USD only. USDC is never converted for this buy; short of USD, no buy.
+  * Cash held as USDC: only this buy's shortfall is converted, right before
+    the order (grid.ensure_usd_for_buy) - the owner, asked: "Convert just
+    $15". Practice converts nothing.
 
 WHAT IT IS NOT
   * Not a grid branch and not a slice. The coin joins the account's BTC,
@@ -220,16 +222,19 @@ async def maybe_buy(session, now=None):
             why = f"cash floor - {spend_why}"
             await _feed("CASH_RESERVE", why)
             return False, why
-        if usd < spend:
-            why = (f"USD ${usd:,.2f} is short of the ${spend:,.2f} buy - USDC is not "
-                   f"converted for the BTC dip buy")
-            await _feed("CASH_RESERVE", why)
-            return False, why
         conc_ok, conc_why = concentration_gate.concentration_verdict(
             PRODUCT_ID, await grid.account_market_book(), spend)
         if not conc_ok:
             await _feed("CONCENTRATION", conc_why)
             return False, conc_why
+        # Cash held as USDC: only this buy's shortfall is converted, after every
+        # gate and right before the order - the grid's own ensure_usd_for_buy
+        # (the owner, 2026-10-19: "Convert just $15"). Practice converts nothing.
+        if usd < spend and not paper:
+            usd_ok, usd_note = await grid.ensure_usd_for_buy(session, spend)
+            if not usd_ok:
+                await _feed("CASH_RESERVE", usd_note)
+                return False, usd_note
 
         # Practice: a buy at the bid is taken at the price seen now.
         fill = ((spend / price, price) if paper else

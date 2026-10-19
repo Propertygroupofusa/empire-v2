@@ -27,7 +27,9 @@ WHAT IT WAS MEASURED ON (scratchpad allcoins/quick_profit2.py, 2026-10-19)
 WHAT STILL APPLIES
   * The cash floor (GRID_CASH_RESERVE_USD) through the grid's spendable_for_slice,
     the $15 minimum, the 20% single-coin ceiling, maker-only with no market
-    fallback, USD only (USDC is never converted for it), at most 20 open pieces.
+    fallback, at most 20 open pieces. Cash held as USDC: only the one buy's
+    shortfall is converted, right before the order (grid.ensure_usd_for_buy) -
+    the owner, asked: "Convert just $15". Practice converts nothing.
   * profit_only.py and no_sell.py, as for every Coinbase seller.
 
 HOW IT STAYS OUT OF THE WAY
@@ -482,15 +484,20 @@ async def _pass(session, now, paper, out):
             if spend < PIECE_USD:
                 await _feed("CASH_RESERVE", pid, f"coin picker: cash floor - {why}")
                 return True
-            if usd < spend:
-                await _feed("CASH_RESERVE", pid, f"coin picker: USD ${usd:,.2f} is short of "
-                                                 f"${spend:,.2f} - USDC is not converted for it")
-                return True
             conc_ok, conc_why = concentration_gate.concentration_verdict(
                 pid, await grid.account_market_book(), spend)
             if not conc_ok:
                 await _feed("CONCENTRATION", pid, f"coin picker: {conc_why}")
                 continue
+            # Cash held as USDC: only this buy's shortfall is converted, after
+            # every gate and right before the order - the grid's own
+            # ensure_usd_for_buy (the owner, 2026-10-19: "Convert just $15").
+            # Practice converts nothing.
+            if usd < spend and not paper:
+                usd_ok, usd_note = await grid.ensure_usd_for_buy(session, spend)
+                if not usd_ok:
+                    await _feed("CASH_RESERVE", pid, f"coin picker: {usd_note}")
+                    return True
             # Practice: a buy at the bid is taken at the price seen now.
             fill = ((spend / px, px) if paper else
                     await engine.place_maker_buy(session, spend, pid, wait))

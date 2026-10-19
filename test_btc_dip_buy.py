@@ -104,8 +104,12 @@ def world(monkeypatch):
     monkeypatch.setattr(concentration_gate, "concentration_verdict", lambda *a, **k: w["conc"])
     monkeypatch.setattr(engine, "place_maker_buy", maker_buy)
     monkeypatch.setattr(engine, "place_market_buy", no_convert)
-    if hasattr(grid, "ensure_usd_for_buy"):
-        monkeypatch.setattr(grid, "ensure_usd_for_buy", no_convert)
+    w["converted"], w["convert_ok"] = [], (True, "converted for this buy")
+
+    async def ensure_usd(session, spend):
+        w["converted"].append(spend)
+        return w["convert_ok"]
+    monkeypatch.setattr(grid, "ensure_usd_for_buy", ensure_usd)
     if hasattr(engine, "convert_usdc_to_usd"):
         monkeypatch.setattr(engine, "convert_usdc_to_usd", no_convert)
     return w
@@ -203,10 +207,20 @@ def test_cash_floor_refuses(world):
     assert world["feed"][-1][0] == "CASH_RESERVE"
 
 
-def test_usd_short_refuses_and_never_converts_usdc(world):
-    world["usd"], world["usdc"] = 10.0, 5000.0
-    bought, why = _pass()
-    assert not bought and world["buys"] == [] and "USDC is not converted" in why
+def test_cash_in_usdc_converts_only_this_buy_then_buys(world):
+    world["usd"], world["usdc"] = 0.0, 5000.0
+    assert _pass()[0] is True
+    assert world["converted"] == [15.0] and world["buys"] == [("BTC-USD", 15.0)]
+
+
+def test_a_conversion_that_fails_buys_nothing(world):
+    world["usd"], world["usdc"] = 0.0, 5000.0
+    world["convert_ok"] = (False, "USDC -> USD conversion not done")
+    assert _pass()[0] is False and world["buys"] == []
+
+
+def test_usd_on_hand_converts_nothing(world):
+    assert _pass()[0] is True and world["converted"] == []
 
 
 def test_twenty_percent_ceiling_refuses(world):
@@ -235,6 +249,8 @@ def test_practice_buys_without_an_order_on_its_own_record(world, monkeypatch):
     async def no_order(*a, **k):
         raise AssertionError("practice mode placed a real order")
     monkeypatch.setattr(engine, "place_maker_buy", no_order)
+    monkeypatch.setattr(grid, "ensure_usd_for_buy", no_order)
+    world["usd"], world["usdc"] = 0.0, 5000.0           # cash in USDC: practice converts nothing
     bought, msg = _pass()
     assert bought and "practice" in msg and world["feed"][-1][0] == "PAPER_BUY"
     assert set(world["keys"]) == {"btc_dip_buy_paper"}
@@ -248,11 +264,12 @@ def test_live_uses_the_real_record(world):
 
 # ------------------------------------------------------------------ shape
 
-def test_the_module_cannot_sell_or_convert():
+def test_the_module_cannot_sell_and_converts_only_through_the_grid():
     code = inspect.getsource(dip).split('"""', 2)[2]      # past the module docstring
     for word in ("place_market_sell", "place_maker_sell", "grid_sell", '"SELL"',
-                 "place_market_buy", "ensure_usd_for_buy", "convert_usdc"):
+                 "place_market_buy", "convert_usdc"):
         assert word not in code, word
+    assert code.count("ensure_usd_for_buy(") == 1 and "if usd < spend and not paper:" in code
 
 
 def test_the_fleet_loop_runs_it_after_the_branches():
