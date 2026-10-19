@@ -29,6 +29,13 @@ WHAT IT IS NOT
   * Not on unless GRID_BTC_DIP_BUY is exactly "true". It runs under
     STOP_TRADING, as GRID_SELL_ONLY does - that is what the owner asked for.
 
+PRACTICE FIRST
+  The owner, the same day: "avoid doing anything outside of the sandbox until your
+  bot has proven it can run flawlessly." GRID_BTC_DIP_BUY=paper runs the same rule,
+  gates and profit funding on live prices but places no order: a buy is recorded at
+  the price seen, against its own record (btc_dip_buy_paper), and the feed says
+  PAPER_BUY. "true" is real money; anything else is off.
+
 Every input that cannot be read is a no-buy, never a guessed yes.
 """
 import logging
@@ -49,20 +56,27 @@ BUY_AT_PRICE = env_float("GRID_BTC_DIP_BUY_PRICE", 81000.0)
 # base_capital = epoch the rule was first switched on (profit counts from
 # there), starting_capital = USD the rule has spent on BTC since.
 STATE_KEY = "btc_dip_buy"
+PAPER_STATE_KEY = "btc_dip_buy_paper"
 
 # Spent but not yet saved. The database is the record; this covers a fill
 # whose write then failed, so a failed write can never let the same profit
 # pay for a second buy.
-_unsaved_spent = 0.0
+_unsaved_spent = {"live": 0.0, "paper": 0.0}
 _said = {}
 # The fleet loop passes every ~30s; the market is read at most once a minute.
 PASS_SECONDS = 60.0
 _next_pass_at = 0.0
 
 
+def mode() -> str:
+    """"live" for exactly "true", "paper" for exactly "paper", otherwise "off"
+    (any case, surrounding spaces ignored)."""
+    return {"true": "live", "paper": "paper"}.get(
+        (os.getenv(GRID_BTC_DIP_BUY_ENV) or "").strip().lower(), "off")
+
+
 def enabled() -> bool:
-    """True only for an explicit "true", parsed as GRID_SELL_ONLY is."""
-    return (os.getenv(GRID_BTC_DIP_BUY_ENV) or "").strip().lower() == "true"
+    return mode() != "off"
 
 
 def verdict(price, profit_since, spent, buy_usd=None, buy_at=None):
@@ -110,7 +124,7 @@ async def price_now(session):
         return None
 
 
-async def read_state(now):
+async def read_state(now, key=STATE_KEY):
     """(start epoch, USD spent). Creates the row on first use, so profit
     counts from the moment the switch is first seen on. Raises when the
     table cannot be read - the caller treats that as no-buy."""
@@ -119,10 +133,10 @@ async def read_state(now):
     from models import TradingBotState
     async with get_session_factory()() as db:
         row = (await db.execute(select(TradingBotState)
-                                .where(TradingBotState.bot_name == STATE_KEY))).scalar_one_or_none()
+                                .where(TradingBotState.bot_name == key))).scalar_one_or_none()
         if row is None or not row.base_capital:
             if row is None:
-                row = TradingBotState(bot_name=STATE_KEY)
+                row = TradingBotState(bot_name=key)
                 db.add(row)
             row.base_capital, row.starting_capital = float(now), 0.0
             await db.commit()
@@ -146,13 +160,13 @@ async def profit_since(start):
     return float(total or 0.0) + await coin_picker.banked_since(since)
 
 
-async def add_spent(usd):
+async def add_spent(usd, key=STATE_KEY):
     from sqlalchemy import select
     from database import get_session_factory
     from models import TradingBotState
     async with get_session_factory()() as db:
         row = (await db.execute(select(TradingBotState)
-                                .where(TradingBotState.bot_name == STATE_KEY))).scalar_one()
+                                .where(TradingBotState.bot_name == key))).scalar_one()
         row.starting_capital = float(row.starting_capital or 0.0) + float(usd)
         await db.commit()
 
@@ -166,9 +180,12 @@ def _say(key, text):
 
 async def maybe_buy(session, now=None):
     """One pass. Returns (bought, reason). Never raises."""
-    global _unsaved_spent, _next_pass_at
-    if not enabled():
+    global _next_pass_at
+    which = mode()
+    if which == "off":
         return False, f"{GRID_BTC_DIP_BUY_ENV} is not on"
+    paper = which == "paper"
+    key = PAPER_STATE_KEY if paper else STATE_KEY
     now = time.time() if now is None else now
     if now < _next_pass_at:
         return False, "read this minute already"
@@ -179,12 +196,12 @@ async def maybe_buy(session, now=None):
         import crypto_grid_bot as grid
 
         try:
-            start, spent = await read_state(now)
+            start, spent = await read_state(now, key)
             made = await profit_since(start)
         except Exception as e:
             _say("state", f"profit or dip-buy record unreadable ({type(e).__name__}) - no buy")
             return False, "profit or dip-buy record unreadable - no buy"
-        spent += _unsaved_spent
+        spent += _unsaved_spent[which]
 
         price = await price_now(session)
         ok, why = verdict(price, made, spent)
@@ -214,8 +231,10 @@ async def maybe_buy(session, now=None):
             await _feed("CONCENTRATION", conc_why)
             return False, conc_why
 
-        fill = await engine.place_maker_buy(session, spend, PRODUCT_ID,
-                                            await grid.maker_wait_seconds())
+        # Practice: a buy at the bid is taken at the price seen now.
+        fill = ((spend / price, price) if paper else
+                await engine.place_maker_buy(session, spend, PRODUCT_ID,
+                                             await grid.maker_wait_seconds()))
         if not fill:
             why = (f"maker buy of ${spend:,.2f} did not fill "
                    f"({engine._last_order_error.get(PRODUCT_ID, 'nobody sold at the bid')}) - "
@@ -225,16 +244,18 @@ async def maybe_buy(session, now=None):
         qty, px = fill
         cost = qty * px
         try:
-            await add_spent(cost + _unsaved_spent)
-            _unsaved_spent = 0.0
+            await add_spent(cost + _unsaved_spent[which], key)
+            _unsaved_spent[which] = 0.0
         except Exception as e:
-            _unsaved_spent += cost
+            _unsaved_spent[which] += cost
             log.error(f"[BTC-DIP] bought, but the record did not save ({type(e).__name__}: {e}) - "
                       f"this process still counts it, so the same profit cannot pay twice")
-        msg = (f"BTC dip buy: {qty:.8f} BTC @ ${px:,.2f} (${cost:,.2f}), paid for by profit - "
-               f"sales had banked ${made - spent:,.2f} toward it. Held: BTC is on the no-sell list.")
+        msg = (f"BTC dip {'practice ' if paper else ''}buy: {qty:.8f} BTC @ ${px:,.2f} "
+               f"(${cost:,.2f}), paid for by profit - sales had banked ${made - spent:,.2f} "
+               f"toward it. " + ("No order placed - practice only." if paper
+                                 else "Held: BTC is on the no-sell list."))
         log.warning(f"[BTC-DIP] {msg}")
-        await _feed("BUY", msg, throttle=False)
+        await _feed("PAPER_BUY" if paper else "BUY", msg, throttle=False)
         return True, msg
     except Exception as e:
         log.error(f"[BTC-DIP] pass failed ({type(e).__name__}: {e}) - no buy")

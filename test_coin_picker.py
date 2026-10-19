@@ -53,14 +53,15 @@ def fresh(monkeypatch):
 
 # ------------------------------------------------------------------- switch
 
-@pytest.mark.parametrize("value,expected", [(None, False), ("", False), ("1", False),
-                                            ("yes", False), ("true", True), (" TRUE ", True)])
-def test_only_an_explicit_true_turns_it_on(monkeypatch, value, expected):
+@pytest.mark.parametrize("value,expected", [(None, "off"), ("", "off"), ("1", "off"),
+                                            ("yes", "off"), ("live", "off"), ("true", "live"),
+                                            (" TRUE ", "live"), ("paper", "paper"), (" Paper ", "paper")])
+def test_only_true_is_real_money_and_paper_is_practice(monkeypatch, value, expected):
     if value is None:
         monkeypatch.delenv("GRID_COIN_PICKER", raising=False)
     else:
         monkeypatch.setenv("GRID_COIN_PICKER", value)
-    assert cp.enabled() is expected
+    assert cp.mode() == expected and cp.enabled() is (expected != "off")
 
 
 def test_off_touches_nothing(monkeypatch):
@@ -138,9 +139,11 @@ def world(monkeypatch):
     monkeypatch.setenv("GRID_COIN_PICKER", "true")
     w = {"pieces": [], "prices": {}, "highs": {}, "claimed": set(), "usd": 3000.0, "usdc": 0.0,
          "conc": (True, "ok"), "buy_fill": (1.0, 9.5), "sell_fill": "full",
-         "buys": [], "sells": [], "sales": [], "recorded": [], "feed": []}
+         "buys": [], "sells": [], "sales": [], "recorded": [], "feed": [], "counted": [],
+         "asked_paper": []}
 
-    async def open_pieces():
+    async def open_pieces(paper=False):
+        w["asked_paper"].append(paper)
         return list(w["pieces"])
 
     async def price_now(session, pid):
@@ -152,8 +155,8 @@ def world(monkeypatch):
     async def claimed():
         return w["claimed"]
 
-    async def record_buy(pid, q, px, rate):
-        w["recorded"].append((pid, q, px, rate))
+    async def record_buy(pid, q, px, rate, paper=False):
+        w["recorded"].append((pid, q, px, rate, paper))
 
     async def record_sale(pid, q, px, pnl):
         w["sales"].append((pid, q, px, pnl))
@@ -184,12 +187,15 @@ def world(monkeypatch):
     async def feed(name, pid, reason, throttle=True):
         w["feed"].append((name, pid))
 
+    async def count(ok, which):
+        w["counted"].append((ok, which))
+
     async def forbidden(*a, **k):
         raise AssertionError("a market order or a USDC conversion")
 
     for name, fn in (("open_pieces", open_pieces), ("price_now", price_now), ("high_24h", high_24h),
                      ("_claimed", claimed), ("record_buy", record_buy), ("record_sale", record_sale),
-                     ("_feed", feed)):
+                     ("_feed", feed), ("_count", count)):
         monkeypatch.setattr(cp, name, fn)
     monkeypatch.setattr(cp, "_rank_task", types.SimpleNamespace(done=lambda: False))
     monkeypatch.setattr(grid, "get_effective_round_trip_fee_rate", rate)
@@ -311,6 +317,54 @@ def test_under_fifteen_dollars_buys_nothing(world, monkeypatch):
     assert world["buys"] == []
 
 
+# ------------------------------------------------------------------ practice
+
+@pytest.fixture
+def practice(world, monkeypatch):
+    monkeypatch.setenv("GRID_COIN_PICKER", "paper")
+
+    async def no_order(*a, **k):
+        raise AssertionError("practice mode placed a real order")
+    monkeypatch.setattr(engine, "place_maker_buy", no_order)
+    monkeypatch.setattr(engine, "place_maker_sell", no_order)
+    return world
+
+
+def test_practice_buys_without_an_order_and_marks_it_paper(practice, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["BBB-USD"])
+    practice["prices"]["BBB-USD"], practice["highs"]["BBB-USD"] = 9.0, 10.0
+    out = _pass()
+    pid, q, px, rate, paper = practice["recorded"][0]
+    assert (pid, px, paper) == ("BBB-USD", 9.0) + (True,) and q * px == pytest.approx(15.0)
+    assert practice["feed"][-1][0] == "PAPER_BUY" and out["mode"] == "paper"
+    assert practice["asked_paper"] == [True]                # reads only the practice book
+
+
+def test_practice_sells_at_the_target_without_an_order(practice):
+    practice["pieces"] = [_piece("AAA-USD", 10.0)]
+    practice["prices"]["AAA-USD"] = 12.0
+    _pass()
+    pid, q, px, pnl = practice["sales"][0]
+    assert px == pytest.approx(cp.target_price(10.0, 0.007)) and pnl == pytest.approx(0.10)
+    assert practice["feed"][-1][0] == "PAPER_SELL"
+
+
+def test_every_pass_is_counted_and_a_failure_is_counted_as_one(practice, monkeypatch):
+    _pass()
+
+    async def fails(*a, **k):
+        raise ValueError("crash inside the pass")
+    monkeypatch.setattr(grid, "get_effective_round_trip_fee_rate", fails)
+    _pass(NOW + 120)
+    assert practice["counted"] == [(True, "paper"), (False, "paper")]
+    assert practice["feed"][-1][0] == "ERROR"
+
+
+def test_a_live_pass_reads_only_the_real_book(world):
+    _pass()
+    assert world["asked_paper"] == [False] and world["counted"] == [(True, "live")]
+
+
 # ---------------------------------------------------------- staying out of the way
 
 def test_held_coins_are_claimed_against_the_grid_tree_and_adoption(monkeypatch):
@@ -353,6 +407,15 @@ def test_its_sales_count_toward_the_btc_dip_buy():
     assert "coin_picker.banked_since(" in inspect.getsource(btc_dip_buy.profit_since)
 
 
+def test_status_and_the_picker_page_show_the_mode_and_both_books():
+    import routers.trading_dashboard as td
+    src = inspect.getsource(td)
+    assert '"grid_coin_picker_mode"' in src and '"grid_btc_dip_buy_mode"' in src
+    page = inspect.getsource(td.coin_picker_status)
+    assert '"practice": book(True)' in page and '"real": book(False)' in page
+    assert '"failed_passes"' in page
+
+
 def test_the_module_cannot_market_trade_or_convert():
     code = inspect.getsource(cp).split('"""', 2)[2]
     for word in ("place_market_sell", "place_market_buy", "ensure_usd_for_buy", "convert_usdc"):
@@ -376,6 +439,10 @@ def test_the_records_round_trip_through_a_database():
         database.get_session_factory = claims.get_session_factory = lambda: S
         try:
             await cp.record_buy("AAA-USD", 2.0, 10.0, 0.007)
+            await cp.record_buy("PPP-USD", 1.0, 5.0, 0.007, paper=True)
+            assert [x.product_id for x in await cp.open_pieces(paper=True)] == ["PPP-USD"]
+            (pp,) = await cp.open_pieces(paper=True)
+            await cp.record_sale(pp.id, 1.0, 5.2, 0.15)         # a practice sale
             (p,) = await cp.open_pieces()
             assert p.target_price == pytest.approx(cp.target_price(10.0, 0.007))
             await cp.record_sale(p.id, 1.5, 10.2, 0.2)          # partial: 0.5 stays open

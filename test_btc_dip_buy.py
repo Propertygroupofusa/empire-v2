@@ -36,7 +36,7 @@ class _Untouchable:
 
 @pytest.fixture(autouse=True)
 def fresh(monkeypatch):
-    monkeypatch.setattr(dip, "_unsaved_spent", 0.0)
+    monkeypatch.setattr(dip, "_unsaved_spent", {"live": 0.0, "paper": 0.0})
     monkeypatch.setattr(dip, "_next_pass_at", 0.0)
     monkeypatch.setattr(dip, "_said", {})
     monkeypatch.setattr(dip, "BUY_USD", 15.0)
@@ -49,9 +49,10 @@ def world(monkeypatch):
     monkeypatch.setenv("GRID_BTC_DIP_BUY", "true")
     w = {"price": 80_500.0, "made": 16.0, "spent": 0.0, "usd": 3000.0, "usdc": 0.0,
          "conc": (True, "ok"), "fill": (0.000186, 80_500.0), "buys": [], "feed": [],
-         "write_fails": False, "state_fails": False}
+         "write_fails": False, "state_fails": False, "keys": []}
 
-    async def read_state(now):
+    async def read_state(now, key="btc_dip_buy"):
+        w["keys"].append(key)
         if w["state_fails"]:
             raise RuntimeError("db down")
         return NOW - 86400, w["spent"]
@@ -59,7 +60,8 @@ def world(monkeypatch):
     async def profit_since(start):
         return w["made"]
 
-    async def add_spent(usd):
+    async def add_spent(usd, key="btc_dip_buy"):
+        w["keys"].append(key)
         if w["write_fails"]:
             raise RuntimeError("db down")
         w["spent"] += usd
@@ -117,14 +119,14 @@ def _pass(now=NOW):
 # ------------------------------------------------------------------- switch
 
 @pytest.mark.parametrize("value,expected", [
-    (None, False), ("", False), ("1", False), ("yes", False), ("false", False),
-    ("true", True), (" TRUE ", True)])
-def test_only_an_explicit_true_turns_it_on(monkeypatch, value, expected):
+    (None, "off"), ("", "off"), ("1", "off"), ("yes", "off"), ("false", "off"),
+    ("true", "live"), (" TRUE ", "live"), ("paper", "paper"), ("PAPER ", "paper")])
+def test_only_true_is_real_money_and_paper_is_practice(monkeypatch, value, expected):
     if value is None:
         monkeypatch.delenv("GRID_BTC_DIP_BUY", raising=False)
     else:
         monkeypatch.setenv("GRID_BTC_DIP_BUY", value)
-    assert dip.enabled() is expected
+    assert dip.mode() == expected and dip.enabled() is (expected != "off")
 
 
 def test_off_touches_nothing(monkeypatch):
@@ -223,6 +225,25 @@ def test_no_fill_uses_no_profit(world):
 def test_market_read_once_a_minute(world):
     _pass()
     assert run(dip.maybe_buy(object(), now=NOW + 30))[1] == "read this minute already"
+
+
+# --------------------------------------------------------------- practice
+
+def test_practice_buys_without_an_order_on_its_own_record(world, monkeypatch):
+    monkeypatch.setenv("GRID_BTC_DIP_BUY", "paper")
+
+    async def no_order(*a, **k):
+        raise AssertionError("practice mode placed a real order")
+    monkeypatch.setattr(engine, "place_maker_buy", no_order)
+    bought, msg = _pass()
+    assert bought and "practice" in msg and world["feed"][-1][0] == "PAPER_BUY"
+    assert set(world["keys"]) == {"btc_dip_buy_paper"}
+    assert world["spent"] == pytest.approx(15.0)
+
+
+def test_live_uses_the_real_record(world):
+    _pass()
+    assert set(world["keys"]) == {"btc_dip_buy"} and world["feed"][-1][0] == "BUY"
 
 
 # ------------------------------------------------------------------ shape

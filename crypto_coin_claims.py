@@ -150,7 +150,8 @@ async def tree_claimed_products():
 async def picker_claimed_products():
     """Coins the coin picker (coin_picker.py) holds an open piece in.
 
-    Held coin only: a pick it has not bought yet is an intention, and the
+    Held coin only - a practice (paper) piece holds nothing and claims nothing,
+    and a pick it has not bought yet is an intention, and the
     picker itself skips any coin the grid or the tree claims before it buys.
     Read on its own, so an unreadable picker table can never cost the grid
     or the tree their claims on each other.
@@ -158,7 +159,8 @@ async def picker_claimed_products():
     from models import CoinPickerPiece
     async with get_session_factory()() as db:
         result = await db.execute(select(CoinPickerPiece.product_id)
-                                  .where(CoinPickerPiece.status == "open"))
+                                  .where(CoinPickerPiece.status == "open")
+                                  .where(CoinPickerPiece.paper == False))  # noqa: E712 - SQL
         return {normalize_product(r[0]) for r in result.all() if r[0]}
 
 

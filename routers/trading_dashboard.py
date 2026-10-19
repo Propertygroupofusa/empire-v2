@@ -917,6 +917,12 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         # The owner's BTC dip buy: $15 at or under $81,000, each paid for by
         # $15 of banked sale profit (btc_dip_buy.py). Parsed as grid_sell_only is.
         "grid_btc_dip_buy": (os.getenv("GRID_BTC_DIP_BUY") or "").strip().lower() == "true",
+        # "live", "paper" (practice: no orders) or "off", for the BTC dip buy and
+        # the coin picker - parsed as btc_dip_buy.mode / coin_picker.mode are.
+        "grid_btc_dip_buy_mode": {"true": "live", "paper": "paper"}.get(
+            (os.getenv("GRID_BTC_DIP_BUY") or "").strip().lower(), "off"),
+        "grid_coin_picker_mode": {"true": "live", "paper": "paper"}.get(
+            (os.getenv("GRID_COIN_PICKER") or "").strip().lower(), "off"),
         **order_block,
     }
 
@@ -17107,11 +17113,12 @@ async def compound_path_view(target_usd_per_hour: float = 20.0):
 
 @router.get("/coin-picker")
 async def coin_picker_status():
-    """The owner's coin picker (coin_picker.py): the latest picks, the pieces it
-    holds, and what its sales banked. Read-only - places and changes nothing.
+    """The owner's coin picker (coin_picker.py): the latest picks, and for the real
+    book and the practice (paper) book apart, the pieces held, what the sales
+    banked, and how many passes ran and failed. Read-only.
 
-    `switch_on_here` reads this web service's own GRID_COIN_PICKER. The picker
-    runs in the trading service, which reads its own copy of the variable."""
+    `mode_here` reads this web service's own GRID_COIN_PICKER. The picker runs in
+    the trading service, which reads its own copy of the variable."""
     from models import CoinPickerPick, CoinPickerPiece
     try:
         async with get_session_factory()() as db:
@@ -17120,21 +17127,36 @@ async def coin_picker_status():
             picks = [] if at is None else (await db.execute(
                 select(CoinPickerPick).where(CoinPickerPick.picked_at == at)
                 .order_by(CoinPickerPick.rank))).scalars().all()
+            counters = {r.bot_name: r for r in (await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name.in_(
+                    ["coin_picker_passes_paper", "coin_picker_passes_live"])))).scalars().all()}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"coin picker record unreadable: {exc}")
-    closed = [p for p in pieces if p.status == "closed"]
-    held = [p for p in pieces if p.status == "open"]
+
+    def book(paper):
+        mine = [p for p in pieces if bool(p.paper) == paper]
+        closed = [p for p in mine if p.status == "closed"]
+        held = [p for p in mine if p.status == "open"]
+        c = counters.get(f"coin_picker_passes_{'paper' if paper else 'live'}")
+        return {
+            "banked_usd": round(sum(p.pnl or 0.0 for p in closed), 2),
+            "sales": len(closed),
+            "open": [{"product_id": p.product_id, "qty": p.qty, "entry_price": p.entry_price,
+                      "cost_usd": round(p.cost_usd or 0.0, 2), "target_price": p.target_price,
+                      "opened_at": (p.opened_at.isoformat() + "Z") if p.opened_at else None}
+                     for p in held],
+            "open_cost_usd": round(sum(p.cost_usd or 0.0 for p in held), 2),
+            "passes": int(c.base_capital or 0) if c else 0,
+            "failed_passes": int(c.starting_capital or 0) if c else 0,
+        }
+
     return {
-        "switch_on_here": (os.getenv("GRID_COIN_PICKER") or "").strip().lower() == "true",
+        "mode_here": {"true": "live", "paper": "paper"}.get(
+            (os.getenv("GRID_COIN_PICKER") or "").strip().lower(), "off"),
         "picked_at": (at.isoformat() + "Z") if at else None,
         "picks": [{"rank": p.rank, "product_id": p.product_id, "round_trips": p.round_trips,
                    "banked_per_piece": p.banked_per_piece, "within_24h": p.within_24h}
                   for p in picks],
-        "banked_usd": round(sum(p.pnl or 0.0 for p in closed), 2),
-        "sales": len(closed),
-        "open": [{"product_id": p.product_id, "qty": p.qty, "entry_price": p.entry_price,
-                  "cost_usd": round(p.cost_usd or 0.0, 2), "target_price": p.target_price,
-                  "opened_at": (p.opened_at.isoformat() + "Z") if p.opened_at else None}
-                 for p in held],
-        "open_cost_usd": round(sum(p.cost_usd or 0.0 for p in held), 2),
+        "practice": book(True),
+        "real": book(False),
     }

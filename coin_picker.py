@@ -34,8 +34,17 @@ HOW IT STAYS OUT OF THE WAY
   It is not a branch - 21 stays 21, and the picker is what grows. Its open pieces
   are registered in crypto_coin_claims, so the grid, the tree and coin adoption
   never take its coins, and it never buys a coin they claim. Unreadable claims
-  mean no buy. Off unless GRID_COIN_PICKER is exactly "true"; it runs under
-  STOP_TRADING, as GRID_SELL_ONLY does.
+  mean no buy. It runs under STOP_TRADING, as GRID_SELL_ONLY does.
+
+PRACTICE FIRST
+  The owner, the same day: "avoid doing anything outside of the sandbox until your
+  bot has proven it can run flawlessly without manual trade conflicts or code
+  crashes." GRID_COIN_PICKER=paper runs every step above on live prices inside the
+  real bot - picks, gates, claims - but places no order: a buy is recorded at the
+  price it would have paid, a sale at its target, as paper pieces that never touch
+  the wallet, the claims or the BTC buy's profit. Every pass and every failure is
+  counted (coin_picker_passes_<mode>) so "ran clean" is a number, not a feeling.
+  GRID_COIN_PICKER=true is real money. Anything else is off.
 """
 import asyncio
 import logging
@@ -76,9 +85,14 @@ _next_pass_at = 0.0
 _said = {}
 
 
+def mode() -> str:
+    """"live" for exactly "true", "paper" for exactly "paper", otherwise "off"
+    (any case, surrounding spaces ignored)."""
+    return {"true": "live", "paper": "paper"}.get((os.getenv(SWITCH_ENV) or "").strip().lower(), "off")
+
+
 def enabled() -> bool:
-    """True only for an explicit "true", parsed as GRID_SELL_ONLY is."""
-    return (os.getenv(SWITCH_ENV) or "").strip().lower() == "true"
+    return mode() != "off"
 
 
 # ------------------------------------------------------------------ pure rules
@@ -200,22 +214,23 @@ async def high_24h(session, pid):
 
 # ------------------------------------------------------------------- the record
 
-async def open_pieces():
+async def open_pieces(paper=False):
     from sqlalchemy import select
     from database import get_session_factory
     from models import CoinPickerPiece
     async with get_session_factory()() as db:
         return list((await db.execute(select(CoinPickerPiece)
-                                      .where(CoinPickerPiece.status == "open"))).scalars().all())
+                                      .where(CoinPickerPiece.status == "open")
+                                      .where(CoinPickerPiece.paper == bool(paper)))).scalars().all())
 
 
-async def record_buy(pid, qty, px, rate):
+async def record_buy(pid, qty, px, rate, paper=False):
     from database import get_session_factory
     from models import CoinPickerPiece
     async with get_session_factory()() as db:
         db.add(CoinPickerPiece(product_id=pid, status="open", qty=qty, entry_price=px,
                                cost_usd=qty * px, target_price=target_price(px, rate),
-                               round_trip_fee_rate=rate))
+                               round_trip_fee_rate=rate, paper=bool(paper)))
         await db.commit()
 
 
@@ -233,7 +248,7 @@ async def record_sale(piece_id, filled_qty, px, pnl):
                                    entry_price=row.entry_price, cost_usd=rest * row.entry_price,
                                    target_price=row.target_price,
                                    round_trip_fee_rate=row.round_trip_fee_rate,
-                                   opened_at=row.opened_at))
+                                   opened_at=row.opened_at, paper=row.paper))
         row.qty, row.cost_usd = filled_qty, filled_qty * (row.entry_price or 0.0)
         row.status, row.exit_price, row.pnl = "closed", px, pnl
         row.closed_at = datetime.utcnow()
@@ -241,7 +256,8 @@ async def record_sale(piece_id, filled_qty, px, pnl):
 
 
 async def banked_since(start_naive_utc):
-    """Profit the picker's sales booked after a moment. Raises when unreadable."""
+    """Profit the picker's REAL sales booked after a moment - never a paper one.
+    Raises when unreadable."""
     from sqlalchemy import func, select
     from database import get_session_factory
     from models import CoinPickerPiece
@@ -249,6 +265,7 @@ async def banked_since(start_naive_utc):
         total = (await db.execute(
             select(func.coalesce(func.sum(CoinPickerPiece.pnl), 0.0))
             .where(CoinPickerPiece.status == "closed")
+            .where(CoinPickerPiece.paper == False)  # noqa: E712 - SQL, not Python
             .where(CoinPickerPiece.closed_at > start_naive_utc))).scalar()
     return float(total or 0.0)
 
@@ -342,6 +359,28 @@ async def _rank_and_store():
         log.error(f"[PICKER] ranking failed ({type(e).__name__}: {e}) - keeping the previous picks")
 
 
+async def _count(ok, which):
+    """One pass (and one failure if not ok) on coin_picker_passes_<mode>:
+    base_capital counts passes, starting_capital failures. Never raises."""
+    try:
+        from sqlalchemy import select
+        from database import get_session_factory
+        from models import TradingBotState
+        key = f"coin_picker_passes_{which}"
+        async with get_session_factory()() as db:
+            row = (await db.execute(select(TradingBotState)
+                                    .where(TradingBotState.bot_name == key))).scalar_one_or_none()
+            if row is None:
+                row = TradingBotState(bot_name=key, base_capital=0.0, starting_capital=0.0)
+                db.add(row)
+            row.base_capital = float(row.base_capital or 0.0) + 1.0
+            if not ok:
+                row.starting_capital = float(row.starting_capital or 0.0) + 1.0
+            await db.commit()
+    except Exception as e:
+        log.warning(f"[PICKER] pass counter not written ({type(e).__name__})")
+
+
 def _say(key, text):
     if _said.get(key) != text:
         _said[key] = text
@@ -352,13 +391,25 @@ async def maybe_trade(session, now=None):
     """One pass: refresh the picks in the background when due, sell what has reached
     its target, then at most one buy. Returns a short summary. Never raises."""
     global _rank_task, _next_pass_at
-    if not enabled():
+    which = mode()
+    if which == "off":
         return {"on": False}
     now = time.time() if now is None else now
     if now < _next_pass_at:
         return {"on": True, "skipped": "read this minute already"}
     _next_pass_at = now + PASS_SECONDS
-    out = {"on": True, "sold": [], "bought": None}
+    paper = which == "paper"
+    out = {"on": True, "mode": which, "sold": [], "bought": None}
+    ok = await _pass(session, now, paper, out)
+    await _count(ok, which)
+    return out
+
+
+async def _pass(session, now, paper, out):
+    """The pass itself. True when it ran to the end, False when it failed."""
+    global _rank_task
+    tag = "PAPER_" if paper else ""
+    word = "practice " if paper else ""
     try:
         import concentration_gate
         import crypto_btc_compound_bot as engine
@@ -369,10 +420,10 @@ async def maybe_trade(session, now=None):
             _rank_task = asyncio.create_task(_rank_and_store())
 
         try:
-            pieces = await open_pieces()
+            pieces = await open_pieces(paper)
         except Exception as e:
             _say("record", f"piece record unreadable ({type(e).__name__}) - nothing this pass")
-            return out
+            return False
         rate = await grid.get_effective_round_trip_fee_rate()
         wait = await grid.maker_wait_seconds()
 
@@ -388,7 +439,9 @@ async def maybe_trade(session, now=None):
                 held.add(p.product_id)
                 _say(f"hold:{p.id}", f"{p.product_id} {why}")
                 continue
-            fill = await engine.place_maker_sell(session, p.qty, p.product_id, wait)
+            # Practice: a resting sell at the target fills AT the target.
+            fill = ((p.qty, p.target_price) if paper else
+                    await engine.place_maker_sell(session, p.qty, p.product_id, wait))
             if not fill:
                 held.add(p.product_id)
                 continue
@@ -397,22 +450,22 @@ async def maybe_trade(session, now=None):
             await record_sale(p.id, fq, fpx, pnl)
             if fq < p.qty * (1 - 1e-6):
                 held.add(p.product_id)
-            msg = (f"coin picker sold {fq:.8g} {p.product_id} @ ${fpx:,.6g} - bought at "
+            msg = (f"coin picker {word}sold {fq:.8g} {p.product_id} @ ${fpx:,.6g} - bought at "
                    f"${p.entry_price:,.6g}, {pnl:+.2f} profit after fees")
             log.warning(f"[PICKER] {msg}")
-            await _feed("SELL", p.product_id, msg, throttle=False)
+            await _feed(f"{tag}SELL", p.product_id, msg, throttle=False)
             out["sold"].append((p.product_id, round(pnl, 2)))
 
         # ---- buys: one per pass, a pick with no open piece, on a 5% dip
         if not _picks or len(held) >= MAX_OPEN:
-            return out
+            return True
         if PIECE_USD < MIN_VIABLE_USD:
             _say("size", f"GRID_COIN_PICKER_USD ${PIECE_USD:,.2f} is under the "
                          f"${MIN_VIABLE_USD:.0f} minimum - no buys")
-            return out
+            return True
         claimed = await _claimed()
         if claimed is None:
-            return out
+            return True
         for pid in _picks:
             if pid in held or pid in claimed or no_sell.blocks(pid):
                 continue
@@ -422,39 +475,42 @@ async def maybe_trade(session, now=None):
             usd, usdc, err = await grid.wallet_cash(session)
             if usd is None:
                 _say("cash", f"cash unreadable ({err}) - no buy")
-                return out
+                return True
             reserve, _ = await grid.unfunded_deployment_reserve()
             spend, why = grid.spendable_for_slice(PIECE_USD, usd + (usdc or 0.0),
                                                   deployment_reserve=reserve)
             if spend < PIECE_USD:
                 await _feed("CASH_RESERVE", pid, f"coin picker: cash floor - {why}")
-                return out
+                return True
             if usd < spend:
                 await _feed("CASH_RESERVE", pid, f"coin picker: USD ${usd:,.2f} is short of "
                                                  f"${spend:,.2f} - USDC is not converted for it")
-                return out
+                return True
             conc_ok, conc_why = concentration_gate.concentration_verdict(
                 pid, await grid.account_market_book(), spend)
             if not conc_ok:
                 await _feed("CONCENTRATION", pid, f"coin picker: {conc_why}")
                 continue
-            fill = await engine.place_maker_buy(session, spend, pid, wait)
+            # Practice: a buy at the bid is taken at the price seen now.
+            fill = ((spend / px, px) if paper else
+                    await engine.place_maker_buy(session, spend, pid, wait))
             if not fill:
                 _say(f"nofill:{pid}", f"maker buy of {pid} did not fill - tries again next pass")
-                return out
+                return True
             q, bpx = fill
-            await record_buy(pid, q, bpx, rate)
-            msg = (f"coin picker bought {q:.8g} {pid} @ ${bpx:,.6g} (${q * bpx:,.2f}) - "
+            await record_buy(pid, q, bpx, rate, paper=paper)
+            msg = (f"coin picker {word}bought {q:.8g} {pid} @ ${bpx:,.6g} (${q * bpx:,.2f}) - "
                    f"{(1 - px / hi) * 100:.1f}% under its 24h high; sells at "
                    f"${target_price(bpx, rate):,.6g} or better, never at a loss")
             log.warning(f"[PICKER] {msg}")
-            await _feed("BUY", pid, msg, throttle=False)
+            await _feed(f"{tag}BUY", pid, msg, throttle=False)
             out["bought"] = (pid, round(q * bpx, 2))
-            return out
-        return out
+            return True
+        return True
     except Exception as e:
         log.error(f"[PICKER] pass failed ({type(e).__name__}: {e}) - nothing more this pass")
-        return out
+        await _feed("ERROR", "fleet", f"coin picker pass failed: {type(e).__name__}: {e}")
+        return False
 
 
 async def _feed(verdict_name, product_id, reason, throttle=True):

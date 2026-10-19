@@ -3238,7 +3238,8 @@ class CoinPickerPiece(Base):
     target_price is fixed at the buy: the price at which selling the whole
     piece nets 1% of its cost after both fee legs. A piece is never sold
     under it (profit_only.py). status is "open" or "closed"; exit_price, pnl
-    and closed_at are set only by a real fill.
+    and closed_at are set only by a fill - a real one, or for a paper piece the
+    practice fill at the target.
     """
     __tablename__ = "coin_picker_pieces"
 
@@ -3254,6 +3255,9 @@ class CoinPickerPiece(Base):
     closed_at = Column(DateTime, nullable=True, index=True)
     exit_price = Column(Float, nullable=True)
     pnl = Column(Float, nullable=True)
+    # True for a practice piece (GRID_COIN_PICKER=paper): no order was placed and
+    # no coin is held. Never claimed, never counted toward the BTC buy's profit.
+    paper = Column(Boolean, default=False, index=True)
 
 
 class CoinPickerPick(Base):
