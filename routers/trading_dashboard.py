@@ -25,6 +25,7 @@ from datetime import datetime, timezone, timedelta
 
 import json as json_module
 import aiohttp
+import no_sell
 import strategy_batch
 import strategy_lab
 import strategy_pine_export
@@ -910,6 +911,9 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         # 24h low, profit sales only. Wins over sell-only when both are on
         # (crypto_grid_bot.grid_bounce_buying).
         "grid_bounce_buying": (os.getenv("GRID_BOUNCE_BUYING") or "").strip().lower() == "true",
+        # The owner's no-sell list: coins nothing in this service sells
+        # (no_sell.py). BTC unless NO_SELL_COINS says otherwise.
+        "no_sell_coins": list(no_sell.coins()),
         **order_block,
     }
 
@@ -7905,6 +7909,8 @@ async def sell_amount_of_holding(req: PartialSellRequest):
     if not asset:
         raise HTTPException(status_code=400, detail="asset is required")
     product_id = f"{asset}-{(req.quote or 'USD').strip().upper()}"
+    if no_sell.blocks(product_id):
+        raise HTTPException(status_code=403, detail=no_sell.reason(product_id))
 
     async with aiohttp.ClientSession() as session:
         # AVAILABLE balance only. account_census sums available + hold
@@ -8015,6 +8021,8 @@ async def manual_sell_coinbase(req: CoinbaseSellRequest):
 
     symbol = req.symbol
     qty_to_sell = req.qty
+    if no_sell.blocks(symbol):
+        raise HTTPException(status_code=403, detail=no_sell.reason(symbol))
 
     # Check if position exists
     if symbol not in crypto_coinbase_bot.open_crypto_positions:

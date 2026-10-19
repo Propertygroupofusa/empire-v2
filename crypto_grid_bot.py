@@ -52,6 +52,7 @@ import slice_lifecycle as _sl  # NEVER rebind this name in a function.
 # did it, and the damage ran in both directions - the insert above them raised,
 # and the PARTIAL write below them would have read a slice object as a module.
 import slice_target
+import no_sell
 import random
 import sys
 import time
@@ -8881,6 +8882,18 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
     # made profit_target mean "not a stop" rather than "the target was hit".
     _rise_hit = bool(slices and price >= branch.reference_price * (1 + grid_pct))
     if _stop_slice is not None or _parked_sell or _rise_hit:
+        if no_sell.blocks(branch.product_id):
+            # THE OWNER'S NO-SELL LIST (no_sell.py), before any slice is
+            # picked or any sale is named. The engine refuses the order too;
+            # stopping here means no balance or book reads for a sale that
+            # cannot happen, and one feed row saying why instead of a retry
+            # warning every cycle.
+            _ns_why = no_sell.reason(branch.product_id)
+            if should_say_state(f"{branch.bot_name}:nosell", f"held:{len(slices)}", time.time()):
+                log.info(f"[GRID] {branch.bot_name}: sell trigger reached on {branch.product_id} - {_ns_why}")
+            if _feed_should_write("NO_SELL", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id, "NO_SELL", _ns_why)
+            return
         if _stop_slice is not None:
             # The stop deliberately bypasses _pick_profitable_slice_to_sell.
             # That function's whole job is to refuse a losing sale; here the

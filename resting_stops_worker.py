@@ -37,6 +37,7 @@ from datetime import datetime
 
 import aiohttp
 
+import no_sell
 import resting_stops
 
 log = logging.getLogger("resting_stops")
@@ -109,6 +110,9 @@ async def cancel(session, order_id):
 
 
 async def place(session, product_id, plan):
+    if no_sell.blocks(product_id):
+        # Backstop for the skip in the pass: no stop is placed on a listed coin.
+        return False, {"error_response": {"message": no_sell.reason(product_id)}}
     import crypto_coinbase_bot
     order = {
         "client_order_id": COID_PREFIX + str(uuid.uuid4()),
@@ -221,6 +225,14 @@ async def check_once(session_factory, *, place_orders=True) -> dict:
         for row in (watch.get("rows") or []):
             asset = row.get("asset")
             if not asset:
+                continue
+            if no_sell.blocks(f"{asset}-USD"):
+                # The owner's no-sell list. A resting stop IS a sale, so none
+                # is planned or placed for this coin. One already resting is
+                # LEFT as it is: this loop never cancels for the list, because
+                # a cancel followed by a refused place is a naked position.
+                results.append({"asset": asset, "action": "skip",
+                                "reason": no_sell.reason(f"{asset}-USD")})
                 continue
             share = ((row.get("usd") or 0) / total * 100.0) if total else None
 

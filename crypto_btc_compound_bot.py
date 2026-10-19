@@ -58,6 +58,7 @@ from models import BotPosition
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 import execution_quantity as _eq
 import dust_cooldown as _dust
+import no_sell as _no_sell
 log = logging.getLogger("crypto_btc_compound_bot")
 
 
@@ -1692,6 +1693,14 @@ async def _place_maker_order(session, order: dict, wait_seconds: int):
         # Same lifecycle for the venue's order id: absent is UNKNOWN, and a
         # previous cycle's id read as this order's would be a false join.
         _last_order_id.pop(product_id, None)
+    if str(order.get("side") or "").upper() == "SELL" and _no_sell.blocks(product_id):
+        # The owner's no-sell list, at the maker leg's door. Nothing is sent,
+        # so nothing rested: False, which keeps it out of the expiry study.
+        _why = _no_sell.reason(product_id)
+        log.warning(f"[BTC-COMPOUND] {product_id}: NOT SELLING - {_why}. No order placed.")
+        _last_order_error[product_id] = _why
+        _last_order_rested[product_id] = False
+        return None
     try:
         async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path),
                                 json=order, timeout=15) as r:
@@ -2151,6 +2160,14 @@ async def _record_order_source(order_id: str, source: str, product_id: str, side
 
 async def _place_and_confirm(session, path: str, order: dict, source: str = None):
     product_id = order.get("product_id")
+    if str(order.get("side") or "").upper() == "SELL" and _no_sell.blocks(product_id):
+        # THE OWNER'S NO-SELL LIST (no_sell.py). Checked at the door every
+        # engine market order goes through, so no caller - the grid, the
+        # family tree, a forced exit - can sell a coin on it.
+        _why = _no_sell.reason(product_id)
+        log.warning(f"[BTC-COMPOUND] {product_id}: NOT SELLING - {_why}. No order placed.")
+        _last_order_error[product_id] = _why
+        return None
     try:
         async with session.post(COINBASE_BASE_URL + path, headers=_auth_headers("POST", path), json=order, timeout=15) as r:
             resp = await r.json()

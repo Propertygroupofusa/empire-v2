@@ -61,6 +61,7 @@ from sqlalchemy import select, func
 from database import get_session_factory
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
+import no_sell
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
 from bot_recovery import loop_detector, circuit_breaker, api_retry, failure_alert, get_recovery_status
 
@@ -1260,6 +1261,11 @@ async def place_order(session, symbol, side, qty, price, skip_on_network_error=F
     """
     product_id = _to_product_id(symbol)
     path = "/api/v3/brokerage/orders"
+
+    if side != "buy" and no_sell.blocks(product_id):
+        # The owner's no-sell list (no_sell.py): no sell order is built.
+        log.warning(f"Not selling {symbol}: {no_sell.reason(product_id)}")
+        return False
 
     if side == "buy":
         # Market order: immediate entry at market price (IOC = Immediate or Cancel)

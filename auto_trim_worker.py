@@ -32,6 +32,7 @@ import aiohttp
 from sqlalchemy import select
 
 import auto_trim
+import no_sell
 
 log = logging.getLogger("auto_trim")
 
@@ -127,6 +128,9 @@ async def _place_market_sell(session, product_id, base_size):
     The single point in this package where money moves. Kept tiny so it
     can be read in one sitting.
     """
+    if no_sell.blocks(product_id):
+        # Backstop for the skip in the pass: nothing on the list leaves here.
+        return False, {"error_response": {"message": no_sell.reason(product_id)}}
     import crypto_coinbase_bot
     order = {
         "client_order_id": str(uuid.uuid4()),
@@ -358,6 +362,16 @@ async def check_once(session_factory, *, place=True) -> dict:
             holding = next((h for h in holdings if (h.get("asset") or "").upper() == asset), {})
             price = holding.get("price")
             units = avail.get(asset)
+
+            if no_sell.blocks(product_id):
+                # The owner's no-sell list wins over the share rule: a coin
+                # on it is held whatever share of the account it reaches.
+                await _record(session_factory, asset=asset, usd=0.0, decided_at=now,
+                              skipped_reason="NO_SELL_LIST", share_pct=p.get("share_pct"),
+                              detail=no_sell.reason(product_id), status="skipped")
+                results.append({"asset": asset, "placed": False,
+                                "reason": no_sell.reason(product_id)})
+                continue
 
             if not units:
                 await _record(session_factory, asset=asset, usd=0.0, decided_at=now,

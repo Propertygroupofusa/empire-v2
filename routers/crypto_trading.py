@@ -17,6 +17,8 @@ import uuid
 import logging
 import httpx
 
+import no_sell
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/crypto", tags=["crypto"])
 
@@ -136,6 +138,8 @@ async def place_order(order: OrderRequest):
                 status_code=400,
                 detail="Missing required order parameters"
             )
+        if str(order.side).strip().upper() != "BUY" and no_sell.blocks(order.product_id):
+            raise HTTPException(status_code=403, detail=no_sell.reason(order.product_id))
 
         # Build order payload
         order_payload = {
@@ -195,6 +199,9 @@ async def withdraw_all_asset(withdraw_req: WithdrawRequest):
     try:
         asset = withdraw_req.product_id.split("-")[0]  # Extract base asset (BTC, AAVE, etc.)
         product_id = withdraw_req.product_id  # Full pair like BTC-USD, AAVE-USD
+        if no_sell.blocks(product_id):
+            # This "withdrawal" is a market sale of the whole holding.
+            raise HTTPException(status_code=403, detail=no_sell.reason(product_id))
 
         headers = generate_auth_headers("GET", "/api/v3/brokerage/accounts")
 
