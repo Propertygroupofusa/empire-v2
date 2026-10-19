@@ -145,11 +145,14 @@ def test_the_buy_branch_is_unreachable_in_sell_only():
 
 
 def test_the_stop_loss_sale_is_off_in_sell_only():
+    """Off under sell-only - and since the owner's profit-only rule
+    (profit_only.py, 2026-10-19) off in every mode, with no switch left that
+    could turn it back on."""
     src, tree = _cycle_tree()
-    override = "    if _owner_sell_only or _owner_bounce:\n        _stop_slice = None\n"
-    assert src.count(override) == 1, "the sell-only override of the stop sale is gone"
+    assert "if _owner_sell_only or _owner_bounce:\n        _stop_slice = None" not in src
     pick = src.index("_stop_slice = _stop_candidate")
-    at = src.index(override)
+    clear = "\n    _stop_slice = None\n"            # body level: unconditional
+    at = src.index(clear, pick)
     # after every place a stop slice can be chosen, before anything reads it
     assert pick < at < src.index("_parked = branch_is_parked(")
     assert at < src.index("if _stop_slice is not None or _parked_sell or _rise_hit:")

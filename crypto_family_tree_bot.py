@@ -87,6 +87,7 @@ from database import get_session_factory
 from models import BotPosition, CryptoTreeBranch, TradingBotState, CryptoBacktestRun, CryptoCoinTradeHistory, CryptoActivityEvent, CryptoManualCoinOverride
 
 import crypto_btc_compound_bot as engine
+import profit_only
 
 
 def AsyncSessionLocal():
@@ -3472,6 +3473,19 @@ async def liquidate_family_tree_and_buy_btc() -> dict:
 
     closed = []
     async with engine.aiohttp.ClientSession() as session:
+        # THE OWNER'S PROFIT-ONLY RULE (profit_only.py). Retiring the tree
+        # sells every branch and then deletes them all, so one sale that would
+        # not clear its cost and fees stops the whole retirement before
+        # anything is sold - a half-retired tree is worse than none.
+        for b in others:
+            pos = await _load_branch_position(b.bot_name)
+            if pos is not None:
+                _bid, _ = await engine.get_best_bid_ask(session, b.product_id)
+                _ok, _why = profit_only.verdict(pos.qty, pos.entry_price, _bid)
+                if not _ok:
+                    log.warning(f"[TREE] 🔒 retirement refused - {b.bot_name} {b.product_id}: {_why}")
+                    return {"status": "refused", "closed_positions": [],
+                            "error": f"{b.bot_name} {b.product_id}: {_why}"}
         for b in others:
             pos = await _load_branch_position(b.bot_name)
             if pos is not None:
@@ -4146,6 +4160,14 @@ async def _branch_sell_and_settle(session, bot_name, product_id, position, reaso
     run_branch_cycle's own comment at its call site: recursing on an
     unchanged state re-tries the identical doomed sell against the
     identical price forever, a real RecursionError risk)."""
+    # THE OWNER'S PROFIT-ONLY RULE (profit_only.py): priced at the bid the
+    # market sell would really fill near. A refusal changes nothing, so it
+    # returns False - the caller must not recurse on it.
+    _bid, _ = await engine.get_best_bid_ask(session, product_id)
+    _ok, _why = profit_only.verdict(position.qty, position.entry_price, _bid)
+    if not _ok:
+        log.info(f"[TREE] {bot_name}: {product_id} {reason} - {_why}")
+        return False
     fill = await engine.place_market_sell(session, position.qty, product_id)
     if not fill:
         stuck_reason = engine._last_order_error.get(product_id, "")

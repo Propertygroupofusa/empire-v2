@@ -26,6 +26,7 @@ from typing import Dict, Optional, Tuple
 
 from sqlalchemy import select
 import crypto_btc_compound_bot as engine
+import profit_only
 from database import get_session_factory
 from models import CryptoGridBranch, CryptoActivityEvent, TradingBotState
 
@@ -383,6 +384,13 @@ class MeanReversionEngine:
 
         position = self.positions[product_id]
         quantity = position.quantity
+
+        # THE OWNER'S PROFIT-ONLY RULE (profit_only.py): a stop-loss, timeout
+        # or RSI exit that would not clear the entry and both fees is held.
+        _ok, _why = profit_only.verdict(quantity, position.entry_price, current_price)
+        if not _ok:
+            log.info(f"[MR] {product_id} {exit_reason} - {_why}")
+            return False
 
         try:
             # Determine order type based on exit reason

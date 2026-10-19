@@ -205,11 +205,11 @@ def test_the_buy_branch_is_reachable_and_the_stop_sale_is_off():
                  and [ast.unparse(t) for t in n.targets] == ["_sell_only"]]
     assert len(sell_only) == 1
     assert ast.unparse(sell_only[0].value) == "bool(getattr(branch, 'buys_paused', False)) or _owner_sell_only"
-    # and the stop-loss sale is cleared under either owner switch
-    overrides = [n for n in ast.walk(tree) if isinstance(n, ast.If)
-                 and ast.unparse(n.test) == "_owner_sell_only or _owner_bounce"]
-    assert len(overrides) == 1
-    assert [ast.unparse(s) for s in overrides[0].body] == ["_stop_slice = None"]
+    # and the stop-loss sale is cleared under bounce - since the owner's
+    # profit-only rule (profit_only.py) in every mode, unconditionally
+    fn = tree.body[0]
+    top = [ast.unparse(n) for n in fn.body if isinstance(n, ast.Assign)]
+    assert top.count("_stop_slice = None") == 2      # the start, and the clear after the pick
 
 
 def test_the_bounce_is_the_last_gate_before_any_usdc_is_converted():

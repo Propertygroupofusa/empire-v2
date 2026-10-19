@@ -62,6 +62,7 @@ from database import get_session_factory
 from models import BotPosition, TradingBotState, CryptoRSIState, CryptoTradeLog, CryptoSupplementalCapital
 from bot_mandates import CRYPTO_MANDATE
 import no_sell
+import profit_only
 from network_config import get_cached_response, cache_response, NETWORK_ENV_CONFIG
 from bot_recovery import loop_detector, circuit_breaker, api_retry, failure_alert, get_recovery_status
 
@@ -1254,7 +1255,8 @@ def size_position(cash_pool_remaining, slots_remaining, price):
     return qty if qty > 0 else None
 
 
-async def place_order(session, symbol, side, qty, price, skip_on_network_error=False):
+async def place_order(session, symbol, side, qty, price, skip_on_network_error=False,
+                      entry_price=None):
     """Coinbase Advanced Trade orders:
     - BUY: market IOC for immediate entry
     - SELL: limit GTC at profit target to hold order until price reached
@@ -1266,6 +1268,14 @@ async def place_order(session, symbol, side, qty, price, skip_on_network_error=F
         # The owner's no-sell list (no_sell.py): no sell order is built.
         log.warning(f"Not selling {symbol}: {no_sell.reason(product_id)}")
         return False
+    if side != "buy":
+        # THE OWNER'S PROFIT-ONLY RULE (profit_only.py): a sell must clear the
+        # entry it was bought at plus both fees. No entry given is a refusal.
+        _ok, _why = (profit_only.verdict(qty, entry_price, price) if entry_price is not None
+                     else (False, profit_only.NO_COST_ON_RECORD))
+        if not _ok:
+            log.info(f"Not selling {symbol}: {_why}")
+            return False
 
     if side == "buy":
         # Market order: immediate entry at market price (IOC = Immediate or Cancel)
@@ -1742,7 +1752,7 @@ async def run_crypto_cycle():
                         continue
 
                     # Sell 25% of original position
-                    filled = await place_order(session, symbol, "sell", sell_qty, price)
+                    filled = await place_order(session, symbol, "sell", sell_qty, price, entry_price=entry)
                     if filled:
                         pnl_partial = (price - entry) * sell_qty
                         daily_pnl += pnl_partial
@@ -1757,7 +1767,7 @@ async def run_crypto_cycle():
                         continue
 
                     # Full exit: sell all remaining
-                    filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price)
+                    filled = await place_order(session, symbol, "sell", remaining_qty if remaining_qty > 0 else qty, price, entry_price=entry)
                     if filled:
                         daily_pnl += unrealized_pnl
                         log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")
@@ -1897,7 +1907,7 @@ async def run_crypto_cycle():
                 reason = f"MAX HOLD TIME ({held_min:.0f}min >= {CRYPTO_MAX_HOLD_SECONDS//60}min, {unrealized_pct*100:+.2f}%)"
 
             if should_exit:
-                filled = await place_order(session, symbol, "sell", qty, price)
+                filled = await place_order(session, symbol, "sell", qty, price, entry_price=entry)
                 if filled:
                     daily_pnl += unrealized_pnl
                     log.info(f"[CRYPTO] 📤 CLOSE {symbol} ({reason}) | Entry: ${entry:.2f} Exit: ${price:.2f} | P&L: ${unrealized_pnl:.2f}")

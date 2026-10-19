@@ -53,6 +53,7 @@ import slice_lifecycle as _sl  # NEVER rebind this name in a function.
 # and the PARTIAL write below them would have read a slice object as a module.
 import slice_target
 import no_sell
+import profit_only
 import random
 import sys
 import time
@@ -8808,13 +8809,14 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
             if _entry and price <= _entry * (1 - _stop_pct):
                 _stop_slice = _stop_candidate
                 break
-    # Under GRID_SELL_ONLY and GRID_BOUNCE_BUYING the stop-loss sale is off:
-    # both exist so a slice is only ever sold at a profit. The two remaining
-    # exits both require one (_pick_profitable_slice_to_sell,
-    # _pick_parked_slice_to_sell), and clearing it here, before the parked
-    # check, keeps that exit open.
-    if _owner_sell_only or _owner_bounce:
-        _stop_slice = None
+    # THE OWNER'S PROFIT-ONLY RULE (profit_only.py): the stop-loss sale is off
+    # for good, in every mode. It used to be off only under GRID_SELL_ONLY and
+    # GRID_BOUNCE_BUYING, and a switch is how nine stop-loss sales booked
+    # -$50.50 on 2026-10-07/08. The two remaining exits both require a profit
+    # (_pick_profitable_slice_to_sell, _pick_parked_slice_to_sell), and
+    # clearing it here, before the parked check, keeps that exit open. The
+    # stop is still measured and logged above; it only never sells.
+    _stop_slice = None
 
     # A branch as full as its levels cannot buy, so the spacing gate is
     # protecting a rebuy that cannot happen - see GRID_PARKED_MIN_NET_PCT.
@@ -8967,6 +8969,24 @@ async def run_grid_branch_cycle(session, branch: CryptoGridBranch, cycle_id: str
         if _sd_state == "PROBE":
             log.info(f"[GRID] {branch.bot_name}: sell probe - {_sd_why}")
         _SELL_SKIPS.pop(_sd_key, None)
+
+        # THE OWNER'S PROFIT-ONLY RULE (profit_only.py), at the grid's one
+        # sale. Both pickers already require a profit; this is the last word
+        # before the order, priced against the same basis the sale will be
+        # booked at (sell_basis_for_slice - the true cost for an adopted
+        # slice) and with this slice's own real fee rates, so no route into
+        # this block - present or future - can sell below cost. Same formula
+        # as _grid_slice_net_pnl, which stays the one booking call.
+        _po_ok, _po_why = profit_only.verdict(
+            oldest.qty, sell_basis_for_slice(oldest, product_id=branch.product_id), price,
+            _slice_rate(oldest, real_fee_rate, exit_leg_rate))
+        if not _po_ok:
+            if should_say_state(f"{branch.bot_name}:profitonly", f"held:{len(slices)}", time.time()):
+                log.info(f"[GRID] {branch.bot_name}: {branch.product_id} - {_po_why}")
+            if _feed_should_write("LOSS_SALE_REFUSED", branch.product_id):
+                await _record_gate_decision(branch.bot_name, branch.product_id,
+                                            "LOSS_SALE_REFUSED", _po_why)
+            return
 
         fill = await grid_sell(session, oldest.qty, branch.product_id, branch.bot_name)
         if not fill:
@@ -11300,6 +11320,27 @@ async def close_all_grid_slices(only_bot_name: str = None,
             # whole branch and settled a fraction of it - the exact books/
             # wallet divergence this function is being reused to avoid.
             total_qty = sum(s.qty for s in slices)
+            # THE OWNER'S PROFIT-ONLY RULE (profit_only.py). A forced close is
+            # a sale like any other: priced at the bid it would really fill
+            # near, every slice in it must clear its own cost and both fees,
+            # or the whole branch stays open. An unreadable bid is a refusal.
+            _bid, _ = await engine.get_best_bid_ask(session, b.product_id)
+            _po_why = None
+            if not _bid:
+                _po_why = "profit-only rule: no bid to price the close against - not sold"
+            else:
+                for s in slices:
+                    _ok, _why = profit_only.verdict(
+                        s.qty, sell_basis_for_slice(s, product_id=b.product_id), _bid,
+                        _slice_rate(s, close_all_fee_rate, close_all_exit_leg_rate))
+                    if not _ok:
+                        _po_why = _why
+                        break
+            if _po_why:
+                results.append({"bot_name": b.bot_name, "product_id": b.product_id,
+                                "sold": False, "slices_closed": 0, "reason": _po_why})
+                log.warning(f"[GRID] close-all: {b.bot_name} {b.product_id} left open - {_po_why}")
+                continue
             # close-all is a PROTECTION, and protections fail open: if the
             # balance cannot be read here, leaving a live position open is
             # the worse outcome, so this is the one caller allowed to sell

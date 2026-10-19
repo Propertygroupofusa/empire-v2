@@ -38,6 +38,7 @@ from datetime import datetime
 import aiohttp
 
 import no_sell
+import profit_only
 import resting_stops
 
 log = logging.getLogger("resting_stops")
@@ -113,6 +114,9 @@ async def place(session, product_id, plan):
     if no_sell.blocks(product_id):
         # Backstop for the skip in the pass: no stop is placed on a listed coin.
         return False, {"error_response": {"message": no_sell.reason(product_id)}}
+    if not profit_only.STOP_ORDERS_ALLOWED:
+        # Backstop for the profit-only return in check_once.
+        return False, {"error_response": {"message": profit_only.NO_STOP_SALES}}
     import crypto_coinbase_bot
     order = {
         "client_order_id": COID_PREFIX + str(uuid.uuid4()),
@@ -166,6 +170,10 @@ async def check_once(session_factory, *, place_orders=True) -> dict:
     if not is_armed():
         return {"armed": False, "placed": 0, "replaced": 0,
                 "detail": "observing - the venue was not contacted"}
+    if not profit_only.STOP_ORDERS_ALLOWED:
+        # The owner's profit-only rule (profit_only.py), before any read: an
+        # armed pass places and cancels nothing.
+        return {"armed": True, "placed": 0, "replaced": 0, "detail": profit_only.NO_STOP_SALES}
 
     import account_census
     import holdings_watch
