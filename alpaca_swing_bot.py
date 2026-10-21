@@ -28,6 +28,7 @@ Trades: Indices (MES, MNQ, MYM, M2K) + Commodities (MGC, MCL, SIL)
 """
 
 import os
+import alpaca_stop
 import asyncio
 import market_direction
 import logging
@@ -669,8 +670,9 @@ async def place_order(session, symbol, qty, side):
     # like it is." This bot never read STOP_TRADING, so the one switch that
     # stops every other bot left this one trading. This is its only order
     # function, so one check here covers every buy and every sell it makes.
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
-        log.info(f"STOP_TRADING is set - no {side} of {symbol} placed. Everything is left as it is.")
+    if alpaca_stop.alpaca_stopped():
+        log.info(f"{alpaca_stop.alpaca_stop_reason()} - no {side} of {symbol} placed. "
+                 f"Everything is left as it is.")
         return None
     _counter = None
     if side == "buy":

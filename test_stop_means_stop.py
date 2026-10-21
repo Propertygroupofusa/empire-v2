@@ -31,6 +31,9 @@ def run(c):
 @pytest.fixture
 def stopped(monkeypatch):
     monkeypatch.setenv("STOP_TRADING", "true")
+    # Alpaca's own switch unset: Alpaca follows STOP_TRADING, as it did
+    # before it had one (alpaca_stop; test_alpaca_own_switch).
+    monkeypatch.delenv("ALPACA_STOP_TRADING", raising=False)
 
 
 class _NoSession:
@@ -87,18 +90,31 @@ def test_resting_stops_contact_nothing_even_when_armed(stopped, monkeypatch):
 
 def test_switched_off_the_swing_bot_is_unchanged(monkeypatch):
     """The gate only acts on an explicit true - unset leaves trading as before."""
+    import alpaca_stop
     monkeypatch.delenv("STOP_TRADING", raising=False)
+    monkeypatch.delenv("ALPACA_STOP_TRADING", raising=False)
+    assert alpaca_stop.alpaca_stopped() is False
     src = open("alpaca_swing_bot.py", encoding="utf-8").read()
     fn = src[src.index("async def place_order("):src.index("async def run_intraday_check(")]
-    assert 'os.getenv("STOP_TRADING", "false").lower() == "true"' in fn
-    assert fn.index("STOP_TRADING") < fn.index("session.post(")
+    assert "alpaca_stop.alpaca_stopped()" in fn
+    assert fn.index("alpaca_stop.alpaca_stopped()") < fn.index("session.post(")
 
 
 @pytest.mark.parametrize("path", [
-    "crypto_grid_bot.py", "prop_bot.py", "crypto_family_tree_bot.py", "crypto_coinbase_bot.py",
-    "auto_deploy.py", "alpaca_wheel_bot.py", "market_brain_runner.py", "idle_rotation_worker.py",
-    "alpaca_swing_bot.py", "concentration_rotation_worker.py", "auto_trim_worker.py",
+    "crypto_grid_bot.py", "crypto_family_tree_bot.py", "crypto_coinbase_bot.py",
+    "auto_deploy.py", "idle_rotation_worker.py",
+    "concentration_rotation_worker.py", "auto_trim_worker.py",
     "resting_stops_worker.py", "routers/trading_dashboard.py",
 ])
 def test_every_job_that_can_trade_reads_the_switch(path):
     assert 'STOP_TRADING' in open(path, encoding="utf-8").read(), path
+
+
+@pytest.mark.parametrize("path", [
+    "prop_bot.py", "alpaca_wheel_bot.py", "market_brain_runner.py",
+    "alpaca_swing_bot.py", "routers/trading_dashboard.py",
+])
+def test_every_alpaca_job_reads_alpacas_switch(path):
+    """Alpaca's jobs read Alpaca's own switch, which follows STOP_TRADING
+    until ALPACA_STOP_TRADING is set (alpaca_stop)."""
+    assert 'alpaca_stop.alpaca_stopped()' in open(path, encoding="utf-8").read(), path

@@ -15,6 +15,7 @@ once you've done that - this is bookkeeping, not a real money-movement API.
 """
 
 import os
+import alpaca_stop
 import time
 import logging
 import asyncio
@@ -210,6 +211,14 @@ def alpaca_venue() -> dict:
                             "account"),
     }
 ALPACA_HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
+
+
+def _alpaca_stop_view():
+    """Alpaca's off switch as the dashboard shows it. Read-only."""
+    stopped, source, detail = alpaca_stop.alpaca_stop_state()
+    return {"stopped": stopped, "decided_by": source, "detail": detail,
+            "separate_from_coinbase": source == alpaca_stop.ENV}
+
 
 # Real, unattended position management - per the account owner's explicit
 # request. No bot enforces either of these today: exits were otherwise
@@ -904,6 +913,9 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         # of the two flags README calls jointly required. This can.
         "venue": alpaca_venue(),
         "stop_trading": os.getenv("STOP_TRADING", "false").lower() == "true",
+        # Alpaca's own switch (alpaca_stop). Follows stop_trading until
+        # ALPACA_STOP_TRADING is set; from then on it is Alpaca's alone.
+        "alpaca_stop_trading": _alpaca_stop_view(),
         # The crypto grid's sell-only switch: no buys, profit sales only. The
         # one thing that runs under STOP_TRADING (crypto_grid_bot.grid_sell_only).
         "grid_sell_only": (os.getenv("GRID_SELL_ONLY") or "").strip().lower() == "true",
@@ -6159,6 +6171,10 @@ async def get_alpaca_overview(db: AsyncSession = Depends(get_db)):
         # Immediately beside the equity, because the figure is meaningless
         # until you know which account it came from.
         "venue": alpaca_venue(),
+        # The switch that stops every Alpaca buy AND sell. It sits above
+        # entries_paused and passive mode: while it is on, neither of those
+        # says anything about what this account will do.
+        "alpaca_stop_trading": _alpaca_stop_view(),
         "alpaca_passive_mode": alpaca_passive_mode,
         "alpaca_entries_paused": alpaca_entries_paused,
         "alpaca_entries_paused_means": (
@@ -7243,8 +7259,8 @@ async def manual_open_prop_position(ticker: str):
     pb = prop_bot_module
     ticker = ticker.upper()
 
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
-        raise HTTPException(status_code=400, detail="STOP_TRADING is set - all entries (manual or automatic) are paused")
+    if alpaca_stop.alpaca_stopped():
+        raise HTTPException(status_code=400, detail=f"{alpaca_stop.alpaca_stop_reason()} - all entries (manual or automatic) are paused")
     if await pb.is_alpaca_passive_mode():
         raise HTTPException(status_code=400, detail="Active Alpaca trading has been retired in favor of a real buy-and-hold SPY position - no new entries")
 
@@ -7373,9 +7389,10 @@ async def alpaca_entry_eligibility():
         raise HTTPException(status_code=500, detail=_module_unavailable_detail("prop_bot"))
     pb = prop_bot_module
 
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
+    if alpaca_stop.alpaca_stopped():
+        _why = f"{alpaca_stop.alpaca_stop_reason()} - all entries paused"
         return {
-            "tickers": {c["symbol"]: {"eligible": False, "reason": "STOP_TRADING is set - all entries paused", "rsi": None} for c in pb.FUTURES.values()},
+            "tickers": {c["symbol"]: {"eligible": False, "reason": _why, "rsi": None} for c in pb.FUTURES.values()},
             "strategy_family": await pb.get_live_strategy_family(),
         }
 
@@ -7546,8 +7563,9 @@ async def check_and_auto_close_positions():
     # STOP MEANS STOP. The owner, 2026-10-14: "stop everything. Don't sell
     # anything ... Just leave everything like it is." This loop closes Alpaca
     # positions (at +8%, or aged at the win floor) and never read STOP_TRADING,
-    # so the switch left it selling. It is honoured here, before any read.
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
+    # so the switch left it selling. It is honoured here, before any read -
+    # through Alpaca's own switch, which follows STOP_TRADING until it is set.
+    if alpaca_stop.alpaca_stopped():
         return
     if not (ALPACA_KEY and ALPACA_SECRET):
         return

@@ -7,6 +7,7 @@ Rule: 7 consecutive profitable days before going live
 """
 
 import os
+import alpaca_stop
 import asyncio
 import market_direction
 import logging
@@ -5084,7 +5085,7 @@ async def run_alpaca_branches_cycle():
     checks the whole-account scan's own outer loop already does."""
     if not await is_alpaca_branch_mode_active():
         return
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
+    if alpaca_stop.alpaca_stopped():
         return
     if await is_alpaca_passive_mode():
         return
@@ -5410,7 +5411,7 @@ async def run_opening_bar_live_cycle():
     this file already respects."""
     if not await is_opening_bar_live_active():
         return
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
+    if alpaca_stop.alpaca_stopped():
         return
     if await is_alpaca_passive_mode():
         return
@@ -5552,8 +5553,8 @@ def run():
     asyncio.set_event_loop(loop)
 
     while True:
-        if os.getenv("STOP_TRADING", "false").lower() == "true":
-            log.warning("STOP_TRADING=true — prop bot paused")
+        if alpaca_stop.alpaca_stopped():
+            log.warning(f"{alpaca_stop.alpaca_stop_reason()} — prop bot paused")
             time.sleep(60)
             continue
         try:

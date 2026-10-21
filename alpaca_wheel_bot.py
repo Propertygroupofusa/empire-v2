@@ -46,6 +46,7 @@ import asyncio
 import logging
 import math
 import os
+import alpaca_stop
 import time
 from datetime import date, datetime, timedelta, timezone
 
@@ -666,8 +667,8 @@ async def run_wheel_cycle():
         status["state"] = "off"
         last_status.update(status)
         return status
-    if os.getenv("STOP_TRADING", "false").lower() == "true":
-        blockers.append("STOP_TRADING=true")
+    if alpaca_stop.alpaca_stopped():
+        blockers.append(alpaca_stop.alpaca_stop_reason())
         last_status.update(status)
         return status
     try:

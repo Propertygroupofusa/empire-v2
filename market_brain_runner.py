@@ -22,14 +22,16 @@ DOES NOT:
     module from GitHub and overwrites its own file - remote code
     replacement between trading cycles on a live account. That is now
     off by default (MARKET_BRAIN_SELF_UPDATE).
- 4. IT RESPECTS STOP_TRADING, the process-wide kill switch every other
-    live subsystem here already honours.
+ 4. IT RESPECTS ALPACA'S OFF SWITCH (alpaca_stop.alpaca_stopped), which
+    every other Alpaca bot honours too. market_brain trades the Alpaca
+    equity side, so Coinbase's switch is not its switch.
 
 It starts on every boot and does nothing at all until the flag is on.
 """
 import asyncio
 import logging
 import os
+import alpaca_stop
 import time
 
 log = logging.getLogger(__name__)
@@ -81,7 +83,7 @@ def run():
     log.info("[BRAIN] runner started - idle until market_brain_owns_equities is on")
     while True:
         try:
-            if os.getenv("STOP_TRADING", "false").lower() == "true":
+            if alpaca_stop.alpaca_stopped():
                 time.sleep(POLL_SECONDS_WHEN_OFF)
                 continue
             if not _flag_on():

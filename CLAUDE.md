@@ -14862,3 +14862,21 @@ is lost". That concern is real and is kept as a limit rather than dropped:
 the test now asserts the bound exists, is stamped on save, and that the
 old slot is still read. 38/38; test_adopted_stop_card 42/42; every page's
 inline script parses.
+
+## Alpaca has its own off switch: `ALPACA_STOP_TRADING`
+
+The owner: "Alpaca and Coinbase are two different things... never to
+combine those." `STOP_TRADING` was the only switch that stopped Alpaca, and
+the Coinbase grid, rotation and boot fixes read it too, so Alpaca could not
+be started or stopped without doing the same to Coinbase.
+
+Every Alpaca job (prop_bot, alpaca_swing_bot, alpaca_wheel_bot,
+market_brain_runner, the dashboard's auto-close loop, manual entry and entry
+check) now asks `alpaca_stop.alpaca_stopped()`. No Coinbase job reads it.
+
+- unset or blank: follows `STOP_TRADING`, exactly as before
+- `false` / `0` / `no` / `off`: Alpaca runs, whatever `STOP_TRADING` says
+- anything else: Alpaca stopped, whatever `STOP_TRADING` says (fails closed)
+
+`/alpaca-overview` and `/status` show `alpaca_stop_trading` with
+`decided_by`. Pinned by test_alpaca_own_switch.py.

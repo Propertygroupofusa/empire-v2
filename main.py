@@ -1606,9 +1606,11 @@ async def lifespan(app: FastAPI):
         if prop_bot_module is not None:
             import threading
             mode = "LIVE" if os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true" else "PAPER"
-            stopped = os.getenv("STOP_TRADING", "false").lower() == "true"
+            import alpaca_stop
+            stopped, stop_source, _ = alpaca_stop.alpaca_stop_state()
             threading.Thread(target=prop_bot_module.run, daemon=True).start()
-            log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | STOP_TRADING: {stopped}")
+            log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | "
+                     f"Alpaca stopped: {stopped} (by {stop_source})")
             log.info("💰 Strategy: Market hours stock scalping + 24/7 crypto = constant opportunities and taking profits")
     except Exception as e:
         log.warning(f"Prop bot failed to start: {e}")
