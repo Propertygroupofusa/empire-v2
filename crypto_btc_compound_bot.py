@@ -752,6 +752,62 @@ def _amount_value(obj):
         return None
 
 
+# THE VENUE SAID "WAIT", NOT "NO". Measured 2026-10-21: four coin picker
+# buys in one night stopped on this conversion - three at the quote, one at
+# the commit, every one "HTTP 429" with an empty body - and every one went
+# through on a later pass, ten minutes to five hours after. A 429 is
+# Coinbase's rate limiter turning the request away before it does anything
+# with it, so the answer is to wait a moment and ask again, honouring
+# Retry-After, the way account_census already does for the account listing.
+#
+# The two steps retry differently because only one of them moves money:
+#   * the QUOTE moves nothing, so a 429 or a 5xx is asked again;
+#   * the COMMIT is asked again on a 429 only. A 429 never reached the
+#     trade. A 5xx might have, so it is reported, not repeated, and the
+#     balance cache is dropped either way so the next read shows the truth.
+#     A repeated commit names the same trade id, so the most it can ever
+#     commit is that one quote - never a second quote, never a new amount.
+# Bounded: CONVERT_RETRY_ATTEMPTS asks per step at most, each wait capped at
+# CONVERT_RETRY_MAX_WAIT_SECONDS, so a buy waits seconds, never a pass.
+CONVERT_RETRY_ATTEMPTS = 4
+CONVERT_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+CONVERT_RETRY_MAX_WAIT_SECONDS = 5.0
+CONVERT_QUOTE_RETRY_STATUSES = (429, 500, 502, 503, 504)
+CONVERT_COMMIT_RETRY_STATUSES = (429,)
+
+
+def _convert_wait_seconds(resp, attempt):
+    """The venue's Retry-After when it sends one, else the backoff step. Capped."""
+    steps = CONVERT_RETRY_BACKOFF_SECONDS
+    wait = steps[min(attempt, len(steps) - 1)]
+    try:
+        raw = resp.headers.get("Retry-After")
+        if raw:
+            wait = float(str(raw).strip())
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return max(0.0, min(wait, CONVERT_RETRY_MAX_WAIT_SECONDS))
+
+
+async def _convert_post(session, path, body, retry_statuses, step):
+    """POST one convert step. (200, json) or (status, body text) of the last answer.
+
+    Signed afresh on every attempt - a signature belongs to one request."""
+    for attempt in range(CONVERT_RETRY_ATTEMPTS):
+        async with session.post(COINBASE_BASE_URL + path,
+                                headers=_auth_headers("POST", path, body),
+                                data=body, timeout=15) as r:
+            if r.status == 200:
+                return 200, await r.json()
+            status, text = r.status, (await r.text())[:200]
+            if status not in retry_statuses or attempt >= CONVERT_RETRY_ATTEMPTS - 1:
+                return status, text
+            wait = _convert_wait_seconds(r, attempt)
+        log.info(f"💱 convert {step} HTTP {status} - attempt {attempt + 1}/"
+                 f"{CONVERT_RETRY_ATTEMPTS}, asking again in {wait:.1f}s")
+        await asyncio.sleep(wait)
+
+
 async def convert_usdc_to_usd(session, amount_usd: float) -> tuple:
     """Convert exactly `amount_usd` of USDC into USD through Coinbase's own
     convert endpoints. Returns (converted, None) or (None, reason).
@@ -783,12 +839,10 @@ async def convert_usdc_to_usd(session, amount_usd: float) -> tuple:
     qpath = "/api/v3/brokerage/convert/quote"
     qbody = json.dumps({**accounts, "amount": f"{amt:.2f}"})
     try:
-        async with session.post(COINBASE_BASE_URL + qpath,
-                                headers=_auth_headers("POST", qpath, qbody),
-                                data=qbody, timeout=15) as r:
-            if r.status != 200:
-                return None, f"convert quote HTTP {r.status}: {(await r.text())[:200]}"
-            quote = await r.json()
+        status, quote = await _convert_post(session, qpath, qbody,
+                                            CONVERT_QUOTE_RETRY_STATUSES, "quote")
+        if status != 200:
+            return None, f"convert quote HTTP {status}: {quote}"
         trade = (quote or {}).get("trade") or {}
         trade_id = trade.get("id")
         if not trade_id:
@@ -810,12 +864,10 @@ async def convert_usdc_to_usd(session, amount_usd: float) -> tuple:
 
         cpath = f"/api/v3/brokerage/convert/trade/{trade_id}"
         cbody = json.dumps(accounts)
-        async with session.post(COINBASE_BASE_URL + cpath,
-                                headers=_auth_headers("POST", cpath, cbody),
-                                data=cbody, timeout=15) as r:
-            if r.status != 200:
-                return None, f"convert commit HTTP {r.status}: {(await r.text())[:200]}"
-            done = await r.json()
+        status, done = await _convert_post(session, cpath, cbody,
+                                           CONVERT_COMMIT_RETRY_STATUSES, "commit")
+        if status != 200:
+            return None, f"convert commit HTTP {status}: {done}"
         status = ((done or {}).get("trade") or {}).get("status")
         if status == "TRADE_STATUS_CANCELED":
             return None, "the venue canceled the conversion"

@@ -548,6 +548,8 @@ _SPEND_USDC_OFF = ("0", "false", "no", "off")
 # this much more - cash either way, never spent by itself.
 USDC_TOP_UP_PCT = 0.01
 USDC_TOP_UP_MIN_USD = 1.00
+# Gaps between the re-reads that confirm a conversion landed as USD.
+USDC_CONFIRM_WAITS_SECONDS = (1.0, 2.0)
 
 
 # ---- BUDGETS THE 10-13/14 ROTATION BUG INFLATED: NO BUYS UNTIL CORRECTED ----
@@ -637,7 +639,19 @@ async def ensure_usd_for_buy(session, spend):
     got, cerr = await convert(session, short)
     if got is None:
         return False, f"USDC -> USD conversion not done: {cerr} - no buy"
+    # The USD read that confirms the conversion can be rate-limited too, or
+    # land a moment before the venue shows the new USD. Neither means the
+    # money is missing, so it is read again - fresh, never from the cache -
+    # before the buy is put off to the next pass.
     usd_after, _e = await engine.get_usd_balance(session)
+    for wait in USDC_CONFIRM_WAITS_SECONDS:
+        if usd_after is not None and usd_after >= float(spend):
+            break
+        await asyncio.sleep(wait)
+        drop = getattr(engine, "invalidate_balance_cache", None)
+        if drop is not None:
+            drop("confirming USD after a USDC conversion")
+        usd_after, _e = await engine.get_usd_balance(session)
     if usd_after is None or usd_after < float(spend):
         return False, (f"converted ${got:,.2f} USDC -> USD but USD reads "
                        f"{'unreadable' if usd_after is None else f'${usd_after:,.2f}'} "
