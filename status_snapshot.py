@@ -43,6 +43,20 @@ def _fmt_usd(n) -> str:
     return f"{sign}${abs(n):,.2f}"
 
 
+def _fmt_pl(n) -> str:
+    """A result with its sign AND the word: "+$450.82 profit", "-$18.59 loss".
+
+    The owner reads this file on a phone. A bare "-$158.20" next to a heading
+    that says "profit" is how a booking quirk got read as the fleet losing
+    money, so every result here says which it is."""
+    if n is None:
+        return "—"
+    n = round(float(n), 2)
+    if n == 0:
+        return "$0.00"
+    return f"{'+' if n > 0 else '-'}${abs(n):,.2f} {'profit' if n > 0 else 'loss'}"
+
+
 async def _build_crypto_section() -> str:
     try:
         import routers.trading_dashboard as td
@@ -72,7 +86,10 @@ async def _build_crypto_section() -> str:
         if pos and pos.get("current_price") is not None and pos.get("entry_price") is not None and pos.get("qty") is not None:
             unrealized += pos["qty"] * (pos["current_price"] - pos["entry_price"])
 
-    total_profit = realized + unrealized
+    # CLOSED AND OPEN ARE KEPT APART, NEVER SUMMED. This used to print one
+    # "Total Profit (realized + unrealized)" figure. Money still held is not
+    # a result until it is sold, and adding it to what closed trades really
+    # earned is how a waiting position gets read as a loss already taken.
 
     # Real "is this thing even ABLE to trade right now" diagnostics - per
     # the account owner's own direct question ("why isn't it trading, I
@@ -92,12 +109,17 @@ async def _build_crypto_section() -> str:
     lines = [
         "## 🌳 Crypto Family Tree",
         "",
-        f"- **Total Profit (realized + unrealized):** {_fmt_usd(total_profit)}",
+        f"- **Closed trades (this older family-tree bot, all time):** {_fmt_pl(realized)}",
+        f"- **Open positions on paper:** {_fmt_usd(unrealized)} (nothing sold - shown apart, never added to the line above)",
         "- **Real starting capital:** not tracked anywhere in this app - unlike Alpaca's bot buckets (see below), no `starting_capital` snapshot was ever recorded for the crypto side (family tree or Grid Bot). The real original deposit amount can only be found in Coinbase's own account/deposit history directly.",
         f"- **Total Allocated:** {_fmt_usd(status.get('total_allocated_usd'))}",
         f"- **Locked Profit:** {_fmt_usd(status.get('locked_usd'))}",
         f"- **Retired (buy-and-hold BTC passive mode):** {'YES - no new entries, existing positions unmanaged' if passive_mode else 'No - actively trading'}",
-        f"- **Real free cash available to fund a branch:** {_fmt_usd(spendable)}",
+        # US DOLLARS ONLY, and now it says so. spendable_for_spawn is the USD
+        # wallet less every branch's unspent budget; cash held as USDC is not
+        # in it. Printed bare, -$856.76 read as money gone while $3,305.35 sat
+        # in USDC on the next line.
+        f"- **US-dollar cash left after every branch's unspent budget (USDC not counted):** {_fmt_usd(spendable)}",
         f"- **Real Coinbase USD / USDC balance:** {_fmt_usd(real_usd)} / {_fmt_usd(real_usdc)}",
         # The exact figure the combined $1M tracker's crypto side reads. Printed
         # here so a session with no live dashboard access can verify the real
@@ -184,10 +206,24 @@ async def _build_alpaca_section() -> str:
     except Exception:
         pass
 
+    # THE BUCKET FIGURE MIXES CLOSED AND OPEN. bots[].pl is each bucket's
+    # capital against its first record, so it moves with the price of stocks
+    # still held. Split here: the paper part is computed from the open
+    # positions, the rest is what closed trades, fees and anything else did.
+    paper = 0.0
+    for p in data.get("positions", []):
+        try:
+            paper += (float(p["current_price"]) - float(p["avg_entry_price"])) * float(p["qty"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    paper = round(paper, 2)
+    rest = round(total_profit - paper, 2)
+
     lines = [
         "## 📈 Alpaca (Stocks/Futures)",
         "",
-        f"- **Total Profit:** {_fmt_usd(total_profit)}",
+        f"- **Closed trades, fees and anything else since the first recorded balance:** {_fmt_pl(rest)}",
+        f"- **On paper in stocks still held:** {_fmt_usd(paper)} (nothing sold - shown apart, never added to the line above)",
         f"- **Real starting capital (earliest recorded, may not be the true original deposit - see note below):** {_fmt_usd(alpaca_starting_capital)}",
         f"- **Equity:** {_fmt_usd(data.get('equity'))}",
         f"- **Cash:** {_fmt_usd(data.get('cash'))}",
@@ -259,9 +295,26 @@ async def _build_grid_section() -> str:
     # so this is a real total across every closed slice ever, not a
     # stable per-branch history.
     total_realized_pnl = None
+    banked = None
+    trade_count = None
+    restated = None
+    restated_n = 0
     try:
         trade_history = await grid.get_grid_trade_history()
         total_realized_pnl = round(sum(b["total_pnl"] for b in trade_history.get("branches", [])), 2)
+        # BANKED IS WHAT THE DASHBOARD CALLS BANKED. The sum above includes
+        # inherited (adopted) sales booked against their adoption mark rather
+        # than what was really paid - four ZEC sales booked at -$311.24 that
+        # gained +$297.78 against the real cost. get_grid_trade_history
+        # publishes both; this file used the raw one alone and printed
+        # -$158.20 while the dashboard showed +$450.82 for the same trades.
+        own = trade_history.get("realized_own_usd")
+        restated = trade_history.get("realized_adopted_restated_usd")
+        restated_n = int(trade_history.get("realized_adopted_restated_count") or 0)
+        adopted = trade_history.get("realized_adopted_usd")
+        trade_count = trade_history.get("total_trade_count")
+        if own is not None:
+            banked = round(float(own) + float(restated if restated is not None else (adopted or 0.0)), 2)
     except Exception:
         pass
 
@@ -273,7 +326,15 @@ async def _build_grid_section() -> str:
         f"- **Drawdown breaker:** {status.get('drawdown_breaker_pct', 0) * 100:.0f}% off peak",
         f"- **Total Allocated:** {_fmt_usd(status.get('total_allocated_usd'))}",
         f"- **Real Free Cash:** {_fmt_usd(status.get('real_free_cash_usd'))}",
-        f"- **Real Realized P&L (all closed slices ever):** {_fmt_usd(total_realized_pnl)}",
+        f"- **Banked profit (every closed sale, at what was really paid):** {_fmt_pl(banked)}"
+        + (f" over {trade_count} trades" if trade_count else ""),
+    ]
+    if restated is not None and restated_n:
+        lines.append(
+            f"- **Booked before restating {restated_n} inherited sale(s):** {_fmt_usd(total_realized_pnl)} - "
+            f"those sales were booked against the price the grid adopted them at, not what was really "
+            f"paid; at the real cost they come to {_fmt_pl(restated)}, which is what the line above uses.")
+    lines += [
         f"- **Branches:** {len(branches)}",
         "",
         "| Branch | Coin | Allocated | Spacing | Levels | Open Slices | Current Price | Peak/Drawdown | Locked |",
@@ -295,6 +356,32 @@ async def _build_grid_section() -> str:
     return "\n".join(lines) + "\n"
 
 
+# A guard that declines every pass writes the same row every 15 minutes. Forty
+# of those filled the whole activity table on 2026-10-22 and pushed every real
+# buy and sale out of it. Runs of these types are folded into one line with a
+# count; a BUY, a SELL or anything else is never folded.
+REPEATING_GUARD_TYPES = ("RECONCILE_REFUSED", "RECONCILE_UNKNOWN")
+ACTIVITY_FETCH = 200
+ACTIVITY_ROWS = 40
+
+
+def collapse_repeats(events):
+    """Fold consecutive guard rows of the same branch and type. Newest first in,
+    newest first out; each folded row keeps the newest message and gains
+    `repeats` and `first_at` (the oldest in its run). Pure."""
+    out = []
+    for e in events or []:
+        prev = out[-1] if out else None
+        if (prev is not None and e.get("event_type") in REPEATING_GUARD_TYPES
+                and prev.get("event_type") == e.get("event_type")
+                and prev.get("bot_name") == e.get("bot_name")):
+            prev["repeats"] = prev.get("repeats", 1) + 1
+            prev["first_at"] = e.get("created_at")
+            continue
+        out.append(dict(e))
+    return out
+
+
 async def _build_activity_section() -> str:
     """Real, recent Live Activity feed excerpt - added so a session with
     no live network access can see WHAT actually happened recently (a
@@ -310,9 +397,10 @@ async def _build_activity_section() -> str:
         return f"## 📡 Recent Activity\n\n_Could not load: {e}_\n"
 
     try:
-        events = await tree.get_activity_feed(limit=40)
+        events = await tree.get_activity_feed(limit=ACTIVITY_FETCH)
     except Exception as e:
         return f"## 📡 Recent Activity\n\n_Could not fetch: {e}_\n"
+    events = collapse_repeats(events)[:ACTIVITY_ROWS]
 
     lines = ["## 📡 Recent Activity (most recent first)", ""]
     if not events:
@@ -323,7 +411,12 @@ async def _build_activity_section() -> str:
         for e in events:
             when = (e.get("created_at") or "—").replace("T", " ")[:19]
             msg = (e.get("message") or "").replace("|", "/")
-            lines.append(f"| {when} | {e.get('bot_name') or '—'} | {e.get('event_type') or '—'} | {msg} |")
+            kind = e.get("event_type") or "—"
+            if e.get("repeats", 1) > 1:
+                first = (e.get("first_at") or "").replace("T", " ")[:19]
+                kind = f"{kind} ×{e['repeats']}"
+                msg = f"(the same refusal {e['repeats']} times since {first}; latest shown) {msg}"
+            lines.append(f"| {when} | {e.get('bot_name') or '—'} | {kind} | {msg} |")
 
     return "\n".join(lines) + "\n"
 
