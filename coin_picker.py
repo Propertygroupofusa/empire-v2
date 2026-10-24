@@ -47,6 +47,14 @@ PRACTICE FIRST
   the wallet, the claims or the BTC buy's profit. Every pass and every failure is
   counted (coin_picker_passes_<mode>) so "ran clean" is a number, not a feeling.
   GRID_COIN_PICKER=true is real money. Anything else is off.
+
+SELL ONLY
+  The owner, 2026-10-24, with coins still falling and the pieces it had bought on
+  5% dips sitting under cost: "Stop the coin picker from buying more."
+  GRID_COIN_PICKER=sell keeps every real piece managed exactly as live does - each
+  sold at its target, at a profit after fees, never under it - and buys nothing.
+  It is the real book with the buy half switched off: "off" would leave the open
+  pieces with nobody to sell them, and "paper" manages only the practice book.
 """
 import asyncio
 import logging
@@ -87,10 +95,14 @@ _next_pass_at = 0.0
 _said = {}
 
 
+MODES = {"true": "live", "paper": "paper", "sell": "sell"}
+
+
 def mode() -> str:
-    """"live" for exactly "true", "paper" for exactly "paper", otherwise "off"
-    (any case, surrounding spaces ignored)."""
-    return {"true": "live", "paper": "paper"}.get((os.getenv(SWITCH_ENV) or "").strip().lower(), "off")
+    """"live" for exactly "true", "paper" for exactly "paper", "sell" for exactly
+    "sell" (real pieces sold at their targets, no buys), otherwise "off" (any
+    case, surrounding spaces ignored)."""
+    return MODES.get((os.getenv(SWITCH_ENV) or "").strip().lower(), "off")
 
 
 def enabled() -> bool:
@@ -402,13 +414,15 @@ async def maybe_trade(session, now=None):
     _next_pass_at = now + PASS_SECONDS
     paper = which == "paper"
     out = {"on": True, "mode": which, "sold": [], "bought": None}
-    ok = await _pass(session, now, paper, out)
-    await _count(ok, which)
+    ok = await _pass(session, now, paper, out, buys=which != "sell")
+    # Sell-only is the real book, so its passes count with live's.
+    await _count(ok, "paper" if paper else "live")
     return out
 
 
-async def _pass(session, now, paper, out):
-    """The pass itself. True when it ran to the end, False when it failed."""
+async def _pass(session, now, paper, out, buys=True):
+    """The pass itself. True when it ran to the end, False when it failed.
+    `buys` False is sell-only: every sale below runs, the buy half never does."""
     global _rank_task
     tag = "PAPER_" if paper else ""
     word = "practice " if paper else ""
@@ -459,6 +473,8 @@ async def _pass(session, now, paper, out):
             out["sold"].append((p.product_id, round(pnl, 2)))
 
         # ---- buys: one per pass, a pick with no open piece, on a 5% dip
+        if not buys:
+            return True
         if not _picks or len(held) >= MAX_OPEN:
             return True
         if PIECE_USD < MIN_VIABLE_USD:

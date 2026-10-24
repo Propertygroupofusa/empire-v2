@@ -55,7 +55,8 @@ def fresh(monkeypatch):
 
 @pytest.mark.parametrize("value,expected", [(None, "off"), ("", "off"), ("1", "off"),
                                             ("yes", "off"), ("live", "off"), ("true", "live"),
-                                            (" TRUE ", "live"), ("paper", "paper"), (" Paper ", "paper")])
+                                            (" TRUE ", "live"), ("paper", "paper"), (" Paper ", "paper"),
+                                            ("sell", "sell"), (" SELL ", "sell"), ("selling", "off")])
 def test_only_true_is_real_money_and_paper_is_practice(monkeypatch, value, expected):
     if value is None:
         monkeypatch.delenv("GRID_COIN_PICKER", raising=False)
@@ -403,6 +404,60 @@ def test_every_pass_is_counted_and_a_failure_is_counted_as_one(practice, monkeyp
 def test_a_live_pass_reads_only_the_real_book(world):
     _pass()
     assert world["asked_paper"] == [False] and world["counted"] == [(True, "live")]
+
+
+# ------------------------------------------------------------- sell only
+# The owner, 2026-10-24: "Stop the coin picker from buying more."
+
+@pytest.fixture
+def selling(world, monkeypatch):
+    monkeypatch.setenv("GRID_COIN_PICKER", "sell")
+    return world
+
+
+def test_sell_only_still_sells_a_real_piece_at_its_target(selling):
+    selling["pieces"] = [_piece("AAA-USD", 10.0)]
+    selling["prices"]["AAA-USD"] = cp.target_price(10.0, 0.007) + 0.01
+    out = _pass()
+    assert selling["sells"] == [("AAA-USD", 1.0)]          # a real maker sell
+    assert selling["sales"][0][3] > 0 and out["sold"][0][1] > 0 and out["mode"] == "sell"
+
+
+def test_sell_only_holds_a_piece_under_its_target(selling):
+    selling["pieces"] = [_piece("AAA-USD", 10.0)]
+    selling["prices"]["AAA-USD"] = 9.0
+    _pass()
+    assert selling["sells"] == [] and selling["sales"] == []
+
+
+def test_sell_only_never_buys_even_on_a_deep_dip(selling, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["BBB-USD", "CCC-USD"])
+    selling["prices"].update({"BBB-USD": 5.0, "CCC-USD": 5.0})
+    selling["highs"].update({"BBB-USD": 10.0, "CCC-USD": 10.0})
+    selling["usdc"] = 3000.0
+    out = _pass()
+    assert selling["buys"] == [] and selling["recorded"] == [] and out["bought"] is None
+    assert selling["converted"] == []                     # and no USDC is converted
+
+
+def test_sell_only_sells_then_buys_nothing_in_the_same_pass(selling, monkeypatch):
+    monkeypatch.setattr(cp, "_picks", ["AAA-USD", "BBB-USD"])
+    selling["pieces"] = [_piece("AAA-USD", 10.0)]
+    selling["prices"].update({"AAA-USD": 10.5, "BBB-USD": 5.0})
+    selling["highs"]["BBB-USD"] = 10.0
+    _pass()
+    assert selling["sells"] == [("AAA-USD", 1.0)] and selling["buys"] == []
+
+
+def test_sell_only_manages_the_real_book_and_counts_with_live(selling):
+    _pass()
+    assert selling["asked_paper"] == [False] and selling["counted"] == [(True, "live")]
+
+
+def test_the_status_pages_show_sell_only():
+    import routers.trading_dashboard as td
+    src = inspect.getsource(td)
+    assert src.count('{"true": "live", "paper": "paper", "sell": "sell"}') == 2
 
 
 # ---------------------------------------------------------- staying out of the way

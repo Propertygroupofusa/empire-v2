@@ -931,9 +931,10 @@ async def get_dashboard_status(db: AsyncSession = Depends(get_db)):
         "grid_btc_dip_buy": (os.getenv("GRID_BTC_DIP_BUY") or "").strip().lower() == "true",
         # "live", "paper" (practice: no orders) or "off", for the BTC dip buy and
         # the coin picker - parsed as btc_dip_buy.mode / coin_picker.mode are.
+        # The coin picker also has "sell": real pieces sold at target, no buys.
         "grid_btc_dip_buy_mode": {"true": "live", "paper": "paper"}.get(
             (os.getenv("GRID_BTC_DIP_BUY") or "").strip().lower(), "off"),
-        "grid_coin_picker_mode": {"true": "live", "paper": "paper"}.get(
+        "grid_coin_picker_mode": {"true": "live", "paper": "paper", "sell": "sell"}.get(
             (os.getenv("GRID_COIN_PICKER") or "").strip().lower(), "off"),
         **order_block,
     }
@@ -17169,7 +17170,7 @@ async def coin_picker_status():
         }
 
     return {
-        "mode_here": {"true": "live", "paper": "paper"}.get(
+        "mode_here": {"true": "live", "paper": "paper", "sell": "sell"}.get(
             (os.getenv("GRID_COIN_PICKER") or "").strip().lower(), "off"),
         "picked_at": (at.isoformat() + "Z") if at else None,
         "picks": [{"rank": p.rank, "product_id": p.product_id, "round_trips": p.round_trips,
