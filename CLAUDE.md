@@ -14880,3 +14880,22 @@ check) now asks `alpaca_stop.alpaca_stopped()`. No Coinbase job reads it.
 
 `/alpaca-overview` and `/status` show `alpaca_stop_trading` with
 `decided_by`. Pinned by test_alpaca_own_switch.py.
+
+## XLM and XRP books claim coin Coinbase does not hold: `BOOK_FIX_XLM_XRP` (2026-10-24)
+
+Measured against Coinbase's fill record: XLM-USD books 2,730.52 against
+1,672.87 owned (1,057.65 short), XRP-USD 855.86 against 813.81 (42.05 short).
+XLM is almost all one TAKER sale of 1,485.57 XLM on 2026-10-02T18:47:36Z
+(order 71864c05, $313.33 gross) that no part of empire-v2 recorded; who
+placed it is not established. XRP is the trimmer's 09-27/09-28 market sales,
+an unrecorded 140.32 maker buy at 2026-10-07T02:48:42Z, and 73.85 units
+slotted on 10-08 with no fill. No money is missing; the books are wrong.
+
+The fleet-wide reconcile cannot be used: it would also delete the 3 ETH-USD
+slices, because staked ETH reads 0.0 to this key. `book_fix.py` reuses
+`slice_reconcile.plan` and `startup_fix.apply_reconcile`, served a grid
+status holding only the two branches, and adds three refusals: a zero
+reading, a gap over 2% larger than measured, and $400 of basis. It runs
+with STOP_TRADING set (no order path), once, only when the owner sets
+`BOOK_FIX_XLM_XRP=yes`. `GET /book-fix?preview=1` shows the exact rows it
+would write. Pinned by test_book_fix.py.

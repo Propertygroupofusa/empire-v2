@@ -9228,6 +9228,38 @@ async def startup_fix_report_endpoint():
     }
 
 
+@router.get("/book-fix")
+async def book_fix_report_endpoint(preview: int = 0):
+    """The one-time XLM/XRP book correction: what it did, or would do.
+
+    READ-ONLY. `preview=1` reads the fleet and the wallet and returns the
+    exact slice rows the correction would change, writing nothing. Without
+    it, this serves the boot run's report from this process (in-memory, so
+    a redeploy clears it - the activity feed keeps the durable line).
+    """
+    try:
+        import book_fix
+    except Exception as e:
+        return {"readable": False,
+                "detail": f"book_fix could not be imported: {type(e).__name__}: {e}"}
+    out = {"readable": True, "armed": book_fix.armed(), "arm_env": book_fix.ARM_ENV,
+           "products": list(book_fix.PRODUCTS),
+           "measured_short_units": book_fix.MEASURED_SHORT_UNITS,
+           "ceiling_usd": book_fix.MAX_BASIS_USD,
+           "report": book_fix.last_report()}
+    if preview:
+        if crypto_grid_bot_module is None:
+            out["preview"] = {"readable": False,
+                              "detail": "crypto_grid_bot module not available"}
+        else:
+            try:
+                out["preview"] = await book_fix.preview(crypto_grid_bot_module)
+            except Exception as e:
+                out["preview"] = {"readable": False,
+                                  "detail": f"preview failed: {type(e).__name__}: {e}"}
+    return out
+
+
 @router.get("/grid-status")
 async def get_grid_status_endpoint(fresh: int = 0):
     if crypto_grid_bot_module is None:

@@ -1373,6 +1373,22 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # One-shot correction of the XLM and XRP books, 2026-10-24. SHIPPED
+        # INERT - nothing happens unless BOOK_FIX_XLM_XRP=yes is set, and it
+        # runs once. It writes slice rows on those two branches only and
+        # can reach no other - no order, no cash. See book_fix.py.
+        try:
+            import book_fix
+            import crypto_grid_bot as _bfg
+            if book_fix.armed():
+                _bfx_task = asyncio.create_task(book_fix.run_at_boot(_bfg))
+                log.warning("[book-fix] armed by environment - running once")
+        except Exception as e:
+            try:
+                log.warning(f"book fix not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # One-shot idle rotation: move idle allocation into the best-ranked
         # coins by dip_depth. SHIPPED INERT - nothing happens unless
         # ROTATION_TASK_TICKET is set, and releasing idle from a non-flat
