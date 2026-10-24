@@ -195,6 +195,64 @@ class BackfillSeoRequest(BaseModel):
     limit: Optional[int] = None
 
 
+class AddChannelRequest(BaseModel):
+    label: str
+    refresh_token: str
+    client_id: Optional[str] = None
+    client_secret: Optional[str] = None
+    content_profile: Optional[dict] = None
+    daily_upload_limit: Optional[int] = None
+
+
+class PublishingRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/youtube/channels", dependencies=[Depends(require_admin_key)])
+async def list_youtube_channels():
+    """Every configured channel. Reports no credential VALUE, ever."""
+    import youtube_channels
+    return {"channels": await youtube_channels.list_channels()}
+
+
+@router.post("/youtube/channels", dependencies=[Depends(require_admin_key)])
+async def add_youtube_channel(payload: AddChannelRequest):
+    """Register a channel that has already been authorised in Google.
+
+    There is no API for CREATING a YouTube channel - the Data API's channels
+    resource has list and update and no insert - so the channel itself is
+    made by hand in YouTube (a Brand Account) and authorised once. This
+    records the result of that.
+
+    It is created with publishing OFF. Turning it on is a separate call,
+    because adding a channel and letting it post publicly are two decisions.
+    """
+    import youtube_channels
+    try:
+        return await youtube_channels.add_channel(
+            label=payload.label, refresh_token=payload.refresh_token,
+            client_id=payload.client_id, client_secret=payload.client_secret,
+            content_profile=payload.content_profile,
+            daily_upload_limit=payload.daily_upload_limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/youtube/channels/{label}/publishing",
+             dependencies=[Depends(require_admin_key)])
+async def set_youtube_publishing(label: str, payload: PublishingRequest):
+    """Turn automatic publishing on or off for one channel.
+
+    Its own endpoint on purpose: this is the switch that decides whether
+    anything reaches the public.
+    """
+    import youtube_channels
+    try:
+        return await youtube_channels.set_publishing(label, payload.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/youtube/health", dependencies=[Depends(require_admin_key)])
 async def youtube_health_endpoint():
     """Why is nothing reaching YouTube? Read-only, uploads nothing.

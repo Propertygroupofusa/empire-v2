@@ -17,14 +17,23 @@ YOUTUBE_CLIENT_ID = os.getenv("YOUTUBE_CLIENT_ID", "")
 YOUTUBE_CLIENT_SECRET = os.getenv("YOUTUBE_CLIENT_SECRET", "")
 
 
-async def get_access_token() -> str:
+async def get_access_token(channel: str = None) -> str:
+    """An access token for one channel. `channel` is a configured label.
+
+    ONE TOKEN PER CHANNEL, BECAUSE THAT IS HOW GOOGLE ISSUES THEM - the
+    consent screen asks which channel you are authorising, so a network of
+    channels cannot share one. With no label this reads the environment
+    variables exactly as it always did, so a service configured the old way
+    is unaffected.
+    """
+    creds = await _resolve_channel(channel)
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.post(
             "https://oauth2.googleapis.com/token",
             data={
-                "client_id": YOUTUBE_CLIENT_ID,
-                "client_secret": YOUTUBE_CLIENT_SECRET,
-                "refresh_token": YOUTUBE_REFRESH_TOKEN,
+                "client_id": creds.client_id,
+                "client_secret": creds.client_secret,
+                "refresh_token": creds.refresh_token,
                 "grant_type": "refresh_token",
             },
         )
@@ -35,6 +44,25 @@ async def get_access_token() -> str:
             log.error(f"YouTube OAuth token refresh failed {r.status_code}: {r.text[:500]}")
         r.raise_for_status()
         return r.json()["access_token"]
+
+
+async def _resolve_channel(channel: str = None):
+    """Credentials for `channel`, or the environment channel when None.
+
+    Raises rather than returning something falsy. A caller that gets None
+    here and carries on would build an upload request with an empty token and
+    read Google's refusal as a channel problem; the refusal belongs at the
+    point the credentials were missing, naming which channel and why.
+    """
+    import youtube_channels
+    res = (youtube_channels.env_channel() if channel is None
+           else await youtube_channels.resolve(channel))
+    if not res.ok:
+        raise RuntimeError(
+            f"no usable YouTube credentials for "
+            f"{'the default channel' if channel is None else repr(channel)}: "
+            f"{res.reason}")
+    return res
 
 
 async def download_video(download_url: str, save_path: str = "/tmp/video.mp4") -> str:
@@ -53,12 +81,18 @@ async def upload_to_youtube(
     tags: list = None,
     category_id: str = "22",
     privacy: str = "public",
+    channel: str = None,
 ) -> dict:
     """
     Uploads a video file to YouTube using resumable upload.
     Returns: { "id": "...", "url": "https://youtube.com/watch?v=..." }
+
+    `channel` names a configured channel; None keeps the old behaviour of
+    using the environment variables. Resolving it is what enforces that a
+    channel has publishing turned on - a configured channel is not a channel
+    that may post, and that check lives in youtube_channels.resolve, not here.
     """
-    access_token = await get_access_token()
+    access_token = await get_access_token(channel)
 
     metadata = {
         "snippet": {
@@ -124,6 +158,7 @@ async def synthesia_to_youtube(
     description: str,
     tags: list = None,
     privacy: str = "unlisted",
+    channel: str = None,
 ) -> dict:
     """Full pipeline: download Synthesia video -> upload to YouTube."""
     video_path = await download_video(synthesia_download_url)
@@ -133,6 +168,7 @@ async def synthesia_to_youtube(
         description=description,
         tags=tags,
         privacy=privacy,
+        channel=channel,
     )
     os.remove(video_path)
     return result

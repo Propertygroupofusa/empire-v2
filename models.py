@@ -3276,3 +3276,70 @@ class CoinPickerPick(Base):
     round_trips = Column(Integer)           # in the 60 days it was ranked on
     banked_per_piece = Column(Float)        # what the rule banked per $15 piece there
     within_24h = Column(Float)              # share of those round trips closed inside 24h
+
+
+class YouTubeChannel(Base):
+    """One YouTube channel this system publishes to, and its own credentials.
+
+    WHY A TABLE AND NOT MORE ENVIRONMENT VARIABLES.
+
+    The uploader read a single YOUTUBE_REFRESH_TOKEN from the environment, so
+    the system could address exactly one channel and adding a second meant
+    editing Railway variables and redeploying. A network of channels is not
+    reachable that way at all: YouTube issues one refresh token PER CHANNEL,
+    because the consent screen asks which channel you are authorising, so N
+    channels is N tokens no matter how they are stored.
+
+    Rows here are the whole credential set for one channel, so adding channel
+    number four is an INSERT and nothing restarts.
+
+    ON THE TOKEN LIVING IN A DATABASE COLUMN. It is a bearer credential and
+    this is not encryption at rest - the row is as protected as the database
+    is. That is the same exposure the environment variable already had, not a
+    new one, and it buys the thing the env var could not do. It is never
+    returned by any endpoint: /youtube/channels reports presence and length,
+    the same rule the health check follows.
+
+    THE TOKEN ONLY SURVIVES IF THE OAUTH APP IS "IN PRODUCTION". Google
+    expires refresh tokens after 7 DAYS while an app's consent screen is in
+    Testing publishing status. In production there is no fixed expiry - only
+    revocation, six months unused, or passing 100 live tokens for one client
+    id. That setting, not this table, is what makes "set it once" true.
+    """
+    __tablename__ = "youtube_channels"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Our name for it, used in logs and on the dashboard.
+    label = Column(String, index=True)
+    # YouTube's own id (UC...), filled in from the API on first successful
+    # auth. Null until then - it is the venue's answer, not ours to invent.
+    channel_id = Column(String, nullable=True, index=True)
+    channel_title = Column(String, nullable=True)
+
+    # Credentials. client_id/secret are nullable: several channels usually
+    # share one OAuth app, so a null here means "use the service default"
+    # rather than "this channel is broken".
+    refresh_token = Column(Text)
+    client_id = Column(String, nullable=True)
+    client_secret = Column(String, nullable=True)
+
+    # WHAT this channel publishes. Free-form so a content strategy can change
+    # without a migration: topics, tone, cadence, target length, the lot.
+    content_profile = Column(JSON, nullable=True)
+
+    # PUBLISHING IS OFF UNTIL IT IS TURNED ON, per channel. A row existing is
+    # not consent to post publicly to it; this flag is. Default False so an
+    # imported or half-configured channel cannot start posting on its own.
+    publishing_enabled = Column(Boolean, default=False)
+    # How many uploads a day this channel may take. Null means no automatic
+    # uploads at all - it can still be published to by hand.
+    daily_upload_limit = Column(Integer, nullable=True)
+
+    # Last known health, written by the health check so the dashboard does
+    # not have to re-authenticate every channel on every page load.
+    last_token_ok_at = Column(DateTime, nullable=True)
+    last_token_error = Column(Text, nullable=True)
+    last_upload_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
