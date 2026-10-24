@@ -549,7 +549,17 @@ _SPEND_USDC_OFF = ("0", "false", "no", "off")
 USDC_TOP_UP_PCT = 0.01
 USDC_TOP_UP_MIN_USD = 1.00
 # Gaps between the re-reads that confirm a conversion landed as USD.
-USDC_CONFIRM_WAITS_SECONDS = (1.0, 2.0)
+#
+# THREE SECONDS WAS NOT ENOUGH. Measured 2026-10-23 21:32:19Z: the coin
+# picker converted $16.00 USDC -> USD (Coinbase shows it Complete, fee
+# $0.00), and after the 1s and 2s re-reads USD still read $0.01. The buy was
+# put off and went through on a pass 22 minutes later with the same $16 -
+# nothing converted twice, but a dip bought late. These gaps add up to 30s:
+# a conversion is a few times a day, and the wait only holds the once-a-
+# minute pass that is already making this buy. Past 30s the buy waits for
+# the next pass exactly as before, and that pass finds the USD already there
+# and converts nothing.
+USDC_CONFIRM_WAITS_SECONDS = (1.0, 2.0, 4.0, 8.0, 15.0)
 
 
 # ---- BUDGETS THE 10-13/14 ROTATION BUG INFLATED: NO BUYS UNTIL CORRECTED ----

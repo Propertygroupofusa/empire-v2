@@ -230,11 +230,42 @@ def test_usd_that_shows_a_moment_late_is_waited_for(monkeypatch, grid_waits):
 
 
 def test_usd_that_never_shows_still_puts_the_buy_off(monkeypatch, grid_waits):
-    e = _Engine([0.0, None, None, None])
+    e = _Engine([0.0] + [None] * (1 + len(grid.USDC_CONFIRM_WAITS_SECONDS)))
     monkeypatch.setattr(grid, "engine", e)
     ok, note = run(grid.ensure_usd_for_buy(None, 15.0))
     assert ok is False and "buy waits for next cycle" in note
     assert e.read_count == 1 + 1 + len(grid.USDC_CONFIRM_WAITS_SECONDS)
+
+
+def test_the_wait_is_bounded_at_thirty_seconds(monkeypatch, grid_waits):
+    e = _Engine([0.0] + [0.01] * (1 + len(grid.USDC_CONFIRM_WAITS_SECONDS)))
+    monkeypatch.setattr(grid, "engine", e)
+    ok, _ = run(grid.ensure_usd_for_buy(None, 15.0))
+    assert ok is False and sum(grid_waits) == 30.0
+
+
+def test_the_oct_23_conversion_now_buys_on_the_same_pass(monkeypatch, grid_waits):
+    """$16.00 converted at 21:32:19Z; USD read $0.01 after the old 1s and 2s
+    re-reads. A few seconds more and the $16 is there - the buy goes now."""
+    e = _Engine([0.01, 0.01, 0.01, 0.01, 16.01])
+    monkeypatch.setattr(grid, "engine", e)
+    ok, note = run(grid.ensure_usd_for_buy(None, 15.0))
+    assert ok is True and "converted $15.99" in note
+    assert grid_waits == [1.0, 2.0, 4.0]
+
+
+def test_a_put_off_buy_never_converts_twice(monkeypatch, grid_waits):
+    """Past the wait, the next pass finds the USD already there."""
+    e = _Engine([16.01])
+    converted = []
+
+    async def convert(session, amount):
+        converted.append(amount)
+        return amount, None
+    e.convert_usdc_to_usd = convert
+    monkeypatch.setattr(grid, "engine", e)
+    assert run(grid.ensure_usd_for_buy(None, 15.0)) == (True, None)
+    assert converted == []
 
 
 def test_usd_that_is_there_at_once_is_not_read_again(monkeypatch, grid_waits):
