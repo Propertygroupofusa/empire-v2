@@ -195,6 +195,25 @@ class BackfillSeoRequest(BaseModel):
     limit: Optional[int] = None
 
 
+@router.get("/youtube/health", dependencies=[Depends(require_admin_key)])
+async def youtube_health_endpoint():
+    """Why is nothing reaching YouTube? Read-only, uploads nothing.
+
+    Admin-guarded like the backfill below, because it reports which
+    credentials exist and relays Google's own error text. It returns no
+    credential VALUE - presence and length only.
+    """
+    from youtube_health import youtube_health
+    try:
+        return await youtube_health()
+    except Exception as e:
+        # A diagnostic that 500s tells you nothing about the thing you came
+        # to diagnose. Report its own failure as the answer.
+        log.error(f"YouTube health check failed: {e}")
+        return {"verdict": f"the check itself failed: {type(e).__name__}: {e}",
+                "can_upload_right_now": False, "checks": []}
+
+
 @router.post("/youtube/backfill-seo", dependencies=[Depends(require_admin_key)])
 async def backfill_youtube_seo(payload: BackfillSeoRequest = BackfillSeoRequest()):
     """One-time (re-runnable) pass that rewrites title/description/tags
