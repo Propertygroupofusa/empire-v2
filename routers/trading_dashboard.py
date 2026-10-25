@@ -17204,6 +17204,10 @@ async def coin_picker_status():
     return {
         "mode_here": {"true": "live", "paper": "paper", "sell": "sell"}.get(
             (os.getenv("GRID_COIN_PICKER") or "").strip().lower(), "off"),
+        # GRID_COIN_PICKER_RULE=btc50: buy only while BTC is above a rising
+        # 50-day average, and target 5% net. Anything else is the picker as built.
+        "rule_here": ("btc50" if (os.getenv("GRID_COIN_PICKER_RULE") or "").strip().lower()
+                      == "btc50" else "standard"),
         "picked_at": (at.isoformat() + "Z") if at else None,
         "picks": [{"rank": p.rank, "product_id": p.product_id, "round_trips": p.round_trips,
                    "banked_per_piece": p.banked_per_piece, "within_24h": p.within_24h}

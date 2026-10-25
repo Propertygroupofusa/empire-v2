@@ -55,6 +55,31 @@ SELL ONLY
   sold at its target, at a profit after fees, never under it - and buys nothing.
   It is the real book with the buy half switched off: "off" would leave the open
   pieces with nobody to sell them, and "paper" manages only the practice book.
+
+THE BTC 50-DAY RULE (GRID_COIN_PICKER_RULE=btc50), 2026-10-24, built switched off
+  The owner: "build the BTC 50-day rule switched off", then "you sure this is the
+  best you can come up with?" Two changes to the BUY half only, and only while
+  the variable reads exactly "btc50":
+    * no buy unless BTC's latest closed hourly close is above the average of the
+      1,200 hourly closes before it - its 50-day average - AND that average is
+      higher than it was a week (168 hours) earlier. Below the line, or on a line
+      that is itself falling, the picker waits. An unreadable history means no buy.
+    * a piece bought under the rule targets 5% net after both fee legs, not 1%.
+  Everything else is unchanged: the picks, the 5% dip, $15, the cash floor, the
+  20% ceiling, maker-only, never a sale at a loss. Pieces already open keep the
+  target they were bought with. Under GRID_COIN_PICKER=sell nothing is bought, so
+  the rule does nothing until buying is switched back on.
+  Measured (scratchpad game/game4.py and game5.py, 11 overlapping 30-day seasons
+  over 180 days, picks from the past only, the account's 0.7% maker round trip,
+  scored as banked profit plus what was still held at each season's end):
+      picker as built (1%, no BTC check)      -$7.70 a season, 5 up / 6 down
+      50-day line, 3% target                  +$2.53, 4 up / 2 sat out / 5 down
+      50-day line rising, 5% target (this)    +$8.36, 6 up / 3 sat out / 2 down,
+                                              worst season -$27.66
+  Every target from 4% to 10% beat 3%, and 5% beat 3% in both the older and the
+  newer half of the seasons - so the target is not one lucky number. Every rule
+  tried lost a little in the older half (this one -$4.67 a season) and won in
+  the newer half (+$22.86): it is a rising-market rule, not a guarantee.
 """
 import asyncio
 import logging
@@ -96,6 +121,61 @@ _said = {}
 
 
 MODES = {"true": "live", "paper": "paper", "sell": "sell"}
+
+RULE_ENV = "GRID_COIN_PICKER_RULE"
+BTC50_HOURS = 1200              # the 50-day average, in hourly closes
+BTC50_RISING_HOURS = 168        # ... and it must be higher than a week earlier
+BTC50_NET = 0.05                # pieces bought under the rule net 5% after fees
+BTC50_RECHECK_SECONDS = 3600.0  # the average moves slowly; read BTC once an hour
+BTC50_RETRY_SECONDS = 300.0     # after an unreadable history, try again in 5 minutes
+_btc50 = {"until": 0.0, "ok": None, "detail": None}
+
+
+def rule() -> str:
+    """"btc50" for exactly "btc50" (any case, surrounding spaces ignored),
+    otherwise "standard" - the picker exactly as it was."""
+    return "btc50" if (os.getenv(RULE_ENV) or "").strip().lower() == "btc50" else "standard"
+
+
+def rule_net() -> float:
+    return BTC50_NET if rule() == "btc50" else NET
+
+
+def btc50_verdict(rows, n=BTC50_HOURS, k=BTC50_RISING_HOURS):
+    """(True / False / None, why). True when the latest closed hourly close is above
+    the average of the n closes before it, AND that average is higher than the
+    same average k hours earlier. None - no buy - when there are not enough
+    closes to say: a gap is not a rising market."""
+    closes = [r[4] for r in (rows or []) if r and r[4]]
+    if len(closes) < int((n + k) * 0.95) + 1:
+        return None, (f"BTC history unreadable ({len(closes)} hourly closes, "
+                      f"need about {n + k})")
+    window = closes[-(n + 1):-1]
+    before = closes[-(n + k + 1):-(k + 1)]
+    avg, avg_before, last = sum(window) / len(window), sum(before) / len(before), closes[-1]
+    above, rising = last > avg, avg > avg_before
+    return above and rising, (
+        f"BTC ${last:,.0f} is {'above' if above else 'not above'} its 50-day average "
+        f"${avg:,.0f} ({(last / avg - 1) * 100:+.1f}%), and that average is "
+        f"{'rising' if rising else 'not rising'} (${avg_before:,.0f} a week ago)")
+
+
+async def btc50_gate(session, now):
+    """The BTC 50-day check, read at most once an hour. Never raises."""
+    if now < _btc50["until"]:
+        return _btc50["ok"], _btc50["detail"]
+    try:
+        rows = await hourly(session, "BTC-USD", BTC50_HOURS + BTC50_RISING_HOURS + 2)
+    except Exception as e:
+        rows = None
+        log.warning(f"[PICKER] BTC history read failed ({type(e).__name__})")
+    # Closed hours only, as the test decided: the candle feed also serves the
+    # hour still forming, and its close is just the price this minute.
+    rows = [r for r in (rows or []) if r[0] + 3600 <= now] or None
+    ok, why = btc50_verdict(rows)
+    _btc50.update(ok=ok, detail=why,
+                  until=now + (BTC50_RECHECK_SECONDS if ok is not None else BTC50_RETRY_SECONDS))
+    return ok, why
 
 
 def mode() -> str:
@@ -238,12 +318,12 @@ async def open_pieces(paper=False):
                                       .where(CoinPickerPiece.paper == bool(paper)))).scalars().all())
 
 
-async def record_buy(pid, qty, px, rate, paper=False):
+async def record_buy(pid, qty, px, rate, paper=False, net=NET):
     from database import get_session_factory
     from models import CoinPickerPiece
     async with get_session_factory()() as db:
         db.add(CoinPickerPiece(product_id=pid, status="open", qty=qty, entry_price=px,
-                               cost_usd=qty * px, target_price=target_price(px, rate),
+                               cost_usd=qty * px, target_price=target_price(px, rate, net),
                                round_trip_fee_rate=rate, paper=bool(paper)))
         await db.commit()
 
@@ -481,6 +561,13 @@ async def _pass(session, now, paper, out, buys=True):
             _say("size", f"GRID_COIN_PICKER_USD ${PIECE_USD:,.2f} is under the "
                          f"${MIN_VIABLE_USD:.0f} minimum - no buys")
             return True
+        net = rule_net()
+        if rule() == "btc50":
+            btc_ok, btc_why = await btc50_gate(session, now)
+            if not btc_ok:
+                _say("btc50", f"BTC 50-day rule: no buys - {btc_why}")
+                await _feed("BTC50", "BTC-USD", f"coin picker: no buys - {btc_why}")
+                return True
         claimed = await _claimed()
         if claimed is None:
             return True
@@ -521,10 +608,10 @@ async def _pass(session, now, paper, out, buys=True):
                 _say(f"nofill:{pid}", f"maker buy of {pid} did not fill - tries again next pass")
                 return True
             q, bpx = fill
-            await record_buy(pid, q, bpx, rate, paper=paper)
+            await record_buy(pid, q, bpx, rate, paper=paper, net=net)
             msg = (f"coin picker {word}bought {q:.8g} {pid} @ ${bpx:,.6g} (${q * bpx:,.2f}) - "
                    f"{(1 - px / hi) * 100:.1f}% under its 24h high; sells at "
-                   f"${target_price(bpx, rate):,.6g} or better, never at a loss")
+                   f"${target_price(bpx, rate, net):,.6g} or better, never at a loss")
             log.warning(f"[PICKER] {msg}")
             await _feed(f"{tag}BUY", pid, msg, throttle=False)
             out["bought"] = (pid, round(q * bpx, 2))

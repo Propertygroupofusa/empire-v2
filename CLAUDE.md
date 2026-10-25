@@ -14899,3 +14899,28 @@ reading, a gap over 2% larger than measured, and $400 of basis. It runs
 with STOP_TRADING set (no order path), once, only when the owner sets
 `BOOK_FIX_XLM_XRP=yes`. `GET /book-fix?preview=1` shows the exact rows it
 would write. Pinned by test_book_fix.py.
+
+## Coin picker: the BTC 50-day rule, built switched off (2026-10-24)
+
+`GRID_COIN_PICKER_RULE=btc50` changes the coin picker's BUY half only: no buy
+unless BTC's latest closed hourly close is above the average of the 1,200
+before it AND that average is higher than a week (168 hours) earlier; new
+pieces target 5% net after fees instead of 1%. Open pieces keep their own
+target. Unset, the picker is exactly as built; under `GRID_COIN_PICKER=sell`
+nothing is bought either way. BTC is read once an hour (5 minutes after an
+unreadable read, which means no buy).
+
+The owner asked "you sure this is the best you can come up with?", so the
+first build (line only, 3%) was re-tested against 22 variants (scratchpad
+game/game4.py, game5.py; 11 overlapping 30-day seasons over 180 days, scored
+as banked plus what was still held at each season's end):
+
+    picker as built                       -$7.70 a season, 5 up / 6 down
+    line only, 3% target (first build)    +$2.53, 4 up / 2 out / 5 down
+    rising line, 5% target (this)         +$8.36, 6 up / 3 out / 2 down
+
+Every target from 4% to 10% beat 3%, and 5% beat 3% in both halves of the
+seasons. Every rule lost a little in the older half and won in the newer:
+it is a rising-market rule. On 2026-10-25 BTC read $80,791 against a $81,799
+line (rising from $81,317 a week earlier) - under it, so no buy.
+`/coin-picker` shows `rule_here`.
