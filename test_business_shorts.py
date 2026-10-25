@@ -235,6 +235,33 @@ def test_the_holes_found_by_probing_stay_closed():
        bs.screen_script(mechanism)[0] is True, str(bs.screen_script(mechanism)[1]))
 
 
+def test_a_date_counts_however_it_is_phrased():
+    """Found by screening a real week: the factual-anchor marker required
+    the literal word "in" before a four-digit year, so two scripts dense
+    with dates were refused -
+
+        "...tax returns filed between 1996 and 2002..."
+        "Philadelphia police used it in the 1950s..."
+
+    A screen that rejects good work over a preposition is the too-tight
+    failure, and it is worse than too loose: it looks like it is working
+    while making the niche unservable."""
+    phrasings = [
+        "Between 1996 and 2002 the study counted seven types of income "
+        "across the group, and that is not the same as seven each person had.",
+        "Philadelphia police used the phrase in the 1950s to describe the "
+        "traffic the day after Thanksgiving, and retailers hated it.",
+        "In 1975 an engineer at Kodak built the first digital camera out of "
+        "spare parts and it recorded onto cassette tape.",
+        "By the 1980s the retailers had reframed the words rather than "
+        "fight them, and the name stuck for good.",
+    ]
+    for p in phrasings:
+        allowed, reasons = bs.screen_script(p + " " * 0 + " It stuck.")
+        ok(f"a date phrased as {p.split()[0]!r}... counts as an anchor",
+           not any("factual anchor" in r for r in reasons), str(reasons))
+
+
 def test_zz_nothing_above_failed():
     assert not _failures, f"{len(_failures)} checks failed: {_failures}"
 

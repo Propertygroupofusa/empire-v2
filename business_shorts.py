@@ -102,7 +102,14 @@ ADVICE_PATTERNS = [
 #: one must be present - not as a style rule, but because a script with no
 #: factual anchor at all is the "generic, template-based" shape.
 FACTUAL_MARKERS = [
-    r"\bin \d{4}\b",            # a year
+    # A YEAR OR A DECADE, ANYWHERE. This was r"\bin \d{4}\b" - it required
+    # the literal word "in" immediately before a four-digit year, and it
+    # rejected two scripts that were dense with dates: "between 1996 and
+    # 2002" and "in the 1950s". Both are as checkable as content gets. A
+    # screen that refuses good work because of a preposition is the too-tight
+    # failure, and that one is worse than too loose because it looks like it
+    # is working while making the niche unservable.
+    r"\b(1[89]\d{2}|20\d{2})s?\b",
     r"\b\d+(\.\d+)?\s*(%|percent)\b",
     r"\$\s?\d",                  # a dollar figure
     r"\bbecause\b", r"\bthe reason\b", r"\bworks by\b", r"\bmeans\b",
