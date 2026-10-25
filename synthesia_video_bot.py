@@ -27,15 +27,30 @@ AVATARS = {
 
 async def create_video(script: str, use_case: str = "marketing",
                         title: str = "Generated Video",
-                        callback_id: str = "") -> dict:
+                        callback_id: str = "",
+                        aspect_ratio: str = "16:9",
+                        test: bool = None) -> dict:
     """
     Generate an AI avatar video from a text script.
     use_case options: real_estate, finance, marketing, sales
+
+    aspect_ratio MATTERS AND WAS MISSING. Synthesia defaults to 16:9, this
+    function sent no value, and a landscape video is not a Short - YouTube
+    will not treat it as one however short it is. Shorts must pass "9:16".
+    The default stays 16:9 so every existing caller is unchanged.
+
+    test=True renders a free WATERMARKED video. Left as None it reads
+    SYNTHESIA_TEST_MODE, so a first run can be proved end to end without
+    spending credits on something nobody has watched yet.
     """
     avatar_id = AVATARS.get(use_case, AVATARS["marketing"])
+    if test is None:
+        test = (os.getenv("SYNTHESIA_TEST_MODE", "").strip().lower()
+                in ("1", "true", "yes", "on"))
 
     payload = {
-        "test": False,
+        "test": bool(test),
+        "aspectRatio": aspect_ratio,
         "title": title,
         "description": f"Auto-generated {use_case} video",
         "visibility": "private",
