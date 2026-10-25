@@ -303,6 +303,97 @@ def test_the_loop_never_dies_on_an_error():
     ok("and it sleeps between passes", "sleep" in src)
 
 
+def test_a_rendered_video_only_publishes_against_a_claimed_row():
+    """The link that was missing entirely: the webhook logged "Video ready"
+    and returned, so nothing ever reached YouTube.
+
+    Now it publishes - but ONLY against a row claimed through the gates. A
+    webhook is an external input; the claim is our own record that a
+    decision passed. A render nobody planned is not published because a
+    callback said so."""
+    async def body(sf):
+        arm()
+        await _ready_channel(sf, limit=5)
+        sent = []
+
+        async def fake_upload(**kw):
+            sent.append(kw)
+            return {"id": "yt_abc"}
+
+        # A callback with no matching row publishes nothing.
+        out = await w.complete_render(sf, "999", "http://x/v.mp4",
+                                      uploader=fake_upload)
+        ok("an unplanned render is not published", out["uploaded"] is False)
+        ok("and says why", "nothing here planned" in out["reason"], str(out))
+        ok("nothing was sent", sent == [])
+
+        # A claimed row publishes, once.
+        rid = await w.claim(sf, "news", "topic-1", "A Title", "private")
+        out = await w.complete_render(sf, str(rid), "http://x/v.mp4",
+                                      uploader=fake_upload)
+        ok("a claimed render publishes", out["uploaded"] is True, str(out))
+        ok("to the right channel", sent[0]["channel"] == "news", str(sent[0]))
+        ok("with the privacy the row carried",
+           sent[0]["privacy"] == "private", str(sent[0]))
+        ok("and the row records the video id",
+           out.get("video_id") == "yt_abc", str(out))
+
+        # THE RETRY. Synthesia retries a webhook; publishing twice is the
+        # duplicate the whole design exists to prevent.
+        out2 = await w.complete_render(sf, str(rid), "http://x/v.mp4",
+                                       uploader=fake_upload)
+        ok("a repeated webhook does NOT publish again",
+           out2["uploaded"] is False, str(out2))
+        ok("because the row is already settled",
+           "already" in out2["reason"], str(out2))
+        ok("and only one upload was ever sent", len(sent) == 1, str(len(sent)))
+        disarm()
+    run(body)
+
+
+def test_publishing_is_rechecked_when_the_render_lands_not_when_claimed():
+    """A render can take a long time. If publishing was switched off in
+    between, the video must not go out on a permission that has since been
+    withdrawn."""
+    async def body(sf):
+        arm()
+        await _ready_channel(sf, limit=5)
+        sent = []
+
+        async def fake_upload(**kw):
+            sent.append(kw)
+            return {"id": "yt_abc"}
+
+        rid = await w.claim(sf, "news", "topic-1", "T", "private")
+        await yc.set_publishing("news", False)        # withdrawn mid-render
+        out = await w.complete_render(sf, str(rid), "http://x/v.mp4",
+                                      uploader=fake_upload)
+        ok("the render is not published", out["uploaded"] is False, str(out))
+        ok("because publishing was turned off",
+           "publishing is OFF" in out["reason"], str(out))
+        ok("and nothing was sent", sent == [])
+        disarm()
+    run(body)
+
+
+def test_a_failed_render_settles_its_row():
+    async def body(sf):
+        arm()
+        await _ready_channel(sf, limit=5)
+        rid = await w.claim(sf, "news", "topic-1", "T", "private")
+        await w.settle(sf, rid, False, error="render failed: out of credits")
+        from models import YouTubeUpload
+        from sqlalchemy import select as _sel
+        async with sf() as db:
+            row = (await db.execute(_sel(YouTubeUpload))).scalars().first()
+        ok("the row is marked failed", row.status == "failed", row.status)
+        ok("with the reason", "out of credits" in (row.error or ""), row.error)
+        ok("and it still blocks a blind retry of that content",
+           (await w.may_upload(sf, "news", "topic-1"))[0] is False)
+        disarm()
+    run(body)
+
+
 def test_zz_nothing_above_failed():
     assert not _failures, f"{len(_failures)} checks failed: {_failures}"
 

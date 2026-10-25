@@ -143,8 +143,42 @@ async def synthesia_webhook(request: Request):
 
     if event_type == "video.completed":
         log.info(f"Video ready | ID: {data.get('id')} | Download: {data.get('download')}")
+        # AND THEN IT IS PUBLISHED. This branch used to log and return, so a
+        # render completed, the callback fired, and the file never reached
+        # YouTube - indistinguishable from outside from a pipeline that
+        # works. complete_render publishes only against an upload row that
+        # was already claimed through the gates, so a render nothing here
+        # planned is not published on the strength of a webhook.
+        try:
+            import youtube_scheduler_worker as _sched
+            from database import get_session_factory as _sf
+            outcome = await _sched.complete_render(
+                _sf, data.get("callbackId") or data.get("callback_id"),
+                data.get("download"))
+            if outcome.get("uploaded"):
+                log.info(f"Published to YouTube | channel="
+                         f"{outcome.get('channel')} | video="
+                         f"{outcome.get('video_id')}")
+            else:
+                log.warning(f"Rendered video NOT published: "
+                            f"{outcome.get('reason')}")
+        except Exception as e:
+            # The webhook must still return 200 - Synthesia retries, and a
+            # retry would re-enter this path. The claimed row is what stops
+            # that becoming a duplicate.
+            log.error(f"Publishing the rendered video failed: "
+                      f"{type(e).__name__}: {e}")
     elif event_type == "video.failed":
         log.error(f"Video failed | ID: {data.get('id')} | Reason: {data.get('message')}")
+        try:
+            import youtube_scheduler_worker as _sched
+            from database import get_session_factory as _sf
+            await _sched.settle(
+                _sf, _sched._as_int(data.get("callbackId")
+                                    or data.get("callback_id")),
+                False, error=f"render failed: {data.get('message')}")
+        except Exception as e:
+            log.error(f"Could not record the render failure: {e}")
 
     return {"received": True}
 

@@ -212,6 +212,78 @@ async def settle(session_factory, upload_id, ok, video_id=None, error=None):
         return True
 
 
+async def complete_render(session_factory, callback_id, download_url,
+                          uploader=None):
+    """A rendered video has arrived. Publish it against its claimed row.
+
+    THIS IS THE LINK THAT WAS MISSING. The Synthesia webhook logged "Video
+    ready" and returned - the render completed, the callback fired, and
+    nothing ever carried the file to YouTube. From outside that looks
+    identical to a pipeline that works, which is the failure mode this whole
+    area keeps producing.
+
+    It publishes ONLY against a row that was already claimed. A render
+    nobody planned does not get uploaded on the strength of a webhook: the
+    callback is an external input, and the claim is our own record of a
+    decision that passed the gates. No row, no upload.
+    """
+    from models import YouTubeUpload
+    if not callback_id or not download_url:
+        return {"uploaded": False,
+                "reason": "the callback carried no id or no download url"}
+
+    async with session_factory() as db:
+        row = (await db.execute(
+            select(YouTubeUpload)
+            .where(YouTubeUpload.id == _as_int(callback_id)))).scalars().first()
+        if row is None:
+            return {"uploaded": False,
+                    "reason": f"no claimed upload matches callback "
+                              f"{callback_id!r} - refusing to publish a video "
+                              f"nothing here planned"}
+        if row.status != "claimed":
+            # Already settled. A webhook can fire twice; publishing twice is
+            # the duplicate this whole design exists to prevent.
+            return {"uploaded": False,
+                    "reason": f"upload {row.id} is already {row.status!r}"}
+        label, title, privacy = row.channel_label, row.title, row.privacy
+        upload_id = row.id
+
+    # The gates are re-checked at the moment of publishing, not trusted from
+    # when the slot was claimed. A render can take a long time, and
+    # publishing may have been switched off in between.
+    import youtube_channels
+    res = await youtube_channels.resolve(label)
+    if not res.ok:
+        await settle(session_factory, upload_id, False,
+                     error=f"publishing refused at render time: {res.reason}")
+        return {"uploaded": False, "reason": res.reason}
+
+    send = uploader
+    if send is None:
+        from youtube_upload_bot import synthesia_to_youtube as send
+    try:
+        result = await send(synthesia_download_url=download_url, title=title,
+                            description="", tags=None,
+                            privacy=privacy or DEFAULT_PRIVACY, channel=label)
+    except Exception as e:
+        await settle(session_factory, upload_id, False,
+                     error=f"{type(e).__name__}: {str(e)[:300]}")
+        return {"uploaded": False, "reason": f"{type(e).__name__}: {e}"}
+
+    vid = (result or {}).get("id")
+    await settle(session_factory, upload_id, bool(vid), video_id=vid,
+                 error=None if vid else "the upload returned no video id")
+    return {"uploaded": bool(vid), "video_id": vid, "channel": label}
+
+
+def _as_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return -1
+
+
 async def enabled_channels(session_factory):
     """Channels the loop may consider. Publishing-enabled only."""
     from models import YouTubeChannel
