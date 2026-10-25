@@ -216,14 +216,38 @@ def _scheduling_check():
         text = p.read_text(encoding="utf-8", errors="replace")
         # A mention inside the router wiring does not schedule anything; what
         # would is an actual scheduler/worker import.
-        for marker in ("youtube_scheduler", "run_batch_pipeline",
+        for marker in ("youtube_scheduler_worker", "run_batch_pipeline",
                        "youtube_auto_pipeline"):
             if marker in text:
                 callers.append(f"{name} references {marker}")
     if callers:
-        return _result("uploads_are_scheduled", OK,
-                       "a production process references the pipeline: "
-                       + "; ".join(callers), callers=callers)
+        # WIRED IS NOT ARMED, and reporting it as OK would recreate exactly
+        # the blindness this check exists to remove. The loop now starts with
+        # the service, but it posts nothing until YOUTUBE_SCHEDULER is armed
+        # AND a channel has publishing turned on, so the state is named
+        # rather than scored as healthy.
+        try:
+            import youtube_scheduler_worker as _w
+            mode = _w.current_mode()
+        except Exception as e:
+            return _result("uploads_are_scheduled", UNKNOWN,
+                           f"a scheduler is wired in but its mode could not "
+                           f"be read ({type(e).__name__}: {e})",
+                           callers=callers)
+        if mode != _w.ARMED:
+            return _result(
+                "uploads_are_scheduled", FAIL,
+                f"the scheduler is wired into the service but DISARMED - "
+                f"{_w.MODE_ENV} is {os.getenv(_w.MODE_ENV)!r} and must be "
+                f"exactly {_w.ARMED!r}. Nothing is posted while it is off, "
+                f"which is the default and is deliberate.",
+                callers=callers, mode=mode)
+        return _result(
+            "uploads_are_scheduled", OK,
+            f"the scheduler is wired in and ARMED ({mode}). It still posts "
+            f"only to channels whose own publishing_enabled is on, and only "
+            f"within each channel's daily_upload_limit.",
+            callers=callers, mode=mode)
     return _result(
         "uploads_are_scheduled", FAIL,
         "NOTHING in this service uploads on its own. service_entrypoint.py "

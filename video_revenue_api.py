@@ -154,6 +154,11 @@ class PublishPropertyRequest(BaseModel):
     title: Optional[str] = "Property Listing"
     description: Optional[str] = ""
     tags: Optional[List[str]] = None
+    # Naming a channel routes this through the per-channel gates
+    # (publishing_enabled, the daily limit, duplicate detection). Left out,
+    # it publishes to the environment-variable channel exactly as before -
+    # the owner's own hand-operated path, unchanged.
+    channel: Optional[str] = None
 
 
 class PublishSocialRequest(BaseModel):
@@ -162,17 +167,27 @@ class PublishSocialRequest(BaseModel):
     description: Optional[str] = ""
     tags: Optional[List[str]] = None
     privacy: Optional[str] = "unlisted"
+    channel: Optional[str] = None
 
 
 @router.post("/publish/youtube/property-listing")
 async def publish_property_youtube(payload: PublishPropertyRequest):
-    """publishes public"""
+    """Publishes PUBLIC. Behind the global write guard, so this is the
+    owner's own hand-operated path.
+
+    NOTE FOR ANYTHING AUTOMATED CALLING THIS. daily_publisher.py POSTs here
+    on a schedule when DAILY_PUBLISHER_ENABLED is true, and without a
+    `channel` that is automatic public posting through the MANUAL path -
+    none of the scheduler's gates (publishing_enabled, the daily limit,
+    duplicate detection) apply. An automated caller should name a channel.
+    """
     result = await synthesia_to_youtube(
         synthesia_download_url=payload.video_url,
         title=payload.title,
         description=payload.description,
         tags=payload.tags,
         privacy="public",
+        channel=payload.channel,
     )
     return result
 
@@ -186,6 +201,7 @@ async def publish_social_youtube(payload: PublishSocialRequest):
         description=payload.description,
         tags=payload.tags,
         privacy=payload.privacy,
+        channel=payload.channel,
     )
     return result
 

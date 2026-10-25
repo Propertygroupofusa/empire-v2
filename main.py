@@ -1270,6 +1270,27 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # YOUTUBE SCHEDULER. The loop that was missing entirely - nothing in
+        # production called the uploader, so the channel went quiet however
+        # good the credentials were. Same switch shape as the two below:
+        # YOUTUBE_SCHEDULER must be exactly "arm", and arming it is still not
+        # permission to post to any particular channel - each one carries its
+        # own publishing_enabled, defaulting off.
+        try:
+            import youtube_scheduler_worker
+            from database import get_session_factory as _yt_sf
+            asyncio.create_task(youtube_scheduler_worker.run_periodically(_yt_sf))
+            try:
+                log.info(f"📺 YouTube scheduler running, "
+                         f"mode={youtube_scheduler_worker.current_mode()}")
+            except Exception:
+                pass          # a failure to LOG must never unstart the task
+        except Exception as e:
+            try:
+                log.warning(f"youtube scheduler not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # RESTING STOPS. The other loop that reaches the venue, and the
         # only one that can place an order which then sits there holding
         # coins. Same switch shape as the trimmer: nothing happens unless

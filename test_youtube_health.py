@@ -221,15 +221,51 @@ def test_the_scheduling_check_is_the_one_that_catches_the_real_state():
     ok("it returns a verdict", chk["name"] == "uploads_are_scheduled", str(chk))
     ok("the status is one of the three",
        chk["status"] in (yh.OK, yh.FAIL, yh.UNKNOWN), str(chk))
+    # TWO DIFFERENT FAILING STATES, and they need different fixes:
+    # nothing wired into the service at all, or wired and DISARMED. Both must
+    # FAIL - "wired" is not "posting", and scoring a disarmed scheduler as OK
+    # would recreate the blindness this check exists to remove. Asserted on
+    # the property (a FAIL names the thing to change) rather than on either
+    # one's wording, since this test previously pinned the first state's
+    # sentence and broke the moment the scheduler was wired in.
     if chk["status"] == yh.FAIL:
-        ok("it explains that credentials being fine changes nothing",
-           "even when every credential check above is green" in chk["detail"],
-           chk["detail"])
-        ok("and names the only remaining path to YouTube",
-           "/publish/youtube/" in chk["detail"], chk["detail"])
+        detail = chk["detail"]
+        names_the_fix = ("/publish/youtube/" in detail        # nothing wired
+                         or "YOUTUBE_SCHEDULER" in detail)    # wired, disarmed
+        ok("a FAIL names what has to change", names_the_fix, detail)
+        ok("and it does not read as a credential problem",
+           "token" not in detail.lower(), detail)
     else:
         ok("it names what does the scheduling", bool(chk.get("callers")),
            str(chk))
+
+
+def test_being_wired_in_is_not_scored_as_posting():
+    """The specific regression: once the worker was imported by main.py, a
+    naive check would see the reference and call scheduling healthy while
+    the switch was still off and nothing was being posted."""
+    import youtube_scheduler_worker as w
+    old = os.environ.get(w.MODE_ENV)
+    try:
+        os.environ.pop(w.MODE_ENV, None)
+        off = yh._scheduling_check()
+        ok("disarmed is a FAIL, not an OK", off["status"] == yh.FAIL, str(off))
+        ok("and it says disarmed rather than missing",
+           "DISARMED" in off["detail"], off["detail"])
+        ok("and names the exact word needed", "'arm'" in off["detail"],
+           off["detail"])
+        os.environ[w.MODE_ENV] = "arm"
+        on = yh._scheduling_check()
+        ok("armed is an OK", on["status"] == yh.OK, str(on))
+        ok("but it still says the per-channel gate applies",
+           "publishing_enabled" in on["detail"], on["detail"])
+        ok("and that the daily limit applies",
+           "daily_upload_limit" in on["detail"], on["detail"])
+    finally:
+        if old is None:
+            os.environ.pop(w.MODE_ENV, None)
+        else:
+            os.environ[w.MODE_ENV] = old
 
 
 def test_a_green_credential_run_still_cannot_claim_uploads_work():

@@ -3343,3 +3343,43 @@ class YouTubeChannel(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class YouTubeUpload(Base):
+    """One upload the scheduler planned, and what became of it.
+
+    THIS ROW IS WRITTEN BEFORE THE UPLOAD IS ATTEMPTED, not after. That
+    ordering is the whole point. An upload is a public, irreversible act: if
+    the row were written on success, a crash or timeout between "YouTube
+    accepted it" and "we recorded it" would leave the scheduler believing
+    nothing happened, and the next cycle would post the same video again. A
+    duplicate on a live channel is not a tidy failure - it is the thing the
+    inauthentic-content policy looks for.
+
+    So the slot is CLAIMED first (status 'claimed'), the upload is attempted,
+    and the row is then settled to 'uploaded' or 'failed'. A row stuck at
+    'claimed' means an attempt whose outcome is UNKNOWN, and it blocks a
+    retry of that same content until a human looks - which is the right
+    direction for a public post. A lost upload costs one video; a duplicate
+    costs the channel's standing.
+
+    content_key is what makes two uploads 'the same'. It is supplied by the
+    caller rather than derived here, because only the caller knows whether
+    two videos about the same topic are a duplicate or a deliberate series.
+    """
+    __tablename__ = "youtube_uploads"
+
+    id = Column(Integer, primary_key=True, index=True)
+    channel_label = Column(String, index=True)
+    # Stable identity for the content, unique per channel. The scheduler
+    # refuses to post a content_key this channel already has a row for.
+    content_key = Column(String, index=True)
+
+    status = Column(String, default="claimed", index=True)  # claimed|uploaded|failed
+    title = Column(Text, nullable=True)
+    privacy = Column(String, nullable=True)
+    youtube_video_id = Column(String, nullable=True)
+    error = Column(Text, nullable=True)
+
+    claimed_at = Column(DateTime, default=datetime.utcnow, index=True)
+    settled_at = Column(DateTime, nullable=True)
