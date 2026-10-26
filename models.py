@@ -3278,6 +3278,35 @@ class CoinPickerPick(Base):
     within_24h = Column(Float)              # share of those round trips closed inside 24h
 
 
+class AlpacaPatientPiece(Base):
+    """One $120 piece the patient stock bot bought (alpaca_patient.py), open or sold.
+
+    Alpaca only - nothing in this table is crypto. target_price is fixed at the
+    buy: the price at which selling the whole piece nets 5% of its cost after
+    the 0.12% round trip. A piece is never sold under it. status is "open" or
+    "closed"; exit_price, pnl and closed_at are set only by a fill. opened_at
+    and closed_at are the START of the regular-session hour that decided them.
+    paper is True for a practice piece: no order was placed and no share is
+    held. The module has no live mode yet, so every row today is paper.
+    """
+    __tablename__ = "alpaca_patient_pieces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    status = Column(String, index=True, default="open")
+    qty = Column(Float)
+    entry_price = Column(Float)
+    cost_usd = Column(Float)
+    target_price = Column(Float)
+    round_trip_cost = Column(Float)              # the cost the target was priced with
+    entry_rsi = Column(Float, nullable=True)
+    opened_at = Column(DateTime, default=datetime.utcnow, index=True)
+    closed_at = Column(DateTime, nullable=True, index=True)
+    exit_price = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+    paper = Column(Boolean, default=True, index=True)
+
+
 class YouTubeChannel(Base):
     """One YouTube channel this system publishes to, and its own credentials.
 

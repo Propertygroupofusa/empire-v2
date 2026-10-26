@@ -14924,3 +14924,28 @@ seasons. Every rule lost a little in the older half and won in the newer:
 it is a rising-market rule. On 2026-10-25 BTC read $80,791 against a $81,799
 line (rising from $81,317 a week earlier) - under it, so no buy.
 `/coin-picker` shows `rule_here`.
+
+## Alpaca: why the stock bot lost, and the patient version in practice (2026-10-26)
+
+Alpaca's own orders (`/trades/closed`, 256 round trips, Sep 4 - Oct 14): to
+Sep 20, 12 trades, +$8.28; Sep 21 - Oct 14, 244 trades, -$52.45. The Sep 24-25
+retune to "take profit faster" (8ed13e9 5-minute checks, f6d414a four intraday
+slots, 0012eeb 50% budget, bf5ee25 $1 targets) on top of stop-loss and 2-hour
+time-limit sells made ~20 trades a day: average win $0.37, average loss $0.54,
+40% winners. Since Oct 12 it sells only at a profit; it has been stopped
+since Oct 14 holding MSFT, NVDA and SLV under cost.
+
+The stock game (scratchpad stockgame/, Yahoo hourly Nov 2023 - Oct 2026, $480
+in play, never a sale at a loss): every bigger target beat a smaller one; the
+SPY trend filter that helped crypto made stocks worse. Best: RSI(14) under 40
+on regular-session hours, sell only at 5% net, 4 x $120 - +$370.54 over 2.75
+years against +$266.40 for holding SPY, worst 60-day season -$40.43.
+
+`alpaca_patient.py` is that rule, PRACTICE ONLY: `ALPACA_PATIENT=paper` reads
+Alpaca's 30-minute IEX bars, builds 09:30-anchored regular-session hours,
+decides each hour 3 minutes after it closes (never on a forming, half-built
+or stale hour) and records paper pieces in `alpaca_patient_pieces`. The file
+has no order path and imports nothing from the Coinbase side. Its own plan()
+replayed over the game's data reproduces +$370.54 exactly.
+`GET /alpaca-patient` shows the practice book. Going live is a separate
+change: the old bots must first be kept from trading or selling its pieces.

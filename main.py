@@ -1410,6 +1410,21 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # The patient stock bot, 2026-10-26 - PRACTICE ONLY. Off unless
+        # ALPACA_PATIENT=paper; it then reads Alpaca's hourly prices and records
+        # what it would buy and sell. alpaca_patient.py has no order path.
+        # Alpaca only: it imports nothing from the Coinbase side.
+        try:
+            import alpaca_patient
+            if alpaca_patient.mode() == "paper":
+                _apt_task = asyncio.create_task(alpaca_patient.run_forever())
+                log.warning("[PATIENT] practice mode - recording, no orders")
+        except Exception as e:
+            try:
+                log.warning(f"patient stock bot not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # One-shot idle rotation: move idle allocation into the best-ranked
         # coins by dip_depth. SHIPPED INERT - nothing happens unless
         # ROTATION_TASK_TICKET is set, and releasing idle from a non-flat

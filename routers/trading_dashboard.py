@@ -16003,6 +16003,59 @@ _ALPACA_GROWTH_CACHE = {"at": 0.0, "key": None, "payload": None}
 _ALPACA_GROWTH_TTL_SECONDS = 180
 
 
+@router.get("/alpaca-patient")
+async def alpaca_patient_status():
+    """The patient stock bot's practice book (alpaca_patient.py). Read-only.
+
+    Pieces it would have bought and sold, what the sales would have banked,
+    and the passes it ran and failed. `worth_now` values an open piece at the
+    newest hourly close the practice loop saw in this process; None means the
+    loop has not read a price since the last restart. Practice places no
+    order, so none of this is money that moved."""
+    import alpaca_patient as ap
+    from models import AlpacaPatientPiece
+    try:
+        async with get_session_factory()() as db:
+            pieces = (await db.execute(select(AlpacaPatientPiece)
+                                       .where(AlpacaPatientPiece.paper == True))).scalars().all()  # noqa: E712
+            counters = {r.bot_name: r for r in (await db.execute(
+                select(TradingBotState).where(TradingBotState.bot_name.in_(
+                    [ap.PASSES_KEY, ap.LAST_BUCKET_KEY])))).scalars().all()}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"patient record unreadable: {exc}")
+    prices = ap.last_prices()
+    held = [p for p in pieces if p.status == "open"]
+    closed = [p for p in pieces if p.status == "closed"]
+    open_rows = []
+    for p in held:
+        px = (prices.get(p.symbol) or (None, None))[1]
+        worth = round(p.qty * px * (1 - (p.round_trip_cost or ap.ROUND_TRIP_COST) / 2), 2) if px else None
+        open_rows.append({"symbol": p.symbol, "entry_price": p.entry_price, "target_price": p.target_price,
+                          "cost_usd": round(p.cost_usd or 0.0, 2), "worth_now": worth,
+                          "vs_cost": round(worth - (p.cost_usd or 0.0), 2) if worth is not None else None,
+                          "entry_rsi": p.entry_rsi,
+                          "opened_at": (p.opened_at.isoformat() + "Z") if p.opened_at else None})
+    passes = counters.get(ap.PASSES_KEY)
+    last = counters.get(ap.LAST_BUCKET_KEY)
+    return {
+        "mode_here": ap.mode(),
+        "is_practice": True,
+        "places_orders": False,
+        "rule": {"buy": f"RSI({ap.RSI_PERIOD}) on regular-session hours under {ap.RSI_BUY_BELOW:.0f}",
+                 "sell": f"only at {ap.NET * 100:.0f}% net after a {ap.ROUND_TRIP_COST * 100:.2f}% round trip",
+                 "piece_usd": ap.PIECE_USD, "max_open": ap.MAX_OPEN, "symbols": ap.SYMBOLS},
+        "banked_usd": round(sum(p.pnl or 0.0 for p in closed), 2),
+        "sales": len(closed),
+        "open": open_rows,
+        "open_cost_usd": round(sum(p.cost_usd or 0.0 for p in held), 2),
+        "passes": int(passes.base_capital or 0) if passes else 0,
+        "failed_passes": int(passes.starting_capital or 0) if passes else 0,
+        "last_hour_decided": (datetime.utcfromtimestamp(last.base_capital).isoformat() + "Z")
+                             if last and last.base_capital else None,
+        "last_pass": ap.last_pass() or None,
+    }
+
+
 @router.get("/alpaca-growth")
 async def alpaca_growth(days: int = 60, fresh: int = 0):
     """Why Alpaca is not growing, and whether raising the risk cap would help.
