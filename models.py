@@ -3287,7 +3287,10 @@ class AlpacaPatientPiece(Base):
     "closed"; exit_price, pnl and closed_at are set only by a fill. opened_at
     and closed_at are the START of the regular-session hour that decided them.
     paper is True for a practice piece: no order was placed and no share is
-    held. The module has no live mode yet, so every row today is paper.
+    held. paper is False for a LIVE piece (alpaca_patient_live.py): qty and
+    entry_price are Alpaca's own fill, opened_at is the fill time, exit_price
+    and pnl are the sell's fill. A sell that filled only in part is split off
+    as its own closed row and the open row keeps the rest.
     """
     __tablename__ = "alpaca_patient_pieces"
 
@@ -3305,6 +3308,39 @@ class AlpacaPatientPiece(Base):
     exit_price = Column(Float, nullable=True)
     pnl = Column(Float, nullable=True)
     paper = Column(Boolean, default=True, index=True)
+
+
+class AlpacaPatientOrder(Base):
+    """One real order the LIVE patient stock bot sent to Alpaca (alpaca_patient_live.py).
+
+    Alpaca only. Every order is a DAY LIMIT order: a buy at the decided hour's
+    close plus a small slack, a sell at the piece's target rounded up to the
+    cent - so no sell can fill under the target. The row is written BEFORE the
+    order goes out (status "sending"), so an order whose reply was lost is
+    still found again by its client_order_id. status: "sending", "sent"
+    (Alpaca took it), "done" (Alpaca finished it, or it never arrived).
+    alpaca_status, filled_qty and filled_avg_price are Alpaca's own last word.
+    piece_id: the piece a sell is for, or the piece a buy's fill opened.
+    """
+    __tablename__ = "alpaca_patient_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_order_id = Column(String, unique=True, index=True)
+    alpaca_order_id = Column(String, nullable=True, index=True)
+    symbol = Column(String, index=True)
+    side = Column(String)                         # "buy" or "sell"
+    status = Column(String, index=True, default="sending")
+    alpaca_status = Column(String, nullable=True)
+    qty = Column(Float)                           # asked for
+    limit_price = Column(Float)
+    filled_qty = Column(Float, nullable=True)
+    filled_avg_price = Column(Float, nullable=True)
+    piece_id = Column(Integer, nullable=True, index=True)
+    entry_rsi = Column(Float, nullable=True)      # buys: the RSI that decided it
+    bucket_start = Column(DateTime, nullable=True)  # buys: the hour that decided it
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
 
 class YouTubeChannel(Base):

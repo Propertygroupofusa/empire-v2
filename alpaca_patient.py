@@ -23,15 +23,24 @@ stockgame/game_targets.py, Nov 2023 - Oct 2026 hourly prices, 32 overlapping
   Every bigger target beat a smaller one; the small-target style lost. It mostly
   rides the market: in a long fall its four pieces just wait.
 
-PRACTICE ONLY, FOR NOW. ALPACA_PATIENT=paper runs every step on Alpaca's real
-hourly prices and records what it would have bought and sold - and places no
-order: this file has no order path at all. Anything else is off. Going live is
-a separate change, made only after practice has shown its numbers, because the
-old bots must first be kept from trading or selling these pieces.
+TWO SAFETY RULES, added with the live switch (the owner, 2026-10-27: "Yes
+build it") and run by practice too, so practice measures what live would do:
+  * a piece never sells on the Eastern date it was bought - live then never
+    makes a day trade (the pattern-day-trader rule);
+  * nothing is bought on the session's last hour (15:30 Eastern): it closes
+    with the market, so the buy could only fill at the next open.
+  Measured on the same game data: +$364.54 against +$370.54 without them -
+  the first rule costs nothing (the one sale it moves happens next morning
+  at the same target), the second skips 2 buys in 2.75 years.
 
-Practice runs whatever STOP_TRADING and ALPACA_STOP_TRADING say: it can
-neither buy nor sell, and watching the market while trading is stopped is the
-whole point of it.
+PRACTICE. ALPACA_PATIENT=paper runs every step on Alpaca's real hourly prices
+and records what it would have bought and sold - and places no order: this
+file has no order path at all. Practice runs whatever STOP_TRADING and
+ALPACA_STOP_TRADING say: it can neither buy nor sell, and watching the market
+while trading is stopped is the whole point of it.
+
+LIVE. ALPACA_PATIENT=live runs the same rule with real orders, from
+alpaca_patient_live.py - the only file that sends one. Anything else is off.
 """
 import asyncio
 import logging
@@ -67,9 +76,10 @@ _last_pass = {}                  # what the newest pass saw and did
 
 
 def mode() -> str:
-    """"paper" for exactly "paper" (any case, spaces ignored), otherwise "off".
-    There is no live mode in this file."""
-    return "paper" if (os.getenv(SWITCH_ENV) or "").strip().lower() == "paper" else "off"
+    """"paper" or "live" for exactly that word (any case, spaces ignored),
+    otherwise "off". A typo is off, never live."""
+    v = (os.getenv(SWITCH_ENV) or "").strip().lower()
+    return v if v in ("paper", "live") else "off"
 
 
 # ------------------------------------------------------------------ pure rules
@@ -144,37 +154,60 @@ def hourly_buckets(bars, now):
     return out
 
 
+def et_date(epoch):
+    """The Eastern calendar date of an epoch."""
+    return datetime.fromtimestamp(epoch, timezone.utc).astimezone(ET).date()
+
+
+def is_last_hour(bucket_start):
+    """True for the session's last bucket (15:30 Eastern): it closes with the
+    market, so a buy decided on it could only fill at the next open."""
+    s = datetime.fromtimestamp(bucket_start, timezone.utc).astimezone(ET)
+    return _bucket_bounds(s.date())[-1][0] == s
+
+
 def plan(pieces, buckets_by_symbol, bucket=None):
     """One pass, as decisions. Changes nothing.
 
     pieces: open pieces as dicts {id, symbol, qty, entry_price, target_price,
-    opened_at (bucket start epoch)}. buckets_by_symbol: closed hourly buckets.
+    opened_at (epoch)}. buckets_by_symbol: closed hourly buckets.
     Returns (sales, buys): a sale is (piece, bucket start, price) at the target,
-    from the first LATER bucket whose high reaches it; a buy is (symbol, bucket
-    start, close, rsi) on the symbol's newest bucket - and, when `bucket` is
-    given, only if that newest bucket IS `bucket`: a stale hour is never bought on.
+    from the first bucket on a LATER Eastern date whose high reaches it; a buy
+    is pick_buys() with the unsold pieces held.
     """
     sales, held = [], set()
     for p in pieces:
+        day = et_date(p["opened_at"])
         hit = next(((t, p["target_price"]) for t, o, h, l, c in buckets_by_symbol.get(p["symbol"], [])
-                    if t > p["opened_at"] and h >= p["target_price"]), None)
+                    if t > p["opened_at"] and et_date(t) > day and h >= p["target_price"]), None)
         if hit:
             sales.append((p, hit[0], hit[1]))
         else:
             held.add(p["symbol"])
+    return sales, pick_buys(held, len(held), buckets_by_symbol, bucket)
+
+
+def pick_buys(held, n_open, buckets_by_symbol, bucket=None):
+    """Buys as (symbol, bucket start, close, rsi), in SYMBOLS order, skipping
+    `held` symbols, up to MAX_OPEN with `n_open` already taken. Each is on the
+    symbol's newest bucket - and, when `bucket` is given, only if that newest
+    bucket IS `bucket`: a stale hour is never bought on - never on the
+    session's last hour, and only with RSI under RSI_BUY_BELOW."""
     buys = []
     for sym in SYMBOLS:
-        if len(held) + len(buys) >= MAX_OPEN:
+        if n_open + len(buys) >= MAX_OPEN:
             break
         if sym in held:
             continue
         bk = buckets_by_symbol.get(sym) or []
         if len(bk) <= RSI_PERIOD or (bucket is not None and bk[-1][0] != bucket):
             continue
+        if is_last_hour(bk[-1][0]):
+            continue
         r = rsi([b[4] for b in bk])
         if r is not None and r < RSI_BUY_BELOW:
             buys.append((sym, bk[-1][0], bk[-1][4], r))
-    return sales, buys
+    return buys
 
 
 # ------------------------------------------------------------------ the record

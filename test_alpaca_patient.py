@@ -1,14 +1,16 @@
-"""The patient stock bot (alpaca_patient.py): practice only, the tested rule, no orders.
+"""The patient stock bot (alpaca_patient.py): the tested rule and its practice, no orders.
 
 Run as written: python3 test_alpaca_patient.py
+(The live orders are alpaca_patient_live.py, tested in test_alpaca_patient_live.py.)
 
 The owner, 2026-10-26: "build the patient version". What these hold:
-  * off unless ALPACA_PATIENT reads exactly "paper" - there is no live mode;
+  * off unless ALPACA_PATIENT reads exactly "paper" or "live" - a typo is off;
   * a piece sells only at its target, the price that nets 5% after the 0.12%
-    round trip, and only on a LATER hour - never under it, never by a stop or
-    a clock;
+    round trip, and only on a LATER Eastern date than it was bought - never
+    under it, never by a stop or a clock, never the same day;
   * a buy needs a 14-hour RSI under 40 on regular-session hours, at most 4
-    pieces and one per symbol, and only on the hour that just closed;
+    pieces and one per symbol, only on the hour that just closed, and never
+    on the session's last hour (15:30);
   * hours are built from 30-minute bars, 09:30-16:00 Eastern, in summer and
     winter time, and an hour still forming - or missing its second half - is
     never decided on;
@@ -59,9 +61,10 @@ class Switch(unittest.TestCase):
     def tearDown(self):
         os.environ.pop(ap.SWITCH_ENV, None)
 
-    def test_only_paper_is_on_and_there_is_no_live_mode(self):
+    def test_only_the_exact_words_paper_and_live_are_on(self):
         for v, want in ((None, "off"), ("", "off"), ("paper", "paper"), (" PAPER ", "paper"),
-                        ("live", "off"), ("true", "off"), ("1", "off"), ("yes", "off")):
+                        ("live", "live"), (" Live ", "live"), ("lve", "off"), ("on", "off"),
+                        ("true", "off"), ("1", "off"), ("yes", "off"), ("'live'", "off")):
             if v is None:
                 os.environ.pop(ap.SWITCH_ENV, None)
             else:
@@ -147,12 +150,47 @@ def piece(sym, entry, at, id_=1):
 
 
 class Plan(unittest.TestCase):
-    def test_a_later_hour_at_the_target_sells_at_the_target(self):
-        p = piece("SPY", 100.0, 3600)
+    def test_a_later_day_at_the_target_sells_at_the_target(self):
+        p = piece("SPY", 100.0, et(2026, 10, 26, 10, 30))
         tgt = p["target_price"]
-        sales, _ = ap.plan([p], {"SPY": buckets([100, 101, 102], highs=[100, 101, tgt + 0.01])})
+        hours = [et(2026, 10, 26, 11, 30), et(2026, 10, 27, 9, 30), et(2026, 10, 27, 10, 30)]
+        data = {"SPY": [(t, 100, h, 100, 100) for t, h in zip(hours, [100, 101, tgt + 0.01])]}
+        sales, _ = ap.plan([p], data)
         self.assertEqual(len(sales), 1)
+        self.assertEqual(sales[0][1], hours[2])
         self.assertEqual(sales[0][2], tgt)
+
+    def test_never_sold_on_the_day_it_was_bought(self):
+        # The pattern-day-trader rule: the target reached the same afternoon
+        # waits for the next trading day, and sells there only if reached again.
+        p = piece("SPY", 100.0, et(2026, 10, 26, 9, 30))
+        tgt = p["target_price"]
+        same_day = [(et(2026, 10, 26, h, 30), 100, tgt + 5, 100, 100) for h in (10, 11, 12, 13, 14, 15)]
+        self.assertEqual(ap.plan([p], {"SPY": same_day})[0], [])
+        next_day = same_day + [(et(2026, 10, 27, 9, 30), 100, tgt, 100, 100)]
+        sales, _ = ap.plan([p], {"SPY": next_day})
+        self.assertEqual([(s[1], s[2]) for s in sales], [(et(2026, 10, 27, 9, 30), tgt)])
+
+    def test_the_last_hour_of_the_session_is_never_bought(self):
+        closes = falling()
+        last = et(2026, 10, 27, 15, 30)
+        data = {"QQQ": [(last - (len(closes) - 1 - i) * 3600, c, c, c, c) for i, c in enumerate(closes)]}
+        self.assertTrue(ap.is_last_hour(last))
+        self.assertEqual(ap.plan([], data)[1], [])
+        moved = {"QQQ": [(t - 3600, o, h, l, c) for t, o, h, l, c in data["QQQ"]]}   # newest is 14:30
+        self.assertFalse(ap.is_last_hour(moved["QQQ"][-1][0]))
+        self.assertEqual(len(ap.plan([], moved)[1]), 1)
+
+    def test_the_last_hour_is_the_last_hour_in_winter_and_summer(self):
+        self.assertTrue(ap.is_last_hour(et(2026, 1, 15, 15, 30)))
+        self.assertTrue(ap.is_last_hour(et(2026, 7, 15, 15, 30)))
+        for hh, mm in ((9, 30), (14, 30), (16, 30), (15, 0)):
+            self.assertFalse(ap.is_last_hour(et(2026, 7, 15, hh, mm)), (hh, mm))
+
+    def test_pick_buys_skips_what_is_held_and_counts_slots(self):
+        data = {s: buckets(falling()) for s in ap.SYMBOLS}
+        self.assertEqual([b[0] for b in ap.pick_buys({"SPY", "DIA"}, 1, data)], ["QQQ", "IWM", "GLD"])
+        self.assertEqual(ap.pick_buys(set(), ap.MAX_OPEN, data), [])
 
     def test_nothing_under_the_target_ever_sells(self):
         p = piece("SPY", 100.0, 0)

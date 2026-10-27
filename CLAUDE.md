@@ -14941,11 +14941,32 @@ SPY trend filter that helped crypto made stocks worse. Best: RSI(14) under 40
 on regular-session hours, sell only at 5% net, 4 x $120 - +$370.54 over 2.75
 years against +$266.40 for holding SPY, worst 60-day season -$40.43.
 
-`alpaca_patient.py` is that rule, PRACTICE ONLY: `ALPACA_PATIENT=paper` reads
+`alpaca_patient.py` is that rule and its practice: `ALPACA_PATIENT=paper` reads
 Alpaca's 30-minute IEX bars, builds 09:30-anchored regular-session hours,
 decides each hour 3 minutes after it closes (never on a forming, half-built
 or stale hour) and records paper pieces in `alpaca_patient_pieces`. The file
-has no order path and imports nothing from the Coinbase side. Its own plan()
-replayed over the game's data reproduces +$370.54 exactly.
-`GET /alpaca-patient` shows the practice book. Going live is a separate
-change: the old bots must first be kept from trading or selling its pieces.
+has no order path and imports nothing from the Coinbase side.
+
+Two rules added with the live switch (2026-10-27, the owner: "Yes build
+it"), run by practice too: a piece never sells on the Eastern date it was
+bought (no day trades), and nothing is bought on the 15:30 hour (it closes
+with the market). Its own plan() replayed over the game's data: +$364.54
+(+$370.54 before; the first rule costs nothing, the second skips 2 buys).
+
+`alpaca_patient_live.py` is LIVE, built switched off: `ALPACA_PATIENT=live`.
+The only file that sends a patient order. DAY LIMIT orders only - a buy at
+the decided close +0.2% at most, withdrawn after 15 minutes unfilled; a sell
+of the whole piece at its target rounded UP to the cent, first placed the
+trading day after the buy and again each day until it fills. No market
+order, stop, time limit or position close. Cash only (Alpaca `cash`, never
+buying power). It sends nothing unless `alpaca_stop.alpaca_stopped()` is
+true: prop_bot adopts untracked positions on every patient symbol and the
+auto-close sells any position at +8% or 10 days, and both stand still only
+while Alpaca's off switch is set. It never buys a symbol Alpaca holds outside
+its book or one with an order it did not send. One sender: a lease row in
+TradingBotState. Orders are recorded in `alpaca_patient_orders` before they
+go out (client ids `patient_entry-` / `patient_exit-`), and every fill,
+part-fill, cancel and lost reply is booked from Alpaca's own numbers.
+STOP_TRADING does not stop it; `ALPACA_PATIENT=paper` does.
+`GET /alpaca-patient` shows the practice book at the top level and the live
+book under `live`, never added together.

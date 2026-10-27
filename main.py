@@ -1410,15 +1410,21 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
-        # The patient stock bot, 2026-10-26 - PRACTICE ONLY. Off unless
-        # ALPACA_PATIENT=paper; it then reads Alpaca's hourly prices and records
-        # what it would buy and sell. alpaca_patient.py has no order path.
-        # Alpaca only: it imports nothing from the Coinbase side.
+        # The patient stock bot, 2026-10-26. Off unless ALPACA_PATIENT says
+        # paper or live. paper reads Alpaca's hourly prices and records what it
+        # would buy and sell (alpaca_patient.py has no order path). live
+        # (2026-10-27) sends real DAY LIMIT orders on the same rule from
+        # alpaca_patient_live.py - only while the old Alpaca bots are stopped,
+        # never a sale under the target. Alpaca only: nothing from Coinbase.
         try:
             import alpaca_patient
             if alpaca_patient.mode() == "paper":
                 _apt_task = asyncio.create_task(alpaca_patient.run_forever())
                 log.warning("[PATIENT] practice mode - recording, no orders")
+            elif alpaca_patient.mode() == "live":
+                import alpaca_patient_live
+                _apl_task = asyncio.create_task(alpaca_patient_live.run_forever())
+                log.warning("[PATIENT] LIVE mode - real limit orders, only while the old Alpaca bots are stopped")
         except Exception as e:
             try:
                 log.warning(f"patient stock bot not started: {type(e).__name__}: {e}")
