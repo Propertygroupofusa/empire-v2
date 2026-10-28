@@ -42,9 +42,23 @@ ONE SENDER. Only the process holding the live lease (TradingBotState row
 LEASE_KEY, renewed every pass) sends orders, so two copies of this app can
 never double-buy.
 
-TO STOP IT: set ALPACA_PATIENT to paper (or remove it). STOP_TRADING does not
-stop it - STOP_TRADING is what keeps the old bots off its pieces. Anything it
-has open stays open, with its resting sell at the target.
+THE OLD STOCKS (the owner, 2026-10-28: "Add the old stocks to the new bot").
+ALPACA_PATIENT_ADOPT names Alpaca positions the old bot left behind, e.g.
+MSFT,NVDA,SLV. Each named symbol is taken over ONCE: a live piece at
+Alpaca's own avg_entry_price and qty, target = that cost netting 5% after the
+round trip, sold exactly like a bought piece - a resting limit sell at the
+target, from the next trading day, never under it. Nothing is taken over
+while an order this bot did not send is open on the symbol. Adopted pieces
+never take one of the 4 buying slots (their money is already spent), but
+they do block buying the same symbol.
+With ALPACA_PATIENT=paper and ALPACA_PATIENT_ADOPT set, this file runs SELL
+ONLY: it takes over the named stocks and rests their profit sells, and buys
+nothing - practice keeps deciding the buys on paper.
+
+TO STOP IT: set ALPACA_PATIENT to paper (or remove it) and remove
+ALPACA_PATIENT_ADOPT. STOP_TRADING does not stop it - STOP_TRADING is what
+keeps the old bots off its pieces. Anything it has open stays open, with its
+resting sell at the target.
 """
 import asyncio
 import logging
@@ -72,6 +86,8 @@ LAST_BUCKET_KEY = "alpaca_patient_last_bucket_live"
 LEASE_KEY = "alpaca_patient_live_lease"
 LEASE_SECONDS = 900
 PRICE_READ_PAUSE = 0.2           # between the 13 symbols' price reads
+ADOPT_ENV = "ALPACA_PATIENT_ADOPT"
+ADOPTED_PREFIX = "alpaca_patient_adopted_"   # TradingBotState: base_capital = the adopted piece's id
 
 _ME = float(random.SystemRandom().randrange(1, 2 ** 52))   # this process, for the lease
 _last_pass = {}
@@ -80,9 +96,31 @@ _last_prices = {}                # symbol -> (bucket start epoch, close)
 
 # ------------------------------------------------------------------ the switch
 
+def adopt_symbols():
+    """The old stocks ALPACA_PATIENT_ADOPT names, upper-cased, patient symbols only."""
+    raw = (os.getenv(ADOPT_ENV) or "").replace(";", ",").replace(" ", ",")
+    out = []
+    for s in raw.split(","):
+        s = s.strip().strip("'\"").upper()
+        if s in ap.SYMBOLS and s not in out:
+            out.append(s)
+    return out
+
+
+def role():
+    """"full" with ALPACA_PATIENT=live; "sell_only" with paper and old stocks
+    named in ALPACA_PATIENT_ADOPT; otherwise None (this file does nothing)."""
+    m = ap.mode()
+    if m == "live":
+        return "full"
+    if m == "paper" and adopt_symbols():
+        return "sell_only"
+    return None
+
+
 def blocker():
     """Why live may not send an order right now, or None."""
-    if ap.mode() != "live":
+    if role() is None:
         return "off"
     if not alpaca_stop.alpaca_stopped():
         return ("the old stock bots are running (Alpaca's off switch is not set) - they would "
@@ -265,6 +303,17 @@ async def close_live_piece(piece_id, sold_qty, exit_price, closed_at):
         return pnl
 
 
+async def adopted_ids():
+    """{symbol: piece id} for every old stock already taken over."""
+    from sqlalchemy import select
+    from database import get_session_factory
+    from models import TradingBotState
+    async with get_session_factory()() as db:
+        rows = (await db.execute(select(TradingBotState)
+                                 .where(TradingBotState.bot_name.like(ADOPTED_PREFIX + "%")))).scalars().all()
+    return {r.bot_name[len(ADOPTED_PREFIX):]: int(r.base_capital) for r in rows if r.base_capital}
+
+
 async def hold_lease(now):
     """True when this process holds the live lease - taken if free or expired,
     renewed if already ours. Only the holder sends orders."""
@@ -370,6 +419,46 @@ async def follow_up(session, out, now):
                 out["problems"].append(f"buy {o.symbol}: cancel not taken (HTTP {cstatus})")
 
 
+async def adopt(session, out, now):
+    """Take over the old stocks ALPACA_PATIENT_ADOPT names - once each, at
+    Alpaca's own cost - as live pieces that sell only at their target."""
+    done = await adopted_ids()
+    todo = [s for s in adopt_symbols() if s not in done]
+    if not todo:
+        return
+    held, orders = await positions_by_symbol(session), await open_orders(session)
+    if held is None or orders is None:
+        out["problems"].append("positions or orders unreadable - nothing taken over this pass")
+        return
+    mine = {p.symbol for p in await live_pieces()}
+    for sym in todo:
+        pos = held.get(sym)
+        if not pos:
+            out["problems"].append(f"take over {sym}: Alpaca holds none")
+            continue
+        if sym in mine:
+            out["problems"].append(f"take over {sym}: this book already holds {sym} - not taken over")
+            continue
+        if any(o.get("symbol") == sym for o in orders):
+            out["problems"].append(f"take over {sym}: an order this bot did not send is open on it - "
+                                   f"not taken over")
+            continue
+        try:
+            qty, entry = float(pos["qty"]), float(pos["avg_entry_price"])
+        except (KeyError, TypeError, ValueError):
+            qty = entry = 0.0
+        if qty <= 0 or entry <= 0:
+            out["problems"].append(f"take over {sym}: quantity or cost unreadable - not taken over")
+            continue
+        pid = await open_live_piece(sym, qty, entry, None,
+                                    datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None))
+        await ap._set_state(ADOPTED_PREFIX + sym, base=float(pid))
+        tgt = sell_limit(ap.target_price(entry))
+        log.warning(f"[PATIENT-LIVE] took over the old bot's {qty:.9g} {sym} at its cost ${entry:,.2f}; "
+                    f"sells at ${tgt:,.2f} or better from the next trading day, never under it")
+        out["adopted"].append((sym, qty, entry, tgt))
+
+
 async def place_sells(session, out, now):
     """A resting limit sell at the target for every piece bought before today
     that has none."""
@@ -415,7 +504,8 @@ async def decide_buys(session, out, now):
     pieces = await live_pieces()
     buying = [o for o in await active_orders() if o.side == "buy"]
     mine = {p.symbol for p in pieces} | {o.symbol for o in buying}
-    n_open = len(pieces) + len(buying)
+    adopted = set((await adopted_ids()).values())
+    n_open = len([p for p in pieces if p.id not in adopted]) + len(buying)   # old stocks take no slot
     if n_open < ap.MAX_OPEN and ap.pick_buys(mine, n_open, buckets, bucket=due):
         held, orders, cash = (await positions_by_symbol(session), await open_orders(session),
                               await account_cash(session))
@@ -450,8 +540,8 @@ async def decide_buys(session, out, now):
 async def run_pass(session, now=None):
     """One live pass. Returns a summary. Never raises."""
     now = time.time() if now is None else now
-    out = {"mode": ap.mode(), "sent": [], "filled": [], "sold": [], "cancelled": [], "problems": [],
-           "skipped": None}
+    out = {"mode": ap.mode(), "role": role(), "sent": [], "filled": [], "sold": [], "cancelled": [],
+           "adopted": [], "problems": [], "skipped": None}
     why = blocker()
     if why:
         out["skipped"] = why
@@ -463,13 +553,18 @@ async def run_pass(session, now=None):
         if not await hold_lease(now):
             out["skipped"] = "another copy of the app holds the live lease - it sends the orders"
         else:
+            if adopt_symbols():
+                await adopt(session, out, now)
             await follow_up(session, out, now)
             is_open = await market_open(session)
             if is_open is not True:
                 out["skipped"] = "market closed" if is_open is False else "market clock unreadable"
             else:
                 await place_sells(session, out, now)
-                out["skipped"] = await decide_buys(session, out, now)
+                if out["role"] == "full":
+                    out["skipped"] = await decide_buys(session, out, now)
+                else:
+                    out["skipped"] = "sell only - the old stocks' profit sells; buys stay in practice"
     except Exception as e:
         log.error(f"[PATIENT-LIVE] pass failed ({type(e).__name__}: {e})")
         try:
@@ -483,14 +578,16 @@ async def run_pass(session, now=None):
 
 
 async def run_forever():
-    """The live loop. Started by main.py only when ALPACA_PATIENT=live."""
+    """The live loop. Started by main.py only when role() is not None."""
     import aiohttp
-    log.warning("[PATIENT-LIVE] live loop started - limit orders only, never a sale under the target")
+    started = role()
+    log.warning(f"[PATIENT-LIVE] live loop started ({started}) - limit orders only, "
+                f"never a sale under the target")
     async with aiohttp.ClientSession() as session:
-        while ap.mode() == "live":
+        while role() == started and started is not None:
             await run_pass(session)
             await asyncio.sleep(ap.PASS_SECONDS)
-    log.warning("[PATIENT-LIVE] ALPACA_PATIENT is no longer live - live loop stopped")
+    log.warning("[PATIENT-LIVE] the switches changed - live loop stopped")
 
 
 def last_pass():

@@ -17,7 +17,10 @@ fake Alpaca that keeps orders, fills, positions and cash. What these hold:
     not send, is never bought - the next dipping symbol takes the slot;
   * fills, part-fills, cancels, refusals and lost replies are all booked
     from Alpaca's own numbers; a buy not filled in 15 minutes is withdrawn;
-  * only the process holding the lease sends orders.
+  * only the process holding the lease sends orders;
+  * the old bot's stocks named in ALPACA_PATIENT_ADOPT are taken over once
+    each, at Alpaca's own cost, and only ever sold at their target - with
+    ALPACA_PATIENT=paper that is all it does (sell only, no buys).
 """
 import asyncio
 import os
@@ -42,7 +45,9 @@ from models import AlpacaPatientOrder, AlpacaPatientPiece, TradingBotState  # no
 
 ET = ZoneInfo("America/New_York")
 OPEN = ("new", "accepted", "partially_filled", "pending_new", "pending_cancel")
-ENV = ("ALPACA_PATIENT", "STOP_TRADING", "ALPACA_STOP_TRADING", "ALPACA_API_KEY", "ALPACA_SECRET_KEY")
+ENV = ("ALPACA_PATIENT", "STOP_TRADING", "ALPACA_STOP_TRADING", "ALPACA_API_KEY", "ALPACA_SECRET_KEY",
+       "ALPACA_PATIENT_ADOPT")
+OLD = {"MSFT": (0.231633, 540.138), "NVDA": (0.563193, 224.148), "SLV": (2.510264, 50.796221)}
 
 
 def et(y, m, d, hh, mm):
@@ -70,6 +75,7 @@ class FakeAlpaca:
         self.is_open = True
         self.cash = 582.26
         self.positions = {}
+        self.entry = {}
         self.free_override = {}
         self.orders = {}
         self.foreign_open = []
@@ -91,7 +97,8 @@ class FakeAlpaca:
         if method == "GET" and path == "/v2/account":
             return 200, {"cash": f"{self.cash:.2f}"}
         if method == "GET" and path == "/v2/positions":
-            return 200, [{"symbol": s, "qty": repr(q), "qty_available": repr(self._free(s))}
+            return 200, [{"symbol": s, "qty": repr(q), "qty_available": repr(self._free(s)),
+                          "avg_entry_price": repr(self.entry.get(s, 100.0))}
                          for s, q in self.positions.items() if q]
         if method == "GET" and path.startswith("/v2/orders?status=open"):
             return 200, [dict(o) for o in self.orders.values() if o["status"] in OPEN] + list(self.foreign_open)
@@ -138,6 +145,7 @@ class LiveCase(unittest.IsolatedAsyncioTestCase):
         self.saved_env = {k: os.environ.get(k) for k in ENV}
         os.environ.update(ALPACA_PATIENT="live", STOP_TRADING="true", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
         os.environ.pop("ALPACA_STOP_TRADING", None)
+        os.environ.pop("ALPACA_PATIENT_ADOPT", None)
         self.dir = tempfile.mkdtemp()
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{os.path.join(self.dir, 'live.db')}")
         self.sf = sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
@@ -424,6 +432,115 @@ class Lease(LiveCase):
             self.assertTrue(await apl.hold_lease(now + 60 + apl.LEASE_SECONDS + 1))   # the holder went quiet
 
 
+class OldStocks(LiveCase):
+    """The owner, 2026-10-28: "Add the old stocks to the new bot"."""
+
+    def hold_old(self):
+        for sym, (q, e) in OLD.items():
+            self.alpaca.positions[sym], self.alpaca.entry[sym] = q, e
+
+    def sell_only(self):
+        os.environ.update(ALPACA_PATIENT="paper", ALPACA_PATIENT_ADOPT="MSFT,NVDA,SLV")
+        self.hold_old()
+
+    async def test_the_named_symbols_are_read_plainly(self):
+        for raw, want in (("MSFT,NVDA,SLV", ["MSFT", "NVDA", "SLV"]), (" msft; nvda  slv ", ["MSFT", "NVDA", "SLV"]),
+                          ("'SLV',XYZ,SLV", ["SLV"]), ("", []), ("yes", [])):
+            with mock.patch.dict(os.environ, {"ALPACA_PATIENT_ADOPT": raw}):
+                self.assertEqual(apl.adopt_symbols(), want, raw)
+
+    async def test_roles(self):
+        for mode, adopt, want in (("paper", "SLV", "sell_only"), ("paper", "", None), ("live", "", "full"),
+                                  ("live", "SLV", "full"), ("lve", "SLV", None), ("", "SLV", None)):
+            with mock.patch.dict(os.environ, {"ALPACA_PATIENT": mode, "ALPACA_PATIENT_ADOPT": adopt}):
+                self.assertEqual(apl.role(), want, (mode, adopt))
+
+    async def test_sell_only_takes_over_the_named_stocks_at_their_own_cost_and_buys_nothing(self):
+        self.sell_only()
+        self.alpaca.positions["QQQ"] = 0.4                          # not named: left alone
+        out = await self.pass_at(T0)
+        pieces = {p.symbol: p for p in await self.pieces()}
+        self.assertEqual(sorted(pieces), ["MSFT", "NVDA", "SLV"])
+        for sym, (q, e) in OLD.items():
+            p = pieces[sym]
+            self.assertEqual((p.qty, p.entry_price, p.status, p.paper, p.entry_rsi), (q, e, "open", False, None))
+            self.assertAlmostEqual(p.target_price, ap.target_price(e))
+            self.assertAlmostEqual(p.cost_usd, q * e)
+        self.assertEqual(sorted(a[0] for a in out["adopted"]), ["MSFT", "NVDA", "SLV"])
+        self.assertEqual([c for c in self.alpaca.calls if c[0] == "POST"], [])    # a falling market, no buy
+        self.assertIn("sell only", out["skipped"])
+        self.assertEqual(sorted(await apl.adopted_ids()), ["MSFT", "NVDA", "SLV"])
+
+    async def test_the_old_stocks_rest_profit_sells_from_the_next_trading_day(self):
+        self.sell_only()
+        await self.pass_at(T0)
+        await self.pass_at(T0 + 600)
+        self.assertEqual(self.alpaca.working("sell"), [])
+        await self.pass_at(NEXT_DAY)
+        sells = {o["symbol"]: o for o in self.alpaca.working("sell")}
+        self.assertEqual(sorted(sells), ["MSFT", "NVDA", "SLV"])
+        for sym, (q, e) in OLD.items():
+            o = sells[sym]
+            self.assertEqual((o["type"], o["time_in_force"], float(o["qty"])), ("limit", "day", q))
+            self.assertGreaterEqual(float(o["limit_price"]), ap.target_price(e))
+            self.assertGreater(float(o["limit_price"]), e * 1.05)
+        self.assertEqual([c for c in self.alpaca.calls if c[0] == "POST" and c[2]["side"] == "buy"], [])
+
+    async def test_a_sold_old_stock_is_never_taken_over_again(self):
+        self.sell_only()
+        await self.pass_at(T0)
+        await self.pass_at(NEXT_DAY)
+        self.alpaca.fill("sell", "MSFT", at="2026-10-28T15:00:00Z")
+        out = await self.pass_at(NEXT_DAY + 300)
+        self.assertEqual([s[0] for s in out["sold"]], ["MSFT"])
+        self.alpaca.positions["MSFT"], self.alpaca.entry["MSFT"] = 0.5, 500.0   # bought by hand later
+        await self.pass_at(NEXT_DAY + 600)
+        msft = [p for p in await self.pieces() if p.symbol == "MSFT"]
+        self.assertEqual([p.status for p in msft], ["closed"])
+        self.assertGreater(msft[0].pnl, 0.05 * msft[0].cost_usd)
+
+    async def test_not_taken_over_while_an_order_it_did_not_send_is_open(self):
+        self.sell_only()
+        self.alpaca.foreign_open = [{"symbol": "NVDA", "client_order_id": "exit_pass-NVDA-1", "side": "sell"}]
+        out = await self.pass_at(T0)
+        self.assertEqual(sorted(p.symbol for p in await self.pieces()), ["MSFT", "SLV"])
+        self.assertTrue(any("NVDA" in p and "did not send" in p for p in out["problems"]))
+
+    async def test_a_named_stock_alpaca_does_not_hold_is_reported_not_invented(self):
+        self.sell_only()
+        os.environ["ALPACA_PATIENT_ADOPT"] = "MSFT,GLD"
+        out = await self.pass_at(T0)
+        self.assertEqual([p.symbol for p in await self.pieces()], ["MSFT"])
+        self.assertTrue(any("GLD" in p and "holds none" in p for p in out["problems"]))
+
+    async def test_in_full_live_the_old_stocks_take_no_buying_slot_and_are_never_bought(self):
+        os.environ["ALPACA_PATIENT_ADOPT"] = "MSFT,NVDA,SLV"
+        self.hold_old()
+        await self.pass_at(T0)
+        self.assertEqual(sorted(p.symbol for p in await self.pieces()), ["MSFT", "NVDA", "SLV"])
+        self.assertEqual([o["symbol"] for o in self.alpaca.working("buy")], ["SPY", "QQQ", "DIA", "IWM"])
+
+    async def test_sell_only_sends_nothing_while_the_old_bots_run(self):
+        self.sell_only()
+        with mock.patch.dict(os.environ, {"ALPACA_STOP_TRADING": "false"}):
+            out = await self.pass_at(T0)
+        self.assertIn("old stock bots", out["skipped"])
+        self.assertEqual(self.alpaca.calls, [])
+        self.assertEqual(await self.pieces(), [])
+
+    async def test_the_status_page_marks_the_taken_over_stocks(self):
+        import routers.trading_dashboard as td
+        self.sell_only()
+        await self.pass_at(T0)
+        with mock.patch.object(td, "get_session_factory", lambda: self.sf):
+            page = await td.alpaca_patient_status()
+        live = page["live"]
+        self.assertEqual((page["mode_here"], page["is_practice"], page["places_orders"]), ("paper", True, True))
+        self.assertEqual((live["role"], live["old_stocks_taken_over"]), ("sell_only", ["MSFT", "NVDA", "SLV"]))
+        self.assertTrue(all(r["taken_over_from_old_bot"] for r in live["open"]))
+        self.assertEqual(page["open"], [])                              # never added to the practice book
+
+
 class StatusPage(LiveCase):
     async def test_two_books_never_added_together(self):
         import routers.trading_dashboard as td
@@ -495,7 +612,7 @@ class Source(unittest.TestCase):
             main = f.read()
         i = main.index("import alpaca_patient")
         hook = main[i:i + 700]
-        self.assertIn('elif alpaca_patient.mode() == "live":', hook)
+        self.assertIn("if alpaca_patient_live.role() is not None:", hook)
         self.assertIn("alpaca_patient_live.run_forever()", hook)
 
     def test_the_dashboard_knows_the_patient_orders(self):

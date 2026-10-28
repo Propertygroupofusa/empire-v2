@@ -1421,10 +1421,14 @@ async def lifespan(app: FastAPI):
             if alpaca_patient.mode() == "paper":
                 _apt_task = asyncio.create_task(alpaca_patient.run_forever())
                 log.warning("[PATIENT] practice mode - recording, no orders")
-            elif alpaca_patient.mode() == "live":
-                import alpaca_patient_live
+            # live: real buys and sells. paper + ALPACA_PATIENT_ADOPT (2026-10-28,
+            # "Add the old stocks to the new bot"): sell only - the old bot's
+            # named stocks rest limit sells at cost +5% net, nothing is bought.
+            import alpaca_patient_live
+            if alpaca_patient_live.role() is not None:
                 _apl_task = asyncio.create_task(alpaca_patient_live.run_forever())
-                log.warning("[PATIENT] LIVE mode - real limit orders, only while the old Alpaca bots are stopped")
+                log.warning(f"[PATIENT] LIVE ({alpaca_patient_live.role()}) - real limit orders, "
+                            f"only while the old Alpaca bots are stopped")
         except Exception as e:
             try:
                 log.warning(f"patient stock bot not started: {type(e).__name__}: {e}")

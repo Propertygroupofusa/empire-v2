@@ -16030,13 +16030,15 @@ async def alpaca_patient_status():
         raise HTTPException(status_code=503, detail=f"patient record unreadable: {exc}")
     # Read apart: a missing orders table (before its first boot) must not
     # hide the practice book.
-    orders, orders_error = [], None
+    orders, orders_error, adopted = [], None, {}
     try:
         async with get_session_factory()() as db:
             orders = (await db.execute(select(AlpacaPatientOrder)
                                        .where(AlpacaPatientOrder.status.in_(("sending", "sent"))))).scalars().all()
+        adopted = await apl.adopted_ids()
     except Exception as exc:
         orders_error = f"{type(exc).__name__}"
+    adopted_pieces = set(adopted.values())
 
     def book(rows, prices, passes_key, last_key):
         held = [p for p in rows if p.status == "open"]
@@ -16046,6 +16048,7 @@ async def alpaca_patient_status():
             px = (prices.get(p.symbol) or (None, None))[1]
             worth = round(p.qty * px * (1 - (p.round_trip_cost or ap.ROUND_TRIP_COST) / 2), 2) if px else None
             open_rows.append({"symbol": p.symbol, "qty": p.qty, "entry_price": p.entry_price,
+                              "taken_over_from_old_bot": (not p.paper) and p.id in adopted_pieces,
                               "target_price": p.target_price,
                               "cost_usd": round(p.cost_usd or 0.0, 2), "worth_now": worth,
                               "vs_cost": round(worth - (p.cost_usd or 0.0), 2) if worth is not None else None,
@@ -16073,7 +16076,10 @@ async def alpaca_patient_status():
     if orders_error:
         live["orders_unreadable"] = orders_error
     live["last_pass"] = apl.last_pass() or None
-    live["blocked_by"] = apl.blocker() if ap.mode() == "live" else None
+    live["role"] = apl.role()
+    live["old_stocks_named"] = apl.adopt_symbols()
+    live["old_stocks_taken_over"] = sorted(adopted)
+    live["blocked_by"] = apl.blocker() if apl.role() is not None else None
     if live["open"] and not alpaca_stop.alpaca_stopped():
         live["warning"] = ("the old Alpaca bots are running - prop_bot adopts untracked positions on these "
                            "symbols and the auto-close sells at +8% or 10 days; these pieces are not "
@@ -16082,7 +16088,7 @@ async def alpaca_patient_status():
     return {
         "mode_here": mode,
         "is_practice": mode != "live",
-        "places_orders": mode == "live" and live["blocked_by"] is None,
+        "places_orders": live["role"] is not None and live["blocked_by"] is None,
         "rule": {"buy": f"RSI({ap.RSI_PERIOD}) on regular-session hours under {ap.RSI_BUY_BELOW:.0f}, "
                         f"never on the session's last hour",
                  "sell": f"only at {ap.NET * 100:.0f}% net after a {ap.ROUND_TRIP_COST * 100:.2f}% round trip, "

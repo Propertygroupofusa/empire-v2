@@ -14970,3 +14970,15 @@ part-fill, cancel and lost reply is booked from Alpaca's own numbers.
 STOP_TRADING does not stop it; `ALPACA_PATIENT=paper` does.
 `GET /alpaca-patient` shows the practice book at the top level and the live
 book under `live`, never added together.
+
+The old stocks (2026-10-28, the owner: "Add the old stocks to the new bot"):
+`ALPACA_PATIENT_ADOPT=MSFT,NVDA,SLV` names Alpaca positions the old bot left
+behind. Each is taken over ONCE (a TradingBotState row
+`alpaca_patient_adopted_<SYM>` holds the piece id) as a live piece at Alpaca's
+own avg_entry_price and qty, target = that cost netting 5% after the round
+trip, sold like any piece: a resting limit sell at the target from the next
+trading day, never under it. Not taken over while any order the bot did not
+send is open on the symbol. Taken-over pieces take none of the 4 buying slots
+but block buying the same symbol. With `ALPACA_PATIENT=paper` plus the
+variable, the live file runs SELL ONLY - take over and rest the profit
+sells, buy nothing - beside the practice loop.
