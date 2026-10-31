@@ -1303,6 +1303,22 @@ async def get_write_guard_status():
     }
 
 
+@router.get("/coinbase-money-check")
+async def coinbase_money_check(days: float = 3.0):
+    """Where the Coinbase cash is (coinbase_money_check.py). Read-only.
+
+    The owner, 2026-10-31, after cash fell with no trade behind it: "make sure
+    it's ... not no anonymous person that's stealing out of my account."
+    Shows the predictions (futures) cash balance next to the main cash, and
+    every USD/USDC movement in the last `days` that is NOT a trade - sends,
+    withdrawals, transfers - each marked left_coinbase, inside_coinbase,
+    came_in or other. GET only: it places, moves and changes nothing."""
+    import coinbase_money_check as mc
+    d = max(0.25, min(float(days), 30.0))
+    async with aiohttp.ClientSession() as session:
+        return await mc.check(session, days=d)
+
+
 @router.get("/account-census")
 async def get_account_census(db: AsyncSession = Depends(get_db)):
     """Every asset Coinbase reports, priced, against what the bots track.
