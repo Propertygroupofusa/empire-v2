@@ -1137,9 +1137,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Sales agent auto-processing startup failed: {e}")
 
+    # The account-wide Alpaca auto-close is retired with the old bots - see
+    # "THE OLD ALPACA BOTS ARE RETIRED" below. It sold any position at +8% or
+    # after 10 days, whoever owned it.
     try:
-        from routers.trading_dashboard import run_auto_close_periodically
-        asyncio.create_task(run_auto_close_periodically())
 
         # THE ALARM. Two independent loops: one notices, one delivers.
         #
@@ -1664,18 +1665,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Retention manager failed: {e}")
 
-    try:
-        if prop_bot_module is not None:
-            import threading
-            mode = "LIVE" if os.getenv("ALPACA_LIVE_TRADE", "false").lower() == "true" else "PAPER"
-            import alpaca_stop
-            stopped, stop_source, _ = alpaca_stop.alpaca_stop_state()
-            threading.Thread(target=prop_bot_module.run, daemon=True).start()
-            log.info(f"📈 Prop bot started (background thread) | Mode: {mode} | "
-                     f"Alpaca stopped: {stopped} (by {stop_source})")
-            log.info("💰 Strategy: Market hours stock scalping + 24/7 crypto = constant opportunities and taking profits")
-    except Exception as e:
-        log.warning(f"Prop bot failed to start: {e}")
+    # THE OLD ALPACA BOTS ARE RETIRED (the owner, 2026-10-31: "Alpaca needs a
+    # spring cleaning"). prop_bot, the swing bot, the wheel, market_brain's
+    # runner and the account-wide auto-close lost -$52.45 from Sep 21 to Oct 14
+    # ($1 targets, stop-loss and time-limit sells) and have been stopped by
+    # STOP_TRADING since Oct 14. Their files stay - the dashboards read their
+    # history - but nothing starts them any more, so no switch can wake them.
+    # The patient stock bot (alpaca_patient.py / alpaca_patient_live.py) is
+    # the only stock bot.
+    log.info("📈 Old Alpaca bots retired - prop_bot, swing, wheel, market_brain and auto-close "
+             "are not started; the patient stock bot is the only stock bot")
 
     # A DB-persisted strategy override wins over the environment variable.
     # See crypto_grid_bot.get_db_strategy_override for why: the env var was
@@ -1808,47 +1807,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Shadow allocator thread failed to start (trading unaffected): {e}")
 
-    print(f"[LIFESPAN] About to check alpaca_swing_bot_module: {alpaca_swing_bot_module is not None}", flush=True)
-    try:
-        if alpaca_swing_bot_module is not None:
-            import threading
-            print("[LIFESPAN] ✓ alpaca_swing_bot_module is not None, starting thread...", flush=True)
-            log.info("🌊 Starting Alpaca Swing bot daemon thread...")
-            swing_bot_thread = threading.Thread(target=alpaca_swing_bot_module.run, daemon=True)
-            swing_bot_thread.start()
-            print("[LIFESPAN] ✓ Alpaca Swing bot thread successfully started", flush=True)
-            log.info("✅ Alpaca Swing bot started | Weekly RSI < 30 entries | 5-10 day holds | Indices + Commodities")
-        else:
-            print("[LIFESPAN] ✗ alpaca_swing_bot_module is None", flush=True)
-            log.warning("⚠️ alpaca_swing_bot module failed to import - bot will not run")
-
-        # market_brain's cycle. Starts on every boot and does NOTHING
-        # until market_brain_owns_equities is set in TradingBotState -
-        # the runner re-reads that flag every cycle, so the owner can
-        # stop it from the dashboard without a redeploy.
-        # Alpaca wheel (cash-secured puts / covered calls). Real orders,
-        # but does nothing until its dashboard switch is on AND a ticker is
-        # approved - the cycle re-reads both every 15 minutes.
-        try:
-            import threading
-            import alpaca_wheel_bot
-            threading.Thread(target=alpaca_wheel_bot.run, daemon=True).start()
-            log.info("🛞 Alpaca wheel engine started (idle until switched on with an approved ticker)")
-        except Exception as e:
-            log.warning(f"⚠️ Alpaca wheel engine failed to start: {e}")
-
-        try:
-            import threading
-            import market_brain_runner
-            threading.Thread(target=market_brain_runner.run, daemon=True).start()
-            log.info("🧠 market_brain runner started (idle until the handover flag is on)")
-        except Exception as e:
-            log.warning(f"⚠️ market_brain runner failed to start: {e}")
-    except Exception as e:
-        import traceback
-        print(f"[LIFESPAN] ✗ Exception: {e}", flush=True)
-        print(f"[LIFESPAN] Traceback: {traceback.format_exc()}", flush=True)
-        log.error(f"🛑 Alpaca Swing bot startup failed: {e}")
+    # The swing bot, the wheel and market_brain's runner are retired - see
+    # "THE OLD ALPACA BOTS ARE RETIRED" above.
 
     # bot_2_crypto_scalper.py retired: it traded crypto (BTC/ETH/SOL/AVAX/
     # DOGE/LINK) through Alpaca using the same ALPACA_API_KEY as prop_bot.py

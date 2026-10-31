@@ -14941,6 +14941,12 @@ SPY trend filter that helped crypto made stocks worse. Best: RSI(14) under 40
 on regular-session hours, sell only at 5% net, 4 x $120 - +$370.54 over 2.75
 years against +$266.40 for holding SPY, worst 60-day season -$40.43.
 
+THE OLD ALPACA BOTS ARE RETIRED (2026-10-31, the owner: "Alpaca needs a
+spring cleaning"). main.py no longer starts prop_bot, the swing bot, the
+wheel, market_brain's runner or the account-wide auto-close. Their files stay
+because the dashboards read their history; nothing runs them. The patient
+stock bot is the only stock bot. test_alpaca_old_bots_retired.py holds this.
+
 `alpaca_patient.py` is that rule and its practice: `ALPACA_PATIENT=paper` reads
 Alpaca's 30-minute IEX bars, builds 09:30-anchored regular-session hours,
 decides each hour 3 minutes after it closes (never on a forming, half-built

@@ -26,6 +26,8 @@ HOW IT TRADES
   * ONLY WHILE THE MARKET IS OPEN, by Alpaca's own clock.
 
 WHY IT SENDS NOTHING UNLESS THE OLD STOCK BOTS ARE STOPPED
+  Since 2026-10-31 main.py no longer starts the old bots at all (the owner:
+  "Alpaca needs a spring cleaning"). This guard stays as a second lock.
   prop_bot.py adopts any Alpaca position on its symbols it is not tracking
   (reconcile_positions_with_broker) and puts its own exits on it, and every
   patient symbol is one of its symbols. The account-wide auto-close sells any
