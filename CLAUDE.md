@@ -14988,3 +14988,11 @@ send is open on the symbol. Taken-over pieces take none of the 4 buying slots
 but block buying the same symbol. With `ALPACA_PATIENT=paper` plus the
 variable, the live file runs SELL ONLY - take over and rest the profit
 sells, buy nothing - beside the practice loop.
+
+## The old crypto strategies are retired (2026-10-31)
+The owner: "Coinbase needs spring cleaning." main.py no longer starts
+family_tree, btc_compound or multi_pair, whatever CRYPTO_STRATEGY_MODE or the
+DB strategy override says - naming one is logged as retired. Each of them
+bought; only grid_fleet runs. Their modules stay because the account census
+(crypto_btc_compound_bot._auth_headers) and the dashboards use them as
+libraries. test_crypto_old_strategies_retired.py holds this.

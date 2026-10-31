@@ -217,6 +217,7 @@ try:
 except Exception as e:
     logging.warning(f"Failed to import crypto_btc_compound_bot: {e}")
 
+RETIRED_CRYPTO_MODES = ("family_tree", "btc_compound", "multi_pair")  # never started - see "THE OLD CRYPTO STRATEGIES ARE RETIRED"
 crypto_family_tree_bot_module = None
 try:
     import crypto_family_tree_bot
@@ -1723,28 +1724,16 @@ async def lifespan(app: FastAPI):
 
     try:
         import threading
-        if crypto_mode == "family_tree" and crypto_family_tree_bot_module is not None:
-            log.info("📡 Starting Crypto (Coinbase) bot daemon thread — family tree strategy (coordinator)...")
-            print("[LIFESPAN] Starting crypto bot thread (family_tree)...", flush=True)
-            bot_thread = threading.Thread(target=crypto_family_tree_bot_module.run, daemon=True)
-            bot_thread.start()
-            print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
-            log.info("✓ Crypto (Coinbase) bot thread started | family tree coordinator | BTC root + branches spawn as they cross $1,000 | 24/7 trading")
-        elif crypto_mode == "btc_compound" and crypto_btc_compound_bot_module is not None:
-            log.info("📡 Starting Crypto (Coinbase) bot daemon thread — BTC compounding loop strategy...")
-            print("[LIFESPAN] Starting crypto bot thread (btc_compound)...", flush=True)
-            bot_thread = threading.Thread(target=crypto_btc_compound_bot_module.run, daemon=True)
-            bot_thread.start()
-            print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
-            log.info("✓ Crypto (Coinbase) bot thread started | BTC-only | single position | adaptive profit target | 24/7 trading")
-        elif crypto_mode == "multi_pair" and crypto_coinbase_bot_module is not None:
-            log.info("📡 Starting Crypto (Coinbase) bot daemon thread — multi-pair RSI strategy...")
-            print("[LIFESPAN] Starting crypto bot thread (multi_pair)...", flush=True)
-            bot_thread = threading.Thread(target=crypto_coinbase_bot_module.run, daemon=True)
-            bot_thread.start()
-            print("[LIFESPAN] ✓ Crypto bot thread started", flush=True)
-            log.info("✓ Crypto (Coinbase) bot thread started | 28 pairs × 12 positions | 24/7 trading | Capital: $700 USD")
-            log.info("💰 Strategy: 24/7 crypto + market hours stock scalping = constant opportunities and taking profits")
+        # THE OLD CRYPTO STRATEGIES ARE RETIRED (the owner, 2026-10-31:
+        # "Coinbase needs spring cleaning"). family_tree, btc_compound and
+        # multi_pair were switched off long ago but still started here if
+        # CRYPTO_STRATEGY_MODE or the DB strategy override ever named one,
+        # and each of them BUYS. Their modules stay - the dashboards and the
+        # account census use them as libraries - but no mode starts their
+        # loops any more. Only grid_fleet runs.
+        if crypto_mode in RETIRED_CRYPTO_MODES:
+            log.warning(f"⚠️ crypto_mode={crypto_mode!r} is a retired strategy - not started. "
+                        f"Only grid_fleet runs.")
         elif crypto_mode == "grid_fleet":
             # Normally the dedicated crypto-trading service owns this loop,
             # and it still does: crypto_grid_bot holds a LEASE, renewed every
@@ -1777,11 +1766,8 @@ async def lifespan(app: FastAPI):
             # distinction immediately visible instead of requiring another
             # round of guessing between "bad env value" and "bad import".
             log.warning(
-                f"⚠️ crypto_mode={crypto_mode!r} did not match any known "
-                f"mode ('family_tree'/'btc_compound'/'multi_pair'/'grid_fleet') - bot will not run | "
-                f"family_tree module loaded: {crypto_family_tree_bot_module is not None} | "
-                f"btc_compound module loaded: {crypto_btc_compound_bot_module is not None} | "
-                f"multi_pair module loaded: {crypto_coinbase_bot_module is not None}"
+                f"⚠️ crypto_mode={crypto_mode!r} did not match 'grid_fleet' (the only mode that "
+                f"runs) - bot will not run"
             )
     except Exception as e:
         log.error(f"🛑 Crypto (Coinbase) bot thread startup failed: {e}")
