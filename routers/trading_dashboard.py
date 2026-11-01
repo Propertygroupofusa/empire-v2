@@ -1303,6 +1303,54 @@ async def get_write_guard_status():
     }
 
 
+@router.get("/coin-keeper")
+async def coin_keeper_status():
+    """The coin keeper's practice book (coin_keeper.py). Read-only.
+
+    Leftover coins it watches (units no grid slice or coin picker piece
+    holds), each with Coinbase's cost, its one profit-only target and how far
+    the price is from it; practice sales and what they would have banked; and
+    every held coin it left out, with the reason. Practice places no order, so
+    none of this is money that moved."""
+    import coin_keeper as ck
+    from models import CoinKeeperPiece
+    try:
+        async with get_session_factory()() as db:
+            rows = (await db.execute(select(CoinKeeperPiece).where(CoinKeeperPiece.paper == True))  # noqa: E712
+                    ).scalars().all()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"keeper record unreadable: {exc}")
+    prices = ck.last_prices()
+    open_rows = []
+    for p in rows:
+        if p.status != "open":
+            continue
+        px = prices.get(p.asset)
+        open_rows.append({"asset": p.asset, "qty": p.qty, "cost_per_unit": p.entry_price,
+                          "cost_usd": round(p.cost_usd or 0.0, 2), "target_price": p.target_price,
+                          "price_now": px,
+                          "rise_to_target_pct": round((p.target_price / px - 1) * 100, 1) if px else None,
+                          "worth_now": round(p.qty * px, 2) if px else None,
+                          "opened_at": (p.opened_at.isoformat() + "Z") if p.opened_at else None})
+    sold = [p for p in rows if p.status == "sold"]
+    last = ck.last_pass()
+    return {
+        "mode_here": ck.mode(),
+        "is_practice": True,
+        "places_orders": False,
+        "rule": {"target": f"{ck.NET * 100:.0f}% net of Coinbase's own cost after a "
+                           f"{ck.SELL_FEE * 100:.1f}% worst-case sale fee, never under it",
+                 "floor_usd": ck.MIN_VIABLE_USD, "never_sold": "the no-sell list (BTC)"},
+        "practice_banked_usd": round(sum(p.pnl or 0.0 for p in sold), 2),
+        "practice_sales": len(sold),
+        "open": open_rows,
+        "open_cost_usd": round(sum(r["cost_usd"] for r in open_rows), 2),
+        "gone": sorted(p.asset for p in rows if p.status == "gone"),
+        "left_out": last.get("skipped") or [],
+        "last_pass": last or None,
+    }
+
+
 @router.get("/coinbase-money-check")
 async def coinbase_money_check(days: float = 3.0):
     """Where the Coinbase cash is (coinbase_money_check.py). Read-only.

@@ -14996,3 +14996,17 @@ DB strategy override says - naming one is logged as retired. Each of them
 bought; only grid_fleet runs. Their modules stay because the account census
 (crypto_btc_compound_bot._auth_headers) and the dashboards use them as
 libraries. test_crypto_old_strategies_retired.py holds this.
+
+## The coin keeper - practice (2026-10-31)
+The owner: "Do the practice mode for the leftover coins." coin_keeper.py,
+COIN_KEEPER=paper (anything else off; no live mode). Every 15 minutes it reads
+Coinbase's own cost per coin (portfolio breakdown: the higher of
+average_entry_price and cost_basis / units), subtracts the units the grid's
+open slices and the coin picker's open real pieces hold, and keeps a leftover
+only if it is worth $15+ (the viability floor - never lower), has a cost, is
+not on NO_SELL_COINS (BTC) and no tree branch claims it. Staked units are never
+counted (available_to_trade). Each leftover gets one practice piece in
+coin_keeper_pieces with one target: 5% net of cost after a worst-case 1.2%
+sale fee. A practice sale is recorded at the target when the public price
+reaches it; an asset sold in practice is never taken in again; a leftover that
+shrinks under its piece is closed "gone". No order path. GET /coin-keeper.

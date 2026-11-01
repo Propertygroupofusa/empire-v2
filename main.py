@@ -1437,6 +1437,22 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # The coin keeper, 2026-10-31 - PRACTICE ONLY. Off unless
+        # COIN_KEEPER=paper; it then gives each leftover coin (units no grid
+        # slice or coin picker piece holds, worth $15+, not BTC) one
+        # profit-only target and records practice sales. coin_keeper.py has
+        # no order path. Coinbase only: it imports nothing from Alpaca.
+        try:
+            import coin_keeper
+            if coin_keeper.mode() == "paper":
+                _ck_task = asyncio.create_task(coin_keeper.run_forever())
+                log.warning("[KEEPER] practice mode - recording, no orders")
+        except Exception as e:
+            try:
+                log.warning(f"coin keeper not started: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+
         # One-shot idle rotation: move idle allocation into the best-ranked
         # coins by dip_depth. SHIPPED INERT - nothing happens unless
         # ROTATION_TASK_TICKET is set, and releasing idle from a non-flat

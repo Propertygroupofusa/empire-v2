@@ -3278,6 +3278,35 @@ class CoinPickerPick(Base):
     within_24h = Column(Float)              # share of those round trips closed inside 24h
 
 
+class CoinKeeperPiece(Base):
+    """One leftover coin the coin keeper (coin_keeper.py) watches, open or closed.
+
+    Coinbase only. A leftover is the units of a coin that neither the grid's
+    open slices nor the coin picker's open pieces hold. entry_price is
+    Coinbase's own cost per unit (the higher of average_entry_price and
+    cost_basis / units); target_price nets 5% of that cost after the
+    worst-case sale fee (sell_fee) and is never undercut. status: "open",
+    "sold" (exit_price and pnl set) or "gone" (the units left the leftover -
+    no profit or loss). paper is True for practice: no order was ever placed.
+    """
+    __tablename__ = "coin_keeper_pieces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    asset = Column(String, index=True)
+    product_id = Column(String)
+    status = Column(String, index=True, default="open")
+    paper = Column(Boolean, default=True, index=True)
+    qty = Column(Float)
+    entry_price = Column(Float)
+    cost_usd = Column(Float)
+    target_price = Column(Float)
+    sell_fee = Column(Float)
+    opened_at = Column(DateTime, default=datetime.utcnow, index=True)
+    closed_at = Column(DateTime, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+    note = Column(String, nullable=True)
+
 class AlpacaPatientPiece(Base):
     """One $120 piece the patient stock bot bought (alpaca_patient.py), open or sold.
 
