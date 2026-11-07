@@ -492,6 +492,43 @@ async def _read_prices(price_reader):
         return None
 
 
+GUARD_STATUSES = ("REFUSED", "UNKNOWN")
+GUARD_REMIND_SECONDS = 24 * 3600
+
+
+def guard_feed_row(state, report, now):
+    """The activity-feed row, if any, for this pass's guard result. Pure.
+
+    WHY. A refused pass was written to the feed EVERY pass, every 15
+    minutes, for as long as the refusal lasted. From 2026-10-30 it ran for
+    over a week: 300 identical rows covered only the last three days and
+    pushed every coin picker sale, error and buy out of the window the owner
+    and the daily check read. The refusal itself was right; repeating it
+    96 times a day said nothing the first row had not.
+
+    state: None, or (status, epoch of the row last written for it).
+    Returns ((event_type, message) or None, new_state):
+      * a REFUSED or UNKNOWN pass gets a row when it starts, when it turns
+        from one into the other, and once every GUARD_REMIND_SECONDS while
+        it lasts - so it never goes silent, and never floods;
+      * the first other pass after one gets ONE RECONCILE_CLEARED row, so
+        the feed's last word is not a refusal that has already ended;
+      * nothing else is written here.
+    The row carries THIS pass's figures, so a reminder is never stale.
+    """
+    status = report.get("status")
+    if status in GUARD_STATUSES:
+        msg = f"[RECONCILE] {status}: {report.get('detail')}"
+        if state is None or state[0] != status or now - state[1] >= GUARD_REMIND_SECONDS:
+            return (f"RECONCILE_{status}", msg), (status, now)
+        return None, state
+    if state is not None:
+        return ("RECONCILE_CLEARED",
+                f"[RECONCILE] cleared - no longer {state[0]}: {status}: "
+                f"{report.get('detail')}"), None
+    return None, None
+
+
 async def loop(session_factory, cash_reader, price_reader=None):
     """Forever. cash_reader() -> real spendable+held USD, or None.
     price_reader() -> {product_id: live price}, or None."""
@@ -499,6 +536,7 @@ async def loop(session_factory, cash_reader, price_reader=None):
                 f"(every {CHECK_SECONDS}s, writes only when armed)")
     started_at = datetime.utcnow()
     repair_tried = False
+    guard_state = None
     while True:
         try:
             armed = await armed_now(session_factory)
@@ -511,15 +549,18 @@ async def loop(session_factory, cash_reader, price_reader=None):
                 await repair_peaks_once(session_factory, prices, started_at)
             report = await run_once(session_factory, cash, dry_run=not armed,
                                     prices=prices)
-            if report.get("status") in ("REFUSED", "UNKNOWN"):
-                # The protection DECLINING to act is a state he should see.
-                # A refused pass means the cash reading collapsed or the
-                # wallet could not be read, and silence there looks exactly
-                # like a healthy quiet fleet.
-                _msg = f"[RECONCILE] {report['status']}: {report.get('detail')}"
-                log.warning(_msg)
-                await _announce("grid", "fleet",
-                                f"RECONCILE_{report['status']}", _msg)
+            # The protection DECLINING to act is a state the owner should see: a
+            # refused pass means the cash reading collapsed or the wallet
+            # could not be read, and silence there looks exactly like a
+            # healthy quiet fleet. The LOG line is written every pass; the
+            # FEED row only when the state starts, changes or clears, plus
+            # one reminder a day - see guard_feed_row.
+            row, guard_state = guard_feed_row(guard_state, report,
+                                              datetime.utcnow().timestamp())
+            if row is not None:
+                await _announce("grid", "fleet", row[0], row[1])
+            if report.get("status") in GUARD_STATUSES:
+                log.warning(f"[RECONCILE] {report['status']}: {report.get('detail')}")
             elif report.get("applied"):
                 log.warning(f"[RECONCILE] applied {report['applied']} correction(s): "
                             f"{report.get('detail')}")

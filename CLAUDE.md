@@ -15010,3 +15010,14 @@ coin_keeper_pieces with one target: 5% net of cost after a worst-case 1.2%
 sale fee. A practice sale is recorded at the target when the public price
 reaches it; an asset sold in practice is never taken in again; a leftover that
 shrinks under its piece is closed "gone". No order path. GET /coin-keeper.
+
+## The reconcile refusal is written to the feed once, not every pass (2026-11-07)
+From 2026-10-30 the reconcile pass refused every 15 minutes (the USD wallet
+read $0 while the cash sat in USDC), and every refusal wrote an activity-feed
+row: 300 identical RECONCILE_REFUSED rows covered three days and pushed every
+coin picker sale and error out of view. reconcile_worker.guard_feed_row now
+decides the feed row: REFUSED/UNKNOWN is written when it starts, when it turns
+into the other, and once a day while it lasts (GUARD_REMIND_SECONDS); the first
+pass after it ends writes one RECONCILE_CLEARED row. The log line is still
+written every pass, and what the pass does is unchanged.
+test_reconcile_feed_once.py holds this.
