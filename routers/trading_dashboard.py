@@ -9526,6 +9526,25 @@ async def get_grid_status_endpoint(fresh: int = 0):
                 _hrs = (datetime.now(timezone.utc) - _dt).total_seconds() / 3600.0
             except ValueError:
                 _hrs = None
+        # A SALE IS A FILL TOO. The open-slice scan above only sees buys
+        # whose slice is still open - a slice that sold takes its own
+        # opened_at with it. Live 2026-11-07 it read 502.8h (TIA's
+        # 10-17 buy) while the trade ledger's newest close was 10.2 days
+        # old. Take the newer of the two. If the ledger cannot be read
+        # the open-slice figure stands, exactly as before.
+        try:
+            from models import CryptoGridTradeHistory
+            async with AsyncSessionLocal() as _db:
+                _closed = (await _db.execute(
+                    select(func.max(CryptoGridTradeHistory.closed_at)))).scalar()
+            if _closed is not None:
+                if _closed.tzinfo is None:
+                    _closed = _closed.replace(tzinfo=timezone.utc)
+                _hc = max(0.0, (datetime.now(timezone.utc) - _closed).total_seconds() / 3600.0)
+                if _hrs is None or _hc < _hrs:
+                    _hrs = _hc
+        except Exception:
+            pass
         data["silence"] = trading_silence.assess(
             hours_since_last_fill=_hrs, refusals_by_product=_ref,
             cycle_errors=_errs, branches=data.get("branches") or [],
