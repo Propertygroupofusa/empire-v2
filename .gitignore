@@ -30,3 +30,6 @@ kalshi_polymarket_data.jsonl
 # committed one is test_baseline.txt.
 test_failures_last_run.txt
 .deploy_watch_baseline.json
+
+# Auto-saved session state written by a Claude Code plugin; not project code
+.anchor/
