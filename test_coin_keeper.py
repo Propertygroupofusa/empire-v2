@@ -3,7 +3,10 @@
 Run as written: python3 test_coin_keeper.py
 
 The owner, 2026-10-31: "Do the practice mode for the leftover coins." What these hold:
-  * off unless COIN_KEEPER reads exactly "paper";
+  * practice runs when COIN_KEEPER is not set or reads "paper" (the owner asked
+    for it on 2026-10-31 and it sat off for 18 days waiting for a variable);
+    anything else that is set - "off", "live", a typo - is off, and there is
+    no live mode;
   * a leftover is the units no grid slice and no coin picker piece holds -
     staked units are never counted, BTC (the no-sell list) is never taken,
     and anything under the $15 floor or without a Coinbase cost is left out
@@ -45,9 +48,10 @@ class Rules(unittest.TestCase):
     def tearDown(self):
         os.environ.pop(ck.SWITCH_ENV, None)
 
-    def test_only_paper_is_on(self):
-        for v, want in ((None, "off"), ("", "off"), ("paper", "paper"), (" PAPER ", "paper"),
-                        ("live", "off"), ("true", "off"), ("on", "off")):
+    def test_practice_is_the_default_and_nothing_else_is_on(self):
+        for v, want in ((None, "paper"), ("", "paper"), ("  ", "paper"), ("paper", "paper"),
+                        (" PAPER ", "paper"), ("off", "off"), (" OFF ", "off"),
+                        ("live", "off"), ("true", "off"), ("on", "off"), ("papr", "off")):
             if v is None:
                 os.environ.pop(ck.SWITCH_ENV, None)
             else:
@@ -222,6 +226,12 @@ class Source(unittest.TestCase):
         for l in self.src.splitlines():
             if l.strip().startswith(("import ", "from ")):
                 self.assertNotIn("alpaca", l.lower(), l)
+
+    def test_there_is_no_live_mode(self):
+        self.assertEqual(set(ck.mode.__code__.co_consts) & {"live", "real"}, set())
+        for v in ("live", "LIVE", "real", "1"):
+            with mock.patch.dict(os.environ, {ck.SWITCH_ENV: v}):
+                self.assertEqual(ck.mode(), "off", v)
 
     def test_the_boot_hook_is_gated_on_paper(self):
         with open("main.py") as f:

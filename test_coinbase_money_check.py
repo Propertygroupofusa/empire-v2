@@ -13,6 +13,17 @@ stealing out of my account". What these hold:
   * the predictions (futures) cash balance is read next to the main cash;
   * a Coinbase refusal is reported, never read as "nothing happened";
   * the file only ever sends GETs.
+
+2026-11-18, after two weeks in which the owner's bet winnings had not come back
+and the report could only say "nothing left":
+  * every USD and USDC wallet is listed by name with its balance;
+  * every portfolio is listed with Coinbase's own totals and cash positions,
+    and one unreadable portfolio does not hide the others;
+  * bets_cash says what went to the predictions balance and what came back -
+    and money sent to fund a bet is inside_coinbase, never "other";
+  * interest is came_in; a came-in type that took money out is shown as other;
+  * a failed side read (futures summary, portfolios) with the wallets read is
+    a problem on the list, never "Coinbase did not answer".
 """
 import asyncio
 import sys
@@ -37,7 +48,9 @@ def tx(t, amount, cur="USDC", at="2026-10-31T06:20:00Z", usd=None, to=None, titl
 
 
 class FakeCoinbase:
-    def __init__(self, txs=None, cfm=None, refuse=None):
+    def __init__(self, txs=None, cfm=None, refuse=None, ports=None, breakdowns=None):
+        self.ports = ports or []
+        self.breakdowns = breakdowns or {}
         self.txs = txs or {}
         self.cfm = cfm
         self.refuse = refuse or set()
@@ -51,10 +64,20 @@ class FakeCoinbase:
         if path.startswith(mc.CFM_PATH):
             return 200, {"balance_summary": self.cfm or {}}
         if path.startswith(mc.V2_ACCOUNTS + "?"):
-            return 200, {"data": [{"id": "acc-usdc", "currency": {"code": "USDC"}},
-                                  {"id": "acc-usd", "currency": {"code": "USD"}},
-                                  {"id": "acc-btc", "currency": {"code": "BTC"}}],
+            return 200, {"data": [{"id": "acc-usdc", "currency": {"code": "USDC"}, "name": "USDC Wallet",
+                                   "type": "wallet", "balance": {"amount": "3317.00", "currency": "USDC"}},
+                                  {"id": "acc-usd", "currency": {"code": "USD"}, "name": "Cash (USD)",
+                                   "type": "fiat", "balance": {"amount": "0.00", "currency": "USD"}},
+                                  {"id": "acc-btc", "currency": {"code": "BTC"}, "name": "BTC Wallet",
+                                   "type": "wallet", "balance": {"amount": "0.018", "currency": "BTC"}}],
                          "pagination": {"next_uri": None}}
+        if path == mc.PORTFOLIOS_PATH:
+            return 200, {"portfolios": [{"uuid": u, "name": n, "type": t} for u, n, t in self.ports]}
+        if path.startswith(mc.PORTFOLIOS_PATH + "/"):
+            u = path.rsplit("/", 1)[1]
+            if u not in self.breakdowns:
+                return 404, {"error": "not found"}
+            return 200, {"breakdown": self.breakdowns[u]}
         for aid, rows in self.txs.items():
             if path.startswith(f"{mc.V2_ACCOUNTS}/{aid}/transactions"):
                 return 200, {"data": rows, "pagination": {"next_uri": None}}
@@ -141,6 +164,85 @@ class Report(unittest.TestCase):
         with mock.patch.object(mc, "_get", boom):
             out = asyncio.run(mc.check(object(), now=NOW))
         self.assertIn("failed", out["verdict"])
+
+
+def money(v):
+    return {"value": str(v), "currency": "USD"}
+
+
+class WhereTheCashSits(unittest.TestCase):
+    def test_every_cash_wallet_is_listed_by_name_with_its_balance(self):
+        out = run(FakeCoinbase())
+        self.assertEqual(out["cash_wallets"],
+                         [{"currency": "USDC", "name": "USDC Wallet", "type": "wallet", "balance": 3317.0},
+                          {"currency": "USD", "name": "Cash (USD)", "type": "fiat", "balance": 0.0}])
+
+    def test_every_portfolio_is_listed_with_coinbases_own_totals(self):
+        fake = FakeCoinbase(
+            ports=[("p-1", "Default", "DEFAULT"), ("p-2", "Predictions", "CONSUMER")],
+            breakdowns={
+                "p-1": {"portfolio_balances": {"total_balance": money(7800), "total_crypto_balance": money(4483),
+                                               "total_cash_equivalent_balance": money(3317),
+                                               "total_futures_balance": money(0)},
+                        "spot_positions": [{"asset": "USDC", "is_cash": True, "total_balance_fiat": 3317.0},
+                                           {"asset": "XRP", "is_cash": False, "total_balance_fiat": 1000.0}]},
+                "p-2": {"portfolio_balances": {"total_balance": money(1507.65),
+                                               "total_cash_equivalent_balance": money(1507.65)},
+                        "spot_positions": [{"asset": "USD", "is_cash": True, "total_balance_fiat": 1507.65}],
+                        "futures_positions": [{}, {}]}})
+        out = run(fake)
+        d, p = out["portfolios"]
+        self.assertEqual((d["name"], d["type"], d["total_usd"], d["cash_usd"], d["coin_usd"], d["futures_usd"]),
+                         ("Default", "DEFAULT", 7800.0, 3317.0, 4483.0, 0.0))
+        self.assertEqual(d["cash_positions"], [{"asset": "USDC", "usd": 3317.0}])
+        self.assertEqual((p["name"], p["cash_usd"], p["futures_positions"]), ("Predictions", 1507.65, 2))
+        self.assertEqual(p["cash_positions"], [{"asset": "USD", "usd": 1507.65}])
+        self.assertEqual(out["problems"], [])
+
+    def test_one_unreadable_portfolio_does_not_hide_the_others(self):
+        fake = FakeCoinbase(ports=[("p-1", "Default", "DEFAULT"), ("p-9", "Other", "CONSUMER")],
+                            breakdowns={"p-1": {"portfolio_balances": {"total_balance": money(10)}}})
+        a, b = run(fake)["portfolios"]
+        self.assertEqual(a["total_usd"], 10.0)
+        self.assertEqual(b, {"name": "Other", "type": "CONSUMER", "unreadable": "breakdown HTTP 404"})
+
+    def test_a_failed_side_read_is_a_problem_and_never_coinbase_did_not_answer(self):
+        # the wallets were read and nothing moved: the answer stands, with the gaps listed
+        out = run(FakeCoinbase(refuse={mc.PORTFOLIOS_PATH, mc.CFM_PATH}))
+        self.assertTrue(out["verdict"].startswith("No USD or USDC left Coinbase"), out["verdict"])
+        self.assertEqual(sorted(out["problems"]), ["futures balance HTTP 403", "portfolios HTTP 403"])
+        self.assertEqual(out["portfolios"], [])
+
+    def test_no_wallet_listed_is_never_an_all_clear(self):
+        class NoWallets(FakeCoinbase):
+            async def get(self, session, path):
+                if path.startswith(mc.V2_ACCOUNTS + "?"):
+                    return 200, {"data": [], "pagination": {"next_uri": None}}
+                return await super().get(session, path)
+        out = run(NoWallets())
+        self.assertIn("did not answer", out["verdict"])
+        self.assertIn("no USD or USDC wallet was listed", out["verdict"])
+
+    def test_bet_cash_says_what_went_and_what_came_back(self):
+        fake = FakeCoinbase(txs={
+            "acc-usdc": [tx("prediction_market_usdc_sell", -54.98),
+                         tx("prediction_market_usdc_sell_additional_encumberment", -0.01),
+                         tx("interest", 2.34)],
+            "acc-usd": [tx("derivatives_settlement", -24.99, cur="USD"),
+                        tx("derivatives_settlement", 20.02, cur="USD"),
+                        tx("send", -5.0, cur="USD")]})
+        out = run(fake)
+        self.assertEqual({k: out["bets_cash"][k] for k in ("sent_usd", "came_back_usd", "net_usd")},
+                         {"sent_usd": 79.98, "came_back_usd": 20.02, "net_usd": -59.96})
+        self.assertIn("not profit or loss", out["bets_cash"]["is"])
+        self.assertEqual(out["totals"], {"inside_coinbase": -59.96, "came_in": 2.34, "left_coinbase": -5.0})
+
+    def test_bet_funding_is_inside_and_interest_came_in(self):
+        self.assertEqual(mc.kind("prediction_market_usdc_sell", -54.98), "inside_coinbase")
+        self.assertEqual(mc.kind("prediction_market_anything_new", -1.0), "inside_coinbase")
+        self.assertEqual(mc.kind("interest", 2.34), "came_in")
+        self.assertEqual(mc.kind("retail_defi_lend_reward_payout", 0.0), "came_in")
+        self.assertEqual(mc.kind("interest", -2.34), "other")       # took money out: show it, do not call it income
 
 
 class Source(unittest.TestCase):

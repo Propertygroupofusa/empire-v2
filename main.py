@@ -1437,8 +1437,8 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
-        # The coin keeper, 2026-10-31 - PRACTICE ONLY. Off unless
-        # COIN_KEEPER=paper; it then gives each leftover coin (units no grid
+        # The coin keeper, 2026-10-31 - PRACTICE ONLY. On by default since
+        # 2026-11-18 (COIN_KEEPER=off stops it); it gives each leftover coin (units no grid
         # slice or coin picker piece holds, worth $15+, not BTC) one
         # profit-only target and records practice sales. coin_keeper.py has
         # no order path. Coinbase only: it imports nothing from Alpaca.

@@ -15021,3 +15021,23 @@ into the other, and once a day while it lasts (GUARD_REMIND_SECONDS); the first
 pass after it ends writes one RECONCILE_CLEARED row. The log line is still
 written every pass, and what the pass does is unchanged.
 test_reconcile_feed_once.py holds this.
+
+## Practice on by default, and the money check shows where cash sits (2026-11-18)
+The owner: "Fix everything make better." Two things that had sat unfixed:
+- **The coin keeper runs without a variable.** The owner asked for the leftover
+  coins practice on 2026-10-31 and it stayed off for 18 days waiting for
+  COIN_KEEPER=paper. coin_keeper.mode() is now "paper" when COIN_KEEPER is
+  unset or reads paper, and "off" for any other value (COIN_KEEPER=off stops
+  it). Still practice only: no order path, no live mode.
+- **The money check could only say "nothing left".** Two weeks after the
+  owner's weekend bets won, no payout had reached the USD or USDC wallet and
+  the futures balance summary read 0. GET /coinbase-money-check now also
+  returns `cash_wallets` (every USD/USDC wallet by name with its balance),
+  `portfolios` (every portfolio with Coinbase's own totals - cash, coin,
+  futures - and its cash positions; one unreadable portfolio does not hide
+  the rest) and `bets_cash` (sent to and back from the predictions balance in
+  the window - cash moved, not profit or loss). prediction_market_* is
+  inside_coinbase, interest is came_in. "Coinbase did not answer" now means
+  no wallet could be read; a failed side read (futures summary, portfolios)
+  is listed in `problems` and decides nothing. Still GET only.
+test_coin_keeper.py and test_coinbase_money_check.py hold this.

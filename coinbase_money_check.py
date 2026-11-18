@@ -26,6 +26,20 @@ The report puts every non-trade USD/USDC movement in one of four kinds:
   other           anything Coinbase types that this file does not know -
                   shown, never hidden.
 
+2026-11-18 - WHAT THE FIRST VERSION COULD NOT SEE. Two weeks after the
+owner's weekend bets won, none of that money had come back to the USD or USDC
+wallet, the futures balance summary read 0, and this report could only say
+"nothing left Coinbase". It now also shows:
+  * cash_wallets - every USD and USDC wallet Coinbase lists, by name, with its
+    balance, so a second cash wallet is seen and not just read;
+  * portfolios - every portfolio with Coinbase's own totals for it (cash,
+    coin, futures) and its cash positions, so a balance held somewhere the
+    wallets do not show has a place to appear;
+  * bets_cash - what went to the predictions balance and what came back in
+    the window. That is cash moved, not profit or loss.
+Money sent to fund a bet (prediction_market_*) is the owner's own balance and
+is inside_coinbase; interest and reward payouts are came_in.
+
 GET only. It places nothing, moves nothing and changes nothing.
 """
 import logging
@@ -35,6 +49,8 @@ log = logging.getLogger("coinbase_money_check")
 
 HOST = "api.coinbase.com"
 CFM_PATH = "/api/v3/brokerage/cfm/balance_summary"
+PORTFOLIOS_PATH = "/api/v3/brokerage/portfolios"
+MAX_PORTFOLIOS = 10
 V2_ACCOUNTS = "/v2/accounts"
 CASH_CURRENCIES = ("USD", "USDC")
 MAX_PAGES = 5
@@ -46,7 +62,10 @@ INSIDE_TYPES = {"transfer", "staking_transfer", "unstaking_transfer", "vault_wit
                 "derivatives_settlement", "fcm_futures_usdc_sell",
                 "fcm_futures_usdc_sell_additional_encumberment_rollup", "wrap_asset", "unwrap_asset"}
 CAME_IN_TYPES = {"receive", "fiat_deposit", "intx_deposit", "earn_payout", "incentives_rewards_payout",
-                 "subscription_rebate", "unsupported_asset_recovery"}
+                 "subscription_rebate", "unsupported_asset_recovery", "interest",
+                 "retail_defi_lend_reward_payout"}
+INSIDE_PREFIXES = ("fcm_", "cfm_", "derivatives_", "staking_", "prediction_market_")
+BET_PREFIXES = ("prediction_market_", "derivatives_settlement")
 
 
 def _headers(method, path):
@@ -97,10 +116,11 @@ def kind(tx_type, amount):
         return None
     if t in LEFT_TYPES:
         return "left_coinbase" if (amount is None or amount < 0) else "came_in"
-    if t in INSIDE_TYPES or t.startswith(("fcm_", "cfm_", "derivatives_", "staking_")):
+    if t in INSIDE_TYPES or t.startswith(INSIDE_PREFIXES):
         return "inside_coinbase"
     if t in CAME_IN_TYPES:
-        return "came_in"
+        # A "came in" type that took money OUT is not what its name says: show it.
+        return "came_in" if (amount is None or amount >= 0) else "other"
     return "other"
 
 
@@ -135,7 +155,8 @@ def _ts(s):
 
 
 async def cash_accounts(session):
-    """[(currency, v2 account id)] for the USD and USDC wallets, or an error string."""
+    """[(currency, v2 account id, name, type, balance)] for every USD and USDC
+    wallet Coinbase lists, or an error string."""
     out, path, pages = [], f"{V2_ACCOUNTS}?limit=300", 0
     while path and pages < MAX_PAGES:
         status, data = await _get(session, path)
@@ -145,7 +166,7 @@ async def cash_accounts(session):
             code = ((a.get("currency") or {}).get("code") if isinstance(a.get("currency"), dict)
                     else a.get("currency"))
             if code in CASH_CURRENCIES and a.get("id"):
-                out.append((code, a["id"]))
+                out.append((code, a["id"], a.get("name"), a.get("type"), _num(a.get("balance"))))
         path = ((data.get("pagination") or {}).get("next_uri")) or None
         pages += 1
     return out
@@ -188,6 +209,60 @@ async def predictions_balance(session):
     }
 
 
+async def portfolios(session):
+    """Every Coinbase portfolio with Coinbase's own totals for it, or an error string.
+
+    One unreadable portfolio is marked on its own row; it does not hide the rest."""
+    status, data = await _get(session, PORTFOLIOS_PATH)
+    if status != 200 or not isinstance(data, dict):
+        return f"portfolios HTTP {status}"
+    out = []
+    for p in (data.get("portfolios") or [])[:MAX_PORTFOLIOS]:
+        row = {"name": p.get("name"), "type": p.get("type")}
+        uuid = p.get("uuid")
+        status, bd = (await _get(session, f"{PORTFOLIOS_PATH}/{uuid}")) if uuid else (None, None)
+        if status != 200 or not isinstance(bd, dict):
+            row["unreadable"] = f"breakdown HTTP {status}"
+            out.append(row)
+            continue
+        b = bd.get("breakdown") or {}
+        bal = b.get("portfolio_balances") or {}
+        row.update({
+            "total_usd": _num(bal.get("total_balance")),
+            "cash_usd": _num(bal.get("total_cash_equivalent_balance")),
+            "coin_usd": _num(bal.get("total_crypto_balance")),
+            "futures_usd": _num(bal.get("total_futures_balance")),
+            "futures_unrealized_usd": _num(bal.get("futures_unrealized_pnl")),
+            "perp_unrealized_usd": _num(bal.get("perp_unrealized_pnl")),
+            "cash_positions": [{"asset": sp.get("asset"), "usd": _num(sp.get("total_balance_fiat"))}
+                               for sp in (b.get("spot_positions") or []) if sp.get("is_cash")],
+            "futures_positions": len(b.get("futures_positions") or []),
+            "perp_positions": len(b.get("perp_positions") or []),
+        })
+        out.append(row)
+    return out
+
+
+def bets_cash(rows):
+    """Cash that went to the predictions balance and cash that came back.
+
+    Sent: USDC sold to fund a bet and USD settled out. Came back: USD settled
+    in. This is cash MOVED - a bet's profit or loss is its payout minus its
+    cost, and a payout that has not been paid back yet is in neither figure."""
+    sent = back = 0.0
+    for r in rows:
+        if not str(r.get("type") or "").startswith(BET_PREFIXES):
+            continue
+        v = r["usd"] if r["usd"] is not None else (r["amount"] or 0.0)
+        if v < 0:
+            sent += -v
+        else:
+            back += v
+    return {"sent_usd": round(sent, 2), "came_back_usd": round(back, 2),
+            "net_usd": round(back - sent, 2),
+            "is": "cash moved to and from the predictions balance - not profit or loss"}
+
+
 def summarize(rows):
     """Totals per kind and the one-line answer."""
     totals = {}
@@ -210,7 +285,8 @@ async def check(session, days=3, now=None):
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     out = {"since": since.isoformat(), "days": days, "places_orders": False, "moves_money": False,
-           "predictions": None, "movements": [], "totals": {}, "verdict": None, "problems": []}
+           "predictions": None, "cash_wallets": [], "portfolios": [], "bets_cash": None,
+           "movements": [], "totals": {}, "verdict": None, "problems": []}
     try:
         p = await predictions_balance(session)
         if isinstance(p, str):
@@ -221,20 +297,33 @@ async def check(session, days=3, now=None):
         if isinstance(accounts, str):
             out["problems"].append(accounts)
             accounts = []
-        rows = []
-        for cur, aid in accounts:
+        rows, wallets_read = [], 0
+        for cur, aid, name, wallet_type, balance in accounts:
+            out["cash_wallets"].append({"currency": cur, "name": name, "type": wallet_type,
+                                        "balance": balance})
             txs = await movements(session, aid, since)
             if isinstance(txs, str):
                 out["problems"].append(f"{cur}: {txs}")
                 continue
+            wallets_read += 1
             rows.extend(describe(tx) for tx in txs)
+        ports = await portfolios(session)
+        if isinstance(ports, str):
+            out["problems"].append(ports)
+        else:
+            out["portfolios"] = ports
         rows.sort(key=lambda r: str(r["at"] or ""), reverse=True)
         out["movements"] = [r for r in rows if r["kind"] is not None]
         out["trades_skipped"] = sum(1 for r in rows if r["kind"] is None)
         out["totals"], out["verdict"] = summarize(rows)
+        out["bets_cash"] = bets_cash(rows)
         unread = [p for p in out["problems"] if p.startswith(CASH_CURRENCIES) or p.startswith("accounts")]
-        if out["problems"] and not rows:
-            out["verdict"] = "Coinbase did not answer - nothing can be said yet: " + "; ".join(out["problems"])
+        if not wallets_read:
+            # No wallet was read at all: there is nothing to say "no" about. A
+            # failed side read (futures summary, portfolios) with the wallets
+            # read is NOT this - it is listed in problems and decides nothing.
+            out["verdict"] = ("Coinbase did not answer - nothing can be said yet: "
+                              + "; ".join(out["problems"] or ["no USD or USDC wallet was listed"]))
         elif unread:
             # A wallet that could not be read is not a wallet where nothing happened.
             out["verdict"] = "Not all movements could be read (" + "; ".join(unread) + ") - " + out["verdict"]

@@ -9,7 +9,7 @@ NEAR, HBAR and ALGO, and small coins no bot ever bought (RNDR, ETC, PUMP,
 HOPR, APT, CRO, ARB ...): about $400 of coin with nothing that would ever sell
 it at a profit.
 
-WHAT THIS DOES, every PASS_SECONDS, with COIN_KEEPER=paper:
+WHAT THIS DOES, every PASS_SECONDS (practice is on unless COIN_KEEPER=off):
   * reads every coin Coinbase holds WITH Coinbase's own cost for it
     (GET /api/v3/brokerage/portfolios/{uuid}: average_entry_price and
     cost_basis - the higher of the two per unit, so a fee inside the cost is
@@ -26,7 +26,8 @@ WHAT THIS DOES, every PASS_SECONDS, with COIN_KEEPER=paper:
     target. Nothing is ever recorded under it.
 
 PRACTICE ONLY. This file has no order path: it cannot sell, buy, cancel or
-move anything. Anything but exactly "paper" is off. A practice sale is not
+move anything. COIN_KEEPER unset or "paper" is practice; any other value is
+off; there is no live mode. A practice sale is not
 money - the coin is still in the account - so an asset sold in practice is
 never taken in again, or practice would "sell" the same coin forever.
 If the real leftover shrinks under a practice piece (the grid's adoption took
@@ -57,8 +58,15 @@ _last_prices = {}
 
 
 def mode() -> str:
-    """"paper" for exactly "paper" (any case, spaces ignored), otherwise "off"."""
-    return "paper" if (os.getenv(SWITCH_ENV) or "").strip().lower() == "paper" else "off"
+    """"paper" when COIN_KEEPER is not set, or reads "paper" (any case, spaces
+    ignored); "off" for anything else that is set - "off", a typo, "live".
+
+    Practice is the default since 2026-11-18. The owner asked for it on
+    2026-10-31 and it sat off for 18 days waiting for a Railway variable; this
+    module has no order path, so running it by default risks nothing. Set
+    COIN_KEEPER=off to stop it. There is still no live mode."""
+    raw = (os.getenv(SWITCH_ENV) or "").strip().lower()
+    return "paper" if raw in ("", "paper") else "off"
 
 
 # ------------------------------------------------------------------ pure rules
@@ -298,14 +306,14 @@ def _done(out, now):
 
 
 async def run_forever():
-    """The practice loop. Started by main.py only when COIN_KEEPER=paper."""
+    """The practice loop. Started by main.py while mode() is "paper"."""
     import aiohttp
     log.warning("[KEEPER] practice loop started - no orders are placed by this module")
     async with aiohttp.ClientSession() as session:
         while mode() == "paper":
             await run_pass(session)
             await asyncio.sleep(PASS_SECONDS)
-    log.warning("[KEEPER] COIN_KEEPER is no longer paper - practice loop stopped")
+    log.warning("[KEEPER] COIN_KEEPER is set to something other than paper - practice loop stopped")
 
 
 def last_pass():

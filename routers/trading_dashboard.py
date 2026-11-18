@@ -1360,7 +1360,10 @@ async def coinbase_money_check(days: float = 3.0):
     Shows the predictions (futures) cash balance next to the main cash, and
     every USD/USDC movement in the last `days` that is NOT a trade - sends,
     withdrawals, transfers - each marked left_coinbase, inside_coinbase,
-    came_in or other. GET only: it places, moves and changes nothing."""
+    came_in or other. Also lists every USD/USDC wallet with its balance, every
+    portfolio with Coinbase's own totals, and what went to and came back from
+    the predictions balance (bets_cash). GET only: it places, moves and
+    changes nothing."""
     import coinbase_money_check as mc
     d = max(0.25, min(float(days), 30.0))
     async with aiohttp.ClientSession() as session:
